@@ -1,0 +1,906 @@
+C CLIM22    SOURCE    PV        16/11/17    21:58:51     9180
+      SUBROUTINE CLIM22(IJAC)
+C************************************************************************
+C
+C PROJET            :  CASTEM 2000
+C
+C NOM               :  CLIM22
+C
+C DESCRIPTION       :  Subroutine appellée par CLIM2
+C
+C                      Modelisation 2D/3D des equations d'Euler
+C                      Conditions aux limites
+C
+C                      Calcul du flux/residu/jacobian de flux
+C
+C LANGAGE           :  FORTRAN 77 + ESOPE 2000 (avec estensions CISI)
+C
+C AUTEUR            :  S. Kudriakov, DEN/DM2S/SFME/LTMF
+C
+C************************************************************************
+C
+C
+C SORTIES
+C
+C RCHPLI   : on donne densité, vitesse, pression
+C            et les fractions massiques sur le bord
+C           (SPG = $TAB2 . 'CENTRE', composantes en LMOTP)
+C
+C RCHPRE   : residu (SPG = $TAB1 . 'CENTRE', composantes en LMOTC)
+C
+C************************************************************************
+C
+C HISTORIQUE (Anomalies et modifications éventuelles)
+C
+C HISTORIQUE : 3/12/03 - for the 'INRI' and 'OUTP' there was
+C                        implemented option for k-\eps model
+C                        (k and \eps are treated as a passive scalars)
+C
+C             20/12/04 - generalisation de 'OUTP' for the
+C                        CREBCOM model (k, \eps and K0 are treated
+C                        as a passive scalars)
+C
+C             03/02/06 - implementation of boundary conditions of
+C                        'RESE'rvoir in the explicit case without
+C                         passive scalars.
+C************************************************************************
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+
+-INC CCOPTIO
+-INC SMLMOTS
+-INC SMELEME
+-INC SMLENTI
+-INC SMMATRIK
+      POINTEUR MLMVIT.MLMOTS
+C
+      INTEGER IJAC, IJACO, I, NESP,NSP
+     &     ,IDOMA, IDBOR, IRET, MELEMC, MELEFE, MELEMF, ICHPVO, INORM
+     &     ,ICHPSU, MELECB, NBCOMP, INDIC, MELEFC, MELRES
+     &     ,JGN, JGM, NBELEM, NBNN, NBSOUS, NBREF, NGF, NLC
+     &     ,I1, ICEN, N1, ILIINP
+     &     ,ILIINC, IROC, IVITC, IPC, ICHLIM, NBOPT, ILIM
+     &     ,ICHRES, ICHRLI, IYN, IKAN, IEPSN, IK0N
+     &     ,NKID,NKMT,NMATRI,NRIGE,MMODEL,INEFMD
+     &     ,JG, ICOND, IRETOU, ICP, ICV, IPGAS,IKEPS,ICREB
+      PARAMETER (NBOPT=9)
+      CHARACTER*8 LOPT(NBOPT)
+      CHARACTER*4 MOT
+      CHARACTER*(4) MOT1(3), CELLCH
+      CHARACTER*8 TYPE
+      REAL*8 CP, CV
+C----------------------------------------------------
+C************ Variables en ACCTAB  ******************
+C----------------------------------------------------
+      INTEGER IVALI, IRETI, IVALR, IRETR
+      REAL*8 XVALI,XVALR
+      LOGICAL LOGII, LOGIR
+      CHARACTER*(8) CHARR,MTYPI, MTYPR
+C-----------------------------------------------------
+      DATA LOPT/'INRI    ','OUTRI   ','INJE    ','OUTP    ',
+     &     'INSU    ','INOU    ','INSS    ','OUTSS   ',
+     &     'RESE    '/
+C---------------------------------------------------
+-INC SMLREEL
+      POINTEUR MLRECP.MLREEL, MLRECV.MLREEL
+C-----------------------------------------
+C Initialisation des variables en ACCTAB
+C-----------------------------------------
+      IVALI = 0
+      IVALR = 0
+      XVALI = 0.0D0
+      XVALR = 0.0D0
+      LOGII = .FALSE.
+      LOGIR = .FALSE.
+      IRETI = 0
+      IRETR = 0
+      CHARR = '        '
+C-------------------------------------------
+C If IKEPS = 0 then there is now passive
+C scalars, otherwise IKEPS = 1
+C ...same about ICREB
+C-------------------------------------------
+      IKEPS = 0
+      ICREB = 0
+C*******************************
+C**** La table domaine *********
+C*******************************
+C
+      CALL LIROBJ('MMODEL',MMODEL,1,IRET)
+      IF(IERR.NE.0)GOTO 9999
+      CALL LEKMOD(MMODEL,IDOMA,INEFMD)
+C     INEFMD inutilisé
+      IF(IERR .NE. 0)GOTO 9999
+C-----------------------------------------
+      CALL LEKTAB(IDOMA,'CENTRE',MELEMC)
+      IF(IERR .NE. 0) GOTO 9999
+C-----------------------------------------
+      CALL LEKTAB(IDOMA,'FACE',MELEMF)
+      IF(IERR .NE. 0) GOTO 9999
+C---------------------------------------------
+C**** Lecture du CHPOINT contenant les volumes
+C---------------------------------------------
+      CALL LEKTAB(IDOMA,'XXVOLUM',ICHPVO)
+      IF(IERR .NE. 0) GOTO 9999
+      INDIC = 1
+      NBCOMP = 1
+      MOT = 'SCAL'
+      CALL QUEPOI(ICHPVO, MELEMC, INDIC, NBCOMP, MOT)
+      IF(IERR .NE. 0) GOTO 9999
+C---------------------------------------------
+      CALL LEKTAB(IDOMA,'XXSURFAC',ICHPSU)
+      IF(IERR .NE. 0) GOTO 9999
+      INDIC = 1
+      NBCOMP = 1
+      MOT = 'SCAL'
+      CALL QUEPOI(ICHPSU, MELEMF, INDIC, NBCOMP, MOT)
+      IF(IERR .NE. 0) GOTO 9999
+C--------------------------------------------
+C**** Les normales aux faces
+C--------------------------------------------
+      IF(IDIM .EQ. 2)THEN
+C        Que les normales
+         CALL LEKTAB(IDOMA,'XXNORMAF',INORM)
+         IF(IERR .NE. 0) GOTO 9999
+         JGN = 4
+         JGM = 2
+         SEGINI MLMVIT
+         MLMVIT.MOTS(1) = 'UX  '
+         MLMVIT.MOTS(2) = 'UY  '
+         CALL QUEPO1(INORM, MELEMF, MLMVIT)
+         SEGDES MLMVIT
+         IF(IERR .NE. 0) GOTO 9999
+      ELSE
+C
+C****    Les normales ('MX  ', ...)
+C        Les tangentes ('RX  ', ...)
+C
+         TYPE = ' '
+         CALL ACMO(IDOMA,'MATROT',TYPE,INORM)
+         IF (TYPE .NE. 'CHPOINT ') THEN
+            CALL MATRAN(IDOMA,INORM)
+            IF(IERR .NE. 0) GOTO 9999
+         ENDIF
+         JGN = 4
+         JGM = 9
+         SEGINI MLMVIT
+         MLMVIT.MOTS(1) = 'MX  '
+         MLMVIT.MOTS(2) = 'MY  '
+         MLMVIT.MOTS(3) = 'MZ  '
+         MLMVIT.MOTS(4) = 'RX  '
+         MLMVIT.MOTS(5) = 'RY  '
+         MLMVIT.MOTS(6) = 'RZ  '
+         MLMVIT.MOTS(7) = 'UX  '
+         MLMVIT.MOTS(8) = 'UY  '
+         MLMVIT.MOTS(9) = 'UZ  '
+         CALL QUEPO1(INORM, MELEMF, MLMVIT)
+         SEGDES MLMVIT
+      ENDIF
+c--------------------------------------------------------
+C**********************************
+C**** La table domaine du bord ****
+C**********************************
+C
+      CALL LIROBJ('MMODEL',MMODEL,1,IRET)
+      IF(IERR.NE.0)GOTO 9999
+      CALL LEKMOD(MMODEL,IDBOR,INEFMD)
+C     INEFMD inutilisé
+      IF(IERR .NE. 0)GOTO 9999
+C
+      CALL LEKTAB(IDBOR,'CENTRE',MELECB)
+      IF(IERR .NE. 0) GOTO 9999
+C
+      TYPE = ' '
+      CALL ACMO(IDBOR,'FACCEN',TYPE,MELEFC)
+      IF (TYPE.NE.'MAILLAGE') THEN
+C
+         CALL LEKTAB(IDOMA,'FACEL',MELEFE)
+         IF(IERR .NE. 0) GOTO 9999
+C
+C******* On cree la connectivité face-centre
+C
+         IPT1=MELECB
+         IPT2=MELEFE
+         SEGACT IPT1
+         SEGACT IPT2
+         CALL KRIPAD(IPT1,MLENTI)
+C        SEGINI MLENTI
+         NBELEM=IPT1.NUM(/2)
+         NBNN=2
+         NBSOUS=0
+         NBREF=0
+         SEGINI IPT3
+         IPT3.ITYPEL=2
+         N1=IPT2.NUM(/2)
+         ICEN=0
+         DO I1=1,N1,1
+            NGF=IPT2.NUM(2,I1)
+            NLC=MLENTI.LECT(NGF)
+            IF(NLC.NE.0)THEN
+               ICEN=ICEN+1
+               IPT3.NUM(1,ICEN)=NGF
+               IPT3.NUM(2,ICEN)=IPT2.NUM(1,I1)
+               IF(IPT2.NUM(1,I1) .NE. IPT2.NUM(3,I1))THEN
+C                Interior point
+C                Donné incompatible
+                  WRITE(IOIMP,*) 'Internal boundary condition!!!'
+                  CALL ERREUR(21)
+               ENDIF
+            ENDIF
+         ENDDO
+C
+         IF(ICEN .NE. NBELEM)THEN
+            CALL ERREUR(5)
+         ENDIF
+         SEGDES IPT1
+         SEGDES IPT2
+         SEGDES IPT3
+         SEGDES MLENTI
+C
+         MELEFC=IPT3
+         CALL ECMO(IDBOR,'FACCEN','MAILLAGE',IPT3)
+      ENDIF
+C-------------------------------------------------
+C**** Le SPG du residu
+C-------------------------------------------------
+      IPT1=MELEFC
+      SEGACT IPT1
+      NBELEM=IPT1.NUM(/2)
+      NBNN=1
+      NBSOUS=0
+      NBREF=0
+      SEGINI IPT2
+      IPT2.ITYPEL=1
+      DO I1=1,NBELEM,1
+         IPT2.NUM(1,I1)=IPT1.NUM(2,I1)
+      ENDDO
+      MELRES=IPT2
+      SEGDES IPT1
+      SEGDES IPT2
+C-------------------------------------------------
+C*** Reading the table PGAS  *********************
+C-------------------------------------------------
+      ICOND = 1
+      CALL QUETYP(MTYPR,ICOND,IRETOU)
+      IF(IERR .NE. 0)GOTO 9999
+      IF(MTYPR .NE. 'TABLE   ')THEN
+C---------------------------------------
+C Message d'erreur standard
+C 37 2
+C On ne trouve pas d'objet de type %m1:8
+C---------------------------------------
+         MOTERR(1:8) = 'TABLE   '
+         CALL ERREUR(37)
+         GOTO 9999
+      ELSE
+         ICOND = 1
+         CALL LIROBJ(MTYPR,IPGAS,ICOND,IRETOU)
+         IF(IERR .NE. 0)GOTO 9999
+      ENDIF
+C-------------------------------------------
+C********  Reading the CPs *****************
+C-------------------------------------------
+      MTYPR = '        '
+      CALL ACMO(IPGAS,'CP',MTYPR,ICP)
+      IF(MTYPR .NE. 'TABLE   ')THEN
+C--------------------------------
+C Message d'erreur standard
+C -301 0 %m1:40
+C--------------------------------
+         MOTERR(1:40) = 'TAB1 . CP = ???                     '
+         WRITE(IOIMP,*) MOTERR(1:40)
+C---------------------------------
+C Message d'erreur standard
+C 21 2
+C Données incompatibles
+C--------------------------------
+         CALL ERREUR(21)
+         GOTO 9999
+      ENDIF
+C-------------------------------------------
+C********  Reading the CVs *****************
+C-------------------------------------------
+      MTYPR = '        '
+      CALL ACMO(IPGAS,'CV',MTYPR,ICV)
+      IF(MTYPR .NE. 'TABLE   ')THEN
+C--------------------------------
+C Message d'erreur standard
+C -301 0 %m1:40
+C--------------------------------
+         MOTERR(1:40) = 'TAB1 . CV = ???                     '
+         WRITE(IOIMP,*) MOTERR(1:40)
+C---------------------------------
+C Message d'erreur standard
+C 21 2
+C Données incompatibles
+C--------------------------------
+         CALL ERREUR(21)
+         GOTO 9999
+      ENDIF
+C---------------------------------------------------------
+C Reading Les especes qui sont dans les Equations d'Euler
+C---------------------------------------------------------
+      MTYPR = '        '
+      CALL ACMO(IPGAS,'ESPEULE',MTYPR,MLMOT1)
+      IF(MTYPR .NE. 'LISTMOTS')THEN
+C---------------------------
+C Message d'erreur standard
+C -301 0 %m1:40
+C---------------------------
+         MOTERR(1:40) = 'TAB1 . ESPEULE = ???                '
+         WRITE(IOIMP,*) MOTERR(1:40)
+C---------------------------
+C Message d'erreur standard
+C 21 2
+C Données incompatibles
+C--------------------------
+         CALL ERREUR(21)
+         GOTO 9999
+      ENDIF
+C-----------------------------------------------------------------
+C Reading Nom de l'espece qui n'est pas dans les equations d'Euler
+C-----------------------------------------------------------------
+      MTYPI = 'MOT     '
+      MTYPR = '        '
+      CALL ACCTAB(IPGAS,MTYPI,IVALI,XVALI,'ESPNEULE', LOGII,IRETI,
+     &     MTYPR,IVALR,XVALR ,CELLCH,LOGIR,IRETR)
+      IF((IERR .NE. 0) .OR. (MTYPR .NE. 'MOT     ')) THEN
+C-------------------------------
+C Message d'erreur standard
+C -301 0 %m1:40
+C-------------------------------
+         MOTERR = 'TAB1 . ESPNEULE = ???        '
+         WRITE(IOIMP,*) MOTERR(1:40)
+C------------------------------
+C Message d'erreur standard
+C 21 2
+C Données incompatibles
+C------------------------------
+         CALL ERREUR(21)
+         GOTO 9999
+      ENDIF
+C------------------------------
+      SEGACT MLMOT1
+      NESP = MLMOT1.MOTS(/2)
+      NSP=NESP+1
+C----------------------
+C** List de CP et CV **
+C----------------------
+      JG = NESP+1
+      SEGINI MLRECP
+      SEGINI MLRECV
+      DO I1 = 1, NESP
+C-------------------------------
+C N.B. MOT1 est un CHARACTER*(4)
+C-------------------------------
+         MOT1(1) = MLMOT1.MOTS(I1)
+         MTYPI = 'MOT     '
+         MTYPR = '        '
+         CALL ACCTAB(ICP,MTYPI,IVALI,XVALI,MOT1(1), LOGII,IRETI,
+     &        MTYPR,IVALR,CP   ,CHARR,LOGIR,IRETR)
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'FLOTTANT')) THEN
+C------------------------------
+C Message d'erreur standard
+C -301 0 %m1:40
+C------------------------------
+            MOTERR = 'TAB1 . CP , TAB1 . ESPEULE = ???        '
+            WRITE(IOIMP,*) MOTERR(1:40)
+C------------------------------
+C Message d'erreur standard
+C 21 2
+C Données incompatibles
+C------------------------------
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+         MLRECP.PROG(I1) = CP
+C-------------------------------------------
+         CALL ACCTAB(ICV,MTYPI,IVALI,XVALI,MOT1(1), LOGII,IRETI,
+     &        MTYPR,IVALR,CV   ,CHARR,LOGIR,IRETR)
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'FLOTTANT')) THEN
+C---------------------------
+C Message d'erreur standard
+C -301 0 %m1:40
+C---------------------------
+            MOTERR = 'TAB1  . CV , TAB1 . ESPEULE = ???       '
+            WRITE(IOIMP,*) MOTERR(1:40)
+C---------------------------
+C Message d'erreur standard
+C 21 2
+C Données incompatibles
+C---------------------------
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+         MLRECV.PROG(I1) = CV
+      ENDDO
+      MTYPI = 'MOT     '
+      MTYPR = '        '
+      CALL ACCTAB(ICP,MTYPI,IVALI,XVALI,CELLCH, LOGII,IRETI,
+     &     MTYPR,IVALR,CP   ,CHARR,LOGIR,IRETR)
+      IF((IERR .NE. 0) .OR. (MTYPR .NE. 'FLOTTANT')) THEN
+C---------------------------
+C Message d'erreur standard
+C -301 0 %m1:40
+C---------------------------
+         MOTERR = 'TAB1  . CP , TAB1 . ESPNEULE = ???      '
+         WRITE(IOIMP,*) MOTERR(1:40)
+C---------------------------
+C Message d'erreur standard
+C 21 2
+C Données incompatibles
+C---------------------------
+         CALL ERREUR(21)
+         GOTO 9999
+      ENDIF
+      MLRECP.PROG(JG) = CP
+C
+      MTYPI = 'MOT     '
+      MTYPR = '        '
+      CALL ACCTAB(ICV,MTYPI,IVALI,XVALI,CELLCH, LOGII,IRETI,
+     &     MTYPR,IVALR,CV   ,CHARR,LOGIR,IRETR)
+      IF((IERR .NE. 0) .OR. (MTYPR .NE. 'FLOTTANT')) THEN
+C----------------------------
+C Message d'erreur standard
+C -301 0 %m1:40
+C----------------------------
+         MOTERR = 'TAB1 . CV , TAB1 . ESPNEULE = ???       '
+         WRITE(IOIMP,*) MOTERR(1:40)
+C----------------------------
+C Message d'erreur standard
+C 21 2
+C Données incompatibles
+C----------------------------
+         CALL ERREUR(21)
+         GOTO 9999
+      ENDIF
+      MLRECV.PROG(JG) = CV
+C-------------------------------------------------
+C**** Noms de variables conservatives
+C-------------------------------------------------
+      TYPE='LISTMOTS'
+      CALL LIROBJ(TYPE,ILIINC,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+      MLMOTS = ILIINC
+      SEGACT MLMOTS
+      NBCOMP = MLMOTS.MOTS(/2)
+      SEGDES MLMOTS
+*---------------------------------------------
+      IF(NBCOMP .EQ. (IDIM+4+NESP)) IKEPS = 1
+      IF(NBCOMP .EQ. (IDIM+5+NESP)) ICREB = 1
+*---------------------------------------------
+      IF((IKEPS .EQ. 0) .AND. (ICREB .EQ. 0)) THEN
+         IF(NBCOMP .NE. (IDIM+2+NESP))THEN
+            MOTERR(1:40) = 'LISTINCO = ???'
+            WRITE(IOIMP,*) MOTERR
+C-----------------------------
+C** Message d'erreur standard
+C   21 2
+C   Données incompatibles
+C-----------------------------
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+      ENDIF
+C--------------------------------------------------------
+C**** Noms de variables primitives
+C--------------------------------------------------------
+      TYPE='LISTMOTS'
+      CALL LIROBJ(TYPE,ILIINP,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+      MLMOTS = ILIINP
+      SEGACT MLMOTS
+      NBCOMP = MLMOTS.MOTS(/2)
+      SEGDES MLMOTS
+      IF((IKEPS .EQ. 0) .AND. (ICREB .EQ. 0)) THEN
+         IF(NBCOMP .NE. (IDIM+2+NESP))THEN
+            MOTERR(1:40) = 'LISTPRIM = ???'
+            WRITE(IOIMP,*) MOTERR
+C-----------------------------
+C** Message d'erreur standard
+C        21 2
+C        Données incompatibles
+C-----------------------------
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+      ENDIF
+C--------------------------------------------------------
+C**** Lecture du CHPOINT RN
+C--------------------------------------------------------
+      TYPE='CHPOINT '
+      CALL LIROBJ(TYPE,IROC,1,IRET)
+      IF (IERR.NE.0) GOTO 9999
+C-----------------------------
+C** Control du CHPOINT: QUEPOI
+C
+C INDIC = 1   -> on impose le pointeur du support geometrique
+C NBCOMP > 0 -> nombre des composantes
+C-----------------------------
+      INDIC = 1
+      NBCOMP = 1
+      MOT = 'SCAL'
+      CALL QUEPOI(IROC, MELEMC, INDIC, NBCOMP, MOT)
+      IF(IERR .NE. 0)GOTO 9999
+C------------------------------------------------------
+C**** Lecture du CHPOINT VITC
+C------------------------------------------------------
+      CALL LIROBJ('CHPOINT',IVITC,1,IRET)
+      IF (IERR.NE.0) GOTO 9999
+C-----------------------
+C**** Control du CHPOINT
+C-----------------------
+      JGN = 4
+      JGM = IDIM
+      SEGINI MLMVIT
+      MLMVIT.MOTS(1) = 'UX  '
+      MLMVIT.MOTS(2) = 'UY  '
+      IF(IDIM .EQ. 3)  MLMVIT.MOTS(3) = 'UZ  '
+      CALL QUEPO1(IVITC, MELEMC, MLMVIT)
+      SEGDES MLMVIT
+      IF(IERR .NE. 0)GOTO 9999
+C-------------------------------------------------------
+C**** Lecture du CHPOINT PC
+C-------------------------------------------------------
+      CALL LIROBJ('CHPOINT',IPC,1,IRET)
+      IF (IERR.NE.0) GOTO 9999
+C-----------------------
+C**** Control du CHPOINT
+C-----------------------
+      INDIC = 1
+      NBCOMP = 1
+      MOT = 'SCAL'
+      CALL QUEPOI(IPC, MELEMC, INDIC, NBCOMP, MOT)
+      IF(IERR .NE. 0)GOTO 9999
+C-----------------------------
+C*** Fraction massiques
+C*** des especes "splittees"
+C-----------------------------
+      TYPE = 'CHPOINT '
+      CALL LIROBJ(TYPE,IYN,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+      CALL QUEPO1(IYN, MELEMC, MLMOT1)
+      IF(IERR .NE. 0) THEN
+         MOTERR = 'CHPO FR.MAS. = ?????'
+         WRITE(IOIMP,*) MOTERR(1:40)
+         CALL ERREUR(21)
+         GOTO 9999
+      ENDIF
+C-----------------------------------
+c Turbulent kinetic energy
+c-----------------------------------
+      IF((IKEPS .GT. 0) .OR. (ICREB .GT. 0)) THEN
+         TYPE = 'CHPOINT '
+         CALL LIROBJ(TYPE,IKAN,1,IRET)
+         INDIC = 1
+         NBCOMP = 1
+         MOT = 'SCAL'
+         CALL QUEPOI(IKAN, MELEMC, INDIC, NBCOMP, MOT)
+         IF(IERR .NE. 0)GOTO 9999
+C--------------------------------------
+c Rate of Turbulent energy dissipation
+c--------------------------------------
+         TYPE = 'CHPOINT '
+         CALL LIROBJ(TYPE,IEPSN,1,IRET)
+         INDIC = 1
+         NBCOMP = 1
+         MOT = 'SCAL'
+         CALL QUEPOI(IEPSN, MELEMC, INDIC, NBCOMP, MOT)
+         IF(IERR .NE. 0)GOTO 9999
+      ENDIF
+C--------------------------------------
+c  K0 K0 K0 K0
+c--------------------------------------
+      IF(ICREB .GT. 0) THEN
+         TYPE = 'CHPOINT '
+         CALL LIROBJ(TYPE,IK0N,1,IRET)
+         INDIC = 1
+         NBCOMP = 1
+         MOT = 'SCAL'
+         CALL QUEPOI(IK0N, MELEMC, INDIC, NBCOMP, MOT)
+         IF(IERR .NE. 0)GOTO 9999
+      ELSE
+         IK0N = 0
+      ENDIF
+C------------------------------------------------------
+C**** CHPOINT condition limite
+C------------------------------------------------------
+      CALL LIROBJ('CHPOINT',ICHLIM,1,IRET)
+      IF (IERR.NE.0) GOTO 9999
+C-----------------------------------------------------
+C**** Resultats
+C-----------------------------------------------------
+      IF(IJAC .EQ.0)THEN
+         TYPE='        '
+         CALL KRCHP1(TYPE,MELRES,ICHRES,ILIINC)
+C
+         TYPE='        '
+         CALL KRCHP1(TYPE,MELECB,ICHRLI,ILIINP)
+      ELSE
+         ICHRES=0
+         ICHRLI=0
+      ENDIF
+C---------------------------------------------------------
+C**** TYPE DE CONDITION LIMITE
+C---------------------------------------------------------
+      CALL LIRMOT(LOPT,NBOPT,ILIM,1)
+      IF(IERR .NE. 0) GOTO 9999
+      IF(ILIM .EQ. 1)THEN
+C-------------------------------------------------
+C********  'INRI    ' ????????????????????????????
+C-------------------------------------------------
+         JGN = 4
+         JGM = IDIM+2+NESP
+         IF(IKEPS .GT. 0) JGM = IDIM+4+NESP
+         SEGINI MLMVIT
+         MLMOTS = ILIINP
+         SEGACT MLMOTS
+         NBCOMP = MLMOTS.MOTS(/2)
+         DO 7 I=1,NBCOMP
+            MLMVIT.MOTS(I)=MLMOTS.MOTS(I)
+ 7       CONTINUE
+         SEGDES MLMOTS
+         CALL QUEPO1(ICHLIM, MELECB, MLMVIT)
+         SEGDES MLMVIT
+         IF (IERR.NE.0) GOTO 9999
+C--------------------------------------------------------
+         IF(IJAC.EQ.0)THEN
+            IF(IKEPS .GT. 0) THEN
+               CALL CL221T(NSP,MELEMF,MELEMC,MELECB,MELEFC,INORM,ICHPVO
+     $              ,ICHPSU,MLRECP,MLRECV,IROC,IVITC,IPC,IYN,IKAN,IEPSN
+     $              ,ICHLIM,ICHRES,ICHRLI)
+            ELSE
+               CALL CLI221(NSP,MELEMF,MELEMC,MELECB,MELEFC,INORM,ICHPVO
+     $              ,ICHPSU,MLRECP,MLRECV,IROC,IVITC,IPC,IYN,ICHLIM
+     $              ,ICHRES,ICHRLI)
+            ENDIF
+         ELSE
+            IF(IDIM.EQ.2)THEN
+               CALL CLI223(NSP,MELEMF,MELEMC,MELECB,MELEFC,MELRES,INORM,
+     &              ICHPVO,ICHPSU,MLRECP,MLRECV,
+     &              IROC,IVITC,IPC,IYN,ICHLIM,ILIINC,ILIINP,IJAC,IJACO)
+            ENDIF
+            IF(IERR.NE.0)GOTO 9999
+         ENDIF
+      ELSEIF(ILIM .EQ. 2)THEN
+C-------------------------------------------------
+C********  'OUTRI    '
+C-------------------------------------------------
+         JGN = 4
+         JGM = IDIM+2+NESP
+         SEGINI MLMVIT
+         MLMOTS = ILIINP
+         SEGACT MLMOTS
+         NBCOMP = MLMOTS.MOTS(/2)
+         DO 77 I=1,NBCOMP
+            MLMVIT.MOTS(I)=MLMOTS.MOTS(I)
+ 77      CONTINUE
+         SEGDES MLMOTS
+         CALL QUEPO1(ICHLIM, MELECB, MLMVIT)
+         SEGDES MLMVIT
+         IF (IERR.NE.0) GOTO 9999
+C--------------------------------------------------------
+         IF(IJAC.EQ.0)THEN
+            CALL CLI222(NSP,MELEMF,MELEMC,MELECB,
+     &           MELEFC,INORM,ICHPVO,ICHPSU,
+     &           MLRECP,MLRECV,IROC,IVITC,IPC,IYN,ICHLIM,ICHRES,ICHRLI)
+            IF(IERR.NE.0)GOTO 9999
+         ENDIF
+C--------------------------------------------------------
+      ELSEIF(ILIM .EQ. 3)THEN
+C------------------------
+C********  'INJE    '
+C------------------------
+         JGN = 4
+         JGM = 2+NESP
+         SEGINI MLMVIT
+         MLMVIT.MOTS(1) = 'MOME'
+         MLMVIT.MOTS(2) = 'RT  '
+         MLMOTS = ILIINP
+         SEGACT MLMOTS
+         DO 78 I=1,NESP
+            MLMVIT.MOTS(2+I)=MLMOTS.MOTS(IDIM+2+I)
+ 78      CONTINUE
+         CALL QUEPO1(ICHLIM, MELECB, MLMVIT)
+         SEGDES MLMVIT
+         IF (IERR.NE.0) GOTO 9999
+C-----------------------------------------------------
+C-----------------------------------------------------
+         IF(IJAC.EQ.0)THEN
+            CALL CLI271(NSP,MELEMF,MELEMC,MELECB,MELEFC,INORM,ICHPVO,
+     &           ICHPSU,MLRECP,MLRECV,IROC,IVITC,IPC,ICHLIM,ICHRES
+     $           ,ICHRLI)
+            IF(IERR.NE.0)GOTO 9999
+         ELSE
+            IF(IDIM.EQ.2)THEN
+               CALL CLI272(NSP,MELEMF,MELEMC,MELECB,MELEFC,MELRES,INORM,
+     &              ICHPVO,ICHPSU,MLRECP,MLRECV,
+     &              IROC,IVITC,IPC,IYN,ICHLIM,ILIINC,ILIINP,IJAC,IJACO)
+c            ELSE
+c               CALL CLI173(MELEMF,MELEMC,MELECB,MELEFC,MELRES,INORM
+c     $              ,ICHPVO,ICHPSU,IROC,IVITC,IPC,IGAMC,ICHLIM,ILIINC
+c     $              ,ILIINP,IJAC,IJACO)
+            ENDIF
+         ENDIF
+C--------------------------
+C**** 'OUTP    '  *********
+C--------------------------
+      ELSEIF(ILIM .EQ. 4)THEN
+         JGN = 4
+         JGM = 1
+         SEGINI MLMVIT
+         MLMVIT.MOTS(1)='PN  '
+         CALL QUEPO1(ICHLIM, MELECB, MLMVIT)
+         SEGDES MLMVIT
+         IF (IERR.NE.0) GOTO 9999
+C
+         IF(IJAC.EQ.0)THEN
+            IF((IKEPS .GT. 0) .OR. (ICREB .GT. 0)) THEN
+               CALL CL251T(NSP,MELEMF,MELEMC,MELECB,MELEFC,INORM,ICHPVO,
+     &              ICHPSU,MLRECP,MLRECV,IROC,IVITC,IPC,IYN,
+     &              IKAN,IEPSN,IK0N,ICHLIM,ICHRES,ICHRLI)
+            ELSE
+               CALL CLI251(NSP,MELEMF,MELEMC,MELECB,MELEFC,INORM,ICHPVO,
+     &              ICHPSU,MLRECP,MLRECV,IROC,IVITC,IPC,IYN,ICHLIM
+     $              ,ICHRES,ICHRLI)
+            ENDIF
+            IF(IERR.NE.0)GOTO 9999
+         ELSE
+            IF(IDIM.EQ.2)THEN
+               CALL CLI252(NSP,MELEMF,MELEMC,MELECB,MELEFC,MELRES,INORM,
+     &              ICHPVO,ICHPSU,MLRECP,MLRECV,
+     &              IROC,IVITC,IPC,IYN,ICHLIM,ILIINC,ILIINP,IJAC,IJACO)
+            ENDIF
+         ENDIF
+      ELSEIF(ILIM .EQ. 5)THEN
+C-----------------------------
+C********  'INSU    '
+C-----------------------------
+         JGN = 4
+         JGM = 2+NESP
+         SEGINI MLMVIT
+         MLMVIT.MOTS(1) = 'HT  '
+         MLMVIT.MOTS(2) = 'S   '
+         MLMOTS = ILIINP
+         SEGACT MLMOTS
+         DO 79 I=1,NESP
+            MLMVIT.MOTS(2+I)=MLMOTS.MOTS(IDIM+2+I)
+ 79      CONTINUE
+         CALL QUEPO1(ICHLIM, MELECB, MLMVIT)
+         SEGDES MLMVIT
+         IF (IERR.NE.0) GOTO 9999
+C
+         IF(IJAC.EQ.0)THEN
+            CALL CLI261(NSP,MELEMF,MELEMC,MELECB,MELEFC,INORM,ICHPVO,
+     &           ICHPSU,MLRECP,MLRECV,IROC,IVITC,IPC,IYN,ICHLIM,ICHRES
+     $           ,ICHRLI)
+            IF(IERR.NE.0)GOTO 9999
+         ELSE
+            IF(IDIM.EQ.2)THEN
+               CALL CLI262(NSP,MELEMF,MELEMC,MELECB,MELEFC,MELRES,INORM,
+     &              ICHPVO,ICHPSU,MLRECP,MLRECV,
+     &              IROC,IVITC,IPC,IYN,ICHLIM,ILIINC,ILIINP,IJAC,IJACO)
+            ENDIF
+         ENDIF
+      ELSEIF(ILIM .EQ. 6)THEN
+C-------------------------------------------------
+C********  'INOU    '
+C-------------------------------------------------
+         JGN = 4
+         JGM = NESP+3
+         SEGINI MLMVIT
+         MLMVIT.MOTS(1) = 'HT  '
+         MLMVIT.MOTS(2) = 'S   '
+         MLMOTS = ILIINP
+         SEGACT MLMOTS
+         DO 770 I=1,NESP
+            MLMVIT.MOTS(I+2)=MLMOTS.MOTS(IDIM+2+I)
+ 770     CONTINUE
+         MLMVIT.MOTS(3+NESP)= 'PN  '
+         SEGDES MLMOTS
+         CALL QUEPO1(ICHLIM, MELECB, MLMVIT)
+         SEGDES MLMVIT
+         IF (IERR.NE.0) GOTO 9999
+C--------------------------------------------------------
+         IF(IJAC.EQ.0)THEN
+            CALL CLI281(NSP,MELEMF,MELEMC,MELECB,MELEFC,INORM,ICHPVO
+     $           ,ICHPSU,MLRECP,MLRECV,IROC,IVITC,IPC,IYN,ICHLIM,ICHRES
+     $           ,ICHRLI)
+            IF(IERR.NE.0)GOTO 9999
+         ELSE
+            IF(IDIM.EQ.2)THEN
+               CALL CLI282(NSP,MELEMF,MELEMC,MELECB,MELEFC,MELRES,INORM,
+     &              ICHPVO,ICHPSU,MLRECP,MLRECV,
+     &              IROC,IVITC,IPC,IYN,ICHLIM,ILIINC,ILIINP,IJAC,IJACO)
+            ENDIF
+         ENDIF
+C--------------------------------------------------------
+      ELSEIF(ILIM .EQ. 7)THEN
+C--------------------------------------
+C******   'INSS' **********************
+C--------------------------------------
+         JGN = 4
+         JGM = IDIM+2+NESP
+         IF(IKEPS .GT. 0) JGM = IDIM+4+NESP
+         SEGINI MLMVIT
+         MLMOTS = ILIINP
+         SEGACT MLMOTS
+         NBCOMP = MLMOTS.MOTS(/2)
+         DO 775 I=1,NBCOMP
+            MLMVIT.MOTS(I)=MLMOTS.MOTS(I)
+ 775     CONTINUE
+         SEGDES MLMOTS
+         CALL QUEPO1(ICHLIM, MELECB, MLMVIT)
+         SEGDES MLMVIT
+         IF (IERR.NE.0) GOTO 9999
+C--------------------------------------------------------
+         IF(IJAC.EQ.0)THEN
+            IF(IKEPS .GT. 0) THEN
+               CALL CL281T(NSP,MELEMF,MELEMC,MELECB,MELEFC,INORM,ICHPVO
+     $              ,ICHPSU,MLRECP,MLRECV,ICHLIM,ICHRES,ICHRLI)
+            ENDIF
+         ENDIF
+C--------------------------
+C**** 'OUTSS  '  *********
+C--------------------------
+      ELSEIF(ILIM .EQ. 8)THEN
+         IF(IJAC.EQ.0)THEN
+            IF(IKEPS .GT. 0) THEN
+               CALL CL291T(NSP,MELEMF,MELEMC,MELECB,MELEFC,INORM,ICHPVO,
+     &              ICHPSU,MLRECP,MLRECV,IROC,IVITC,IPC,IYN,
+     &              IKAN,IEPSN,ICHLIM,ICHRES,ICHRLI)
+            ENDIF
+         ENDIF
+      ELSEIF(ILIM .EQ. 9)THEN
+C-------------------------------------------------
+C********  'RESE    ' ****************************
+C-------------------------------------------------
+         IF((IJAC .NE. 0) .OR. (IKEPS .NE. 0) .OR. (ICREB .GT. 0)) THEN
+            WRITE(IOIMP,*) 'RESI implemented in explicit case only!'
+            WRITE(IOIMP,*) 'No passive scalars!'
+            CALL ERREUR(21)
+C           Données incompatibles
+            GOTO 9999
+         ENDIF
+C
+C
+         JGN = 4
+         JGM = 2+NESP
+         SEGINI MLMVIT
+         MLMOTS = ILIINP
+         SEGACT MLMOTS
+         MLMVIT.MOTS(1)='RN  '
+         MLMVIT.MOTS(2)='PN  '
+C
+         DO 8 I=1,NESP
+            MLMVIT.MOTS(2+I)=MLMOTS.MOTS(2+I+IDIM)
+ 8       CONTINUE
+         SEGDES MLMOTS
+C
+         CALL QUEPO1(ICHLIM, MELECB, MLMVIT)
+         SEGSUP MLMVIT
+         IF (IERR.NE.0) GOTO 9999
+C
+         CALL CLI22R(NSP,MELEMF,MELEMC,MELECB,MELEFC,INORM,ICHPVO,ICHPSU
+     $        ,MLRECP,MLRECV,IPC,ICHLIM,ICHRES,ICHRLI)
+         IF(IERR.NE.0)GOTO 9999
+C--------------------------------------------------------
+      ENDIF
+C--------------------------------------------------------
+      IF(IJAC .EQ. 0) THEN
+         TYPE = 'CHPOINT '
+         CALL ECROBJ(TYPE,ICHRES)
+         CALL ECROBJ(TYPE,ICHRLI)
+      ELSE
+         CALL ECROBJ('MATRIK  ',IJACO)
+      ENDIF
+ 9999 CONTINUE
+      RETURN
+      END
+
+
+
+
+
+
+

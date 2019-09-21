@@ -1,0 +1,1700 @@
+C GRAD1     SOURCE    KICH      18/12/05    21:15:04     10024
+
+C=======================================================================
+C=                             G R A D 1                               =
+C=                             ---------                               =
+C=                                                                     =
+C=  Fonction :                                                         =
+C=  ----------                                                         =
+C=  Traitement des informations necessaires au calcul du gradient d'un =
+C=  champ deplacement/temperature. Branchement suivant l'element fini. =
+C=  Sous-programme appele par GRAD (grad.eso)                          =
+C=                                                                     =
+C=  Parametres :  (E)=Entree   (S)=Sortie                              =
+C=  ------------                                                       =
+C=   IPMODL   (E)   Pointeur sur segment MMODEL                        =
+C=   IPCHE2   (E)   Pointeur sur segment MCHELM de DEPLACEMENT/TEMPER. =
+C=   IPCHE1   (E)   Pointeur sur segment MCHELM de CARACTERISTIQUES    =
+C=   IPCHL1   (S)   Pointeur sur segment MCHELM de GRADIENT resultat   =
+C=   IRET     (S)   Entier valant 1 en cas de succes, 0 sinon (et un   =
+C=                  message d'erreur est imprime dans ce cas)          =
+C=                                                                     =
+C=  Remarque :  En entree du sousprogramme, IPCHL1 contient le CHPOINT =
+C=  ----------  de deplacement ou de temperature fourni a l'operateur  =
+C=              'GRAD'. Dans le cas d'un modele MECANIQUE, ce CHPOINT  =
+C=              est indispensable a avoir pour calculer les deforma-   =
+C=              generalisees au(x) point(s) support(s).                =
+C=                                                                     =
+C=  Christian LE BRETON - Denis ROBERT-MOUGIN, le 31 juillet 1986.     =
+C=  Modifications aux nouvelles normes I.MONNIER, le 28 mai 1990.      =
+C=======================================================================
+
+      SUBROUTINE GRAD1 (IPMODL,MODEPL,IPCHE2,IPCHE1, IPCHL1,IRET)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+C     Booleen de determination automatique des noms de composantes
+      LOGICAL COMAUT
+
+-INC CCOPTIO
+-INC CCHAMP
+-INC CCREEL
+
+-INC SMCHAML
+-INC SMMODEL
+-INC SMELEME
+-INC SMINTE
+-INC SMCOORD
+-INC SMLREEL
+
+      SEGMENT INFO
+        INTEGER INFELL(JG)
+      ENDSEGMENT
+
+      SEGMENT NOTYPE
+        CHARACTER*16 TYPE(NBTYPE)
+      ENDSEGMENT
+
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS),NSOF(NS),IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+
+      SEGMENT MVELCH
+        REAL*8 VALMAT(NV1)
+      ENDSEGMENT
+
+      SEGMENT MWRK1
+        REAL*8 XDDL(LRE),XE(3,NBNO),GRADI(NGRA)
+        REAL*8 DDHOOK(NSTRS,NSTRS),DDHOMU(NSTRS,NSTRS)
+      ENDSEGMENT
+
+      SEGMENT MWRK2
+        REAL*8 SHPWRK(6,NBNO),BGR(NGRA,LRE),BB(2,NGRA)
+      ENDSEGMENT
+
+      SEGMENT MWRK3
+        REAL*8 WORK(LW)
+      ENDSEGMENT
+
+      SEGMENT MWRK4
+        REAL*8 BPSS(3,3),XEL(3,NBNO),XDDLOC(LRE)
+      ENDSEGMENT
+
+      PARAMETER (NINF=3)
+      INTEGER INFOS(NINF)
+      CHARACTER*8 CMATE
+      CHARACTER*(NCONCH) CONM
+
+      DIMENSION A(4,60),BBX(3,60),UDPGE(3),PP(4,4)
+      LOGICAL LDPGE,lsupgd,lsupdp
+      INTEGER ISUP1
+
+      IF(MODEPL.GT.0) THEN
+        COMAUT=.FALSE.
+      ELSE
+        COMAUT=.TRUE.
+      ENDIF
+
+      IRET=0
+      ISUP1=0
+      iMess=0
+
+C  1 - QUELQUES INITIALISATIONS
+C ==============================
+C  1.1 - Activation du MMODEL
+C =====
+      MMODEL=IPMODL
+      SEGACT,MMODEL
+      NSOUS=KMODEL(/1)
+C
+      KEL22 = 0
+      DO ISOUS = 1,NSOUS
+        IMODEL=KMODEL(ISOUS)
+        SEGACT IMODEL
+        IF (FORMOD(1).EQ.'CHARGEMENT') KEL22 = KEL22 + 1
+C        SEGDES IMODEL
+      ENDDO
+C
+C =====
+C  1.2 - Cas des modes de calculs en DEFORMATIONS GENERALISEES
+C        En mecanique, on conserve le CHPOINT de deplacements pour
+C        calculer les deplacements du point support en DPGE (IPCHP1)
+C =====
+      IPCHP1 = IPCHL1
+C =====
+C  1.3 - Activation du MCHELM resultat du champ de gradients
+C =====
+      L1=8
+      N1=NSOUS-KEL22
+      N3=6
+      SEGINI,MCHELM
+      TITCHE='GRADIENT'
+      IFOCHE=IFOUR
+      IPCHL1=MCHELM
+C =====
+C  1.4 - Les composantes des champs de deplacement/temperature, de
+C        gradient resultat sont toutes du meme type ('REAL*8') sur tout
+C        le modele IPMODL. Le segment MOTYCH de type NOTYPE associe est
+C        donc initialise une seule fois.
+C =====
+      NBTYPE=1
+      SEGINI,NOTYPE
+      TYPE(1)='REAL*8'
+      MOTYCH=NOTYPE
+
+C  2 - BOUCLE SUR LES ZONES ELEMENTAIRES DU MODELE (iSou)
+C ========================================================
+      isouss=0
+      DO 2000 iSou=1,NSOUS
+C =====
+C  2.1 - Quelques initialisations
+C =====
+        NDEP=0
+
+        IF(COMAUT) THEN
+          MODEPL=0
+        ENDIF
+        IVADEP=0
+        NGRA=0
+        MOGRAD=0
+        IVAGRA=0
+        MOCARA=0
+        IVACAR=0
+        MOMATR=0
+        IVAMAT=0
+        MWRK1=0
+        MWRK2=0
+        MWRK3=0
+        MWRK4=0
+        MCHAML=0
+        MELVAL=0
+        MVELCH=0
+
+C =====
+C  2.2 - Activation du sous-modele (iSou)
+C =====
+        IMODEL=KMODEL(iSou)
+        SEGACT,IMODEL
+C
+        IF (FORMOD(1).EQ.'CHARGEMENT')  GOTO 2000
+C
+        NFOR = formod(/2)
+        CALL PLACE(FORMOD,NFOR,iliais,'LIAISON')
+        iaffai=1
+        DO iou=1,matmod(/2)
+          if (matmod(iou).eq.'MODAL' .or. matmod(iou).eq.'STATIQUE' .or.
+     $        matmod(iou).eq.'IMPEDANCE') iaffai=0
+        ENDDO
+        IF (iaffai.eq.0 .or. iliais.ne.0)  GOTO 2000
+        MELE=NEFMOD
+* au cas ou il y en aurait besoin
+        IF (mele.eq.22.or.mele.eq.259.or.mele.eq.50000) goto 2000
+        isouss=isouss+1
+        IPMAIL=IMAMOD
+        CONM=CONMOD
+C =====
+C  2.3 - Determination ...
+C =====
+        CALL IDENT(IPMAIL,CONM,IPCHE2,IPCHE1,INFOS,iOK)
+        IF (iOK.EQ.0) GOTO 200
+        iOK=0
+C =====
+C  2.4 - Determination de la nature du materiau et verification
+C =====
+        NFOR=FORMOD(/2)
+        CMATE = CMATEE
+        MATE  = IMATEE
+*NU     INAT  = INATUU
+        IF (CMATE.EQ.' ') THEN
+          CALL ERREUR(251)
+          GOTO 200
+        ENDIF
+        CALL PLACE(FORMOD,NFOR,ITHEHY,'THERMOHYDRIQUE')
+        CALL PLACE(FORMOD,NFOR,ITHER ,'THERMIQUE'     )
+        CALL PLACE(FORMOD,NFOR,IDIFF ,'DIFFUSION'     )
+C =====
+C  2.5 - Recuperation d'informations lies au maillage IPMAIL
+C =====
+        MELEME=IPMAIL
+        SEGACT,MELEME
+        NBNN=NUM(/1)
+        NBELEM=NUM(/2)
+        NBNO=NBNN
+C =====
+C  2.6 - Recuperation d'informations sur l'element fini du sous-modele
+C        suivant la formulation du modele (MECANIQUE ou THERMIQUE)
+C =====
+C SP 07/08 : NII=Nombre Inconnues Independantes
+C            (e.g. T,Pc,Pg en Thermohydrique)
+        NII=1
+        IPINF=0
+        IF (ITHEHY.NE.0) THEN
+          MFR=65
+          CALL TSHAPE(MELE,'GAUSS',IPMINT)
+          IPMIN1=0
+          NII=3
+          LRE=NII*NBNN
+C*OF : Valeur de LW ?
+          LW=1700
+          NSTRS=0
+          LDPGE = .FALSE.
+          NDPGE = 0
+        ELSE IF (ITHER.NE.0 .OR. IDIFF.NE.0) THEN
+          MFR=NUMMFR(MELE)
+          CALL TSHAPE(MELE,'GAUSS',IPMINT)
+          IPMIN1=0
+          IF (MFR.EQ.5.OR.MFR.EQ.9) THEN
+            CALL TSHAPE(MELE,'NOEUD',IPMIN1)
+          ENDIF
+          IF (MFR.EQ.3.OR.MFR.EQ.5.OR.MFR.EQ.9) THEN
+            LRE=3*NBNN
+          ELSE
+            LRE=NBNN
+          ENDIF
+C*OF : Valeur de LW ?
+          LW=1700
+          NSTRS=0
+          LDPGE = .FALSE.
+          NDPGE = 0
+c ajout bp du 18/06/2013 : il faut renseigner NPINT pour idtemp
+          NPINT=0
+          IF(INFMOD(/1).NE.0) NPINT=INFMOD(1)
+        ELSE
+          if(infmod(/1).lt.7)then
+            CALL ELQUOI(MELE,0,5,IPINF,IMODEL)
+            INFO=IPINF
+            IF (IERR.NE.0) GOTO 210
+            MFR=INFELL(13)
+            IPMINT=INFELL(11)
+            IPMIN1=INFELL(12)
+            LRE=INFELL(9)
+            LW=INFELL(7)
+            LHOOK=INFELL(10)
+            NSTRS=INFELL(16)
+            segsup info
+          else
+            MFR=INFELE(13)
+*            IPMINT=INFELE(11)
+            ipmint=infmod(7)
+            IPMIN1=INFMOD(8)
+            LRE=INFELE(9)
+            LW=INFELE(7)
+            LHOOK=INFELE(10)
+            NSTRS=INFELE(16)
+          endif
+          CALL INFDPG(MFR,IFOUR, LDPGE,NDPGE)
+        ENDIF
+C =====
+C  2.6 - Recherche des DDL du noeud support des def. planes generalisees
+C        Dans ce cas, IPCHP1 est fourni a GRAD via IPCHL1 (cf. 1.3)
+C =====
+        IF (LDPGE) THEN
+          IF (IPCHP1.EQ.0) THEN
+            CALL ERREUR(621)
+            GOTO 210
+          ENDIF
+          IIPDPG = imodel.IPDPGE
+          IIPDPG = IPTPOI(IIPDPG)
+          IF (IIPDPG.EQ.0) THEN
+            CALL ERREUR(925)
+            CALL ERREUR(5)
+            GOTO 210
+          ENDIF
+          CALL DEPDPG(IPCHP1,UDPGE(1),UDPGE(2),UDPGE(3),IIPDPG)
+        ELSE
+          IIPDPG = 0
+        ENDIF
+C =====
+C  2.7 - Segment d'integration
+C =====
+        MINTE=IPMINT
+        SEGACT,MINTE
+        NBPGAU=POIGAU(/1)
+C =====
+C  2.8 - Recuperation des noms des caracteristiques GEOMETRIQUES
+C        Verification de leur presence dans le MCHAML (IPCHE1)
+C =====
+        NBROBL=0
+        NBRFAC=0
+        IVECT =0
+       if (iaffai.eq.1.and.iliais.eq.0) then
+C= 2.8.1 - Elements COQUES : epaisseur et excentrement
+        IF (MFR.EQ.3.OR.MFR.EQ.5.OR.MFR.EQ.9) THEN
+          NBROBL=1
+          NBRFAC=1
+          SEGINI,NOMID
+          LESOBL(1)='EPAI'
+          LESFAC(1)='EXCE'
+          MOCARA=NOMID
+          NBTYPE=1
+          SEGINI,NOTYPE
+          TYPE(1)='REAL*8'
+C= 2.8.2 - Elements BARREs
+        ELSE IF (MFR.EQ.27) THEN
+          NBROBL=1
+          SEGINI NOMID
+          MOCARA=NOMID
+          LESOBL(1)='SECT'
+          NBTYPE=1
+          SEGINI NOTYPE
+          TYPE(1)='REAL*8'
+C= 2.8.3 - Elements BARREs EXCENTREES : section, excentrements et orientation
+        ELSE IF (MFR.EQ.49) THEN
+          NBROBL=6
+          SEGINI NOMID
+          MOCARA=NOMID
+          LESOBL(1)='SECT'
+          LESOBL(2)='EXCZ'
+          LESOBL(3)='EXCY'
+          LESOBL(4)='VX  '
+          LESOBL(5)='VY  '
+          LESOBL(6)='VZ  '
+          NBTYPE=1
+          SEGINI NOTYPE
+          TYPE(1)='REAL*8'
+
+C= 2.8.4 - Elements POUTRES
+        ELSE IF (MFR.EQ.7) THEN
+          IF (CMATE.EQ.'SECTION') THEN
+            NBROBL=0
+            NBRFAC=1
+            SEGINI NOMID
+            MOCARA=NOMID
+            LESFAC(1)='VECT'
+            IVECT=1
+
+            NBTYPE=1
+            SEGINI NOTYPE
+            TYPE(1)='POINTEURPOINT   '
+          ELSE
+            IF(IFOUR.EQ.2) THEN
+              NBROBL=4
+              NBRFAC=3
+              SEGINI NOMID
+              MOCARA=NOMID
+              LESOBL(1)='TORS'
+              LESOBL(2)='INRY'
+              LESOBL(3)='INRZ'
+              LESOBL(4)='SECT'
+              LESFAC(1)='SECY'
+              LESFAC(2)='SECZ'
+              LESFAC(3)='VECT'
+              IVECT=1
+              NBTYPE=7
+              SEGINI NOTYPE
+              TYPE(1)='REAL*8'
+              TYPE(2)='REAL*8'
+              TYPE(3)='REAL*8'
+              TYPE(4)='REAL*8'
+              TYPE(5)='REAL*8'
+              TYPE(6)='REAL*8'
+              TYPE(7)='POINTEURPOINT   '
+            ELSEIF(IFOUR.EQ.-1.OR.IFOUR.EQ.-2.OR.IFOUR.EQ.-3) THEN
+              NBRFAC=1
+              NBROBL=2
+              SEGINI NOMID
+              MOCARA=NOMID
+              LESOBL(1)= 'SECT'
+              LESOBL(2)= 'INRZ'
+              LESFAC(1)= 'SECY'
+              NBTYPE=1
+              SEGINI NOTYPE
+              TYPE(1)='REAL*8'
+            ENDIF
+          ENDIF
+C= 2.8.5 - Elements POUTRES TIMO 2D :
+C*      non defini actuellement
+C= 2.8.6 - Elements TUYAUX
+        ELSE IF (MFR.EQ.13) THEN
+          NBROBL=2
+          NBRFAC=3
+          SEGINI NOMID
+          MOCARA=NOMID
+          LESOBL(1)='EPAI'
+          LESOBL(2)='RAYO'
+          LESFAC(1)='RACO'
+          LESFAC(2)='CISA'
+          LESFAC(3)='VECT'
+          IVECT=1
+          NBTYPE=5
+          SEGINI NOTYPE
+          TYPE(1)='REAL*8'
+          TYPE(2)='REAL*8'
+          TYPE(3)='REAL*8'
+          TYPE(4)='REAL*8'
+          TYPE(5)='POINTEURPOINT   '
+        ENDIF
+       endif
+        NCARA=NBROBL
+        NCARF=NBRFAC
+        NCAR =NBROBL+NBRFAC
+C= 2.8.x - Verification de la presence des caracteristiques dans IPCHE1
+        IF (NCAR.NE.0) THEN
+          IF (IPCHE1.NE.0) THEN
+            MOTYPE=NOTYPE
+            CALL KOMCHA(IPCHE1,IPMAIL,CONM,MOCARA,MOTYPE,1,
+     .                  INFOS,3,IVACAR)
+            SEGSUP,NOTYPE
+            IF (IERR.NE.0) GOTO 220
+*           IF (IVACAR.NE.0) THEN
+*             MPTVAL=IVACAR
+*             IPMELV=IVAL(1)
+*             CALL QUELCH(IPMELV,ICONS)
+*             IF (ICONS.NE.0) THEN
+*               CALL ERREUR(566)
+*               GOTO 220
+*             ENDIF
+*           ENDIF
+*  CAS DES POUTRES : TRAITEMENT DES VECTEURS
+            IF (IVECT.EQ.1) THEN
+              MPTVAL=IVACAR
+              IF (IVAL(NCAR).EQ.0) THEN
+C           MOT CLE VECT EN CAS DE CONVERSION
+                segsup mptval
+                IVECT=2
+                NOMID=MOCARA
+C*              SEGACT NOMID
+                NBRFAC=NBRFAC+2
+                SEGADJ NOMID
+                LESFAC(NBRFAC-2)='VX  '
+                LESFAC(NBRFAC-1)='VY  '
+                LESFAC(NBRFAC)  ='VZ  '
+                NCARF=NBRFAC
+                NCAR=NCARA+NCARF
+                CALL KOMCHA(IPCHE1,IPMAIL,CONM,MOCARA,MOTYCH,
+     $                      1,INFOS,3,IVACAR)
+                IF (IERR.NE.0) GOTO 220
+              ENDIF
+            ENDIF
+          ELSE
+            MOTERR(1:8)='CARACTER'
+            MOTERR(9:12)=NOMTP(MELE)
+            MOTERR(13:20)='GRAD'
+            CALL ERREUR(145)
+            GOTO 220
+          ENDIF
+        ENDIF
+C =====
+C  2.9.1 - Traitement particulier dans le cas de l'element COQUE DST
+C        Recuperation des donnees contenues dans la matrice de HOOKE
+C        Verification de leur presence dans le MCHAML (IPCHE1)
+C =====
+        NMATR=0
+        NMATF=0
+        NMATT=0
+        IF (MELE.EQ.93) THEN
+          IF (FORMOD(1).EQ.'MECANIQUE'.AND.CMATE.EQ.'ISOTROPE') THEN
+            NBROBL=2
+            NBRFAC=0
+            SEGINI,NOMID
+            LESOBL(1)='YOUN'
+            LESOBL(2)='NU  '
+            MOMATR=NOMID
+            NMATR=NBROBL
+            NMATF=NBRFAC
+            IF (IPCHE1.NE.0) THEN
+C*OF : On va utiliser MOTYCH pour gagner un peu de temps
+C*OF          NBTYPE=1
+C*OF          SEGINI,NOTYPE
+C*OF          TYPE(1)='REAL*8'
+C*OF          MOTYPE=NOTYPE
+C*OF          CALL KOMCHA(IPCHE1,IPMAIL,CONM,MOMATR,MOTYPE,1,
+              CALL KOMCHA(IPCHE1,IPMAIL,CONM,MOMATR,MOTYCH,1,
+     .                    INFOS,3,IVAMAT)
+              IF (IERR.NE.0) GOTO 230
+C*OF          SEGSUP,NOTYPE
+            ELSE
+              SEGSUP,NOTYPE
+              MOTERR(1:8)='CARACTER'
+              MOTERR(9:12)=NOMTP(MELE)
+              MOTERR(13:20)='GRAD'
+              CALL ERREUR(145)
+              GOTO 230
+            ENDIF
+            NMATT=NMATR+NMATF
+            MPTVAL=IVAMAT
+            NBGMAT=0
+            NELMAT=0
+            DO i=1,NMATT
+              IF (IVAL(i).NE.0)THEN
+                MELVAL=IVAL(i)
+                NBGMAT=MAX(NBGMAT,VELCHE(/1))
+                NELMAT=MAX(NELMAT,VELCHE(/2))
+              ENDIF
+            ENDDO
+          ENDIF
+        ENDIF
+C =====
+C  2.9.2 - Cas d'un joint unidimensionnel JOI1
+C   Chargement des vecteurs stitués dans les caractéristiques matériau
+C =====
+       IF(MFR.EQ.75) THEN
+          IF(IDIM.EQ.3) THEN
+             NBROBL=6
+             NBRFAC=0
+             SEGINI NOMID
+             MOMATR=NOMID
+             LESOBL(1)='V1X'
+             LESOBL(2)='V1Y'
+             LESOBL(3)='V1Z'
+             LESOBL(4)='V2X'
+             LESOBL(5)='V2Y'
+             LESOBL(6)='V2Z'
+             NMATR=NBROBL
+             NMATF=NBRFAC
+          ELSE IF(IDIM.EQ.2) THEN
+             NBROBL=2
+             NBRFAC=0
+             SEGINI NOMID
+             MOMATR=NOMID
+             LESOBL(1)='V1X'
+             LESOBL(2)='V1Y'
+             NMATR=NBROBL
+             NMATF=NBRFAC
+          ENDIF
+            NBTYPE=1
+            SEGINI NOTYPE
+            TYPE(1)='REAL*8'
+            MOTYPE=NOTYPE
+*
+         CALL KOMCHA(IPCHE1,IPMAIL,CONM,MOMATR,MOTYPE,1,INFOS,3,IVAMAT)
+         SEGSUP NOTYPE
+         IF (IERR.NE.0) GOTO 2000
+*
+          NMATT=NMATR+NMATF
+*                                                                        C
+          IF(ISUP1.EQ.1)THEN
+            CALL VALCHE(IVAMAT,NMATT,IPMINT,IPPORE,MOMATR,MELE)
+            IF(IERR.NE.0)THEN
+               ISUP1=0
+               GOTO 2000
+            ENDIF
+          ENDIF
+          MPTVAL=IVAMAT
+          NBGMAT = 0
+          NELMAT = 0
+          DO 11265 IM=1,NMATT
+            IF(IVAL(IM).NE.0)THEN
+              MELVAL=IVAL(IM)
+              IF (CMATE.EQ.'SECTION') THEN
+                NBGMAT=MAX(NBGMAT,IELCHE(/1))
+                NELMAT=MAX(NELMAT,IELCHE(/2))
+              ELSE
+                NBGMAT=MAX(NBGMAT,VELCHE(/1))
+                NELMAT=MAX(NELMAT,VELCHE(/2))
+              ENDIF
+            ENDIF
+11265    CONTINUE
+        nmattd=nmatt
+        ivamtd= ivamat
+C        segdes nomid
+       ENDIF
+C ======
+C  2.10 - Recuperation des noms des composantes de DEPL. ou T
+C         Verification de leur presence dans le MCHAML (IPCHE2)
+C*OF Par abus : MODEPL noms des composantes de DEPL et de Temperatures
+C ======
+       IF(COMAUT) THEN
+         IF(LNOMID(1).NE.0) THEN
+           NOMID=LNOMID(1)
+           SEGACT NOMID
+           MODEPL=NOMID
+           ndep=LESOBL(/2)
+           NFAC=LESFAC(/2)
+           LSUPDP=.FALSE.
+         ELSE
+           LSUPDP=.TRUE.
+           IF (ITHER.NE.0 .OR. IDIFF.NE.0) THEN
+             CALL IDTEMP(MFR,IFOUR,NPINT,MODEPL,NDEP,NFAC)
+             IF (MFR.EQ.1) THEN
+               MDM=29
+             ELSE IF (MFR.EQ.3.OR.MFR.EQ.5.OR.MFR.EQ.9) THEN
+               MDM=39
+             ENDIF
+           ELSE
+             CALL IDPRIM(IMODEL,MFR,MODEPL,NDEP,NFAC)
+             MDM=MFR
+           ENDIF
+         ENDIF
+       ELSE
+           LSUPDP=.FALSE.
+           NOMID=MODEPL
+           SEGACT NOMID
+           ndep=LESOBL(/2)
+           NFAC=LESFAC(/2)
+       ENDIF
+       CALL KOMCHA(IPCHE2,IPMAIL,CONM,MODEPL,MOTYCH,1,INFOS,3,IVADEP)
+       IF (IERR.NE.0) GOTO 240
+C ======
+C  2.11 - Recuperation des noms des composantes de gradient
+C ======
+       IF(LNOMID(3).NE.0) then
+         MOGRAD=LNOMID(3)
+         NOMID=MOGRAD
+         SEGACT,NOMID
+         NGRA=LESOBL(/2)
+         NFAC=LESFAC(/2)
+         LSUPGD=.FALSE.
+       ELSE
+         LSUPGD=.TRUE.
+        CALL IDGRAD(MDM,IFOUR,MOGRAD,NGRA,NFAC)
+         NOMID=MOGRAD
+         SEGACT,NOMID
+       ENDIF
+C ======
+C  2.12 - Initialisation du MCHAML des gradients (MCHAML)
+C         associe au modele elementaire iSou (de maillage IPMAIL)
+C         Remplissage des donnees associees a MCHAML dans MCHELM(global)
+C ======
+C= 2.12.1 - Initialisation de MCHAML
+        N2=NGRA
+        SEGINI,MCHAML
+C= 2.12.2 - Remplissage de MCHEML(iSou)
+        CONCHE(iSouss)=CONMOD
+        IMACHE(iSouss)=IPMAIL
+        ICHAML(iSouss)=MCHAML
+        INFCHE(iSouss,1)=0
+        INFCHE(iSouss,2)=0
+        INFCHE(iSouss,3)=NIFOUR
+        INFCHE(iSouss,4)=IPMINT
+        INFCHE(iSouss,5)=0
+        IF (ITHEHY.NE.0 .OR. ITHER.NE.0  .OR. IDIFF.NE.0) THEN
+          INFCHE(iSouss,6)=6
+        ELSE
+          INFCHE(iSouss,6)=5
+        ENDIF
+C= 2.12.3 - Initialisation des N2 MELVAL associes a MCHAML
+C=          Fin du remplissage de MCHAML
+        N1EL=0
+        N1PTEL=0
+        MPTVAL=IVADEP
+        DO i=1,NDEP
+          MELVAL=IVAL(i)
+          N1PTEL=MAX(N1PTEL,VELCHE(/1))
+          N1EL=MAX(N1EL,VELCHE(/2))
+        ENDDO
+        IF (N1PTEL.EQ.1.OR.NBPGAU.EQ.1) THEN
+          N1PTEL=1
+        ELSE
+          N1PTEL=NBPGAU
+        ENDIF
+        N1EL=MIN(N1EL,NBELEM)
+*        write(6,*) 'N1PTEL,N1EL=',N1PTEL,N1EL
+        N2PTEL=0
+        N2EL=0
+        NS=1
+        NCOSOU=NGRA
+        SEGINI,MPTVAL
+        NOMID=MOGRAD
+        DO i=1,N2
+          NOMCHE(i)=LESOBL(i)
+          TYPCHE(i)='REAL*8'
+          SEGINI,MELVAL
+          IELVAL(i)=MELVAL
+          IVAL(i)=MELVAL
+        ENDDO
+        IVAGRA=MPTVAL
+C ======
+C  2.13 - Initialisations de quelques valeurs
+C ======
+cbp     NDDD=NDEP -> ne prend pas en compte les composantes facultatives
+        MPTVAL=IVADEP
+        NDDD=IVAL(/1)
+C* Attention si composantes facultatives en DPGE ??
+        IF (LDPGE) NDDD=NDEP-NDPGE
+*
+        IF (MFR.EQ.77) THEN
+*         zones cohesives : on se limite aux composantes obligatoires
+          NDDD=NDEP
+        ENDIF
+
+C POUR les XFEM on fait un cas particulier inspiré du cas massif
+        IF (MFR.EQ.63) THEN
+          CALL GRAD1X(IMODEL,IVADEP,LRE,IVAGRA,NGRA,
+     &                IPMINT,IPMIN1,IIPDPG,IOK)
+          GOTO 260
+        ELSE IF (MFR.EQ.29) THEN
+          i=NGRA
+          NGRA=i*NBNO
+          SEGINI,MWRK1
+          NGRA=i
+        ELSE
+          SEGINI,MWRK1
+        ENDIF
+C
+        IF (ITHEHY.NE.0) THEN
+          LREII=LRE/NII
+          NGRAII=NGRA/NII
+          JG=LREII
+          SEGINI,MLREE1
+          JG=NGRAII
+          SEGINI,MLREE2
+        ENDIF
+        IF (ITHEHY.NE.0 .OR. ITHER.NE.0  .OR. IDIFF.NE.0) THEN
+          NOELE=57
+        ELSE
+          NOELE=MELE
+        ENDIF
+C ======
+C  2.14 - Boucle sur les elements du sous-modele elementaire
+C ======
+
+        DO 100 IB=1,NBELEM
+C= 2.14.1 - Recuperation des coordonnees des noeuds de l'element
+          CALL DOXE(XCOOR,IDIM,NBNO,NUM,IB,XE)
+C= 2.14.2 - Recuperation des deplacements/temperatures aux noeuds
+C=          Traitement dans les cas des modes generalises
+          MPTVAL=IVADEP
+          IE=1
+          DO iGau=1,NBNN
+            DO i=1,NDDD
+              MELVAL=IVAL(i)
+              IF (MELVAL.NE.0) THEN
+                IGMN=MIN(iGau,VELCHE(/1))
+                IBMN=MIN(IB,VELCHE(/2))
+                XDDL(IE)=VELCHE(IGMN,IBMN)
+              ELSE
+                XDDL(IE)=XZero
+              ENDIF
+              IE=IE+1
+            ENDDO
+          ENDDO
+          IF (NDPGE.GT.0) THEN
+            DO i=1,NDPGE
+              XDDL(IE)=UDPGE(i)
+              IE=IE+1
+            ENDDO
+          ENDIF
+
+C= 2.14.3 - Branchement suivant l'element fini
+c            1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20
+      GOTO (99,99,99, 4,99, 4,99, 4,99, 4,99,99,99, 4, 4, 4, 4,99,99,99,
+c           21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40
+     .      99,99, 4, 4, 4, 4,27,28,29,99,99,99,99,99,99,99,99,99,99,99,
+     .      41,29,99,44,99,99,99,99,49,99,99,99,99,99,99,41, 4, 4, 4, 4,
+     .       4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,99,99,
+     .      99,99,99,29,85,99,99,88,99,99,99,99,93,99,99,99,99,99,99,99,
+     .      99,99,99,99,99,99,99,99,99,99, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+     .       4, 4),MELE
+          IF (MELE.EQ.183.OR.MELE.EQ.184) GOTO 4
+          IF (MELE.GE.191.AND.MELE.LE.194) GOTO 4
+          IF (MELE.EQ.265) GOTO 265
+          IF (MELE.EQ.266) GOTO 266
+          IF (MELE.EQ.267) GOTO 267
+          IF (MELE.EQ.273.OR.MELE.EQ.274) GOTO 4
+ 99       CONTINUE
+CC*OF On ne veut plus sortir sur une erreur :
+C*        MOTERR(1:4)=NOMTP(MELE)
+C*        MOTERR(9:12)='GRADIENT'
+C*        iMess=86
+C*OF On met un champ de gradient nul pour les elements non implementes !
+          N1PTEL=1
+          N1EL=1
+          N2PTEL=0
+          N2EL=0
+          DO i=1,IELVAL(/1)
+            MELVAL=IELVAL(i)
+            SEGADJ,MELVAL
+            VELCHE(1,1)=XZero
+          ENDDO
+          iOK=1
+          GOTO 250
+C= 2.14.4 - Elements MASSIFS et INCOMPRESSIBLES
+ 4        CONTINUE
+          IF (IB.EQ.1) SEGINI,MWRK2
+          ISDJC=0
+          DO iGau=1,NBPGAU
+C -- Calcul de la matrice B et du jacobien au point de Gauss IGAU
+            IF (ITHEHY.NE.0) THEN
+              CALL BGRMAS(iGau,NOELE,NBNO,LREII,IFOUR,NGRAII,NIFOUR,XE,
+     .                    XZero,SHPTOT,SHPWRK,BB,BGR,DJAC,IIPDPG)
+            ELSE
+C= 2.14.4bis - Elements massifs en 'ELECTROSTATIQUE' et 'DIFFUSION'
+              IF (MFR.EQ.71) THEN
+                CALL BELEC(XE,SHPTOT(1,1,IGAU),NBNO,NGRA,+1,
+     &                     SHPWRK,BGR,DJAC)
+              ELSE IF (MFR.EQ.73) THEN
+                CALL BDIFF(XE,SHPTOT(1,1,IGAU),NBNN,NGRA,+1,
+     &                     SHPWRK,BGR,DJAC)
+              ELSE
+C- Elements MASSIFS et INCOMPRESSIBLES en MECANIQUE
+C     Calcul des coeff de modification de b-barre (elts incompres)
+C
+      IF (MFR.EQ.31.and.igau.eq.1) THEN
+C= NOM  :   ICT3, ICQ4, ICT6, ICQ8, ICC8, ICT4, ICP6, IC20, IC10, IC15
+C= MELE :    69 ,  70 ,  71 ,  72 ,  73 ,  74 ,  75 ,  76 ,  77 ,  78
+        CALL BBCAL3(IB,IGAU,IDIM,NBPGAU,POIGAU,QSIGAU,ETAGAU,DZEGAU,
+     1   NOELE,MFR,NBNO,LRE,IFOUR,NGRA,NIFOUR,
+     2   A,BBX,XE,SHPTOT,SHPWRK,BB,BGR,PP)
+      ENDIF
+C
+                CALL BGRMAS(iGau,NOELE,NBNO,LRE,IFOUR,NGRA,NIFOUR,XE,
+     .                      XZero,SHPTOT,SHPWRK,BB,BGR,DJAC,IIPDPG)
+
+
+C En cas d'elements incompressibles : BGENE selon la methode B-BARRE
+          IF (MFR.EQ.31) THEN
+            CALL BBAR(IGAU,NBPGAU,POIGAU,QSIGAU,ETAGAU,DZEGAU,
+     &                NOELE,NBNO,LRE,IFOUR,NGRA,XE,DJAC,A,BBX,BGR)
+          ENDIF
+
+              ENDIF
+            ENDIF
+            IF (DJAC.LT.XZero) ISDJC=ISDJC+1
+            IF (DJAC.EQ.XZero) THEN
+              iMess=259
+              GOTO 260
+            ENDIF
+            IF (ITHEHY.NE.0) THEN
+              DO KII=1,NII
+                DO LLL=1,LREII
+                  MLREE1.PROG(LLL)=XDDL(LLL*NII-(NII-KII))
+                ENDDO
+                CALL BGRDEP(BGR,NGRAII,MLREE1.PROG,LREII,MLREE2.PROG)
+                DO LLL=1,NGRAII
+                  GRADI(LLL+(KII-1)*NGRAII)=MLREE2.PROG(LLL)
+                ENDDO
+              ENDDO
+            ELSE
+              IF (MFR.EQ.71 .OR. MFR.EQ.73) THEN
+                CALL BST(BGR,XDDL,LRE,NGRA,GRADI)
+              ELSE
+                CALL BGRDEP(BGR,NGRA,XDDL,LRE,GRADI)
+              ENDIF
+            ENDIF
+            MPTVAL=IVAGRA
+            DO i=1,NGRA
+              MELVAL=IVAL(i)
+              IGMN=MIN(iGau,VELCHE(/1))
+              IBMN=MIN(IB,VELCHE(/2))
+              VELCHE(IGMN,IBMN)=GRADI(i)
+            ENDDO
+          ENDDO
+          IF (ISDJC.NE.0.AND.ISDJC.NE.NBPGAU) THEN
+            iMess=195
+            GOTO 260
+          ENDIF
+          GOTO 100
+C= 2.14.5 - Elements COQUES COQ3 (thermique - mecanique)
+ 27       IF (ITHER.NE.0 .OR. IDIFF.NE.0) THEN
+            IF (IB.EQ.1) SEGINI,MWRK2
+            ISDJC=0
+            DO iGau=1,NBPGAU
+              CALL CQTGR1(iGau,MELE,NBNN,LRE,IFOUR,NGRA,XE,SHPTOT,
+     .                    XDDL,SHPWRK,BGR,DJAC,GRADI)
+              IF (IERR.NE.0) GOTO 260
+              IF (DJAC.EQ.XZero) THEN
+                iMess=259
+                GOTO 260
+              ENDIF
+              IF (DJAC.LT.XZero) ISDJC=ISDJC+1
+              MPTVAL=IVAGRA
+              DO i=1,NGRA
+                MELVAL=IVAL(i)
+                IGMN=MIN(iGau,VELCHE(/1))
+                IBMN=MIN(IB,VELCHE(/2))
+                VELCHE(IGMN,IBMN)=GRADI(i)
+              ENDDO
+            ENDDO
+            IF (ISDJC.NE.0.AND.ISDJC.NE.NBPGAU) THEN
+              iMess=195
+              GOTO 260
+            ENDIF
+          ELSE
+C= COQ3 mecanique : un point d'integration au centre de gravite
+            IF (IB.EQ.1) SEGINI,MWRK3
+            CALL COQ3GR(XE,XDDL,GRADI,WORK)
+            MPTVAL=IVAGRA
+            DO i=1,NGRA
+              MELVAL=IVAL(i)
+              IBMN=MIN(IB,VELCHE(/2))
+              VELCHE(1,IBMN)=GRADI(i)
+            ENDDO
+          ENDIF
+          GOTO 100
+C= 2.14.6 - Elements DKT
+ 28       IF (IB.EQ.1) SEGINI,MWRK2,MWRK4
+          CALL VPAST(XE,BPSS)
+          CALL VCORLC(XE,XEL,BPSS)
+          CALL MATVEC(XDDL,XDDLOC,BPSS,6)
+          EPAIST=XZero
+          MPTVAL=IVACAR
+          IF (IVAL(1).NE.0) THEN
+            MELVAL=IVAL(1)
+            IBMN=MIN(IB,VELCHE(/2))
+            DO iGau=1,NBPGAU
+              IGMN=MIN(iGau,VELCHE(/1))
+              EPAIST=EPAIST+VELCHE(IGMN,IBMN)
+            ENDDO
+            EPAIST=EPAIST/NBPGAU
+          ENDIF
+          DO iGau=1,NBPGAU
+            MPTVAL=IVACAR
+            MELVAL=IVAL(2)
+            IF (MELVAL.NE.0) THEN
+              IBMN=MIN(IB,VELCHE(/2))
+              EXCEN=VELCHE(1,IBMN)
+            ELSE
+              EXCEN=XZero
+            ENDIF
+            CALL BGRMAS(iGau,MELE,NBNO,LRE,IFOUR,NGRA,0,XEL,
+     .                  EXCEN,SHPTOT,SHPWRK,BB,BGR,DJAC,IIPDPG)
+            CALL BGRDEP(BGR,NGRA,XDDLOC,LRE,GRADI)
+            MPTVAL=IVAGRA
+            DO i=1,NGRA
+              MELVAL=IVAL(i)
+              IGMN=MIN(iGau,VELCHE(/1))
+              IBMN=MIN(IB,VELCHE(/2))
+              VELCHE(IGMN,IBMN)=GRADI(i)
+            ENDDO
+          ENDDO
+          GOTO 100
+C= 2.14.7 - Elements COQ8 et COQ6
+ 41       IF (IB.EQ.1) THEN
+            SEGINI,MWRK3
+            MINTE1=IPMIN1
+            SEGACT,MINTE1
+          ENDIF
+C= Recuperation de l'epaisseur et des excentrements
+          MPTVAL=IVACAR
+          EPAIST=XZero
+          MELVAL=IVAL(1)
+          IF (MELVAL.NE.0) THEN
+            IBMN=MIN(IB,VELCHE(/2))
+            DO iGau=1,NBPGAU
+              IGMN=MIN(iGau,VELCHE(/1))
+              EPAIST=EPAIST+VELCHE(IGMN,IBMN)
+            ENDDO
+            EPAIST=EPAIST/NBPGAU
+          ENDIF
+          EXCEN=XZero
+          MELVAL=IVAL(2)
+          IF (MELVAL.NE.0) THEN
+            IBMN=MIN(IB,VELCHE(/2))
+            DO iGau=1,NBPGAU
+              IGMN=MIN(iGau,VELCHE(/1))
+              EXCEN=EXCEN+VELCHE(IGMN,IBMN)
+            ENDDO
+            EXCEN=EXCEN/NBPGAU
+          ENDIF
+C= Element thermique
+          IF (ITHER.NE.0 .OR. IDIFF.NE.0) THEN
+            CALL CQTGR2(XE,NBNN,NBPGAU,LRE,EPAIST,DZEGAU,
+     .                  SHPTOT,MINTE1.SHPTOT,XDDL,WORK(1),WORK(1+LRE))
+            IE=LRE
+C= Element mecanique
+          ELSE
+            CALL CQ8GRA(XE,NBNO,NBPGAU,LRE,EPAIST,EXCEN,DZEGAU,
+     .                  SHPTOT,MINTE1.SHPTOT,XDDL,WORK,IRR)
+            IE=0
+          ENDIF
+          MPTVAL=IVAGRA
+          DO iGau=1,NBPGAU
+            DO i=1,NGRA
+              MELVAL=IVAL(i)
+              IGMN=MIN(iGau,VELCHE(/1))
+              IBMN=MIN(IB,VELCHE(/2))
+              IE=IE+1
+              VELCHE(IGMN,IBMN)=WORK(IE)
+            ENDDO
+          ENDDO
+          GOTO 100
+
+C= 2.14.8 - Element COQ2
+ 44       IF (IB.EQ.1) SEGINI,MWRK2
+C= Element thermique
+          IF (ITHER.NE.0 .OR. IDIFF.NE.0) THEN
+            ISDJC=0
+            DO iGau=1,NBPGAU
+              CALL CQTGR1(iGau,MELE,NBNN,LRE,IFOUR,NGRA,XE,SHPTOT,
+     .                    XDDL,SHPWRK,BGR,DJAC,GRADI)
+              IF (IERR.NE.0) GOTO 260
+              IF (DJAC.EQ.XZero) THEN
+                iMess=259
+                GOTO 260
+              ENDIF
+              MPTVAL=IVAGRA
+              DO i=1,NGRA
+                MELVAL=IVAL(i)
+                IGMN=MIN(iGau,VELCHE(/1))
+                IBMN=MIN(IB,VELCHE(/2))
+                VELCHE(IGMN,IBMN)=GRADI(i)
+              ENDDO
+            ENDDO
+C= Element mecanique
+          ELSE
+            MPTVAL=IVACAR
+            IF (IVAL(1).NE.0) THEN
+              MELVAL=IVAL(1)
+              IBMN=MIN(IB,VELCHE(/2))
+              EPAIST=VELCHE(1,IBMN)
+            ELSE
+              EPAIST=XZero
+            ENDIF
+            DO iGau=1,NBPGAU
+              CALL BGRCQ2(BGR,DJAC,iGau,IFOUR,XE,NIFOUR,
+     .                    QSIGAU,POIGAU,IERT)
+              IF (IERT.NE.0) THEN
+                IF (IERT.EQ.1) iMess=255
+                IF (IERT.EQ.2) iMess=256
+                GOTO 260
+              ENDIF
+              CALL BGRDEP(BGR,NGRA,XDDL,LRE,GRADI)
+              MPTVAL=IVAGRA
+              DO i=1,NGRA
+                MELVAL=IVAL(i)
+                IGMN=MIN(iGau,VELCHE(/1))
+                IBMN=MIN(IB,VELCHE(/2))
+                VELCHE(IGMN,IBMN)=GRADI(i)
+              ENDDO
+            ENDDO
+          ENDIF
+          GOTO 100
+
+C= 2.14.9 - Element COQ4
+ 49       MPTVAL=IVACAR
+          MELVAL=IVAL(1)
+          IF (MELVAL.NE.0) THEN
+            IBMN=MIN(IB,VELCHE(/2))
+            EPAIST=VELCHE(1,IBMN)
+          ELSE
+            EPAIST=XZero
+          ENDIF
+          MELVAL=IVAL(2)
+          IF (MELVAL.NE.0) THEN
+            IBMN=MIN(IB,VELCHE(/2))
+            EXCEN=VELCHE(1,IBMN)
+          ELSE
+            EXCEN=XZero
+          ENDIF
+C= Element thermique
+          IF (ITHER.NE.0 .OR. IDIFF.NE.0) THEN
+            IF (IB.EQ.1) THEN
+              SEGINI,MWRK3
+              MINTE1=IPMIN1
+              SEGACT,MINTE1
+            ENDIF
+            CALL CQTGR2(XE,NBNN,NBPGAU,LRE,EPAIST,DZEGAU,
+     .                  SHPTOT,MINTE1.SHPTOT,XDDL,WORK(1),WORK(1+LRE))
+            MPTVAL=IVAGRA
+            IE=LRE
+            DO iGau=1,NBPGAU
+              DO i=1,NGRA
+                MELVAL=IVAL(i)
+                IGMN=MIN(iGau,VELCHE(/1))
+                IBMN=MIN(IB,VELCHE(/2))
+                IE=IE+1
+                VELCHE(IGMN,IBMN)=WORK(IE)
+              ENDDO
+            ENDDO
+C= Element mecanique
+          ELSE
+            IF (IB.EQ.1) SEGINI,MWRK2,MWRK4
+            CALL CQ4LOC(XE,XEL,BPSS,IERT,1)
+            IF (IERT.EQ.1) IG1=IB
+            IF (IERT.EQ.3) THEN
+              IERT=0
+              NOPLAN=1
+            ELSE
+              NOPLAN=0
+            ENDIF
+            CALL MATVEC(XDDL,XDDLOC,BPSS,8)
+            DO iGau=1,NBPGAU
+              CALL BGRCQ4(iGau,XEL,SHPTOT,SHPWRK,BGR,DJAC,EXCEN,
+     .                    NOPLAN,IERT)
+              IF (IERT.EQ.1) THEN
+                iMess=321
+                GOTO 260
+              ENDIF
+              CALL BGRDEP(BGR,NGRA,XDDLOC,LRE,GRADI)
+              MPTVAL=IVAGRA
+              DO i=1,NGRA
+                MELVAL=IVAL(i)
+                IGMN=MIN(iGau,VELCHE(/1))
+                IBMN=MIN(IB,VELCHE(/2))
+                VELCHE(IGMN,IBMN)=GRADI(i)
+              ENDDO
+            ENDDO
+          ENDIF
+          GOTO 100
+C= 2.14.10 - Element DST
+ 93       IF (IB.EQ.1) THEN
+            NV1=NMATT
+            SEGINI,MWRK2,MWRK3,MWRK4,MVELCH
+          ENDIF
+          CALL VPAST(XE,BPSS)
+          CALL VCORLC(XE,XEL,BPSS)
+          CALL MATVEC(XDDL,XDDLOC,BPSS,6)
+C= Calcul de la moyenne des epaisseurs
+          MPTVAL=IVACAR
+          EPAIST=XZero
+          MELVAL=IVAL(1)
+          IF (MELVAL.NE.0) THEN
+            IBMN=MIN(IB,VELCHE(/2))
+            DO iGau=1,NBPGAU
+              IGMN=MIN(iGau,VELCHE(/1))
+              EPAIST=EPAIST+VELCHE(IGMN,IBMN)
+            ENDDO
+            EPAIST=EPAIST/NBPGAU
+          ENDIF
+C= Calcul de la moyenne des excentrements
+          EXCEN=XZero
+          MELVAL=IVAL(2)
+          IF (MELVAL.NE.0) THEN
+            IBMN=MIN(IB,VELCHE(/2))
+            DO iGau=1,NBPGAU
+              IGMN=MIN(iGau,VELCHE(/1))
+              EXCEN=EXCEN+VELCHE(IGMN,IBMN)
+            ENDDO
+            EXCEN=EXCEN/NBPGAU
+          ENDIF
+          DO iGau=1,NBPGAU
+            MPTVAL=IVAMAT
+            DO i=1,NMATT
+              IF (IVAL(i).NE.0) THEN
+                MELVAL=IVAL(i)
+                IGMN=MIN(iGau,VELCHE(/1))
+                IBMN=MIN(IB,VELCHE(/2))
+                VALMAT(i)=VELCHE(IGMN,IBMN)
+              ELSE
+                VALMAT(i)=XZero
+              ENDIF
+            ENDDO
+            IF (iGau.LE.NBGMAT.AND.(IB.LE.NELMAT.OR.NBGMAT.GT.1)) THEN
+              CALL DOHDST(VALMAT,CMATE,IFOUR,NSTRS,DDHOOK,IRTD1)
+              IF (IRTD1.EQ.0) GOTO 260
+            ENDIF
+            CALL HOOKMU(EPAIST,XZero,LHOOK,DDHOOK,DDHOMU)
+            CALL ZERO(BGR,NGRA,LRE)
+C= Termes de la matrice BGR relatifs aux cisaillements transverses
+            CALL DSTGR2(XEL,NGRA,NSTRS,DDHOMU,WORK(1),WORK(10),
+     .                  WORK(19),BGR)
+C= Termes de la matrice BGR relatifs aux effets de membrane
+            CALL DSTGR1(iGau,NBNO,XEL,NGRA,QSIGAU,ETAGAU,SHPTOT,SHPWRK,
+     .                  EXCEN,WORK(1),WORK(10),WORK(19),BGR,DJAC)
+C= Multiplication de BGR par les deplacements XDDLOC
+            CALL BGRDEP(BGR,NGRA,XDDLOC,LRE,GRADI)
+            MPTVAL=IVAGRA
+            DO i=1,NGRA
+              MELVAL=IVAL(i)
+              IGMN=MIN(iGau,VELCHE(/1))
+              IBMN=MIN(IB,VELCHE(/2))
+              VELCHE(IGMN,IBMN)=GRADI(i)
+            EnDDO
+          ENDDO
+          GOTO 100
+C= 2.14.29 - ElementS POUTRE, TUYA, TIMO
+ 29       IF (IB.EQ.1) THEN
+            SEGINI,MWRK2
+            SEGINI,MWRK3
+          ENDIF
+C= Element thermique
+          IF (ITHER.NE.0 .OR. IDIFF.NE.0) THEN
+            IMESS = 86
+            GOTO 260
+C= Element mecanique
+          ELSE
+C  ON CHERCHE LES CARACTERISTIQUES DE L ELEMENT IB
+            CALL ZERO(WORK,NCAR,1)
+            DO 4029 IGAU=1,NBNN
+              MPTVAL=IVACAR
+              DO 6029 IC=1,NCAR
+                IF (IVAL(IC).NE.0) THEN
+                  MELVAL=IVAL(IC)
+                  IBMN=MIN(IB  ,VELCHE(/2))
+                  IGMN=MIN(IGAU,VELCHE(/1))
+                  IF (IGMN.GT.0.AND.IBMN.GT.0) THEN
+                    WORK(IC)=WORK(IC)+VELCHE(IGMN,IBMN)
+                  ELSE
+                    WORK(IC)=0.
+                  ENDIF
+                ELSE
+                  WORK(IC)=0.
+                ENDIF
+                IF (IGAU.EQ.NBNN) WORK(IC)=WORK(IC)/NBNN
+ 6029         CONTINUE
+ 4029       CONTINUE
+C CAS OU ON A LU LE MOT VECTEUR
+            IF (IFOUR.EQ.2) THEN
+              IF (IVECT.EQ.1) THEN
+                IF (IVAL(NCAR).NE.0) THEN
+                  MELVAL=IVAL(NCAR)
+                  IBMN=MIN(IB,IELCHE(/2))
+                  IP=IELCHE(1,IBMN)
+                  IREF=(IP-1)*(IDIM+1)
+                  DO 6129 IC=1,IDIM
+                    WORK(NCAR+IC-1)=XCOOR(IREF+IC)
+ 6129             CONTINUE
+                ELSE
+                  DO 6229 IC=1,IDIM
+                    WORK(NCAR+IC-1)=0.D0
+ 6229             CONTINUE
+                ENDIF
+              ENDIF
+            ENDIF
+C  CAS DES TUYAUX - ON CALCULE LES CARACTERISTIQUES DE LA POUTRE
+C                   EQUIVALENTE
+            IF (MELE.EQ.42) THEN
+              CISA=WORK(4)
+              VX=WORK(5)
+              VY=WORK(6)
+              VZ=WORK(7)
+              CALL TUYCAR(WORK,CISA,VX,VY,VZ,KERRE,2)
+            ENDIF
+C  ON CALCULE LES GRADIENTS
+            IF (MELE.EQ.84) THEN
+              IF (CMATE.EQ.'SECTION') THEN
+                IF (IFOUR.EQ.-2.OR.IFOUR.EQ.-1.OR.IFOUR.EQ.-3) THEN
+                  CALL TIMGR2(XE,XDDL,WORK(12),WORK(25))
+                ELSE
+                  CALL TIMGR1(XE,XDDL,WORK(1),WORK(12),WORK(25))
+                ENDIF
+              ELSE
+                IF (IFOUR.EQ.-2.OR.IFOUR.EQ.-1.OR.IFOUR.EQ.-3) THEN
+                  CALL TIMGR2(XE,XDDL,WORK(12),WORK(25))
+                ELSE
+                  CALL TIMGR1(XE,XDDL,WORK(7),WORK(12),WORK(25))
+                ENDIF
+              ENDIF
+            ELSE
+              IF (IFOUR.EQ.-2.OR.IFOUR.EQ.-1.OR.IFOUR.EQ.-3) THEN
+                CALL POUGR2(XE,XDDL,WORK,WORK(12),WORK(25))
+              ELSE
+                CALL POUGR1(XE,XDDL,WORK,WORK(12),WORK(25))
+              ENDIF
+            ENDIF
+C  REMPLISSAGE
+            DO iGau=1,NBPGAU
+              MPTVAL=IVAGRA
+              DO i=1,NGRA
+                MELVAL=IVAL(i)
+                IGMN=MIN(iGau,VELCHE(/1))
+                IBMN=MIN(IB,VELCHE(/2))
+                IDECA=11+I+(IGAU-1)*NGRA
+                VELCHE(IGMN,IBMN)=WORK(IDECA)
+              ENDDO
+            ENDDO
+          ENDIF
+          GOTO 100
+C
+C     ELEMENT JOI2
+C
+ 85       IF (IB.EQ.1) THEN
+            SEGINI,MWRK2
+            SEGINI,MWRK4
+          ENDIF
+C= Element thermique
+          IF (ITHER.NE.0 .OR. IDIFF.NE.0) THEN
+            IMESS = 86
+            GO TO 260
+C= Element mecanique
+          ELSE
+C
+         CALL JO2LOC(XE,SHPTOT,NBNN,XEL,BPSS,NOQUAL)
+C
+C     BOUCLE SUR LES POINTS DE GAUSS
+C
+         DO 4085 IGAU=1,NBPGAU
+C
+            CALL BJO2(IGAU,MFR,IFOUR,NIFOUR,XEL,BPSS,SHPTOT,SHPWRK,
+     .                                       BGR,DJAC,IRRT)
+C           IRRT.NE.0 JACOBIEN <= 0
+            IF(IRRT.NE.0) THEN
+              INTERR(1)=IB
+              IMESS=612
+              GOTO 260
+            ENDIF
+C
+            CALL BST(BGR,XDDL,LRE,NSTRS,GRADI)
+C
+C     REMPLISSAGE DU SEGMENT CONTENANT LES GRADIENTS
+C
+            MPTVAL=IVAGRA
+            DO 9085 ICOMP=1,NGRA
+               MELVAL=IVAL(ICOMP)
+               IGMN=MIN(IGAU,VELCHE(/1))
+               IBMN=MIN(IB  ,VELCHE(/2))
+               VELCHE(IGMN,IBMN)=GRADI(ICOMP)
+ 9085       CONTINUE
+ 4085    CONTINUE
+C
+      ENDIF
+      GOTO 100
+C
+C     ELEMENT JOI4
+C
+ 88       IF (IB.EQ.1) THEN
+            SEGINI,MWRK2
+            SEGINI,MWRK4
+          ENDIF
+C= Element thermique
+          IF (ITHER.NE.0 .OR. IDIFF.NE.0) THEN
+            IMESS = 86
+            GO TO 260
+C= Element mecanique
+          ELSE
+
+C
+         CALL JO4LOC(XE,SHPTOT,NBNN,XEL,BPSS,NOQUAL)
+C
+C     BOUCLE SUR LES POINTS DE GAUSS
+C
+         DO 4088 IGAU=1,NBPGAU
+C
+            CALL BJO4(IGAU,XEL,BPSS,SHPTOT,SHPWRK,BGR,DJAC,IRRT)
+C           IRRT.NE.0 JACOBIEN <= 0
+            IF (IRRT.NE.0) THEN
+              INTERR(1)=IB
+              IMESS = 611
+              GOTO 260
+            ENDIF
+C
+            CALL BST(BGR,XDDL,LRE,NGRA,GRADI)
+C
+C     REMPLISSAGE DU SEGMENT CONTENANT LES GRADIENTS
+C
+            MPTVAL=IVAGRA
+            DO 9088 ICOMP=1,NGRA
+               MELVAL=IVAL(ICOMP)
+               IGMN=MIN(IGAU,VELCHE(/1))
+               IBMN=MIN(IB  ,VELCHE(/2))
+               VELCHE(IGMN,IBMN)=GRADI(ICOMP)
+ 9088       CONTINUE
+ 4088    CONTINUE
+C
+      ENDIF
+      GOTO 100
+
+C= 2.14.265 - JOINT UNIDIMENSIONNEL JOI1
+ 265        SEGINI,MWRK2
+            SEGINI,MWRK3
+            SEGINI,MWRK4
+C
+C     RANGEMENT DES CARACTERISTIQUES DANS WORK
+C
+      MPTVAL=IVAMAT
+      DO IC=1,NMATT
+        IF(IVAL(IC).NE.0) THEN
+          MELVAL=IVAL(IC)
+          IBMN=MIN(IB,VELCHE(/2))
+          WORK(IC)=VELCHE(1,IBMN)
+        ELSE
+          WORK(IC)=0.D0
+        ENDIF
+      END DO
+C
+      CALL MAPALU(NMATT,WORK,BPSS,IDIM)
+C
+C  CALCUL DES DEPLACEMENTS LOCAUX
+C
+      IAW1 = 101
+      IAW2 = IAW1 + LRE
+      CALL JOILOC(XDDL,BPSS,WORK(IAW1),WORK(IAW2),LRE,IDIM)
+*
+C  ON CALCULE LES GRADIENTS
+*
+      CALL JOIGR1(XDDL,WORK,LRE,NGRA,IDIM)
+C  REMPLISSAGE
+           DO iGau=1,NBPGAU
+             MPTVAL=IVAGRA
+             DO i=1,NGRA
+               MELVAL=IVAL(i)
+               IGMN=MIN(iGau,VELCHE(/1))
+               IBMN=MIN(IB,VELCHE(/2))
+*               IDECA=11+I+(IGAU-1)*NGRA
+               VELCHE(IGMN,IBMN)=WORK(I)
+             ENDDO
+           ENDDO
+          GOTO 100
+
+C= 2.14.266 - Element ZCO2
+ 266      CONTINUE
+          IF (IB.EQ.1) SEGINI,MWRK2,MWRK4
+          DO 2660 iGau=1,NBPGAU
+C     MATRICE JACOBIENNE
+      DO  I=1,NBNO
+       SHPWRK(1,I) = SHPTOT(1,I,IGAU)
+       SHPWRK(2,I) = SHPTOT(2,I,IGAU)
+      ENDDO
+C     TRAITEMENT PARTICULIER POUR LE CAS 2D
+C     SINON, APPEL A DEVOLU
+      IF(IDIM.EQ.2) THEN
+        dXdQsi=0.D0
+        dYdQsi=0.D0
+        DO i=1,NBNO
+          dXdQsi=dXdQsi+SHPWRK(2,i)*XE(1,i)
+          dYdQsi=dYdQsi+SHPWRK(2,i)*XE(2,i)
+        ENDDO
+        DJAC=SQRT(dXdQsi*dXdQsi+dYdQsi*dYdQsi)
+C  ON MULTIPLIE PAR LE RAYON EN AXI
+       IF (IFOUR.EQ.0) THEN
+        RAYON=0.D0
+        DO IRAY=1,NBNO
+         RAYON=RAYON+SHPTOT(1,IRAY,IGAU)*XE(1,IRAY)
+        ENDDO
+        DJAC=DJAC*RAYON
+       ENDIF
+      ELSE
+*        write(ioimp,*) 'option 3d non implementee'
+        GOTO 260
+*        CALL DEVOLU(XE,SHPWRK,MFR,NBNO,IFOUR,NIFOUR,IDIM,1.D0,RR,DJAC)
+      ENDIF
+            IF (DJAC.LT.XZero) ISDJC=ISDJC+1
+            IF (DJAC.EQ.XZero) THEN
+              iMess=259
+              GOTO 260
+            ENDIF
+c     passage Ni,qsi -> Ni,x
+      dQsidX = 0.d0
+      dQsidY = 0.d0
+      if((abs(dXdQsi)).gt.XPETIT) dQsidX = 1.d0/dXdQsi
+      if((abs(dYdQsi)).gt.XPETIT) dQsidY = 1.d0/dYdQsi
+      IF(IDIM.EQ.3) THEN
+        dQsidZ = 0.d0
+        if(abs(dZdQsi).gt.XPETIT) dQsidZ = 1.d0/dZdQsi
+      ENDIF
+      CALL ZERO(BGR,NGRA,LRE)
+c     on boucle sur les NGRA(=idim*idim) ligne :
+c     IGRA2 permet de remplir 1 sur idim
+      IGRA2=1
+      DO  iidim = 1,idim
+c         on boucle sur les idim*NBNO colonnes :
+c         II permet de remplir 1 sur idim
+          DO  I=1,NBNO
+              II = idim*(I-1) + iidim
+              BGR(IGRA2  ,II) = SHPWRK(2,I)*dQsidX
+              BGR(IGRA2+1,II) = SHPWRK(2,I)*dQsidY
+              if(idim.eq.3) BGR(IGRA2+2,II) = SHPWRK(2,I)*dQsidZ
+          ENDDO
+          IGRA2=IGRA2+idim
+      ENDDO
+c         {grad u}_i = [Bij] * {u_j}
+          CALL BGRDEP(BGR,NGRA,XDDL,LRE,GRADI)
+c         on remplit
+          MPTVAL=IVAGRA
+          DO i=1,NGRA
+            MELVAL=IVAL(i)
+            IGMN=MIN(iGau,VELCHE(/1))
+            IBMN=MIN(IB,VELCHE(/2))
+            VELCHE(IGMN,IBMN)=GRADI(i)
+          ENDDO
+ 2660     CONTINUE
+          GOTO 100
+
+C= 4.14.267 - Element ZCO3
+ 267      CONTINUE
+          IF (IB.EQ.1) SEGINI,MWRK2,MWRK4
+          DO 2670 iGau=1,NBPGAU
+C         MATRICE JACOBIENNE
+          DO  I=1,NBNO
+             SHPWRK(1,I) = SHPTOT(1,I,IGAU)
+             SHPWRK(2,I) = SHPTOT(2,I,IGAU)
+             SHPWRK(3,I) = SHPTOT(3,I,IGAU)
+          ENDDO
+c          write(6,*) 'SHPWRK(2,I) = ' ,(SHPWRK(2,iou),iou=1,NBNO)
+c          write(6,*) 'SHPWRK(3,I) = ' ,(SHPWRK(3,iou),iou=1,NBNO)
+
+
+          dXdQsi=0.D0
+          dXdEta=0.D0
+          dYdQsi=0.D0
+          dYdEta=0.D0
+          dZdQsi=0.D0
+          dZdEta=0.D0
+          DO i=1,NBNO
+             dXdQsi=dXdQsi+SHPWRK(2,i)*XE(1,i)
+             dXdEta=dXdEta+SHPWRK(3,i)*XE(1,i)
+             dYdQsi=dYdQsi+SHPWRK(2,i)*XE(2,i)
+             dYdEta=dYdEta+SHPWRK(3,i)*XE(2,i)
+             dZdQsi=dYdQsi+SHPWRK(2,i)*XE(3,i)
+             dZdEta=dZdEta+SHPWRK(3,i)*XE(3,i)
+          ENDDO
+
+c          write(6,*)' dXdQsi = ',dXdQsi
+c          write(6,*)' dYdQsi = ',dYdQsi
+c          write(6,*)' dZdQsi = ',dZdQsi
+c          write(6,*)' dXdEta = ',dXdEta
+c          write(6,*)' dYdEta = ',dYdEta
+c          write(6,*)' dZdEta = ',dZdEta
+C         définition des vecteurs de la base orthonormé
+c         vQsi
+          vQsi = sqrt(dXdQsi*dXdQsi+dYdQsi*dYdQsi+dZdQsi*dZdQsi)
+c          write(6,*) 'Norme de vQsi = ',vQsi
+          vQsiX = dXdQsi / vQsi
+          vQsiY = dYdQsi / vQsi
+          vQsiZ = dZdQsi / vQsi
+c          write(6,*) ' vQsiX = ', vQsiX
+c          write(6,*) ' vQsiY = ', vQsiY
+c          write(6,*) ' vQsiZ = ', vQsiZ
+
+c         produit scalaire VEta vQsi
+          Sca1 = dXdEta*vQsiX + dYdEta*vQsiY + dZdEta*vQsiZ
+c          write(6,*) 'VEta.vQsi = ',Sca1
+c         EEta = Veta - sca1 Eqsi (orthogonalisation)
+          vEtaX = dXdEta - sca1 * vQsiX
+          vEtaY = dYdEta - sca1 * vQsiY
+          vEtaZ = dZdEta - sca1 * vQsiZ
+c          write(6,*) ' vEtaX = ', vEtaX
+c          write(6,*) ' vEtaY = ', vEtaY
+c          write(6,*) ' vEtaZ = ', vEtaZ
+c         on morme EEta
+          vEta = sqrt(vEtaX*vEtaX+vEtaY*vEtaY+vEtaZ*vEtaZ)
+c          write(6,*) 'Norme de vEta = ',veta
+          vEtaX = vEtaX / vEta
+          vEtaY = vEtaY / vEta
+          vEtaZ = vEtaZ / vEta
+
+c         Qsi,x
+          dQsidX=0.D0
+          dQsidY=0.D0
+          dQsidZ=0.D0
+          dEtadX=0.D0
+          dEtadY=0.D0
+          dEtadZ=0.D0
+          dQsidX=(vQsiX - (sca1*vEtaX)/vEta)/vQsi
+          dQsidY=(vQsiY - (sca1*vEtaY)/vEta)/vQsi
+          dQsidZ=(vQsiZ - (sca1*vEtaZ)/vEta)/vQsi
+          dEtadX=vEtaX/vEta
+          dEtadY=vEtaY/vEta
+          dEtadZ=vEtaZ/vEta
+
+c          write(6,*)' dQsidX = ',dQsidX
+c          write(6,*)' dQsidY = ',dQsidY
+c          write(6,*)' dQsidZ = ',dQsidZ
+c          write(6,*)' dEtadX = ',dEtadX
+c          write(6,*)' dEtadY = ',dEtadY
+c          write(6,*)' dEtadZ = ',dEtadZ
+
+c          write(6,*) 'SHPWRK(1,I) = ' ,(SHPWRK(1,iou),iou=1,NBNO)
+c          write(6,*) 'SHPWRK(2,I) = ' ,(SHPWRK(2,iou),iou=1,NBNO)
+c          write(6,*) 'SHPWRK(3,I) = ' ,(SHPWRK(3,iou),iou=1,NBNO)
+
+          CALL ZERO(BGR,NGRA,LRE)
+c     on boucle sur les NGRA(=idim*idim) ligne :
+c     IGRA2 permet de remplir 1 sur idim
+          IGRA2=1
+          DO  iidim = 1,idim
+c         on boucle sur les idim*NBNO colonnes :
+c         II permet de remplir 1 sur idim
+             DO  I=1,NBNO
+                II = idim*(I-1) + iidim
+                BGR(IGRA2  ,II) = SHPWRK(2,I)*dQsidX+SHPWRK(3,I)*dEtadX
+                BGR(IGRA2+1,II) = SHPWRK(2,I)*dQsidY+SHPWRK(3,I)*dEtadY
+                if(idim.eq.3) then
+                 BGR(IGRA2+2,II) = SHPWRK(2,I)*dQsidZ+SHPWRK(3,I)*dEtadZ
+                endif
+             ENDDO
+             IGRA2=IGRA2+idim
+          ENDDO
+c         {grad u}_i = [Bij] * {u_j}
+c          DO  I=1,NGRA
+c          write(6,*) 'BGR(',I,',..) = ' ,(BGR(I,iou),iou=1,idim*NBNO)
+c          write(6,*) 'BGR(2,I) = ' ,(BGR(2,iou),iou=1,idim*NBNO)
+c          write(6,*) 'BGR(3,I) = ' ,(BGR(3,iou),iou=1,idim*NBNO)
+c          ENDDO
+
+          CALL BGRDEP(BGR,NGRA,XDDL,LRE,GRADI)
+c          write(6,*) 'XDDL(i) = ' ,(XDDL(iou),iou=1,LRE)
+c          write(6,*) 'GRADI(i) = ' ,(GRADI(iou),iou=1,NGRA)
+c         on remplit
+          MPTVAL=IVAGRA
+          DO i=1,NGRA
+            MELVAL=IVAL(i)
+            IGMN=MIN(iGau,VELCHE(/1))
+            IBMN=MIN(IB,VELCHE(/2))
+            VELCHE(IGMN,IBMN)=GRADI(i)
+          ENDDO
+
+ 2670     CONTINUE
+          GOTO 100
+
+
+ 100    CONTINUE
+
+
+
+        IF (ITHEHY.NE.0) SEGSUP,MLREE1,MLREE2
+C= Fin de la boucle sur les elements
+        iOK=1
+C ======
+C  2.15 - Desactivation/suppression de segments associes a iSou
+C ======
+ 260    IF (MWRK2.NE.0) SEGSUP,MWRK2
+        IF (MWRK3.NE.0) SEGSUP,MWRK3
+        IF (MWRK4.NE.0) SEGSUP,MWRK4
+        IF (MVELCH.NE.0) SEGSUP,MVELCH
+C        IF (IPMIN1.NE.0) SEGDES,MINTE1
+ 250    CONTINUE
+        SEGSUP,MWRK1
+        NOMID=MOGRAD
+        if(lsupgd)SEGSUP,NOMID
+ 240    NOMID=MODEPL
+        if(lsupdp)SEGSUP,NOMID
+        IF(COMAUT) MODEPL=0
+        CALL DTMVAL(IVADEP,1)
+ 230    IF (MOMATR.NE.0) THEN
+          NOMID=MOMATR
+          SEGSUP,NOMID
+        ENDIF
+        CALL DTMVAL(IVAMAT,1)
+ 220    IF (MOCARA.NE.0) THEN
+          NOMID=MOCARA
+          SEGSUP,NOMID
+        ENDIF
+        CALL DTMVAL(IVACAR,1)
+C        SEGDES,MINTE
+ 210    CONTINUE
+C        SEGDES,MELEME
+ 200    CONTINUE
+C        SEGDES,IMODEL
+C= Sortie prematuree en cas d'ERREUR (iOK=0)
+        IF (iOK.EQ.0) THEN
+          CALL DTMVAL(IVAGRA,3)
+          IF (MCHAML.NE.0) SEGSUP,MCHAML
+          SEGSUP,MCHELM
+          IF (iMess.NE.0) THEN
+            INTERR(1)=IB
+            CALL ERREUR(iMess)
+          ENDIF
+          GOTO 300
+        ENDIF
+        MPTVAL = IVAGRA
+        DO i = 1, IVAL(/1)
+          MELVAL = IVAL(i)
+          CALL COMRED(MELVAL)
+        ENDDO
+        CALL DTMVAL(IVAGRA,1)
+        SEGDES,MCHAML
+ 2000 continue
+
+C  3 - MENAGE : DESACTIVATION/DESTRUCTION DE SEGMENTS
+C ====================================================
+      IRET=1
+      if( n1.ne.isouss) then
+        n1=isouss
+        segadj mchelm
+      endif
+      SEGDES,MCHELM
+ 300  CONTINUE
+C      SEGDES,MMODEL
+      NOTYPE=MOTYCH
+      SEGSUP,NOTYPE
+C*    IF (IPCHE1.NE.0) THEN
+C*      MCHELM=IPCHE1
+C*      SEGDES,MCHELM
+C*    ENDIF
+C*    IF (IPCHE2.NE.0) THEN
+C*      MCHELM=IPCHE2
+C*      SEGDES,MCHELM
+C*    ENDIF
+
+      RETURN
+      END
+
+
+
+
+
+
+

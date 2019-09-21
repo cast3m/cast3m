@@ -1,0 +1,868 @@
+C DOHOT1    SOURCE    BP208322  17/03/01    21:17:03     9325
+
+      SUBROUTINE DOHOT1(IVAMAT,NMATT,IVACON,NSTRS,IVARI,NVART,TRAC,
+     &             LTRAC,IGAU,IB,MATE,MAPL,XPREC,DTPS,IFOU,LHOOK,
+     &             DDHOOK,IRET)
+*_______________________________________________________________________
+*
+*  entrees :
+*  --------
+*
+*     ivamat  pointeur sur un segment mptval contenant les materiaux
+*     nmatt   nombre de composantes du materiau
+*     ivacon  pointeur sur un segment mptval contenant les contraintes
+*     nstrs   nombre de composantes de contraintes
+*     ivari   pointeur sur un segment mptval contenant les variables
+*             internes
+*     nvart   nombre de composantes de variables internes
+*     trac    courbe de traction
+*     ltrac   taille du tableau trac
+*     igau    numero du point de gauss ou l'on veut le mat. de hooke
+*     ib      numero de l'element ou l'on veut le mat. de hooke
+*     mate    numeror du materiau lineaire
+*     mapl    numero du materiau plastique
+*     xprec   flottant precision
+*     dtps    flottant pas de temps pour les modeles visqueux
+*     ifou    option ifour de ccoptio
+*     lhook   taille de la matrice de hooke
+*
+*  sorties :
+*  --------
+*
+*     ddhook  matrice de hooke tangente pour l'element ib
+*     iret    = 1 si ok
+*             = < 0 : no de l erreur a appeler dans ktanga
+*             = 0 : autre erreur
+*
+*     passage aux nouveaux chamelem par jm campenon le 05/91
+*_______________________________________________________________________
+*
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*
+-INC CCOPTIO
+-INC SMCHAML
+*
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS)    ,NSOF(NS)
+        INTEGER      IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+*
+      SEGMENT WRK5
+         INTEGER NTRAT,NTRAC
+      ENDSEGMENT
+*
+      SEGMENT WTRAV
+         REAL*8 TXR(IDIM,IDIM)
+      ENDSEGMENT
+
+      SEGMENT WRKMAT
+        REAL*8 VALMAT(NMATT)
+        REAL*8 D1HO(LHOOK,LHOOK),ROTH(LHOOK,LHOOK)
+        REAL*8 XLOC(3,3),XGLOB(3,3)
+      ENDSEGMENT
+*
+      PARAMETER(XZER=0.D0,UN=1.D0,DEUX=2.D0,TROIS=3.D0,QUATRE=4.D0)
+      PARAMETER(CINQ=5.D0,SIX=6.D0,HUIT=8.D0,XNEUF=9.D0,DOUZE=12.D0)
+      PARAMETER(UNTIER=.33333 33333 33333D0,TRDEMI=1.5D0)
+      PARAMETER(DETIER=.66666 66666 66666D0,UNDEMI=0.5D0)
+      PARAMETER(UNQU=.25D0)
+*
+      DIMENSION DDHOOK(LHOOK,*)
+      DIMENSION TRAC(*)
+*
+*     arguments pour l appel a DOHMAS et DOHMAO
+      DIMENSION   VELA(2)
+      CHARACTER*8 CMATE
+*
+      DIMENSION XSTRS(8),DEVIAT(8),XMAT(30)
+      DIMENSION DDF(8),DDG(8),DHDF(8),DHDG(8)
+      DIMENSION XVAR(14),XKTA(3,3)
+      DIMENSION PMATRIC(6,6),GMATRIC(6,6),GDMATR(6,6),GINV(6,6),COEF3(6)
+*     matrice P pour le modele viscoplastique parfait
+*     la matrice sert a passer de la contrainte a la contrainte deviatorique
+      DATA PMATRIC /2.D0,-1.D0,-1.D0,0.D0,0.D0,0.D0,
+     &              -1.D0,2.D0,-1.D0,0.D0,0.D0,0.D0,
+     &              -1.D0,-1.D0,2.D0,0.D0,0.D0,0.D0,
+     &               0.D0, 0.D0,0.D0,6.D0,0.D0,0.D0,
+     &               0.D0, 0.D0,0.D0,0.D0,6.D0,0.D0,
+     &               0.D0, 0.D0,0.D0,0.D0,0.D0,6.D0/
+*
+      DATA COEF3 /1.D0,1.D0,1.D0,2.D0,2.D0,2.D0/
+*
+*-----------------------------------------------------------------------
+*                formulation massive (MFR=1)
+* Pour autres formulations (ex : coques) voir dans dohota.eso
+*-----------------------------------------------------------------------
+      IF ((MATE.EQ.1).AND.(MAPL.EQ.54)) THEN
+         WRK5 = IRET
+      ELSE IF ((MATE.EQ.2).OR.(MATE.EQ.3).OR.(MATE.EQ.4)) THEN
+         WTRAV = IRET
+      ENDIF
+*
+      IRET=0
+      CALL ZERO(DDHOOK,LHOOK,LHOOK)
+      CALL ZERO(XMAT,30,1)
+*
+*-----------------------------------------------------------------------
+*                     MATERIAU ISOTROPE
+*-----------------------------------------------------------------------
+      IF (MATE.EQ.1) THEN
+*-----------------------------------------------------------------------
+C        Initialisations
+         XXHH =0.D0
+         SIGY =0.D0
+         ALP  =0.D0
+C        Initialisation de ILOGEL : sortie de PENT1
+C        =1 on doit/peut calculer DDHOOK tangent ; =0 DDHOOK elastique
+         ILOGEL = 0
+*
+C        Contraintes
+         MPTVAL=IVACON
+         DO 50 ICOMP=1,NSTRS
+            MELVAL=IVAL(ICOMP)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            XSTRS(ICOMP)=VELCHE(IGMN,IBMN)
+  50     CONTINUE
+C
+C        Deformation plastique
+C
+         MPTVAL=IVARI
+         MELVAL=IVAL(1)
+         IGMN=MIN(IGAU,VELCHE(/1))
+         IBMN=MIN(IB  ,VELCHE(/2))
+         EPS =VELCHE(IGMN,IBMN)
+C        si autres variables internes
+         IF (NVART.EQ.NSTRS+1) THEN
+            DO 60 ICOMP=1,NSTRS
+               MELVAL=IVAL(ICOMP+1)
+               IGMN=MIN(IGAU,VELCHE(/1))
+               IBMN=MIN(IB  ,VELCHE(/2))
+               XSTRS(ICOMP)= XSTRS(ICOMP)-VELCHE(IGMN,IBMN)
+  60        CONTINUE
+         ENDIF
+C
+C Recuperation des caracteristiques elastiques isotropes
+C
+         MPTVAL=IVAMAT
+C        Module d Young
+         MELVAL=IVAL(1)
+         IGMN=MIN(IGAU,VELCHE(/1))
+         IBMN=MIN(IB  ,VELCHE(/2))
+         YOU =VELCHE(IGMN,IBMN)
+C        Coefficient de Poisson
+         MELVAL=IVAL(2)
+         IGMN=MIN(IGAU,VELCHE(/1))
+         IBMN=MIN(IB  ,VELCHE(/2))
+         XNU =VELCHE(IGMN,IBMN)
+*
+*-----------------------------------------------------------------------
+*               Recuperation des caracteristiques
+*          Calcul eventuel de la contrainte equivalente
+*-----------------------------------------------------------------------
+C  Plastique parfait
+         IF (MAPL.EQ.1) THEN
+*
+            MPTVAL=IVAMAT
+            MELVAL=IVAL(3)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            SIGY =VELCHE(IGMN,IBMN)
+*
+C           Calcul de la contrainte equivalente
+            XXXX   = XSTRS(1)*XSTRS(1) + XSTRS(2)*XSTRS(2)
+     &               + XSTRS(3)*XSTRS(3)
+            YYYY   = XSTRS(1)*XSTRS(2) + XSTRS(2)*XSTRS(3)
+     &               + XSTRS(3)*XSTRS(1)
+            SIGET2 = XXXX - YYYY
+            IF (NSTRS.GE.4) THEN
+              DO 61 I=4,NSTRS
+                SIGET2 = SIGET2 + TROIS*XSTRS(I)*XSTRS(I)
+61            CONTINUE
+            ENDIF
+            SIGET = SQRT(SIGET2)
+*
+C           A t on plastifie ?
+            CALL PENT1(EPS,SIGET,YOU,SIGY,XXHH,TRAC,LTRAC,MAPL,XPREC,
+     &                  YOUTA,ILOGEL)
+            IF (ILOGEL.EQ.-1) THEN
+               IRET=-275
+               RETURN
+            ENDIF
+*
+C  Drucker simple : ALFA * Tr(S) +  Seq = K
+         ELSE IF (MAPL.EQ.3) THEN
+*
+            MPTVAL=IVAMAT
+            MELVAL=IVAL(3)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            XLTR =VELCHE(IGMN,IBMN)
+            MELVAL=IVAL(4)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            XLCS =VELCHE(IGMN,IBMN)
+*
+            DEN = ABS(XLCS) + XLTR
+            IF(DEN.EQ.0.D0) THEN
+              IRET=-366
+              RETURN
+            ENDIF
+C           ALP = ALFA ; XXHH = BETA = 1 ; SIGY = K
+            ALP  = (ABS(XLCS) - XLTR)/DEN
+            XXHH = UN
+            SIGY = DEUX*ABS(XLCS)*XLTR/DEN
+*
+*            XMAT(1) = 2.0D0*ABS(ALP)*SIGY/DEN
+*            XMAT(2) = (ABS(ALP) - SIGY)/DEN
+*            XMAT(3) = 1.D0
+            XMAT(1) = ALP
+            XMAT(2) = XXHH
+            XMAT(3) = SIGY
+            XMAT(4)=XMAT(1)
+            XMAT(5)=XMAT(2)
+            XMAT(6)=XMAT(1)
+            XMAT(7)=XMAT(2)
+            XMAT(8)=XMAT(3)
+            XMAT(9)=0.D0
+*
+C           Calcul de la contrainte equivalente
+            XXXX   = XSTRS(1)*XSTRS(1) + XSTRS(2)*XSTRS(2)
+     &               + XSTRS(3)*XSTRS(3)
+            YYYY   = XSTRS(1)*XSTRS(2) + XSTRS(2)*XSTRS(3)
+     &               + XSTRS(3)*XSTRS(1)
+            SIGET2 = XXXX - YYYY
+            IF (NSTRS.GE.4) THEN
+              DO 62 I=4,NSTRS
+                SIGET2 = SIGET2 + TROIS*XSTRS(I)*XSTRS(I)
+62            CONTINUE
+            ENDIF
+            SIGET = SQRT(SIGET2)
+*
+C           A t on plastifie ?
+            SIDD = ALP * (XSTRS(1)+XSTRS(2)+XSTRS(3)) + SIGET
+            CALL PENT1(EPS,SIDD,YOU,SIGY,XXHH,TRAC,LTRAC,MAPL,XPREC,
+     &                  YOUTA,ILOGEL)
+            IF (ILOGEL.EQ.-1) THEN
+               IRET=-275
+               RETURN
+            ENDIF
+*
+C  Cinematique
+         ELSE IF (MAPL.EQ.4) THEN
+*
+            MPTVAL=IVAMAT
+            MELVAL=IVAL(3)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            SIGY =VELCHE(IGMN,IBMN)
+*
+            MELVAL=IVAL(4)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            XXHH=VELCHE(IGMN,IBMN)
+*
+C           Calcul de la contrainte equivalente
+            XXXX   = XSTRS(1)*XSTRS(1) + XSTRS(2)*XSTRS(2)
+     &               + XSTRS(3)*XSTRS(3)
+            YYYY   = XSTRS(1)*XSTRS(2) + XSTRS(2)*XSTRS(3)
+     &               + XSTRS(3)*XSTRS(1)
+            SIGET2 = XXXX - YYYY
+            IF (NSTRS.GE.4) THEN
+              DO 63 I=4,NSTRS
+                SIGET2 = SIGET2 + TROIS*XSTRS(I)*XSTRS(I)
+63            CONTINUE
+            ENDIF
+            SIGET = SQRT(SIGET2)
+*
+C           A t on plastifie ?
+            CALL PENT1(EPS,SIGET,YOU,SIGY,XXHH,TRAC,LTRAC,MAPL,XPREC,
+     &                  YOUTA,ILOGEL)
+            IF (ILOGEL.EQ.-1) THEN
+               IRET=-275
+               RETURN
+            ENDIF
+*
+C  Plastique isotrope
+         ELSE IF (MAPL.EQ.5) THEN
+*
+C           Calcul de la contrainte equivalente
+            XXXX   = XSTRS(1)*XSTRS(1) + XSTRS(2)*XSTRS(2)
+     &               + XSTRS(3)*XSTRS(3)
+            YYYY   = XSTRS(1)*XSTRS(2) + XSTRS(2)*XSTRS(3)
+     &               + XSTRS(3)*XSTRS(1)
+            SIGET2 = XXXX - YYYY
+            IF (NSTRS.GE.4) THEN
+              DO 64 I=4,NSTRS
+                SIGET2 = SIGET2 + TROIS*XSTRS(I)*XSTRS(I)
+64            CONTINUE
+            ENDIF
+            SIGET = SQRT(SIGET2)
+*
+C           A t on plastifie ?
+            CALL PENT1(EPS,SIGET,YOU,SIGY,XXHH,TRAC,LTRAC,MAPL,XPREC,
+     &                  YOUTA,ILOGEL)
+            IF (ILOGEL.EQ.-1) THEN
+               IRET=-275
+               RETURN
+            ENDIF
+*
+C  Drucker Prager
+         ELSE IF (MAPL.EQ.15) THEN
+*
+            MPTVAL=IVAMAT
+            DO 1106 IC=3,NMATT
+              MELVAL=IVAL(IC)
+              XMAT(IC-2)=VELCHE(IGMN,IBMN)
+1106        CONTINUE
+*
+** ALP = ALFA ou ETA ; XXHH = BETA ou MU ; SIGY = K ou KL+H*EPS
+            IF(EPS.EQ.0.D0) THEN
+              ALP=XMAT(6)
+              XXHH=XMAT(7)
+              SIGY=XMAT(8)
+            ELSE
+              ALP=XMAT(1)
+              XXHH=XMAT(2)
+              SIGY=XMAT(3)+XMAT(9)*EPS
+            ENDIF
+*
+C           Calcul de la contrainte equivalente
+            XXXX   = XSTRS(1)*XSTRS(1) + XSTRS(2)*XSTRS(2)
+     &               + XSTRS(3)*XSTRS(3)
+            YYYY   = XSTRS(1)*XSTRS(2) + XSTRS(2)*XSTRS(3)
+     &               + XSTRS(3)*XSTRS(1)
+            SIGET2 = XXXX - YYYY
+            IF (NSTRS.GE.4) THEN
+              DO 66 I=4,NSTRS
+                SIGET2 = SIGET2 + TROIS*XSTRS(I)*XSTRS(I)
+66            CONTINUE
+            ENDIF
+            SIGET = SQRT(SIGET2)
+*
+C           A t on plastifie ?
+            SIDD = ALP * (XSTRS(1)+XSTRS(2)+XSTRS(3)) + XXHH * SIGET
+            CALL PENT1(EPS,SIDD,YOU,SIGY,XXHH,TRAC,LTRAC,MAPL,XPREC,
+     &                  YOUTA,ILOGEL)
+            IF (ILOGEL.EQ.-1) THEN
+               IRET=-275
+               RETURN
+            ENDIF
+*
+C  Viscoplastique parfait
+         ELSE IF (MAPL.EQ.43) THEN
+*
+C           Recuperation des caracteristiques
+            MPTVAL=IVAMAT
+            MELVAL = IVAL(3)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            SIGY = VELCHE(IGMN,IBMN)
+            MELVAL = IVAL(5)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            CK = VELCHE(IGMN,IBMN)
+            MELVAL = IVAL(4)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            CN = VELCHE(IGMN,IBMN)
+            ILOGEL = 1
+*
+C  Betocy
+         ELSE IF (MAPL.EQ.54) THEN
+C
+            MPTVAL=IVAMAT
+            DO 1107 IC=1,NMATT-2
+              MELVAL=IVAL(IC)
+              IGMN=MIN(IGAU,VELCHE(/1))
+              IBMN=MIN(IB  ,VELCHE(/2))
+              XMAT(IC)=VELCHE(IGMN,IBMN)
+1107        CONTINUE
+C          Lecture Variables internes
+            MPTVAL=IVARI
+            DO 1108 IC=1,NVART
+              MELVAL=IVAL(IC)
+              IGMN=MIN(IGAU,VELCHE(/1))
+              IBMN=MIN(IB  ,VELCHE(/2))
+              XVAR(IC)=VELCHE(IGMN,IBMN)
+1108        CONTINUE
+            ILOGEL = 1
+*
+C  Rotating Crack
+         ELSE IF (MAPL.EQ.55) THEN
+C          Lecture materiau
+            MPTVAL=IVAMAT
+            DO 1109 IC=1,NMATT
+              MELVAL=IVAL(IC)
+              IGMN=MIN(IGAU,VELCHE(/1))
+              IBMN=MIN(IB  ,VELCHE(/2))
+              XMAT(IC)=VELCHE(IGMN,IBMN)
+1109        CONTINUE
+C          Lecture Variables internes
+            MPTVAL=IVARI
+            DO 1110 IC=1,NVART
+              MELVAL=IVAL(IC)
+              IGMN=MIN(IGAU,VELCHE(/1))
+              IBMN=MIN(IB  ,VELCHE(/2))
+              XVAR(IC)=VELCHE(IGMN,IBMN)
+1110        CONTINUE
+            ILOGEL = 1
+*
+* BCN (start)
+         ELSE IF ((MAPL.EQ.111).OR.(MAPL.EQ.112).OR.(MAPL.EQ.113)) THEN
+            IF (MAPL.EQ.112.OR.MAPL.EQ.113) THEN
+C           J2 (MAPL=112) or Rounded Hyperbolic Mohr-Coulomb (MAPL=113)
+C           get auxiliary variable for CTM
+              MPTVAL=IVARI
+              MELVAL=IVAL(2)
+              IGMN=MIN(IGAU,VELCHE(/1))
+              IBMN=MIN(IB  ,VELCHE(/2))
+              AUX1 =VELCHE(IGMN,IBMN)
+            ELSE IF (MAPL.EQ.111) THEN
+C           MRS-Lade (MAPL=111)
+C           get auxiliary variable for CTM
+              MPTVAL=IVARI
+              MELVAL=IVAL(1)
+              IGMN=MIN(IGAU,VELCHE(/1))
+              IBMN=MIN(IB  ,VELCHE(/2))
+              EPSCON =VELCHE(IGMN,IBMN)
+              MPTVAL=IVARI
+              MELVAL=IVAL(2)
+              IGMN=MIN(IGAU,VELCHE(/1))
+              IBMN=MIN(IB  ,VELCHE(/2))
+              EPSCAP =VELCHE(IGMN,IBMN)
+              MPTVAL=IVARI
+              MELVAL=IVAL(3)
+              IGMN=MIN(IGAU,VELCHE(/1))
+              IBMN=MIN(IB  ,VELCHE(/2))
+              AUX1CON =VELCHE(IGMN,IBMN)
+              MPTVAL=IVARI
+              MELVAL=IVAL(4)
+              IGMN=MIN(IGAU,VELCHE(/1))
+              IBMN=MIN(IB  ,VELCHE(/2))
+              AUX1CAP =VELCHE(IGMN,IBMN)
+            ENDIF
+C           The three models: read material constants in XMAT
+            XMAT(1)=YOU
+            XMAT(2)=XNU
+            XMAT(3)=0.D0
+            XMAT(4)=0.D0
+            MPTVAL=IVAMAT
+            DO IC=3,NMATT
+              MELVAL=IVAL(IC)
+              IGMN=MIN(IGAU,VELCHE(/1))
+              IBMN=MIN(IB  ,VELCHE(/2))
+              XMAT(IC+2)=VELCHE(IGMN,IBMN)
+            ENDDO
+            ILOGEL = 1
+         ENDIF
+* BCN (end)
+*
+*-----------------------------------------------------------------------
+*                 Calcul de la matrice elastique
+*-----------------------------------------------------------------------
+         VELA(1) = YOU
+         VELA(2) = XNU
+* MATE = 1 --> CMATE = ISOTROPE
+         CMATE = 'ISOTROPE'
+         CALL DOHMAS(VELA,CMATE,IFOU,LHOOK,1,DDHOOK,IRETOU)
+         IF (IRETOU.EQ.0) THEN
+           IRET = -81
+           RETURN
+         ENDIF
+         IRET = 1
+*
+*        ILOGEL = 0 on a fini, =1 on calcule la matrice tangente
+         IF (ILOGEL.EQ.0) RETURN
+*        series de Fourier, on rend la matrice elastique
+         IF (IFOU.EQ.1) RETURN
+*
+*-----------------------------------------------------------------------
+*                 Calcul de la matrice tangente
+*-----------------------------------------------------------------------
+c  MODELE MRS_LADE
+         IF (MAPL.EQ.111) THEN
+*
+*        notice de l operateur MODE: "option de calcul : plan defo,axis"
+*        sinon, on rend la matrice elastique
+           IF ((IFOU.EQ.-1).OR.(IFOU.EQ.0)) THEN
+             nescri =0
+             nues   =6
+C            mrs-lade requiere siempre derivacion numerica
+             nnumer=3
+             deltax=2.D0**(int(log10(1.D-6)/log10(2.D0)))
+             call mtc_MRSMAC(DDHOOK,LHOOK,XSTRS,NSTRS,EPSCON,EPSCAP,
+     &                       AUX1CON,AUX1CAP,XMAT,nescri,nues,
+     &                       nnumer,deltax,kerre)
+*            kerre = 1 : formulacion no disponible
+             IF (KERRE.EQ.1) THEN
+               IRET = -328
+             ENDIF
+           ENDIF
+*
+c  MODELE J2
+         ELSE IF (MAPL.EQ.112) THEN
+*        notice de l operateur MODE: "option de calcul : plan defo,axis"
+*          sinon, on rend la matrice elastique
+           IF ((IFOU.EQ.-1).OR.(IFOU.EQ.0)) THEN
+             nescri   =0
+             nues     =6
+             call mtc_j2(DDHOOK,LHOOK,XSTRS,NSTRS,EPS,AUX1,XMAT,
+     &                   nescri,nues,kerre)
+*          kerre vaut toujours 0
+           ENDIF
+*
+c  MODELE RH_COULOMB
+         ELSE IF (MAPL.EQ.113) THEN
+*        notice de l operateur MODE: "option de calcul : plan defo,axis"
+*          sinon, on rend la matrice elastique
+           IF ((IFOU.EQ.-1).OR.(IFOU.EQ.0)) THEN
+             nescri   =0
+             nues     =6
+             call mtc_rhmc(DDHOOK,LHOOK,XSTRS,NSTRS,AUX1,XMAT,
+     &                     nescri,nues,kerre)
+*          kerre vaut toujours 0
+           ENDIF
+*
+C  Viscoplastique parfait
+         ELSE IF (MAPL.EQ.43) THEN
+*
+*          tout sauf contraintes planes
+*          sinon on rend la matrice elastique
+           IF ((IFOU.EQ.-1).OR.(IFOU.EQ.-3).OR.(IFOU.EQ.0).OR.
+     &      (IFOU.EQ.2).OR.(IFOU.EQ.3).OR.(IFOU.EQ.7).OR.(IFOU.EQ.9)
+     &      .OR.(IFOU.EQ.11).OR.(IFOU.EQ.12).OR.(IFOU.EQ.14).OR.
+     &      (IFOU.EQ.15)) THEN
+*            SIGMA EQUIVALENT: (3/2(s':s'))**0.5D0
+             XXXX   = XSTRS(1)*XSTRS(1) + XSTRS(2)*XSTRS(2)
+     &               + XSTRS(3)*XSTRS(3)
+             YYYY   = XSTRS(1)*XSTRS(2) + XSTRS(2)*XSTRS(3)
+     &               + XSTRS(3)*XSTRS(1)
+             SIGET2 = XXXX - YYYY
+             IF (NSTRS.GE.4) THEN
+               DO 67 I=4,NSTRS
+                 SIGET2 = SIGET2 + TROIS*XSTRS(I)*XSTRS(I)
+67             CONTINUE
+             ENDIF
+             SIGEQ = SQRT(SIGET2)
+*
+             XMOY=(XSTRS(1)+XSTRS(2)+XSTRS(3))*UNTIER
+             DO 200 IA=1,3
+               DEVIAT(IA)=XSTRS(IA)- XMOY
+  200        CONTINUE
+             IF (NSTRS.GE.4) THEN
+               DO 300 IA=4,NSTRS
+                 DEVIAT(IA)=XSTRS(IA)
+  300          CONTINUE
+             ENDIF
+*
+             SYN = ( SIGEQ - SIGY ) / CK
+             IF (SYN .GT. XPREC) THEN
+*            on ne travaille que si l'evolution est plastique
+*
+               AUX6 = UNDEMI * YOU / (UN+XNU)
+*
+*              ON CALCULE LA MATRICE G
+               COEF1 = SYN ** CN / SIGEQ*DTPS*2.D0*AUX6/3.D0
+               COEF2=SYN**(CN-1.D0)*(SYN/SIGEQ+CN/CK)/SIGET2*DTPS
+     &                *2.D0*AUX6
+               DO 610 I=1,NSTRS
+                 DO 600 J=1,NSTRS
+                   GMATRIC(I,J)=COEF1*PMATRIC(I,J)+
+     &                       COEF2*DEVIAT(I)*DEVIAT(J)*COEF3(I)
+ 600             CONTINUE
+                 GMATRIC(I,I)=GMATRIC(I,I)+1.D0
+ 610           CONTINUE
+
+               CALL INVHOK(GMATRIC,GINV,NSTRS)
+*
+*              on calcule InvG . D
+               DO 650 I=1,NSTRS
+                 DO 640 J=I,NSTRS
+                   GDMATR(I,J)=0.D0
+                   DO 630 K=1,NSTRS
+                     GDMATR(I,J)=GDMATR(I,J)+GINV(I,K)*DDHOOK(K,J)
+ 630               CONTINUE
+                   GDMATR(J,I)=GDMATR(I,J)
+ 640             CONTINUE
+ 650           CONTINUE
+*              on remet tout dans DHOOK
+               DO 670 I=1,NSTRS
+                 DO 660 J=1,NSTRS
+                   DDHOOK(I,J)=GDMATR(I,J)
+ 660             CONTINUE
+ 670           CONTINUE
+             ENDIF
+           ENDIF
+*
+C  Betocy
+         ELSE IF (MAPL.EQ.54) THEN
+*
+*          notice de l operateur MODE : "en 2D contraintes planes"
+*          sinon on rend la matrice elastique
+           IF (IFOU.EQ.-2) THEN
+             CALL BETOKT(XMAT,TRAC,XVAR,XSTRS,NTRAT,NTRAC,DDHOOK,KERRE)
+*            kerre toujours nul
+           ENDIF
+*
+C  Rotating Crack
+         ELSE IF (MAPL.EQ.55) THEN
+*
+* notice de MATE : "la direction de fissuration change a chaque pas"
+* possible en 1D ? dans ROTKTA DDHOOK(4,4), en 1D on va jusque 3
+*          sinon on rend la matrice elastique
+           IF (IFOU.EQ.-2) THEN
+             CALL ROTKTA(XMAT,XVAR,XSTRS,DDHOOK,KERRE)
+*            kerre = 2 "impossible d inverser"
+             IF (KERRE.EQ.2) IRET = 0
+           ENDIF
+*
+C  Plastique parfait, cinematique, isotrope
+         ELSE IF ((MAPL.EQ.1).OR.(MAPL.EQ.4).OR.(MAPL.EQ.5)) THEN
+*
+           IF (IFOU.EQ.-2) THEN
+*          2D contraintes planes
+             XXXX = XSTRS(1)*XSTRS(1) + XSTRS(2)*XSTRS(2)
+             YYYY = XSTRS(1)*XSTRS(2)
+             ZZZZ = XSTRS(4)*XSTRS(4)
+             AUX4=UNTIER/(UN-XNU*XNU)
+             U=(DEUX*XSTRS(1)-XSTRS(2)+XNU*(DEUX*XSTRS(2)-
+     &               XSTRS(1)))*AUX4
+             V=(DEUX*XSTRS(2)-XSTRS(1)+XNU*(DEUX*XSTRS(1)-
+     &               XSTRS(2)))*AUX4
+             W= XSTRS(4)/(UN+XNU)
+             A= CINQ*XXXX - HUIT*YYYY
+             B= CINQ*YYYY - DEUX*XXXX
+             C= DETIER*(XXXX-YYYY)+DEUX*ZZZZ
+             D= (A+DEUX*XNU*B)*AUX4  +  SIX*ZZZZ/(UN+XNU)
+             XNUM=TROIS*YOU*(YOU-YOUTA)
+             DENOM=DEUX*YOUTA*C + (YOU - YOUTA)*D
+             BETA=XNUM/DENOM
+*
+             DDHOOK(1,1)=DDHOOK(1,1)-BETA*U*U
+             DDHOOK(2,1)=DDHOOK(2,1)-BETA*V*U
+             DDHOOK(4,1)=DDHOOK(4,1)-BETA*W*U
+             DDHOOK(1,2)=DDHOOK(1,2)-BETA*U*V
+             DDHOOK(2,2)=DDHOOK(2,2)-BETA*V*V
+             DDHOOK(4,2)=DDHOOK(4,2)-BETA*W*V
+             DDHOOK(1,4)=DDHOOK(1,4)-BETA*U*W
+             DDHOOK(2,4)=DDHOOK(2,4)-BETA*V*W
+             DDHOOK(4,4)=DDHOOK(4,4)-BETA*W*W
+*
+           ELSE IF ((IFOU.EQ.4).OR.(IFOU.EQ.8)) THEN
+*          DYCZ,GYCZ
+             XXXX = XSTRS(1)*XSTRS(1) + XSTRS(2)*XSTRS(2)
+             YYYY = XSTRS(1)*XSTRS(2)
+             AUX4=UNTIER/(UN-XNU*XNU)
+             U=(DEUX*XSTRS(1)-XSTRS(2)+XNU*(DEUX*XSTRS(2)-
+     &               XSTRS(1)))*AUX4
+             V=(DEUX*XSTRS(2)-XSTRS(1)+XNU*(DEUX*XSTRS(1)-
+     &               XSTRS(2)))*AUX4
+             A= CINQ*XXXX - HUIT*YYYY
+             B= CINQ*YYYY - DEUX*XXXX
+             C= DETIER*(XXXX-YYYY)
+             D= (A+DEUX*XNU*B)*AUX4
+             XNUM=TROIS*YOU*(YOU-YOUTA)
+             DENOM=DEUX*YOUTA*C + (YOU - YOUTA)*D
+             BETA=XNUM/DENOM
+*
+             DDHOOK(1,1)=DDHOOK(1,1)-BETA*U*U
+             DDHOOK(2,1)=DDHOOK(2,1)-BETA*V*U
+             DDHOOK(1,2)=DDHOOK(1,2)-BETA*U*V
+             DDHOOK(2,2)=DDHOOK(2,2)-BETA*V*V
+*
+           ELSE IF ((IFOU.EQ.5).OR.(IFOU.EQ.10).OR.(IFOU.EQ.13)
+     &               .OR.(IFOU.EQ.6)) THEN
+*          CYDZ,CYGZ,AXCZ,CYCZ
+*            comment adapter les formules 2D contraintes planes au 1D CY.. ?
+*            pour le moment, on rend la matrice elastique
+*
+           ELSE
+*          tout sauf contraintes planes (1D aussi)
+*            deviateur
+             XMOY=(XSTRS(1)+XSTRS(2)+XSTRS(3))*UNTIER
+             DO 201 IA=1,3
+               DEVIAT(IA)=XSTRS(IA)- XMOY
+  201        CONTINUE
+             IF (NSTRS.GE.4) THEN
+               DO 301 IA=4,NSTRS
+                 DEVIAT(IA)=XSTRS(IA)
+  301          CONTINUE
+             ENDIF
+*
+             XNUM = XNEUF * YOU * ( YOU - YOUTA)
+             XXXX = TROIS * ( YOU - YOUTA ) +
+     &                DEUX * ( UN + XNU ) * YOUTA
+             DENOM= DEUX * SIGET2 * ( UN + XNU ) * XXXX
+             BETA = XNUM / DENOM
+*
+             DO 400 ICOMP1=1,NSTRS
+               DO 400 ICOMP2=1,NSTRS
+                 DDHOOK(ICOMP1,ICOMP2)= DDHOOK(ICOMP1,ICOMP2) -
+     &                         BETA*DEVIAT(ICOMP1)*DEVIAT(ICOMP2)
+ 400         CONTINUE
+*
+           ENDIF
+*
+C  Drucker simple, Drucker Prager
+         ELSE IF ((MAPL.EQ.3).OR.(MAPL.EQ.15)) THEN
+*
+*          si SIGET = 0 (avec tr(S) dans le critere, c est possible)
+*          on rend la matrice elastique (sinon on divise par SIGET=0)
+           IF (SIGET.EQ.0.) RETURN
+           CALL ZERO(DDF,NSTRS,1)
+           CALL ZERO(DDG,NSTRS,1)
+*
+           IF ((IFOU.EQ.-2).OR.(IFOU.EQ.4).OR.(IFOU.EQ.8)) THEN
+*          2D contraintes planes et 1D DYCZ GYCZ
+             SIGM = (XSTRS(1)-XSTRS(2)*0.5D0)/SIGET
+             DDF(1)=XMAT(1) + XMAT(2)*SIGM
+             DDG(1)=XMAT(4) + XMAT(5)*SIGM
+             SIGM = (XSTRS(2)-XSTRS(1)*0.5D0)/SIGET
+             DDF(2)=XMAT(1) + XMAT(2)*SIGM
+             DDG(2)=XMAT(4) + XMAT(5)*SIGM
+             IF (NSTRS.GE.4) THEN
+               DDF(4)=6.D0*XMAT(2)*XSTRS(4)/SIGET
+               DDG(4)=6.D0*XMAT(5)*XSTRS(4)/SIGET
+             ENDIF
+*
+           ELSE IF ((IFOU.EQ.5).OR.(IFOU.EQ.10).OR.(IFOU.EQ.13)) THEN
+*          1D CYDZ CYGZ et AXCZ
+             SIGM = (XSTRS(1)-XSTRS(3)*0.5D0)/SIGET
+             DDF(1)=XMAT(1) + XMAT(2)*SIGM
+             DDG(1)=XMAT(4) + XMAT(5)*SIGM
+             SIGM = (XSTRS(3)-XSTRS(1)*0.5D0)/SIGET
+             DDF(3)=XMAT(1) + XMAT(2)*SIGM
+             DDG(3)=XMAT(4) + XMAT(5)*SIGM
+*
+           ELSE IF (IFOU.EQ.6) THEN
+*          1D CYCZ
+             SIGM = (XSTRS(1)-XSTRS(2)*0.5D0)/SIGET
+             DDF(1)=XMAT(1) + XMAT(2)*SIGM
+             DDG(1)=XMAT(4) + XMAT(5)*SIGM
+*
+           ELSE
+             SIGM = (XSTRS(1)-XSTRS(2)*0.5D0 -XSTRS(3)*0.5D0)/SIGET
+             DDF(1)=XMAT(1) + XMAT(2)*SIGM
+             DDG(1)=XMAT(4) + XMAT(5)*SIGM
+             SIGM = (XSTRS(2)-XSTRS(1)*0.5D0 -XSTRS(3)*0.5D0)/SIGET
+             DDF(2)=XMAT(1) + XMAT(2)*SIGM
+             DDG(2)=XMAT(4) + XMAT(5)*SIGM
+             SIGM = (XSTRS(3)-XSTRS(1)*0.5D0 -XSTRS(2)*0.5D0)/SIGET
+             DDF(3)=XMAT(1) + XMAT(2)*SIGM
+             DDG(3)=XMAT(4) + XMAT(5)*SIGM
+             IF (NSTRS.GE.4) THEN
+               DO 421 I=4,NSTRS
+                 DDF(I)=6.D0*XMAT(2)*XSTRS(I)/SIGET
+                 DDG(I)=6.D0*XMAT(5)*XSTRS(I)/SIGET
+ 421           CONTINUE
+             ENDIF
+*
+           ENDIF
+*
+           DO 422 I=1,NSTRS
+             DHDF(I)=0.D0
+             DHDG(I)=0.D0
+             DO 422 J=1,NSTRS
+               DHDF(I)=DHDF(I)+DDHOOK(I,J)*DDF(J)
+               DHDG(I)=DHDG(I)+DDHOOK(I,J)*DDG(J)
+ 422       CONTINUE
+*
+           DENOM = XMAT(9)* SQRT(2.D0*XMAT(4)*XMAT(4)+
+     &                                     XMAT(5)*XMAT(5))
+           DO 423 I=1,NSTRS
+             DENOM = DENOM + DDF(I)*DHDG(I)
+ 423       CONTINUE
+           DO 320 ICOMP1=1,NSTRS
+             DO 320 ICOMP2=1,NSTRS
+               DDHOOK(ICOMP1,ICOMP2)=DDHOOK(ICOMP1,ICOMP2)
+     &                       -  DHDG(ICOMP1)*DHDF(ICOMP2)/DENOM
+ 320       CONTINUE
+*
+         ELSE
+*          on rend la matrice elastique pour les autres modeles
+         ENDIF
+*
+*-----------------------------------------------------------------------
+*                     MATERIAU UNIDIRECTIONNEL (MATE=4)
+*                      Acier unidirectionnel (MAPL=40)
+*-----------------------------------------------------------------------
+      ELSE IF ((MATE.EQ.4).AND.(MAPL.EQ.40).AND.(IFOU.LE.0)) THEN
+*-----------------------------------------------------------------------
+         DO 530 IC=1,3
+            MPTVAL=IVAMAT
+            MELVAL=IVAL(IC)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            XMAT(IC)=VELCHE(IGMN,IBMN)
+ 530     CONTINUE
+         V1X=TXR(1,1)*XMAT(2)+TXR(1,2)*XMAT(3)
+         V1Y=TXR(2,1)*XMAT(2)+TXR(2,2)*XMAT(3)
+         XMAT(2)=V1X
+         XMAT(3)=V1Y
+C     Lecture Variables internes
+         MPTVAL=IVARI
+         MELVAL=IVAL(4)
+         IGMN=MIN(IGAU,VELCHE(/1))
+         IBMN=MIN(IB  ,VELCHE(/2))
+         XVAR(1)=VELCHE(IGMN,IBMN)
+*
+         CALL UNIAKT(XMAT,XVAR,IFOU,DDHOOK,KERRE)
+* kerre toujours nul
+         IRET = 1
+*
+*-----------------------------------------------------------------------
+*                          AUTRE MATERIAU :
+*            UNIDIRECTIONNEL (sauf MAPL=40 et IFOU = -3,-2,-1,0)
+*            ORTHOTROPE
+*            ANISOTROPE
+*-----------------------------------------------------------------------
+      ELSE
+*-----------------------------------------------------------------------
+         IF (MATE.EQ.2) THEN
+           CMATE = 'ORTHOTRO'
+         ELSE IF (MATE.EQ.3) THEN
+           CMATE = 'ANISOTRO'
+         ELSE IF (MATE.EQ.4) THEN
+           CMATE = 'UNIDIREC'
+         ELSE
+C        cet operateur ne fonctionne pas pour le materiau %m1:8
+           IRET = -834
+           RETURN
+         ENDIF
+         SEGINI,WRKMAT
+         MPTVAL = IVAMAT
+         SEGACT,MPTVAL
+         DO 9004 IM=1,NMATT
+            IF (IVAL(IM).NE.0) THEN
+               MELVAL=IVAL(IM)
+               IBMN=MIN(IB  ,VELCHE(/2))
+               IGMN=MIN(IGAU,VELCHE(/1))
+               if (ibmn.gt.0.and.igmn.gt.0) then
+                 VALMAT(IM)= VELCHE(IGMN,IBMN)
+C*             else
+C*               VALMAT(IM)=0.D0
+               endif
+C*          ELSE
+C*             VALMAT(IM)=0.D0
+            ENDIF
+ 9004    CONTINUE
+         CALL DOHMAO(VALMAT,CMATE,IFOU,IDIM,TXR,XLOC,XGLOB,D1HO,
+     &               ROTH,DDHOOK,LHOOK,1,IRETOU)
+         SEGSUP,WRKMAT
+         IF (IRETOU.EQ.0) THEN
+           IRET = -81
+         ELSE IF (IRETOU.EQ.1) THEN
+           IRET = 1
+         ELSE
+           IRET = 0
+         ENDIF
+      ENDIF
+*
+      RETURN
+      END
+
+
+

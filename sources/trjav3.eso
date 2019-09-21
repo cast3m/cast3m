@@ -1,0 +1,228 @@
+C TRJAV3    SOURCE    PV        09/03/13    21:17:06     6328
+      SUBROUTINE TRJAV3(EPSILO,NSAUV,MLREE6
+     $     ,MELVA1,MELVA2,MELVA3,IPT9,IZVIT,IZPART,IPART
+     $     ,TMIN,TMAX,MELEME,IELTFA,IZCENT,IFACEL,IPARPO,IZSH,SORTIE)
+****************************************************************************
+*** SP 'TRJAV3' : fait avancer une particule n° 'IPART' jsuqu'à instant 'TMAX'
+*** ou jusqu'à ce que particule sorte du domaine. Pour chaque intersection
+*** element-trajectoire, les coordonnées réelles et le tps courant réel
+*** associés à la particule n° 'IPART' sont stockés via 'IPARPO'.
+***
+*** E = 'EPSILO' erreur précision calul relative acceptee (cause machine)
+***     'NSAUV' taille de la liste des tps de sauvegarde
+***     'MLREE6' liste des tps de sauvegarde
+***     'MELVA1' segment content coeffs disper intrinseques longitudinaux
+***     'MELVA2' segment content coeffs disper intrinseques transversaux
+***     'MELVA3' segment content coeffs diff moleculaire
+***     'IPT9' pteur sur maillage decrivant faces impermeables du domaine
+***     'IZVIT' segment decrivant les vitesses (<- 'TRJVIT' OU 'TRJFLU')
+***     'IZPART' position initiale en coordonnees reference de la particule
+***     'IPART' n° de la particule concernee
+***     'TMIN'  instant de depart de la particule
+***     'TMAX'  instant à ne pas depasser pour la particule
+***     'MELEME' pteur sur le maillage du domaine etudie
+***     'IELTFA' pteur sur la table "DOMAINE.ELTFA"
+***     'IZCENT' pteur sur la table "DOMAINE.CENTRE"
+***     'IFACEL' pteur sur la table " DOMAINE.FACEL"
+*** S = 'IPARPO' position reelle et tps correspondant de la particule aux
+***              interfaces des elements traversees.
+***     'IZSH' segmt content fcts forme,base et coord reelles des noeuds
+***     'SORTIE' tableau contenant respectivement tps et coords de sortie
+******************************************************************************
+
+*** ORIGINE = SP 'TRJAVA' modifié par PATRICK MEYNIEL 12/99
+***                                   CYRIL NOU       08/00
+***
+***********************************************************
+*** DECLARATION/ACIVATION SEGMENTS UTILISES DS 'TRJAV2' ***
+***********************************************************
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+-INC CCOPTIO
+-INC SMCOORD
+-INC SMELEME
+-INC SMCHAML
+-INC SMLREEL
+      POINTEUR IZCENT.MELEME,IELTFA.MELEME,IFACEL.MELEME
+      POINTEUR MLREE6.MLREEL
+      SEGMENT IZPART
+         INTEGER NLEPA(NPART),NUMPA(NPART)
+         REAL*8  COORPA(NDIM,NPART)
+      ENDSEGMENT
+      SEGMENT  IPARPO
+         INTEGER NAPAR(NPOS),NUMP(NPOS)
+         REAL*8 CREF(NDIM,NPOS),TPAR(NPOS)
+      ENDSEGMENT
+      SEGMENT IZSH
+          REAL*8 SHP(6,MNO9),SHY(12,MNO9),XYZL(3,MNO9)
+      ENDSEGMENT
+      SEGMENT IZVIT
+         REAL*8 TEMTRA(NVIPT)
+         INTEGER IPUN(NBS),IDUN(NBS),IPVPT(NVIPT),IFORML
+      ENDSEGMENT
+***   declaration de segment utilise dans le cas du transitoire
+***   'IPUN1' = pteurs sur les 'IZUN', 'IPUMAX' sur le 'IZUMAX'
+      SEGMENT IZVPT
+         INTEGER IPUN1(NBS),IPUMAX
+      ENDSEGMENT
+***   declaration de segment contenant les vitesses ou flux
+      SEGMENT IZUN
+         REAL*8 UN(I1,I2,I3)
+      ENDSEGMENT
+***   declaration de segment contenant la vitesse ou flux max par element
+      SEGMENT IZUMAX
+           REAL*8 UMAX(NBREL)
+      ENDSEGMENT
+***   variables pour positions, stockage, aleatoire et rebond
+      DIMENSION XDEP(3),XDEP2(3),XARI(3),XARI2(3)
+      DIMENSION XSTOC(3),Z(3),XIREB(3),XNREB(3)
+      DIMENSION PT1(3),PT2(3),PT3(3),PT4(3),UCEN(3)
+***   contient respectivement tps de sortie et coords de sortie
+      DIMENSION SORTIE(4)
+***   activation si necessaire segments liés au pb (maillage, vitesse,...)
+      SEGACT IFACEL
+********************************************************
+*** INITIALISATION DU LACHER DE LA PARTICULE 'IPART' ***
+********************************************************
+
+***   initialisation trajectoire % position lacher particule
+*      WRITE(6,*) '-> Trajectoire particule n°',IPART
+      CALL INITPA(EPSILO,IPART,IZPART,TMIN,NSAUV,MLREE6
+     $     ,MELEME,IPT9,NDIM,NPOS,ITER,IPARPO,IVPT,IEL1,XDEP2,TDEP
+     $     ,JFACE,JREBO,XIREB,XNREB,ICHGZ,Z,KSAUV,DTSTOC,DTCUMU,IZSH,
+     $      IELTFA)
+***   initialisation element initial % position lacher particule
+***   localisation, caractérisation élément content particule 'IPART'
+      CALL TRJLOC(NDIM,MELEME,IZCENT,IELTFA,IZVIT,IVPT
+     $     ,IEL1,TDEP,NOEL1,ITY1,ITYG,IZSH,IZUN,NOUN1,IELL,DIAM,IPT1)
+***   calcul des coefficients de dispersion long et trans
+      CALL COEFDI(NDIM,ITY1,ITYG,NOEL1,NOUN1,DIAM,UN(1,1,IELL)
+     $     ,IEL1,IZCENT,MELVA1,MELVA2,MELVA3,DIFL,DIFT,UCEN,IZSH)
+***   cas ou soit particule ne peut pas bouger (pas conv,disp et diff)
+***   soit Jacobien nul dans approximation de la vitesse efmh
+      IF (IEL1.EQ.(-1)) GOTO 40
+***   choix du pas de tps pour la traversee de la maille
+      CALL TRJCDT(NDIM,DIAM,IZVIT,IVPT,IEL1,DIFL,DIFT,UCEN,DTREEL)
+
+***********************************************************
+*** TRAVERSEE ENTRE 2 INTERFACES DE L'ELEMENT CONSIDERE ***
+***********************************************************
+
+ 10   CONTINUE
+***   traversee de l'element 'IEL1' ('IELL')
+      CALL TRAVER(DIAM,EPSILO,NSAUV,MLREE6,TMIN,NDIM
+     $     ,ITY1,ITYG,IEL1,IELL,NOEL1,NOUN1,DIFL,DIFT,DTREEL
+     $     ,IZUN,IZSH,TDEP,XDEP2,NPOS,ITER,IPARPO,KSAUV,DTSTOC
+     $     ,DTCUMU,ICHGZ,Z,JFACE,JREBO,XIREB,XNREB,TARI,XARI2)
+***   cas ou echec recalibrage sur face element
+      IF (IEL1.EQ.(-1)) GOTO 40
+
+************************************************************
+*** RECHERCHE DU PROCHAIN ELEMENT TRAVERSE PAR PARTICULE ***
+************************************************************
+
+***   teste si face de recalibrage est une face impermeable
+      CALL TESTFA(EPSILO,NDIM,ITYG
+     $     ,XARI2,IZSH,JFTEST,PT1,PT2,PT3,PT4)
+      CALL LOCIMP(NDIM,JFACE,XARI2,PT1,PT2,PT3,PT4,IPT9
+     $     ,JREBO,XIREB,XNREB,IEL1,IELTFA)
+
+***   chgt element à traverser
+      CALL CHGELE(EPSILO,NDIM,JREBO,XNREB,TARI
+     $     ,XARI2,DTREEL,IVPT,MELEME,IFACEL,IZCENT,IELTFA
+     $     ,IZVIT,IZUN,IEL1,TDEP,XDEP2,JFACE,ICHGZ,IZSH)
+********************************************************
+*** DIFFERENTS CAS POSSIBLES APRES TRAVERSEE ELEMENT ***
+********************************************************
+
+***   cas ou il n'y a pas d'élément suivant
+      IF (IEL1.EQ.0) THEN
+         SORTIE(1)=TDEP
+         SORTIE(2)=XDEP2(1)
+         SORTIE(3)=XDEP2(2)
+         SORTIE(4)=XDEP2(3)
+         GOTO 20
+***   cas ou tps maximum imposé est dépassé
+      ELSEIF ((TMAX-TDEP).LE.0.D0) THEN
+         SORTIE(1)=TDEP
+         SORTIE(2)=XDEP2(1)
+         SORTIE(3)=XDEP2(2)
+         SORTIE(4)=XDEP2(3)
+         GOTO 20
+***   cas ou on refait la meme démarche dans élément suivant
+      ELSE
+***   localisation, caractérisation élément content particule 'IPART'
+      CALL TRJLOC(NDIM,MELEME,IZCENT,IELTFA,IZVIT,IVPT
+     $     ,IEL1,TDEP,NOEL1,ITY1,ITYG,IZSH,IZUN,NOUN1,IELL,DIAM,IPT1)
+***   calcul des coefficients de dispersion long et trans
+      CALL COEFDI(NDIM,ITY1,ITYG,NOEL1,NOUN1,DIAM,UN(1,1,IELL)
+     $     ,IEL1,IZCENT,MELVA1,MELVA2,MELVA3,DIFL,DIFT,UCEN,IZSH)
+***   choix du pas de tps pour la traversee de la maille
+      IF (IEL1.NE.(-1))
+     *CALL TRJCDT(NDIM,DIAM,IZVIT,IVPT,IEL1,DIFL,DIFT,UCEN,DTREEL)
+          GOTO 10
+      ENDIF
+
+*************************************************************************
+*** REAJUSTEMENT DE 'IPARPO' (POUR LE TRACE VIA OPERATEUR 'TRTRAJEC') ***
+*************************************************************************
+
+***   recuperation de variables de travail pour la sauvegarde
+ 20   TSTOC=TPAR(ITER)
+      IESTO=NAPAR(ITER)
+      DO 30 I=1,NDIM
+         XSTOC(I)=CREF(I,ITER)
+ 30   CONTINUE
+***   on supprime les pts sauvegardés dont tps sauvegarde > 'TMAX'
+      IF (TSTOC.GT.((1+EPSILO)*TMAX)) THEN
+         ITER=ITER-1
+         GOTO 20
+      ENDIF
+***   au moins 2 pts sauvegardés car 'TRTRAJEC' => maillage 'SEG2'
+      IF(ITER.EQ.1)CALL TRJSTO(NDIM,IESTO,NPOS,ITER,IPARPO,TSTOC,XSTOC)
+      IF(ABS((TPAR(ITER)-TDEP)/TDEP).GT.EPSILO) THEN
+        NPOS=ITER+1
+        SEGADJ IPARPO
+        NAPAR(NPOS)=IESTO
+        TPAR(NPOS)=TDEP
+        DO 35 III=1,IDIM
+        CREF(III,NPOS)=XDEP2(III)
+   35   CONTINUE
+      ELSE
+***   on reajuste la dimension du segment 'IPARPO'
+      NPOS=ITER
+      SEGADJ IPARPO
+      ENDIF
+***   on sort du module pour traiter la particule suivante
+      RETURN
+
+******************************************************
+*** CAS D'ERREUR LORS DE LA TRAVERSEE DE L'ELEMENT ***
+******************************************************
+
+ 40   WRITE(6,*) '=================================================='
+      WRITE(6,*) 'LA PARTICULE N°',IPART,' VA ETRE ELIMINEE POUR'
+      WRITE(6,*) 'OPERATEUR "TRAJ" POUR UNE DES RAISONS SUIVANTES : '
+      WRITE(6,*)
+      WRITE(6,*) 'a) ni convection, ni dispersion, ni diffusion     '
+      WRITE(6,*) 'b) Jacobien nul pour approximation vitesse efmh   '
+      WRITE(6,*) 'c) echec recalibrage particule sur face élément   '
+      WRITE(6,*) 'd) echec localisation particule ds un élément     '
+      WRITE(6,*)
+      WRITE(6,*) 'OPERATEUR "TRAJ" CONTINUE POUR PARTICULE SUIVANTE '
+      WRITE(6,*) '=================================================='
+
+***   indication pour elimination particule
+      SORTIE(1)=-1.D0
+
+      RETURN
+      END
+
+
+
+
+
+
+
+

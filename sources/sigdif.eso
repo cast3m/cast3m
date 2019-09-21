@@ -1,0 +1,159 @@
+C SIGDIF    SOURCE    BP208322  17/03/01    21:18:18     9325
+
+      SUBROUTINE SIGDIF (MELE,IELE,IPMAIL,NBPGAU,IPMINT1,NDEP,IVADEP,
+     &                   LDIFF,LRE,MATE,IVAMAT,NVMAT, IVASTR)
+
+*----------------------------------------------------------------------*
+*       CALCUL DES FLUX DE DIFFUSION (FORMULATION 'DIFFUSION')         *
+*----------------------------------------------------------------------*
+*   ENTREES :                                                          *
+*   ________                                                           *
+*        MELE     Numero de l'element fini                             *
+*        IPMAIL   Pointeur sur un segment  MELEME                      *
+*        IPMINT   Pointeur sur un segment MINTE                        *
+*        NBPGAU   Nombre de point d'integration pour la rigidite       *
+*        MATE     Numero du materiau                                   *
+*        IVAMAT   Pointeur sur un segment MPTVAL pour le materiau ou   *
+*        NVMAT    Nombre de composantes de materiau                    *
+*                                                                      *
+*   SORTIES :                                                          *
+*   ________                                                           *
+*        IPMATR   pointeur sur la rigidite de la sous-zone             *
+*----------------------------------------------------------------------*
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCREEL
+
+-INC SMCHAML
+-INC SMCOORD
+-INC SMELEME
+-INC SMINTE
+
+      SEGMENT MWKELT
+        REAL*8 DFICK(LDIFF,LDIFF),BGRDIF(LDIFF,LRE)
+        REAL*8 XEL(3,NBNN),SHP(6,NBNN)
+        REAL*8 VALMAT(NVMAT)
+      ENDSEGMENT
+
+      SEGMENT MWKMAT
+        REAL*8 XLOC(3,3),XGLOB(3,3),TXR(IDIM,IDIM)
+        REAL*8 DFICK1(LDIFF,LDIFF)
+      ENDSEGMENT
+
+      SEGMENT MWKDIF
+        REAL*8 DDLDIF(LRE),FLUDIF(LDIFF)
+      ENDSEGMENT
+
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS),NSOF(NS)
+        INTEGER IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+
+      MINTE = IPMINT1
+      MELEME = IPMAIL
+      NBNN   = NUM(/1)
+      NBELEM = NUM(/2)
+
+      SEGINI,MWKELT
+      IWKELT = MWKELT
+
+      MWKMAT = 0
+      IF (MATE.EQ.2.OR.MATE.EQ.3) THEN
+        CALL RESHPT(1,NBNN,IELE,MELE,0,IPMINT2,IRT1)
+        MINTE2 = IPMINT2
+        SEGACT,MINTE2
+        NBSH = MINTE2.SHPTOT(/2)
+        SEGINI,MWKMAT
+      ENDIF
+      IWKMAT = MWKMAT
+
+      SEGINI,MWKDIF
+
+C-------------------------
+C Boucle sur les elements
+C-------------------------
+      DO IEL = 1,NBELEM
+C - Recuperation des coordonnees des noeuds de l element IEL
+        CALL DOXE(XCOOR,IDIM,NBNN,NUM,IEL,XEL)
+C - Calcul des axes locaux dans les cas orthotrope et anisotrope
+        IF (MATE.EQ.2.OR.MATE.EQ.3) THEN
+          CALL RLOCAL(XEL,MINTE2.SHPTOT,NBSH,NBNN,TXR)
+          IF (NBSH.EQ.-1) THEN
+            CALL ERREUR(525)
+            GOTO 999
+          ENDIF
+        ENDIF
+C - Recuperation des ddls de diffusion aux noeuds de l element IEL
+        MPTVAL = IVADEP
+        IE = 1
+        DO IGAU = 1, NBNN
+          DO ICOMP = 1, NDEP
+            MELVAL = IVAL(ICOMP)
+            IGMN = MIN(IGAU,VELCHE(/1))
+            IEMN = MIN(IEL ,VELCHE(/2))
+            DDLDIF(IE) = VELCHE(IGMN,IEMN)
+            IE = IE+1
+          ENDDO
+        ENDDO
+C--  --  --  --  --  --  --  --  --
+C - Boucle sur les points de Gauss
+C--  --  --  --  --  --  --  --  --
+        ISDJC = 0
+        DO IGAU = 1, NBPGAU
+C -- Calcul de la matrice Bdif et du jacobien au point de Gauss IGAU
+          CALL BDIFF(XEL,SHPTOT(1,1,IGAU),NBNN,LDIFF,-1,
+     &               SHP,BGRDIF,DJAC)
+          IF (DJAC.LT.0.) ISDJC = ISDJC+1
+          IF (DJAC.EQ.0.) THEN
+            INTERR(1) = IEL
+            CALL ERREUR(259)
+            GOTO 999
+          ENDIF
+C -- Recuperation des proprietes materielles (IGAU)
+          MPTVAL = IVAMAT
+          DO i = 1, NVMAT
+            MELVAL = IVAL(i)
+            IEMN = MIN(IEL ,VELCHE(/2))
+            IGMN = MIN(IGAU,VELCHE(/1))
+            VALMAT(i) = VELCHE(IGMN,IEMN)
+          ENDDO
+C -- Calcul de la matrice de diffusion lineaire Fick (IGAU)
+          CALL DOFICK(MATE,IDIM, IWKELT,IWKMAT)
+C -- Calcul du flux de diffusion lineaire Phidif (IGAU)
+          CALL DBST(BGRDIF,DFICK,DDLDIF,LRE,LDIFF,FLUDIF)
+C -- Remplissage du segment contenant Phidif = "contraintes"
+          MPTVAL = IVASTR
+          DO ICOMP = 1, LDIFF
+            MELVAL = IVAL(ICOMP)
+            IEMN = MIN(IEL,VELCHE(/2))
+            VELCHE(IGAU,IEMN) = FLUDIF(ICOMP)
+          ENDDO
+C--  --  --  --  --  --  --  --  --
+        ENDDO
+C--  --  --  --  --  --  --  --  --
+        IF (ISDJC.NE.0 .AND. ISDJC.NE.NBPGAU) THEN
+          INTERR(1) = IEL
+          CALL ERREUR(195)
+          GOTO 999
+        ENDIF
+C-------------------------
+      ENDDO
+C-------------------------
+
+ 999  CONTINUE
+      IF (MATE.EQ.2.OR.MATE.EQ.3) THEN
+       SEGDES,MINTE2
+       SEGSUP,MWKMAT
+      ENDIF
+      SEGSUP,MWKELT
+      SEGSUP,MWKDIF
+
+      RETURN
+      END
+
+
+

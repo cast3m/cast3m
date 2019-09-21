@@ -1,0 +1,709 @@
+C RELA3     SOURCE    BP208322  16/11/18    21:20:52     9177
+      SUBROUTINE RELA3(IPC,IPM,LP,IROTA)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+*****************************************************************
+*
+*  relation de corps rigide en cas des coques ou des poutres
+*  eventuellement en combinaison avec des massifs
+*
+*  entrées
+*  IPC : pointeur sur le maillage (ou numero du point) ayant des
+*        ddl de rotation naturellement (poutres ou coques)
+*
+*  IPM : pointeur sur le maillage n'ayant pas des ddl de rotation
+*        naturellement (massif)
+*
+*  LP  : 0 --> IPC est un maillage
+*        1 --> IPC est un point
+*
+*  IROTA : 1 les rotaions de  IPC sont de ddl du problème
+*          0 les rotaions de  IPC ne sont pas de ddl du problème
+*            (on s'en sert pour traiter le cas fourier 0 et axis
+*             en l'absence du mot clé ROTA)
+*
+*  on écrit dans la pile la rigidité KRIGI
+*
+* I. Politopoulos  09/05/95
+****************************************************************
+-INC CCOPTIO
+-INC CCGEOME
+-INC SMELEME
+-INC SMCOORD
+-INC SMRIGID
+-INC CCHAMP
+
+      CHARACTER*4 MODEPL(5),MODEDU(5)
+      CHARACTER*4 MORODU(4),MOROTA(4)
+
+      DATA MODEPL(1)/'UX  '/
+      DATA MODEPL(2)/'UY  '/
+      DATA MODEPL(3)/'UZ  '/
+      DATA MODEPL(4)/'UR  '/
+      DATA MODEPL(5)/'UT  '/
+      DATA MODEDU(1)/'FX  '/
+      DATA MODEDU(2)/'FY  '/
+      DATA MODEDU(3)/'FZ  '/
+      DATA MODEDU(4)/'FR  '/
+      DATA MODEDU(5)/'FT  '/
+      DATA MOROTA(1)/'RX  '/
+      DATA MOROTA(2)/'RY  '/
+      DATA MOROTA(3)/'RZ  '/
+      DATA MOROTA(4)/'RT  '/
+      DATA MORODU(1)/'MX  '/
+      DATA MORODU(2)/'MY  '/
+      DATA MORODU(3)/'MZ  '/
+      DATA MORODU(4)/'MT  '/
+
+
+
+*  activation du maillage avec des ddl de rotation
+* et definition du noeud maitre
+
+      IF (LP.EQ.0) THEN
+        MELEME=IPC
+        SEGACT MELEME
+        IF(ITYPEL .NE.1) CALL CHANGE(MELEME,1)
+        NBPOIC=NUM(/2)
+        IP1 = NUM(1,1)
+* si 1 seul point
+      ELSE
+        IP1 = IPC
+        NBPOIC = 1
+      ENDIF
+* activation du maillage massif
+      IF (IPM .NE. 0) THEN
+       IPT2 = IPM
+       SEGACT IPT2
+       IF(IPT2.ITYPEL .NE.1) CALL CHANGE(IPT2,1)
+       NBPOIM = IPT2.NUM(/2)
+      ELSE
+       NBPOIM = 0
+      ENDIF
+
+      NBTOT = NBPOIC + NBPOIM
+
+* nombre de noeuds
+cc       SEGACT MCOORD
+       NBNO = XCOOR(/1)/(IDIM+1)
+
+**  definition du noeud maitre en cas fourier 0 pour
+** la relation sur UT car il ne peut pas etre sur l'axe.
+** Pour ne pas mettre un critere absolu on choisit le point
+** le plus lointain
+      IF ((IFOUR .EQ. 1) .AND. (NIFOUR.EQ.0)) THEN
+        XMAX = 0.D0
+         DO 8 I=1,NUM(/2)
+          IPP1 = NUM(1,I)
+          IREF1 = (IPP1-1)*(IDIM+1)
+          XI1 =  XCOOR(IREF1+1)
+           IF(ABS(XI1).GT.XMAX) THEN
+             XMAX = ABS(XI1)
+             NUM(1,I)=IP1
+             IP1 = IPP1
+             NUM(1,1)=IP1
+           ENDIF
+  8      CONTINUE
+      ENDIF
+* quelques dimensions pour l'initialisation du maillage des relations
+        NBSOUS = 0
+        NBREF = 0
+        NBNN = 3
+* coordonnees du point maitre
+         IREFP1 = (IP1-1)*(IDIM+1)
+         X1 =  XCOOR(IREFP1+1)
+         Y1 =  XCOOR(IREFP1+2)
+
+      IF((IFOMOD.EQ.0).OR.((IFOMOD.EQ.1).AND.(NIFOUR.EQ.0)))
+     +  GOTO 100
+
+c
+ccc  debut 3D ou (2d plan cont ou defo) ou (fourier 1)
+c
+         IF (IDIM .EQ.3) THEN
+            Z1 =  XCOOR(IREFP1+3)
+* nombre de types de matrices et nombre de relations
+            L1 = 3
+            L2 = 3
+            NNMAT = 6
+            NBRELA = (NBPOIC-1)*6 + NBPOIM*3
+         ENDIF
+         IF (IDIM.EQ.2) THEN
+          IF (IFOMOD.EQ.-1) THEN
+            L1 = 1
+            L2 = 2
+            NNMAT = 3
+            NBRELA = (NBPOIC-1)*3 + NBPOIM*2
+* fourier 1, -1. il faut imposer en plus que ur = -ut
+          ELSE IF (ABS(NIFOUR).EQ.1) THEN
+            L1 = 1
+            L2 = 3
+            NNMAT = 4
+* + 2 car le nombre des relations ur=-ut et entre rt et uz est
+* egal au nombre des points
+            NBRELA = (NBPOIC-1)*4 + NBPOIM*3 + 2
+          ENDIF
+         ENDIF
+         IF (NBPOIC .EQ.1) THEN
+          IF ((IFOMOD.EQ.2).OR.(IFOMOD.EQ.-1)) THEN
+            NNMAT = IDIM
+          ELSE IF (ABS(NIFOUR).EQ.1) THEN
+            NNMAT = 3
+          ENDIF
+         ENDIF
+
+* on ajuste MCOORD pour les noeuds associes aux multiplicateurs
+       NBPTS = NBNO + NBRELA
+       NBNOI = NBNO
+       SEGADJ MCOORD
+* initialisation du segment mrigid
+      NRIGE=7
+      NRIGEL=NNMAT
+      SEGINI MRIGID
+      ICHOLE=0
+      IMGEO1=0
+      IMGEO2=0
+      ISUPEQ=0
+      IFORIG=IFOMOD
+      MTYMAT='RIGIDITE'
+      KRIGI=MRIGID
+* relations sur les rotations
+      IND = 0
+      IF (NBPOIC.GT.1) THEN
+        NELRIG = (NBPOIC-1)
+        NLIGRE = 3
+        NLIGRP = NLIGRE
+        NLIGRD = NLIGRE
+*        SEGINI IMATRI
+        SEGINI XMATRI
+        IXMATR=XMATRI
+*          DO 5 I=1,NELRIG
+*            IMATTT(I) = IXMATR
+*    5     CONTINUE
+* on remplit les valeurs RE de la matrice pour les rotations
+         RE(1,1,1)=  0.D0
+         RE(2,1,1)= 1.D0
+         RE(3,1,1)= -1.D0
+         RE(2,2,1)= 0.D0
+         RE(3,2,1)= 0.D0
+         RE(3,3,1)= 0.D0
+* on definit explicitement les termes symetriques car on a constaté
+* des petites differences aux resultats si on le fait pas
+         RE(1,2,1)= RE(2,1,1)
+         RE(1,3,1)= RE(3,1,1)
+         RE(2,3,1)= RE(3,2,1)
+         do ioup=2,nelrig
+           do io=1,re(/2)
+             do iu=1,re(/1)
+              re(iu,io,ioup)=re(iu,io,1)
+             enddo
+           enddo
+         enddo
+       SEGDES XMATRI
+*       SEGDES IMATRI
+* boucle sur les differents types de matrices
+       DO 10 IAA= 1,L1
+        IRIGEL(2,IAA) = 0
+        IRIGEL(5,IAA) = NIFOUR
+        IRIGEL(6,IAA) = 0
+        IRIGEL(7,IAA) = 0
+        IRIGEL(4,IAA) = xMATRI
+        COERIG(IAA) =1.D0
+* initialisation du segment melem associé aux blocages
+        NBELEM = NBPOIC-1
+        SEGINI IPT1
+        IRIGEL(1,IAA) = IPT1
+        IPT1.ITYPEL = 22
+* on remplit le tableau des descripteurs
+        SEGINI DESCR
+        IRIGEL(3,IAA)=DESCR
+        LISINC(1)='LX'
+        LISDUA(1)='FLX'
+        NOELEP(1)=1
+        NOELED(1)=1
+         IF (IDIM.EQ.3) THEN
+          LISINC(2)= MOROTA(IAA)
+          LISINC(3)= MOROTA(IAA)
+          LISDUA(2)= MORODU(IAA)
+          LISDUA(3)= MORODU(IAA)
+         ELSE IF (IFOMOD.EQ.-1) THEN
+          LISINC(2)= MOROTA(3)
+          LISINC(3)= MOROTA(3)
+          LISDUA(2)= MORODU(3)
+          LISDUA(3)= MORODU(3)
+         ELSE IF (ABS(NIFOUR).EQ.1) THEN
+          LISINC(2)= MOROTA(4)
+          LISINC(3)= MOROTA(4)
+          LISDUA(2)= MORODU(4)
+          LISDUA(3)= MORODU(4)
+         ENDIF
+        NOELEP(2)=2
+        NOELEP(3)=3
+        NOELED(2)=2
+        NOELED(3)=3
+        SEGDES DESCR
+*  boucle sur les points du maillage ayant des ddl de rotation
+         DO 20 II=1,NBELEM
+              IP2 = NUM(1,(II+1))
+              IREFP2 = (IP2-1)*(IDIM+1)
+              X2 =  XCOOR(IREFP2+1)
+              Y2 =  XCOOR(IREFP2+2)
+              IF (IDIM.EQ.3) Z2 =  XCOOR(IREFP2+3)
+              IPT1.ICOLOR(II) = IDCOUL
+* points associés aux multiplicateurs
+              IPT1.NUM(1,II) = NBNOI + 1
+              IREFM1 = NBNOI*(IDIM+1)
+              NBNOI = NBNOI + 1
+              IPT1.NUM(2,II) = IP1
+              IPT1.NUM(3,II) = IP2
+              XCOOR(IREFM1+1) = (X1 + X2)/2
+              XCOOR(IREFM1+2) = (Y1 + Y2)/2
+               IF (IDIM.EQ.3) THEN
+                XCOOR(IREFM1+3) = (Z1 + Z2)/2
+               ENDIF
+ 20     CONTINUE
+        SEGDES IPT1
+       IND = IAA
+ 10    CONTINUE
+      ENDIF
+
+*  fin de relations sur les rotations on passe
+* aux relations entre le noeud maitre et les depl. des autres noeuds
+       IF (IDIM.EQ.3) NLIGRE = 5
+       IF (IDIM.EQ.2) NLIGRE = 4
+       NLIGRP = NLIGRE
+       NLIGRD = NLIGRE
+       NELRIG = (NBTOT-1)
+       NBELEM = NBTOT-1
+* boucle sur les differents types de matrices
+      DO 40 IAAA= 1,L2
+        IAA = IND + IAAA
+* relations entre rt et uz et ur = -ut en fourier 1
+       IF((ABS(NIFOUR).EQ.1).AND.(IAAA.gt.1)) then
+         nligre = 3
+         nligrp = nligre
+         nligrd = nligre
+         NELRIG = NBTOT
+         NBELEM = NBTOT
+       ENDIF
+* initialisation du segment melem associé aux blocages
+        SEGINI IPT1
+        IPT1.ITYPEL = 22
+*
+        IRIGEL(1,IAA) = IPT1
+        IRIGEL(2,IAA) = 0
+        IRIGEL(5,IAA) = NIFOUR
+        IRIGEL(6,IAA) = 0
+        IRIGEL(7,IAA) = 0
+        SEGINI xMATRI
+        IRIGEL(4,IAA) = xMATRI
+        COERIG(IAA) =1.D0
+* on remplit le tableau des descripteurs
+        SEGINI DESCR
+        IRIGEL(3,IAA)=DESCR
+        LISINC(1)='LX'
+        LISDUA(1)='FLX'
+        NOELEP(1)=1
+        NOELED(1)=1
+
+        NOELEP(2)=3
+        NOELEP(3)=2
+        NOELED(2)=3
+        NOELED(3)=2
+       IF (.NOT.((ABS(NIFOUR).EQ.1).AND.(IAAA.gt.1)))THEN
+        NOELEP(4)=2
+        NOELED(4)=2
+       endif
+        IF ((ABS(NIFOUR).EQ.1).and.(iaaa.eq.1)) kk = 4
+        IF ((IFOMOD.EQ.2).OR.(IFOMOD.EQ.-1)) KK = IAAA
+        LISINC(2)= MODEPL(KK)
+        LISINC(3)= MODEPL(KK)
+        LISDUA(2)= MODEDU(KK)
+        LISDUA(3)= MODEDU(KK)
+* relation entre rt et uz en fourier 1
+        IF ((ABS(NIFOUR).EQ.1).and.(iaaa.eq.2)) then
+        LISINC(2)= MODEPL(3)
+        LISINC(3)= MOROTA(4)
+        LISDUA(2)= MODEDU(3)
+        LISDUA(3)= MORODU(4)
+        endif
+* relation entre ur et ut en fourier 1
+       if ((ABS(NIFOUR).EQ.1).AND.(IAAA.eq.3)) then
+        LISINC(2)= MODEPL(4)
+        LISINC(3)= MODEPL(5)
+        LISDUA(2)= MODEDU(4)
+        LISDUA(3)= MODEDU(5)
+       ENDIF
+
+        IF (IDIM.EQ.3) THEN
+         IF (IAAA.EQ.1) THEN
+           LISINC(4)= MOROTA(2)
+           LISINC(5)= MOROTA(3)
+           LISDUA(4)= MORODU(2)
+           LISDUA(5)= MORODU(3)
+         ELSE IF (IAAA.EQ.2) THEN
+           LISINC(4)= MOROTA(3)
+           LISINC(5)= MOROTA(1)
+           LISDUA(4)= MORODU(3)
+           LISDUA(5)= MORODU(1)
+         ELSE
+           LISINC(4)= MOROTA(1)
+           LISINC(5)= MOROTA(2)
+           LISDUA(4)= MORODU(1)
+           LISDUA(5)= MORODU(2)
+         ENDIF
+        NOELEP(5)=2
+        NOELED(5)=2
+* cont. ou defo planes
+       ELSE IF (IFOMOD.EQ.-1) THEN
+        LISINC(4)= MOROTA(3)
+        LISDUA(4)= MORODU(3)
+* fourier 1 ou -1
+       ELSE IF ((ABS(NIFOUR).EQ.1).AND.(IAAA.eq.1)) THEN
+        LISINC(4)= MOROTA(4)
+        LISDUA(4)= MORODU(4)
+       ENDIF
+
+       SEGDES DESCR
+
+*  boucle sur les points du maillage total
+          DO 50 II=1,NBELEM
+           IF(NBELEM.NE.NBTOT) THEN
+* partie coques ou poutres
+            IF (II.LT.NBPOIC) IP2 = NUM(1,(II+1))
+* partie massif
+            IF (II.GE.NBPOIC) IP2 = IPT2.NUM(1,(II-NBPOIC+1))
+           ELSE
+* fourier 1 ou -1, relation ur = -ut et relation entre rt et uz
+            IF (II.LE.NBPOIC) IP2 = NUM(1,II)
+            IF (II.GT.NBPOIC) IP2 = IPT2.NUM(1,(II-NBPOIC))
+           ENDIF
+            IREFP2 = (IP2-1)*(IDIM+1)
+            X2 =  XCOOR(IREFP2+1)
+            Y2 =  XCOOR(IREFP2+2)
+            IF (IDIM.EQ.3) Z2 =  XCOOR(IREFP2+3)
+            IPT1.ICOLOR(II) = IDCOUL
+* points associés aux multiplicateurs
+            IPT1.NUM(1,II) = NBNOI + 1
+            IREFM1 = NBNOI*(IDIM+1)
+            NBNOI = NBNOI + 1
+              IF((ABS(NIFOUR).EQ.1).AND.(IAAA.EQ.3)) THEN
+                IP1 = IP2
+                X1 = X2
+                Y1 = Y2
+              ENDIF
+            IPT1.NUM(2,II) = IP1
+            IPT1.NUM(3,II) = IP2
+            XCOOR(IREFM1+1) = (X1 + X2)/2
+            XCOOR(IREFM1+2) = (Y1 + Y2)/2
+              IF (IDIM.EQ.3) THEN
+                XCOOR(IREFM1+3) = (Z1 + Z2)/2
+              ENDIF
+* on remplit les valeurs RE de la matrice
+*            SEGINI XMATRI
+*            IXMATR = XMATRI
+*            IMATTT(II) = IXMATR
+
+            IF (IAAA.EQ.1) THEN
+              COEF1 = Z2-Z1
+              COEF2 = Y2-Y1
+            ELSE IF (IAAA.EQ.2) THEN
+              COEF1 = X2-X1
+              COEF2 = Z2-Z1
+            ELSE
+              COEF1 = Y2-Y1
+              COEF2 = X2-X1
+            ENDIF
+
+            RE(1,1,ii)=  0.D0
+            RE(2,1,ii)= 1.D0
+            RE(3,1,ii)= -1.D0
+       if (abs(nifour).eq.1) then
+* relation entre uz et rt en fourier 1
+          if (iaaa.eq.2) then
+            re(3,1,ii) = -x2
+          endif
+* relation ur = -ut en fourier 1
+          if (iaaa.eq.3) then
+            RE(3,1,ii)= 1.D0
+          endif
+       ENDIF
+          IF (IDIM.EQ.3) THEN
+            RE(4,1,ii)= -1.D0*COEF1
+            RE(5,1,ii)=  1.D0*COEF2
+          ELSE IF (IFOMOD.EQ.-1) THEN
+           IF (IAAA.EQ.1) THEN
+             RE(4,1,ii)= 1.D0*COEF2
+           ELSE
+             RE(4,1,ii)= -1.D0*COEF1
+           ENDIF
+          ELSE  IF ((ABS(NIFOUR).EQ.1).and.(iaaa.eq.1)) then
+* relation entre ur1, ur2 et rt1 en fourier 1
+*  le signe ne respecte pas le triedre orthonorme de fourier mais
+*  celui des calculs plans. Ce n'est pas tres elegant mais c'est
+*  comme ca dans C2000 !!!!
+             RE(4,1,ii)= 1.D0*COEF2
+          ENDIF
+
+              DO 7 I=1,1
+                DO 6 J=2,NLIGRE
+                  RE(I,J,ii)=RE(J,I,ii)
+  6             CONTINUE
+  7           CONTINUE
+
+              DO 3 I=2,NLIGRE
+                DO 4 J=2,NLIGRE
+                  RE(I,J,ii)=0.D0
+  4             CONTINUE
+  3           CONTINUE
+
+*           SEGDES XMATRI
+ 50       CONTINUE
+       SEGDES xMATRI
+       SEGDES IPT1
+ 40   CONTINUE
+      GOTO 1000
+
+*
+*** fin 3D ou (2d plan cont ou defo) ou (fourier 1)
+*
+
+ 100   CONTINUE
+*
+*** fourier 0 ou axis
+*
+      NBNN = 2
+
+      IF (IFOMOD.EQ.0) THEN
+* axis : UR=0  RT=0  UZ = cte
+        L2 = 2
+        NNMAT = 3
+        NBRELA = NBPOIC*3 + NBPOIM*2 - 1
+* cas sans rotation
+         if (irota.eq.0) then
+           nnmat = 2
+           nbrela = nbpoic*2 -1
+         endif
+      ELSE
+* fourier 0 : UR=0  RT=0  UZ = cte  relation d'analogie sur UT
+        L2 = 3
+        NNMAT = 4
+        NBRELA = NBPOIC*4 + NBPOIM*3 - 2
+* cas sans rotation
+         if (irota.eq.0) then
+           nnmat = 3
+           nbrela = nbpoic*3 -2
+         endif
+      ENDIF
+* on ajuste MCOORD pour les noeuds associes aux multiplicateurs
+       NBPTS = NBNO + NBRELA
+       NBNOI = NBNO
+       SEGADJ MCOORD
+* initialisation du segment mrigid
+      NRIGE=7
+      NRIGEL=NNMAT
+      SEGINI MRIGID
+      ICHOLE=0
+      IMGEO1=0
+      IMGEO2=0
+      ISUPEQ=0
+      IFORIG=IFOMOD
+      MTYMAT='RIGIDITE'
+      KRIGI=MRIGID
+       if (irota.eq.0) goto 121
+*  rotation RT = 0
+      NELRIG = NBPOIC
+        NLIGRE = 2
+        NLIGRP = NLIGRE
+        NLIGRD = NLIGRE
+*        SEGINI IMATRI
+        SEGINI XMATRI
+*        IXMATR=XMATRI
+*          DO 105 I=1,NELRIG
+*            IMATTT(I) = IXMATR
+*  105     CONTINUE
+* on remplit les valeurs RE de la matrice pour les rotations
+         RE(1,1,1)=  0.D0
+         RE(2,1,1)= 1.D0
+         RE(2,2,1)= 0.D0
+         RE(1,2,1)= RE(2,1,1)
+         do ioup=2,nelrig
+           do io=1,re(/2)
+             do iu=1,re(/1)
+                re(iu,io,ioup)=re(iu,io,1)
+              enddo
+           enddo
+         enddo
+*       SEGDES XMATRI
+       SEGDES xMATRI
+
+        IRIGEL(2,1) = 0
+        IRIGEL(5,1) = NIFOUR
+        IRIGEL(6,1) = 0
+        IRIGEL(7,1) = 0
+        IRIGEL(4,1) = xMATRI
+        COERIG(1) =1.D0
+* initialisation du segment melem associé aux blocages
+        NBELEM = NBPOIC
+        SEGINI IPT1
+        IRIGEL(1,1) = IPT1
+        IPT1.ITYPEL = 22
+* on remplit le tableau des descripteurs
+        SEGINI DESCR
+        IRIGEL(3,1)=DESCR
+        LISINC(1)='LX'
+        LISDUA(1)='FLX'
+        LISINC(2)= MOROTA(4)
+        LISDUA(2)= MORODU(4)
+        NOELEP(1)=1
+        NOELED(1)=1
+        NOELEP(2)=2
+        NOELED(2)=2
+        SEGDES DESCR
+*  boucle sur les points du maillage ayant des ddl de rotation
+         DO 120 II=1,NBELEM
+            IP2 = NUM(1,II)
+            IREFP2 = (IP2-1)*(IDIM+1)
+            X2 =  XCOOR(IREFP2+1)
+            Y2 =  XCOOR(IREFP2+2)
+            IPT1.ICOLOR(II) = IDCOUL
+* points associés aux multiplicateurs
+            IPT1.NUM(1,II) = NBNOI + 1
+            IREFM1 = NBNOI*(IDIM+1)
+            NBNOI = NBNOI + 1
+            IPT1.NUM(2,II) = IP2
+            XCOOR(IREFM1+1) = X2
+            XCOOR(IREFM1+2) = Y2
+ 120    CONTINUE
+      SEGDES IPT1
+ 121   continue
+
+*  fin de relations sur la rotation on passe aux relations
+*  sur les déplacements
+      DO 140 IAAA= 1,L2
+       IAA = 1 + IAAA
+       if (irota.eq.0) iaa = iaaa
+        IF (IAAA.EQ.1) THEN
+          NLIGRE = 2
+          NBELEM = NBTOT
+        ELSE
+          NLIGRE =3
+          NBELEM = NBTOT-1
+          NBNN = 3
+        ENDIF
+       NLIGRP = NLIGRE
+       NLIGRD = NLIGRE
+       NELRIG = NBELEM
+* initialisation du segment melem associé aux blocages
+        SEGINI IPT1
+        IPT1.ITYPEL = 22
+        IRIGEL(1,IAA) = IPT1
+        IRIGEL(2,IAA) = 0
+        IRIGEL(5,IAA) = NIFOUR
+        IRIGEL(6,IAA) = 0
+        IRIGEL(7,IAA) = 0
+        SEGINI xMATRI
+
+
+        IRIGEL(4,IAA) = xMATRI
+        COERIG(IAA) =1.D0
+* on remplit le tableau des descripteurs
+        SEGINI DESCR
+        IRIGEL(3,IAA)=DESCR
+        LISINC(1)='LX'
+        LISDUA(1)='FLX'
+        NOELEP(1)=1
+        NOELED(1)=1
+        NOELEP(2)=2
+        NOELED(2)=2
+         IF(IAAA.EQ.1) THEN
+          LISINC(2) = MODEPL(4)
+          LISDUA(2) = MODEDU(4)
+         ELSE
+          NOELEP(3)=4
+          NOELED(3)=4
+           IF(IAAA.EQ.2) THEN
+            LISINC(2) = MODEPL(3)
+            LISDUA(2) = MODEDU(3)
+            LISINC(3) = MODEPL(3)
+            LISDUA(3) = MODEDU(3)
+           ELSE
+            LISINC(2) = MODEPL(5)
+            LISDUA(2) = MODEDU(5)
+            LISINC(3) = MODEPL(5)
+            LISDUA(3) = MODEDU(5)
+           ENDIF
+         ENDIF
+        SEGDES DESCR
+          DO 150 II=1,NBELEM
+           IF(IAAA.GT.1) THEN
+            IF (II.LT.NBPOIC) IP2 = NUM(1,(II+1))
+            IF (II.GE.NBPOIC) IP2 = IPT2.NUM(1,(II-NBPOIC+1))
+           ELSE
+            IF (II.LE.NBPOIC) IP2 = NUM(1,II)
+            IF (II.GT.NBPOIC) IP2 = IPT2.NUM(1,(II-NBPOIC))
+           ENDIF
+            IREFP2 = (IP2-1)*(IDIM+1)
+            X2 =  XCOOR(IREFP2+1)
+            Y2 =  XCOOR(IREFP2+2)
+            IPT1.ICOLOR(II) = IDCOUL
+* points associés aux multiplicateurs
+            IPT1.NUM(1,II) = NBNOI + 1
+            IREFM1 = NBNOI*(IDIM+1)
+            NBNOI = NBNOI + 1
+            IPT1.NUM(3,II) = IP2
+             IF(IAAA.GT.1) THEN
+              IPT1.NUM(4,II) = IP1
+              XCOOR(IREFM1+1) = (X1 + X2)/2
+              XCOOR(IREFM1+2) = (Y1 + Y2)/2
+             ELSE
+              XCOOR(IREFM1+1) = X2
+              XCOOR(IREFM1+2) = Y2
+             ENDIF
+
+* on remplit les valeurs RE de la matrice
+
+*             SEGINI XMATRI
+*             IXMATR = XMATRI
+           IF(IAAA.EQ.1) THEN
+             RE(1,1,ii)= 0.D0
+             RE(2,1,ii)= 1.D0
+             RE(2,2,ii)= 0.D0
+             RE(1,2,ii)= RE(2,1,ii)
+             RE(1,2,ii)= RE(3,1,ii)
+            ELSE
+              RE(1,1,ii)=  0.D0
+              RE(2,1,ii)= 1.D0
+               IF (IAAA.EQ.2) THEN
+                RE(3,1,ii)= -1.D0
+               ELSE
+                COEF1 = X2/X1
+                RE(3,1,ii)= -1.D0*COEF1
+               ENDIF
+              RE(2,2,ii)= 0.D0
+              RE(3,2,ii)= 0.D0
+              RE(3,3,ii)= 0.D0
+              RE(1,2,ii)= RE(2,1,ii)
+              RE(1,3,ii)= RE(3,1,ii)
+              RE(2,3,ii)= RE(3,2,ii)
+            ENDIF
+
+*            SEGDES XMATRI
+*            IMATTT(II) = IXMATR
+ 150      CONTINUE
+       SEGDES xMATRI
+       SEGDES IPT1
+ 140  CONTINUE
+
+ 1000 CONTINUE
+      SEGDES MRIGID
+      CALL ECROBJ('RIGIDITE', KRIGI)
+      IF (LP.EQ.0) SEGDES MELEME
+      IF (IPM.NE.0) SEGDES IPT2
+      RETURN
+      END
+
+
+
+
+

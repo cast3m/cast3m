@@ -1,0 +1,445 @@
+C COMBIL    SOURCE    BP208322  17/12/18    21:15:00     9667
+C COMBIL    SOURCE    BP208322  15/06/26    21:15:07     8562
+
+      SUBROUTINE COMBIL(ITACH,ITAFL,NCH,IRETT)
+
+C----------------------------------------------------------------------
+C    CE SUBROUTINE EFFECTUE LA COMBINAISON LINEAIRE DES NCH CHPOINT
+C    CONTENUS DANS ITACH, AVEC LES NCH FLOTTANTS CONTENUS DANS ITAFL
+C    LE RESULTAT EST UN CHPOINT,MIS DANS IRETT
+C    ATTENTION : TAFL EN DOUBLE PRECISION
+c    BP, 2015-06-26 : segments actifs en E/S
+c    BP, 2017-12-14 : changement de methode inspire de funobj
+C----------------------------------------------------------------------
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+-INC SMCOORD
+-INC SMCHPOI
+-INC TMTRAV
+-INC SMELEME
+
+c     SEGMENTS D'ENTREE :
+      SEGMENT ITACH(0)
+      SEGMENT/ITAFL/(TAFL(0)*D)
+
+C     ITRAV : SEGMENT DE TRAVAIL POUR CRECHP
+      SEGMENT ITRAV
+        CHARACTER*4 INC (NN)
+        INTEGER     IHAR(NN)
+      ENDSEGMENT
+
+C     ICPR(#global) = #local
+      SEGMENT ICPR(XCOOR(/1)/(IDIM+1))
+
+C     IZON1(#local) = indice de la zone a laquelle appartient ce noeud
+      SEGMENT IZON1(NZON1)
+
+c     IIPT1(indice de zone) = maillage support definissant cette zone
+      SEGMENT IIPT1(NIPT1)
+
+c     IELEM(#local)=#element de IPT1
+      SEGMENT IELEM(NZON1)
+
+      SEGMENT MICOM(NCOM)
+
+      INTEGER OOOVAL
+      CHARACTER*8 CHA8,CHA8a,CHA8b
+      REAL*8  VAL
+C
+      IRETT=0
+
+      IF(NCH.GT.1) GOTO 2
+C----------------------------------------------------------------------
+C     METHODE POUR NCH=1
+C----------------------------------------------------------------------
+      ICHPO=ITACH(1)
+      VAL=TAFL(1)
+      CALL MUCHPO(ICHPO,VAL,IRETT,1)
+      RETURN
+
+ 2    CONTINUE
+      IF(NCH.GT.2) GOTO 3
+C----------------------------------------------------------------------
+C     METHODE POUR NCH=2
+C----------------------------------------------------------------------
+      ICHPO1=ITACH(1)
+      ICHPO2=ITACH(2)
+      VAL1=TAFL(1)
+      VAL2=TAFL(2)
+      CALL ADCHPO(ICHPO1,ICHPO2,IRETT,VAL1,VAL2)
+      RETURN
+
+ 3    CONTINUE
+C----------------------------------------------------------------------
+C     METHODEs POUR NCH>2 :
+c     addition de CHPOINT en une seule fois (Pas de CHPOINT temporaires)
+c     - methode RAPIDE : evite la partition de la geometrie
+c                        (inspiree de adchpo.eso)
+c     - methode GENERALE : pas d'hypothese sur les supports
+c                          (inspiree de funobj.eso)
+C----------------------------------------------------------------------
+
+c     INITIALISATIONS
+      NN    = 0
+      NNIN  = 0
+      NNNOE = 0
+      NAT   =  1
+      NATi  = -1
+      NATf  = -1
+      CHA8  = '        '
+      CHA8a = '        '
+      CHA8b = '        '
+      SEGACT,MCOORD
+      SEGINI,ICPR
+      NLOC  = 0
+      NIPT1 = 0
+      NCOM  = 0
+
+C---- OUVERTURE DE TOUS LES MCHPOI ----
+      DO 400 III = 1,NCH
+        MCHPOI = ITACH(III)
+        SEGACT,MCHPOI
+        NSOUPO = MCHPOI.IPCHP(/1)
+        NAT    = MAX(NAT,MCHPOI.JATTRI(/1))
+        NATi   = MCHPOI.JATTRI(1)
+        CHA8   = MCHPOI.MTYPOI
+        IF(III .EQ. 1) THEN
+          NATf = NATi
+          CHA8a=CHA8
+          CHA8b=CHA8
+        ELSE
+          IF (NATi .NE. NATf) THEN
+            NATf=0
+          ENDIF
+          IF (CHA8 .NE. CHA8a) THEN
+            CHA8b='INDETERM'
+          ENDIF
+        ENDIF
+        NIPT1=NIPT1+NSOUPO
+        DO 401 JJJ = 1,NSOUPO
+C         Ouverture de tous les MSOUPO
+          MSOUPO = MCHPOI.IPCHP(JJJ)
+          SEGACT,MSOUPO
+          NC=MSOUPO.NOHARM(/1)
+          NN=NN+NC
+          NCOM=MAX(NCOM,NC)
+
+c     +++ on regarde si on peut eviter de partitionner la geometrie +++
+c         (remplissage de ICPR et IZON)
+          MELEME=IGEOC
+          SEGACT,MELEME
+          DO 402 IEL=1,NUM(/2)
+            INUM=NUM(1,IEL)
+            ILOC=ICPR(INUM)
+c           si noeud jamais vu : on l'ajoute a ICPR
+            IF(ILOC.EQ.0) THEN
+              NLOC=NLOC+1
+              ILOC=NLOC
+              ICPR(INUM)=ILOC
+            ENDIF
+c           IZON(indice chpoint,#local car trop gros sinon)=indice de zone
+c             IZON(III,ILOC)=JJJ
+ 402      CONTINUE
+
+ 401    CONTINUE
+ 400  CONTINUE
+
+c +++ on regarde si on peut eviter de partitionner la geometrie +++
+      NZON1=NLOC
+      SEGINI,IZON1,IIPT1
+      IBMAX=0
+      DO 410 III = 1,NCH
+        MCHPOI = ITACH(III)
+        NSOUPO = MCHPOI.IPCHP(/1)
+        DO 411 JJJ = 1,NSOUPO
+          MSOUPO = MCHPOI.IPCHP(JJJ)
+          MELEME = IGEOC
+          INUM11=NUM(1,1)
+          ILOC11=ICPR(INUM11)
+c         quelle zone du chpoint final est associee a ce noeud ?
+          IB = IZON1(ILOC11)
+          IF(IB.EQ.0) THEN
+c           on verifie bien qu'on a jamais vu aucun noeud de ce maillage
+            IBMAX=IBMAX+1
+            DO 412 IEL=1,NUM(/2)
+              INUM=NUM(1,IEL)
+              ILOC=ICPR(INUM)
+              IF(IZON1(ILOC).NE.IB) GOTO 419
+              IZON1(ILOC)=IBMAX
+ 412        CONTINUE
+c           ici, tous les noeuds de MELEME appartiennent a la zone IB=0
+c           il faut ajouter MELEME dans IIPT1 (+ noeuds dans IZON1)
+            IIPT1(IBMAX)=MELEME
+          ELSE
+c           on verifie bien qu'il s'agit bien du meme maillage
+            IPT1=IIPT1(IB)
+            IF(MELEME.EQ.IPT1) GOTO 411
+            IF(NUM(/2).NE.IPT1.NUM(/1)) GOTO 419
+c           il faut verifier que tous les noeuds sont dans la zone IB
+            DO 413 IEL=1,NUM(/2)
+              INUM=NUM(1,IEL)
+              ILOC=ICPR(INUM)
+              IF(IZON1(ILOC).NE.IB) GOTO 419
+ 413        CONTINUE
+c           ici, tous les noeuds de MELEME appartiennent a la zone IB
+          ENDIF
+ 411    CONTINUE
+ 410  CONTINUE
+
+
+C----------------------------------------------------------------------
+c     methode RAPIDE (evitant de partitionner la geometrie)
+C----------------------------------------------------------------------
+c       write(*,*) 'combil: methode rapide',NLOC,NCOM
+      NZON1=NLOC
+      SEGINI,IELEM,MICOM
+
+c     Creation du chpoint de sortie : MCHPO1
+      NSOUPO=IBMAX
+      SEGINI,MCHPO1
+c       MCHPOI=ITACH(1)
+c       MCHPO1.MTYPOI=MTYPOI
+c       MCHPO1.MOCHDE='COMBINAISON LINEAIRE'
+c       MCHPO1.JATTRI(1)=JATTRI(1)
+c       MCHPO1.IFOPOI=IFOPOI
+
+c     boucle sur les chpoints en entree
+      DO 700 III = 1,NCH
+        MCHPOI = ITACH(III)
+        VAL    = TAFL(III)
+        NSOUPO = MCHPOI.IPCHP(/1)
+
+        DO 701 JJJ = 1,NSOUPO
+c         ajout de la contribution de la JJ eme zone du III eme chpoint
+          MSOUPO = IPCHP(JJJ)
+          NC0    = NOCOMP(/2)
+          MELEME = IGEOC
+          MPOVAL = IPOVAL
+          SEGACT,MPOVAL
+          N0     = VPOCHA(/1)
+          INUM11 = NUM(1,1)
+          ILOC11 = ICPR(INUM11)
+c         ... a la zone IB du chpoint de sortie
+          IB     = IZON1(ILOC11)
+          MSOUP1 = MCHPO1.IPCHP(IB)
+          IPT1   = IIPT1(IB)
+
+c        +si MSOUP1 n'existe pas il faut creer MSOUP1 et MPOVA1
+          IF(MSOUP1.LE.0) THEN
+            NC=NC0
+            N=N0
+            SEGINI,MSOUP1=MSOUPO
+            MCHPO1.IPCHP(IB)=MSOUP1
+            MSOUP1.IGEOC=IPT1
+c           pas de pb de composante car on a duplique
+            SEGINI,MPOVA1
+            MSOUP1.IPOVAL=MPOVA1
+c          -cas maillage identique : pas de pb
+            IF(MELEME.EQ.IPT1) THEN
+              DO 710 K1=1,N0
+              DO 710 K2=1,NC0
+                MPOVA1.VPOCHA(K1,K2)=VAL*VPOCHA(K1,K2)
+ 710          CONTINUE
+c          -cas maillages differents :
+c           on remplit IELEM(#local)=#element de IPT1
+            ELSE
+c             rem : on ne remet pas a 0 IELEM car on va parcourir
+c                   exactement les noeuds remplis
+              DO IEL=1,IPT1.NUM(/2)
+                ILOC=ICPR(IPT1.NUM(1,IEL))
+                IELEM(ILOC)=IEL
+              ENDDO
+              DO 712 K1=1,N0
+                ILOC=ICPR(NUM(1,K1))
+                IEL=IELEM(ILOC)
+                DO 713 K2=1,NC0
+                  MPOVA1.VPOCHA(K1,K2)=VAL*VPOCHA(IEL,K2)
+ 713            CONTINUE
+ 712          CONTINUE
+            ENDIF
+
+c        +MSOUP1 deja existant
+          ELSE
+c          -recensement des composantes
+            NC1=MSOUP1.NOCOMP(/2)
+            NC=NC1
+            MPOVA1=MSOUP1.IPOVAL
+            N1=MPOVA1.VPOCHA(/1)
+            N=N1
+            DO 730 IC=1,NC0
+              DO 731 IC1=1,NC1
+                IF(NOCOMP(IC).NE.MSOUP1.NOCOMP(IC1)) GOTO 731
+                IF(NOHARM(IC).EQ.MSOUP1.NOHARM(IC1)) GOTO 732
+ 731          CONTINUE
+c             on n'a pas trouve la composante IC : on agrandit
+              NC=NC+1
+              SEGADJ,MSOUP1
+              IC1=NC
+              MSOUP1.NOCOMP(IC1)=NOCOMP(IC)
+              MSOUP1.NOHARM(IC1)=NOHARM(IC)
+ 732          CONTINUE
+c             on a trouve la composante IC en IC1
+              MICOM(IC)=IC1
+ 730        CONTINUE
+            IF(NC.GT.NC1) SEGADJ,MPOVA1
+c          -cas maillage identique : pas de pb
+            IF(MELEME.EQ.IPT1) THEN
+              DO 750 K1=1,N0
+              DO 751 K2=1,NC0
+                IC1=MICOM(K2)
+                MPOVA1.VPOCHA(K1,IC1)=(VAL*VPOCHA(K1,K2))
+     &         +MPOVA1.VPOCHA(K1,IC1)
+ 751          CONTINUE
+ 750          CONTINUE
+c          -cas maillages differents :
+c           on remplit IELEM(#local)=#element de IPT1
+            ELSE
+              DO IEL=1,IPT1.NUM(/2)
+                ILOC=ICPR(IPT1.NUM(1,IEL))
+                IELEM(ILOC)=IEL
+              ENDDO
+              DO 752 K1=1,N0
+                ILOC=ICPR(NUM(1,K1))
+                IEL=IELEM(ILOC)
+                DO 753 K2=1,NC0
+                  IC1=MICOM(K2)
+                  MPOVA1.VPOCHA(K1,IC1)=(VAL*VPOCHA(IEL,K2))
+     &           +MPOVA1.VPOCHA(K1,IC1)
+  753          CONTINUE
+ 752          CONTINUE
+            ENDIF
+
+          ENDIF
+
+ 701    CONTINUE
+
+ 700  CONTINUE
+
+c     Desactivation/suppression
+      SEGSUP,ICPR,IZON1,IIPT1,IELEM
+      IRETT=MCHPO1
+      GOTO 900
+
+
+
+ 419  CONTINUE
+      SEGSUP,IZON1
+C----------------------------------------------------------------------
+c     methode GENERALE (pas d'hypothese sur les supports)
+C----------------------------------------------------------------------
+c       write(*,*) 'combil: methode generale'
+
+C---- DECOMPTE ET STOCKAGE DES COMPOSANTES DIFFERENTES ----
+      SEGINI,ITRAV,ICPR
+      DO 420 III = 1,NCH
+        MCHPOI = ITACH(III)
+        DO 430 JJJ = 1,MCHPOI.IPCHP(/1)
+          MSOUPO = MCHPOI.IPCHP(JJJ)
+          DO 431 KKK = 1,MSOUPO.NOHARM(/1)
+            DO 432 LLL = 1,NNIN
+              IF(MSOUPO.NOCOMP(KKK) .NE. ITRAV.INC (LLL)) GOTO 432
+              IF(MSOUPO.NOHARM(KKK) .EQ. ITRAV.IHAR(LLL)) GOTO 431
+ 432        CONTINUE
+c           nouveau ddl : on l'ajoute a la liste ITRAV
+            NNIN = NNIN + 1
+            ITRAV.INC (NNIN)=MSOUPO.NOCOMP(KKK)
+            ITRAV.IHAR(NNIN)=MSOUPO.NOHARM(KKK)
+ 431      CONTINUE
+          IPT1  =MSOUPO.IGEOC
+          MPOVAL=MSOUPO.IPOVAL
+c           SEGACT,IPT1,MPOVAL
+          SEGACT,MPOVAL
+          DO 433 MMM=1,IPT1.NUM(/2)
+            INOEUD=IPT1.NUM(1,MMM)
+c           nouveau noeud : on l'ajoute a la liste ICPR
+            IF(ICPR(INOEUD) .EQ. 0) THEN
+              NNNOE = NNNOE + 1
+              ICPR(INOEUD)= NNNOE
+            ENDIF
+ 433      CONTINUE
+ 430    CONTINUE
+ 420  CONTINUE
+
+C---- CREATION DE MTRAV ET REMPLISSAGE ----
+      SEGINI,MTRAV
+      DO 450 III = 1,NCH
+        MCHPOI = ITACH(III)
+        VAL    = TAFL(III)
+        DO 460 JJJ = 1,MCHPOI.IPCHP(/1)
+          MSOUPO=MCHPOI.IPCHP(JJJ)
+          IPT1  =MSOUPO.IGEOC
+          MPOVAL=MSOUPO.IPOVAL
+C         Recherche de la composante correspondante
+          DO 461 KKK=1,MSOUPO.NOCOMP(/2)
+            DO 462 LLL=1,NNIN
+              IF(MSOUPO.NOCOMP(KKK) .NE. ITRAV.INC (LLL)) GOTO 462
+              IF(MSOUPO.NOHARM(KKK) .EQ. ITRAV.IHAR(LLL)) GOTO 463
+ 462        CONTINUE
+            CALL ERREUR(5)
+ 463        CONTINUE
+C             on procede a la combinaison lineaire des valeurs
+c             en 1 pt d'une meme composante
+              DO 465 MMM=1,IPT1.NUM(/2)
+                INOEUD      =ICPR(IPT1.NUM(1,MMM))
+                IGEO(INOEUD)= IPT1.NUM(1,MMM)
+                IBIN(LLL,INOEUD)= 1
+                BB  (LLL,INOEUD)= BB(LLL,INOEUD)
+     &          +(VAL*MPOVAL.VPOCHA(MMM,KKK))
+ 465          CONTINUE
+ 461      CONTINUE
+c           SEGDES,IPT1,MPOVAL,MSOUPO
+          SEGDES,MPOVAL
+ 460    CONTINUE
+c         SEGDES,MCHPOI
+C       Remplissage des NOMS de composante et NUMEROS d'harmoniques
+        DO 451 JJJ = 1,NNIN
+          INCO(JJJ)=ITRAV.INC (JJJ)
+          NHAR(JJJ)=ITRAV.IHAR(JJJ)
+ 451    CONTINUE
+ 450  CONTINUE
+      SEGSUP,ITRAV,ICPR
+
+C---- FERMETURE DE TOUS LES MCHPOI ----
+      DO 500 III = 1,NCH
+        MCHPOI = ITACH(III)
+        DO 510 JJJ = 1,MCHPOI.IPCHP(/1)
+          MSOUPO=MCHPOI.IPCHP(JJJ)
+          IPT1  =MSOUPO.IGEOC
+          SEGDES,IPT1,MSOUPO
+ 510    CONTINUE
+        SEGDES,MCHPOI
+ 500  CONTINUE
+
+
+C---- CREATION DU CHPOINT FINAL A PARTIR DU MTRAV ----
+      CALL CRECHP (MTRAV,ID1)
+      SEGSUP,MTRAV
+      IRETT=ID1
+
+
+ 900  CONTINUE
+C---- DERNIERS AJUSTEMENTS DU CHPOINT FINAL ----
+      MCHPOI=IRETT
+C     Dans crechp "NAT" vaut 1, on AJUSTE le SEGMENT si besoin
+      SEGACT,MCHPOI*MOD
+      IF (NAT .GT. MCHPOI.JATTRI(/1))SEGADJ,MCHPOI
+C     Le chapeau du CHPOINT est complete d'apres le premier de la liste
+      MCHPO4 = ITACH(1)
+      SEGACT,MCHPO4
+      MCHPOI.MTYPOI=CHA8b
+      MCHPOI.MOCHDE='COMBINAISON LINEAIRE'
+      DO IATT=1,NAT
+        MCHPOI.JATTRI(IATT)=NATf
+      ENDDO
+      MCHPOI.IFOPOI=MCHPO4.IFOPOI
+      SEGDES,MCHPOI,MCHPO4
+
+      RETURN
+
+      END
+
+
+

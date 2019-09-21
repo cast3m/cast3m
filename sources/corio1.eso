@@ -1,0 +1,689 @@
+C CORIO1    SOURCE    PV        17/10/03    21:15:14     9581
+        SUBROUTINE CORIO1 (IPMODL,IPCHE1,IPROTA,NUMLI1,NUMLI2, IPRIG)
+
+*_______________________________________________________________________
+*
+*             appelé par CORIOL ( opérateur CORIOLIS )
+*
+*  Creation d'une matrice d'amortissement de couplage gyroscopique
+*  dans le repère tournant (éléments BARR,POUT,TIMO,TUYAU,COQUES 3D)
+*
+*  entrees :
+*  ========
+*   ipmodl pointeur sur un mmodel
+*   ipche1 pointeur sur un mchaml de caracteristique
+*   iprota point = vecteur vitesse de rotation
+*
+*  sorties :
+*  =========
+*    iprig pointeur sur la matrice construite
+*          = 0 en cas d'erreur (IERR non nul aussi)
+*
+*                    Didier COMBESCURE mars 2003
+*_______________________________________________________________________
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCHAMP
+-INC CCGEOME
+-INC CCREEL
+
+-INC SMRIGID
+-INC SMCHAML
+-INC SMELEME
+-INC SMCOORD
+-INC SMINTE
+-INC SMMODEL
+
+      INTEGER oooval
+
+      SEGMENT NOTYPE
+        CHARACTER*16 TYPE(NBTYPE)
+      ENDSEGMENT
+C
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS),NSOF(NS)
+        INTEGER IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+C
+      CHARACTER*8 CMATE
+      CHARACTER*(NCONCH) CONM
+      PARAMETER (NINF=3)
+      INTEGER INFOS(NINF)
+      DIMENSION VROT(3)
+      LOGICAL lsupfo,lsupde
+C
+      IPRIG = 0
+C
+c_______________________________________________________________________
+c
+c     initialisation du chapeau de l objet rigidite
+c_______________________________________________________________________
+      NRIGEL = 0
+      SEGINI,MRIGID
+      IFORIG = IFOMOD
+c*    IFORIG = IFOUR
+      ICHOLE = 0
+      IMGEO1 = 0
+      IMGEO2 = 0
+      ISUPEQ = 0
+      IF (NUMLI2.EQ.0) THEN
+        MTYMAT = 'AMORTISS'
+      ELSE
+        MTYMAT = 'MASSE'
+      ENDIF
+
+C____________________________________________________________________
+C
+C    LECTURE DU VECTEUR ROTATION ET MULTIPLICATION PAR 2 (pour Coriolis)
+C____________________________________________________________________
+C
+C     Cas 3D
+      IF (IFOUR.EQ.2) THEN
+        IF (IPROTA.EQ.0) THEN
+          VROT(1) =0.
+          VROT(2) = 0.
+          VROT(3) = 2.D0
+        ELSE
+          VROT(1) = 2.D0 * XCOOR((4*IPROTA) - 3)
+          VROT(2) = 2.D0 * XCOOR((4*IPROTA) - 2)
+          VROT(3) = 2.D0 * XCOOR((4*IPROTA) - 1)
+        ENDIF
+C     Cas Axi et 2D Fourier
+      ELSE IF ((IFOUR.EQ.0) .OR. (IFOUR.EQ.1)) THEN
+        IF (IPROTA.EQ.0) THEN
+          VROT(1) =0.
+          VROT(2) = 2.D0
+          VROT(3) = 0.
+        ELSE
+          VROT(1) = 0.D0
+          VROT(2) = 2.D0*XCOOR((3*IPROTA) - 1)
+          VROT(3) = 0.D0
+        ENDIF
+C     Pas d'autres cas ...
+C     --> ERREUR "Fonction indisponible pour ce mode de calcul"
+      ELSE
+        write(ioimp,*) 'Impossible de calculer la matrice de CORIolis'
+        CALL ERREUR(710)
+        GOTO 999
+      ENDIF
+
+C-----------------------------------------------------------------------
+C     ACTIVATION DU MODELE
+C-----------------------------------------------------------------------
+      MMODEL = IPMODL
+      SEGACT,MMODEL
+      NSOUS = KMODEL(/1)
+C
+C-----------------------------------------------------------------------
+C     DEBUT DE LA BOUCLE SUR LES DIFFERENTES SOUS ZONES
+C-----------------------------------------------------------------------
+      DO 500 ISOUS = 1, NSOUS
+C
+        IMODEL = KMODEL(ISOUS)
+        SEGACT,IMODEL
+
+C- Quelques initialisations
+        IPMINT = 0
+
+        MOMATR = 0
+        MOCARA = 0
+        MOTYPM = 0
+        MOTYPC = 0
+        ISUPM = 0
+        ISUPC = 0
+
+        MODEPL = 0
+        MOFORC = 0
+        lsupde = .false.
+        lsupfo = .false.
+
+        IDESCR = 0
+
+C- Recuperation d'informations sur le maillage elementaire
+        IPT1 = IMAMOD
+        SEGACT,IPT1
+        NBNOE1 = IPT1.NUM(/1)
+        NBELE1 = IPT1.NUM(/2)
+
+C- Quelques informations sur le modele
+        IIPDPG = imodel.IPDPGE
+        IIPDPG = IPTPOI(IIPDPG)
+        CONM   = CONMOD
+        CMATE  = CMATEE
+        MATE   = IMATEE
+c*        INAT   = INATUU
+c- Tableau infos
+        iret = 1
+        CALL IDENT(IPT1,CONM,IPCHE1,0, INFOS,iret)
+        IF (iret.EQ.0) GOTO 599
+
+C- Recuperation d'informations sur l'element fini
+        MELE  = NEFMOD
+
+        NPINT = 1
+        IF (INFMOD(/1).NE.0) NPINT = INFMOD(1)
+C support des champs
+        IPLAZ = 4
+        IF (NPINT.EQ.12345) IPLAZ = 1
+
+        MFR   =INFELE(13)
+        LRE  = INFELE(9)
+        NDDL = INFELE(15)
+        IF (IFOUR.EQ.1) THEN
+          LRE  = 2*LRE
+          NDDL = 2*NDDL
+        ENDIF
+        LW    = INFELE(7)
+        LHOOK = INFELE(10)
+        IELE  = INFELE(14)
+        IPMINT = INFMOD(2+IPLAZ)
+C*        IPMINT = INFELE(11)
+        IPMIN1 = INFMOD(8)
+C*        ICARA = INFELE(5)
+        IPPORE = 0
+        IF (MFR.EQ.33) IPPORE = NBNOE1
+C
+C INITIALISATION DE MINTE
+        MINTE  = IPMINT
+        SEGACT,MINTE
+        NBPGAU = POIGAU(/1)
+*
+C- RECHERCHE DES NOMS D'INCONNUES ET DES DUAUX
+C-----------------------------------------------------------------------
+        if (lnomid(1).ne.0) then
+          MODEPL = lnomid(1)
+        else
+          lsupde=.true.
+          CALL IDPRIM(IMODEL,MFR,MODEPL,NDEPL,NDUM)
+        endif
+        nomid = MODEPL
+        SEGACT,nomid
+        ndepl = lesobl(/2)
+c*        ndum=lesfac(/2)
+
+        if (lnomid(2).ne.0) then
+          MOFORC = lnomid(2)
+        else
+          CALL IDDUAL(IMODEL,MFR,MOFORC,NFORC,NDUM)
+          lsupfo=.true.
+        endif
+        nomid = MOFORC
+        SEGACT,nomid
+        nforc=lesobl(/2)
+c*        ndum=lesfac(/2)
+C
+        IF (NDEPL.EQ.0.OR.NFORC.EQ.0.OR.NDEPL.NE.NFORC) THEN
+          CALL ERREUR(5)
+          GOTO 598
+        ENDIF
+C
+C  REMPLISSAGE DU SEGMENT DESCRIPTEUR
+C-------------------------------------
+        NLIGRP = LRE
+        NLIGRD = LRE
+        SEGINI,DESCR
+        IDESCR = DESCR
+C
+        NCOMP = NDEPL
+        IF (MFR.EQ.33) NCOMP = NDEPL-1
+        NBNNS = NBNOE1
+        IF (MFR.EQ.19.OR.MFR.EQ.21) NBNNS = NBNOE1/2
+
+        IDDL=1
+        DO 1004 inoe =1, NBNNS
+          DO 1005 ICOMP=1,NCOMP
+            IF (IFOUR.NE.1) THEN
+              NOMID=MODEPL
+              LISINC(IDDL)=LESOBL(ICOMP)
+              NOMID=MOFORC
+              LISDUA(IDDL)=LESOBL(ICOMP)
+              NOELEP(IDDL) = inoe
+              NOELED(IDDL) = inoe
+            ELSE
+              NOMID=MODEPL
+              I = 2*IDDL
+              LISINC(I-1)=LESOBL(ICOMP)
+              IF (LESOBL(ICOMP).EQ.'UR  ') THEN
+                LISINC(I)='IUR '
+              ELSEIF (LESOBL(ICOMP).EQ.'UZ  ') THEN
+                LISINC(I)='IUZ '
+              ELSEIF (LESOBL(ICOMP).EQ.'UT  ') THEN
+                LISINC(I)='IUT '
+              ELSEIF (LESOBL(ICOMP).EQ.'RT  ') THEN
+                LISINC(I)='IRT '
+              ENDIF
+              NOMID=MOFORC
+              LISDUA(I-1)=LESOBL(ICOMP)
+              IF (LESOBL(ICOMP).EQ.'FR  ') THEN
+                LISDUA(I)='IFR '
+              ELSEIF (LESOBL(ICOMP).EQ.'FZ  ') THEN
+                LISDUA(I)='IFZ '
+              ELSEIF (LESOBL(ICOMP).EQ.'FT  ') THEN
+                LISDUA(I)='IFT '
+              ELSEIF (LESOBL(ICOMP).EQ.'MT  ') THEN
+                LISDUA(I)='IMT '
+              ENDIF
+              NOELEP(I-1) = inoe
+              NOELED(I-1) = inoe
+              NOELEP(I) = inoe
+              NOELED(I) = inoe
+            ENDIF
+            IDDL=IDDL+1
+ 1005     CONTINUE
+ 1004   CONTINUE
+
+        SEGDES,DESCR
+        IDESCR = DESCR
+C
+C- Recuperation des composantes MATERIAU
+C-----------------------------------------------------------------------
+        NBROBL = 0
+        NBRFAC = 0
+        nomid  = 0
+        notype = 0
+        LHOTRA = 0
+*
+* rho dans les cas poutre,tuyau, massif, coque
+*
+        IF (MFR.EQ.1.OR.MFR.EQ.27.OR.MFR.EQ.7.OR.MFR.EQ.13.OR.
+     &      MFR.EQ.3.OR.MFR.EQ.5.OR.MFR.EQ.9) THEN
+*
+          IF (CMATE.NE.'SECTION') THEN
+            NBROBL = 1
+            SEGINI,nomid
+            LESOBL(1)='RHO '
+            NBTYPE = 1
+            SEGINI NOTYPE
+            TYPE(1)='REAL*8'
+          ELSE
+            LHOTRA=LHOOK
+            NBROBL=2
+            SEGINI,nomid
+            LESOBL(1)='MODS'
+            LESOBL(2)='MATS'
+            NBTYPE=2
+            SEGINI NOTYPE
+            TYPE(1) = 'POINTEURMMODEL'
+            TYPE(2) = 'POINTEURMCHAML'
+          ENDIF
+        ENDIF
+C
+        MOMATR = nomid
+        MOTYPM = notype
+        NMATR = NBROBL
+        NMATF = NBRFAC
+        NMATT = NMATR+NMATF
+*
+*    verification du support des composantes recherchees
+*
+        IF (MOMATR.NE.0) THEN
+          CALL QUESUQ(IMODEL,IPCHE1,4,0,MOMATR,IPLAZ,ISUPM,iret)
+          IF (ISUPM.GT.1) GOTO 597
+        ENDIF
+*
+C- Recuperation des composantes CARACTERISTIQUES
+C-----------------------------------------------------------------------
+        NBROBL = 0
+        NBRFAC = 0
+        nomid  = 0
+        notype = 0
+        IVECT = 0
+*
+* caracteristiques pour les poutres
+        IF (MFR.EQ.7 ) THEN
+          IF (CMATE.EQ.'SECTION') THEN
+            NBRFAC=2
+            SEGINI NOMID
+            LESFAC(1)='OMEG'
+            LESFAC(2)='VECT'
+            IVECT=1
+*
+            NBTYPE=2
+            SEGINI NOTYPE
+            TYPE(1)='REAL*8'
+            TYPE(2)='POINTEURPOINT   '
+*
+          ELSE
+            NBROBL=4
+            NBRFAC=4
+            SEGINI NOMID
+            LESOBL(1)='TORS'
+            LESOBL(2)='INRY'
+            LESOBL(3)='INRZ'
+            LESOBL(4)='SECT'
+            LESFAC(1)='SECY'
+            LESFAC(2)='SECZ'
+            LESFAC(3)='OMEG'
+            LESFAC(4)='VECT'
+            IVECT=1
+*
+            NBTYPE=8
+            SEGINI NOTYPE
+            TYPE(1)='REAL*8'
+            TYPE(2)='REAL*8'
+            TYPE(3)='REAL*8'
+            TYPE(4)='REAL*8'
+            TYPE(5)='REAL*8'
+            TYPE(6)='REAL*8'
+            TYPE(7)='REAL*8'
+            TYPE(8)='POINTEURPOINT   '
+          ENDIF
+*
+* caracteristiques pour les tuyaux
+        ELSE IF (MFR.EQ.13) THEN
+          NBROBL=2
+          NBRFAC=3
+          SEGINI NOMID
+          LESOBL(1)='EPAI'
+          LESOBL(2)='RAYO'
+          LESFAC(1)='RACO'
+          LESFAC(2)='OMEG'
+          LESFAC(3)='VECT'
+          IVECT=1
+*
+          NBTYPE=5
+          SEGINI NOTYPE
+          TYPE(1)='REAL*8'
+          TYPE(2)='REAL*8'
+          TYPE(3)='REAL*8'
+          TYPE(4)='REAL*8'
+          TYPE(5)='POINTEURPOINT   '
+*
+* caracteristiques pour les barres
+        ELSE IF (MFR.EQ.27) THEN
+          NBROBL=1
+          SEGINI NOMID
+          LESOBL(1)='SECT'
+*
+          NBTYPE=1
+          SEGINI NOTYPE
+          TYPE(1)='REAL*8'
+*
+* epaisseur et excentrement dans le cas des coques
+        ELSE IF (MFR.EQ.3.OR.MFR.EQ.5.OR.MFR.EQ.9) THEN
+          NBROBL=1
+          NBRFAC=1
+          SEGINI NOMID
+          LESOBL(1)='EPAI'
+          LESFAC(1)='EXCE'
+*
+          NBTYPE=1
+          SEGINI NOTYPE
+          TYPE(1)='REAL*8'
+*
+        ENDIF
+*
+        MOCARA = nomid
+        MOTYPC = notype
+        NCARA = NBROBL
+        NCARF = NBRFAC
+        NCARR = NCARA+NCARF
+
+*    verification du support des composantes recherchees
+*
+        IF (MOCARA.NE.0)THEN
+          CALL QUESUQ(IMODEL,IPCHE1,4,0,MOCARA,IPLAZ,ISUPC,iret)
+          IF (ISUPC.GT.1) GOTO 597
+        ENDIF
+
+C- Partionnement si necessaire de la matrice de coriolis
+C- determinant ainsi le nombre d'objets elementaires de MRIGID
+C-----------------------------------------------------------------------
+        LTRK = oooval(1,4)
+        IF (LTRK.EQ.0) LTRK = oooval(1,1)
+* Ajout a la taille en mots de la matrice des infos du segment
+        LSEG = LRE*LRE*NBELE1 + 16
+        NBLPRT = (LSEG-1)/LTRK + 1
+        NBLMAX = (NBELE1-1)/NBLPRT + 1
+        NBLPRT = (NBELE1-1)/NBLMAX + 1
+*        write(ioimp,*) ' corio1 : nblprt nblmax = ',nblprt,nblmax,nbele1
+
+C Ajout de la matrice de CORIOLIS a la matrice globale
+C-----------------------------------------------------------------------
+        NRIGE0 =  IRIGEL(/2)
+        NRIGEL = NRIGE0 + NBLPRT
+        SEGADJ,MRIGID
+
+        descr  = IDESCR
+        meleme = IPT1
+        nbnn   = NBNOE1
+        nbelem = NBELE1
+        nbsous = 0
+        nbref  = 0
+*
+* Boucle sur les PARTITIONS elementaires de la matrice
+************************************************************************
+        DO 5000 irige = 1, NBLPRT
+
+          IF (NBLPRT.GT.1) THEN
+C- Partitionnement du maillage support de la matrice elementaire
+C- (IPT1 peut etre desactive suite a l'appel a KOMCHA !)
+            SEGACT,IPT1
+            ielem = (irige-1)*NBLMAX
+            nbelem = MIN(NBLMAX,NBELE1-ielem)
+*          write(ioimp,*) ' creation segment ',nbnn,nbelem
+            SEGINI,meleme
+            itypel = IPT1.itypel
+            DO ielt = 1, nbelem
+              jelt = ielt + ielem
+              DO inoe = 1, nbnn
+                num(inoe,ielt) = IPT1.NUM(inoe,jelt)
+              ENDDO
+              icolor(ielt) = IPT1.ICOLOR(jelt)
+            ENDDO
+C- Recopie du descripteur
+            des1 = IDESCR
+            SEGINI,descr=des1
+            SEGDES,descr
+          ENDIF
+
+          ipmail = meleme
+          ipdesc = descr
+
+C- Initialisation de la matrice de rigidite elementaire (xmatri)
+          NELRIG = nbelem
+          SEGINI,xmatri
+          ipmatr = xmatri
+
+C- Recuperation des valeurs des proprietes materiau et geometriques
+          IVAMAT = 0
+          IVACAR = 0
+
+          IF (MOMATR.NE.0)  THEN
+            CALL KOMCHA(IPCHE1,ipmail,CONM,MOMATR,MOTYPM,1,INFOS,3,
+     &                  IVAMAT)
+            IF (IERR.NE.0) GOTO 5100
+            IF (ISUPM.EQ.1) THEN
+              CALL VALCHE(IVAMAT,NMATT,IPMINT,IPPORE,MOMATR,MELE)
+              IF (IERR.NE.0)THEN
+                ISUPM = 0
+                GOTO 5100
+              ENDIF
+            ENDIF
+          ENDIF
+C
+          IF (MOCARA.NE.0)  THEN
+            CALL KOMCHA(IPCHE1,ipmail,CONM,MOCARA,MOTYPC,1,INFOS,3,
+     &                  IVACAR)
+            IF (IERR.NE.0) GOTO 5100
+            IF (ISUPC.EQ.1)THEN
+              CALL VALCHE(IVACAR,NCARR,IPMINT,IPPORE,MOCARA,MELE)
+              IF (IERR.NE.0)THEN
+                ISUPC = 0
+                GOTO 5100
+              ENDIF
+            ENDIF
+          ENDIF
+
+C-----------------------------------------------------------------------
+C     NUMERO DES ETIQUETTES      :
+C     ETIQUETTES DE 1 A 98 POUR TRAITEMENT SPECIFIQUE A L ELEMENT
+C     LES ELEMENTS SONT GROUPES COMME SUIT :
+C      - MASSIF,LIQUIDE 'SURFACE LIBRE' ----------------------> CORIO3
+C      - COQ3/POUTRE,DKT,COQ4,COQ8,DST ------------------> CORIO2
+C        ET POUTRE DE TIMOSCHENKO
+C______________________________________________________________________
+*                 CABL SEG2 SEG3 TRI3 TRI4 TRI6 TRI7 QUA4 QUA5 QUA8 QUA9
+          GOTO (  99,  99,  99,  11,  99,  11,  99,  11,  99,  11,  99
+*               RAC2 RAC3 CUB8 CU20 PRI6 PR15 LIA3 LIA4 LIA6 LIA8 MULT
+     &         ,  99,  99,  11,  11,  11,  11,  99,  99,  99,  99,  99
+*               TET4 TE10 PYR5 PY13 COQ3  DKT POUT LISP FAC3 FAC4 FAC6
+     &         ,  11,  11,  11,  11,  21,  21,  21,  99,  99,  99,  99
+*               FAC8 LTR3 LQU4 LCU8 LPR6 LTE4 LPY5 COQ8 TUYA TUFI COQ2
+     &         ,  99,  99,  99,  99,  99,  99,  99,  21,  21,  99,  21
+*               POI1 BARR RACO LSU2 COQ4 LISM COF3 RES2 LSU3 LSU4 LICO
+     &         ,  99,  21,  99,  99,  21,  99,  99,  99,  99,  99,  99
+*               COQ6 CVS2 CVS3 CVT3 CVT6 CVQ4 CVQ8 THP5 TH13 THP6 TH15
+     &         ,  21,  99,  99,  99,  99,  99,  99,  99,  99,  99,  99
+*               THC8 TH20 ICT3 ICQ4 ICT6 ICQ8 ICC8 ICT4 ICP6 IC20 IC10
+     &         ,  99,  99,  99,  99,  99,  99,  99,  99,  99,  99,  99
+*               IC15 TRIP QUAP CUBP TETP PRIP TIMO JOI2 JOI3 JOT3 JOI4
+     &         ,  99,  99,  99,  99,  99,  99,  21,  99,  99,  99,  99
+*               JOI6 JOI8 LISC TRIH  DST LIC4 CERC TUYO LSE2 LITU HYT3
+     &         ,  99,  99,  99,  99,  21,  99,  99,  99,  99,  99,  99
+*               HYQ4 HYT4 HYP6 HYC8 TRIS QUAS POIS FOR3 JOP3 JOP6 JOP8
+     &         ,  99,  99,  99,  99,  99,  99,  99,  99,  99,  99,  99
+*               POL3 POL4 POL5 POL6 POL7 POL8 POL9 PO10 PO11 PO12 PO13
+     &         ,  99,  99,  99,  99,  99,  99,  99,  99,  99,  99,  99
+*               PO14 BAR3 BAEX LIA2 QUAH CUBH ROT3 SEF2 TRF3 QUF4 CUF8
+     &         ,  99,  21,  99,  99,  99,  99,  99,  99,  99,  99,  99
+*               PRF6 TEF4 PYF5 MSE3 MTR6 MQU9 MC27 MP18 MT10 MP14 SEF3
+     &         ,  99,  99,  99,  99,  99,  99,  99,  99,  99,  99,  99
+*               TRF7 QUF9 CF27 PF21 TF15 PF19 SEG6 TR21 QU36 C216 P126
+     &         ,  99,  99,  99,  99,  99,  99,  99,  99,  99,  99,  99
+*               TE56 PY91 TRH6
+     &         ,  99,  99,  99),MELE
+C
+ 99       CONTINUE
+          MOTERR(1: 4) = NOMTP(MELE)
+          MOTERR(5:12) = 'CORI1'
+          CALL ERREUR(86)
+          GOTO 5100
+
+C_______________________________________________________________________
+C
+C     MASSIF
+C_______________________________________________________________________
+C
+ 11       CONTINUE
+          CALL CORIO3(ipmail,NDDL,LRE,NBPGAU,IPMINT,MELE,MFR,IVAMAT,
+     &                IVACAR,NMATT,ipmatr,VROT,NUMLI1,IIPDPG)
+C
+          GOTO 5100
+C_______________________________________________________________________
+C
+C     POUTRE, POUTRE DE TIMOSCHENKO, COQUE, BARRE
+C_______________________________________________________________________
+C
+ 21       CONTINUE
+          CALL CORIO2(ipmail,LRE,LW,MELE,IVAMAT,NMATT,IVACAR,NCARR,
+     &                IVECT,isous,NBPGAU,IPMINT,IPMIN1,NDDL,MATE,
+     &                CMATE,LHOTRA,ipmatr,VROT,NUMLI1,IIPDPG)
+          GOTO 5100
+C_______________________________________________________________________
+C
+C     DESACTIVATION DES SEGMENTS PROPRES A LA ZONE GEOMETRIQUE IA
+C_______________________________________________________________________
+ 5100     CONTINUE
+C
+          IF (ISUPM.EQ.1 .OR. NBLPRT.GT.1) THEN
+            CALL DTMVAL(IVAMAT,3)
+          ELSE
+            CALL DTMVAL(IVAMAT,1)
+          ENDIF
+C
+          IF (ISUPC.EQ.1 .OR. NBLPRT.GT.1) THEN
+            CALL DTMVAL(IVACAR,3)
+          ELSE
+            CALL DTMVAL(IVACAR,1)
+          ENDIF
+          xmatri = ipmatr
+          IF (NBLPRT.GT.1) THEN
+            meleme = ipmail
+            SEGDES,meleme
+          ENDIF
+
+C- Sortie prematuree en cas d'erreur
+          IF (IERR.NE.0) GOTO 597
+
+C- Stockage de la matrice
+          jrige = NRIGE0 + irige
+          COERIG(jrige)   = 1.
+          IRIGEL(1,jrige) = ipmail
+          IRIGEL(2,jrige) = 0
+          IRIGEL(3,jrige) = ipdesc
+          IRIGEL(4,jrige) = ipmatr
+          IRIGEL(5,jrige) = NIFOUR
+          IRIGEL(6,jrige) = 0
+C- Matrice antisymetrique si non 'HARM'
+          IF (NUMLI1.EQ.0) THEN
+            IRIGEL(7,jrige) = 1
+            xmatri.symre=1
+          ELSE
+            IRIGEL(7,jrige) = 0
+            xmatri.symre=0
+          ENDIF
+          SEGDES,xmatri
+          IRIGEL(8,jrige) = 0
+
+ 5000   CONTINUE
+C- Fin de la boucle sur les partitions
+
+ 597    CONTINUE
+        IF (MOMATR.NE.0) THEN
+          nomid = MOMATR
+          SEGSUP,NOMID
+c           notype = NOTYPM
+          notype = MOTYPM
+          SEGSUP,notype
+        ENDIF
+        IF (MOCARA.NE.0) THEN
+          nomid = MOCARA
+          SEGSUP,NOMID
+c           notype = NOTYPC
+          notype = MOTYPC
+          SEGSUP,notype
+        ENDIF
+ 598    CONTINUE
+        IF (MODEPL.NE.0) THEN
+          nomid = MODEPL
+          SEGDES,nomid
+          IF (lsupde) SEGSUP,nomid
+        ENDIF
+        IF (MOFORC.NE.0) THEN
+          nomid = MOFORC
+          SEGDES,nomid
+          IF (lsupfo) SEGSUP,nomid
+        ENDIF
+c*        MINTE = IPMINT
+        SEGDES,MINTE
+ 599    CONTINUE
+c*        IPT1 = IMAMOD
+        SEGDES,IPT1
+        SEGDES,IMODEL
+
+C- En cas d'erreur
+        IF (IERR.NE.0) GOTO 999
+
+ 500  CONTINUE
+C* Fin de la boucle sur les modeles elementaires
+
+ 999  CONTINUE
+      IF (IERR.NE.0) THEN
+        SEGSUP,MRIGID
+        IPRIG = 0
+      ELSE
+        SEGDES,MRIGID
+        IPRIG = MRIGID
+      ENDIF
+
+      SEGDES,MMODEL
+
+      RETURN
+      END
+
+

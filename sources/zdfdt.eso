@@ -1,0 +1,856 @@
+C ZDFDT     SOURCE    PV        16/11/17    22:02:43     9180
+      SUBROUTINE ZDFDT(MTABX,MTAB1)
+C---------------------------------------------------------------------
+C Cet opérateur discrétise le terme de dérivée temporelle.
+C---------------------------------------------------------------------
+C Les formulations numériques sont EF Galerkin, EF Petrov-Galerkin et
+C VF, la matrice masse pouvant etre condensée en EF.
+C---------------------------------------------------------------------
+C
+C-------------------------
+C Phrase d'appel GIBIANE :
+C-------------------------
+C
+C 'DFDT' TAB1 ;
+C
+C TAB1 : Table de sous-type 'KIZX' contenant les données pour DFDT
+C
+C--------------------------------
+C Construction de TAB1 via EQEX :
+C--------------------------------
+C
+C 'ZONE' TAB2 'OPER' 'DFDT' CHP1 CHP2 FLOT1 (CHP3) (CHP4) 'INCO' MOT1
+C
+C  TAB2  : TABLE DOMAINE associée à la zone d'action de l'opérateur
+C  CHP1  : Coefficient multiplicateur de la dérivée temporelle
+C          (densité dans le cas de la qdm ou rho*cp en thermique)
+C          (FLOTTANT ou MOT ou CHPO) - (spg : CENTRE ou SOMMET)
+C  CHP2  : Inconnue au pas de temps précédant
+C          (MOT ou CHPO SCAL ou CHPO VECT) - (spg : CENTRE ou SOMMET)
+C  FLOT1 : Valeur du pas de temps (MOT ou REEL ou ENTIER)
+C  CHP3  : Champ de vitesse - Optionnel (utilisé en Petrov-Galerkin)
+C          (POINT ou MOT ou CHPO) - (spg : CENTRE ou SOMMET)
+C  CHP4  : Diffusion - Optionnel (utilisé en Petrov-Galerkin)
+C          (FLOTTANT ou MOT ou CHPO) - (spg : CENTRE ou SOMMET)
+C  MOT1  : Nom de l'inconnue sur laquelle agit l'opérateur (MOT)
+C
+C------------
+C Résultats :
+C------------
+C
+C Les matrices élémentaires sont stockés dans un objet MATRIK qui
+C est rangé à l'indice de type MOT MATELM de la table KIZX.
+C Le second membre est stocké dans un CHPO et assemblé dans la table
+C EQEX à l'indice de type MOT SMBR.
+C---------------------------------------------------------------------
+C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+C
+-INC CCOPTIO
+-INC CCREEL
+*-
+-INC CCGEOME
+-INC SIZFFB
+      POINTEUR IZF1.IZFFM
+-INC SMCOORD
+-INC SMLENTI
+      POINTEUR IPADU.MLENTI,IPADS.MLENTI
+-INC SMELEME
+      POINTEUR MELEM1.MELEME,MELEMS.MELEME,MELEMZ.MELEME
+      POINTEUR MELEMO.MELEME
+-INC SMCHAML
+-INC SMCHPOI
+      POINTEUR IZRO.MPOVAL,DT.MPOVAL,IZTGG2.MPOVAL,IZTU1.MPOVAL
+      POINTEUR IZTCO.MPOVAL,MZUN.MPOVAL,MZMU.MPOVAL
+-INC SMMATRIK
+-INC SMLMOTS
+C
+      PARAMETER (LRV=64,NPX=9,NPGX=9)
+      DIMENSION WT(LRV,NPX,NPGX),WS(LRV,NPX,NPGX),HK(LRV,3,NPX,NPGX)
+      DIMENSION PGSK(LRV,NPGX),RPGK(LRV,NPGX),AIRE(LRV)
+      DIMENSION UMJ(LRV,3,NPGX),DUMJ(LRV,3,NPGX)
+      DIMENSION COEFK(LRV),ANUK(LRV)
+      DIMENSION AL(LRV),AH(LRV),AP(LRV)
+C
+      CHARACTER*8 NOMI,TYPE,TYPC,NOM,NOM0,NOMDT
+      PARAMETER (NTB=1)
+      CHARACTER*8 LTAB(NTB)
+      DIMENSION KTAB(NTB),IXV(4)
+      DATA LTAB/'KIZX    '/
+C
+C DFDT
+C     write(6,*)' Opérateur ZDFDT '
+      DTM1   = 0.D0
+      DTX    = 0.D0
+      MLENTI = 0
+      IAXI   = 0
+      NPTU = 0
+      IF (IFOMOD.EQ.0) IAXI=2
+      DEUPI=1.D0
+      IF(IAXI.NE.0)DEUPI=2.D0*XPI
+C
+C- Récupération de la table DOMAINE associée au domaine local
+C
+      CALL LEKTAB(MTABX,'DOMZ',MTABZ)
+      IF (MTABZ.EQ.0) THEN
+C Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  DOMZ  '
+         MOTERR( 9:16) = '  DOMZ  '
+         MOTERR(17:24) = '  KIZX  '
+         CALL ERREUR(786)
+         RETURN
+      ENDIF
+C
+C- Récupération de la table INCO (pointeur KINC)
+C
+      CALL LEKTAB(MTAB1,'INCO',KINC)
+      IF (KINC.EQ.0) THEN
+C Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  INCO  '
+         MOTERR( 9:16) = '  INCO  '
+         MOTERR(17:24) = '  EQEX  '
+         CALL ERREUR(786)
+         RETURN
+      ENDIF
+C
+C- Récupération de la table PASDETPS (pointeur KINT)
+C
+      CALL LEKTAB(MTAB1,'PASDETPS',KINT)
+C?2   IF(KINT.EQ.0)KINT=KINC
+C
+C- Récupération de la table des options KOPT (pointeur KOPTI)
+C
+      CALL LEKTAB(MTABX,'KOPT',KOPTI)
+      IF (KOPTI.EQ.0) THEN
+C Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  KOPT  '
+         MOTERR( 9:16) = '  KOPT  '
+         MOTERR(17:24) = '  KIZX  '
+         CALL ERREUR(786)
+         RETURN
+      ELSE
+         CALL ACME(KOPTI,'IDCEN',IDCEN)
+         IF (IERR.NE.0) RETURN
+         CALL ACME(KOPTI,'KFORM',KFORM)
+         IF (IERR.NE.0) RETURN
+         CALL ACME(KOPTI,'KPOIND',KPOIND)
+         IF (IERR.NE.0) RETURN
+         CALL ACME(KOPTI,'KMACO',KMACO)
+         IF (IERR.NE.0) RETURN
+      ENDIF
+
+      IDCENV = IDCEN
+      IF (IDCEN.EQ.5.OR.IDCEN.EQ.4) IDCENV=1
+C
+C- Récupération des indices CENTRE, FACE, SOMMET et MAILLAGE
+C- de la table DOMAINE
+C
+      CALL LEKTAB(MTABZ,'SOMMET',MELEMS)
+      CALL LEKTAB(MTABZ,'FACE',MELEMF)
+      CALL LEKTAB(MTABZ,'CENTRE',MELEMC)
+      CALL LEKTAB(MTABZ,'MAILLAGE',MELEMZ)
+      CALL LEKTAB(MTABZ,'MACRO1',MELEMI)
+      CALL LEKTAB(MTABZ,'MACRO',MACRO)
+      CALL LEKTAB(MTABZ,'QUADRATI',MQUAD)
+      IF (IERR.NE.0) RETURN
+
+C
+C- Vérification des compatiblités Formulation/SPG
+C- Identification du spg de l'inconnue
+C- MELEM1=spg ; MELEME=connectivité associée ;
+C
+
+      IF(KFORM.EQ.0)THEN
+        IF(KPOIND.EQ.99)THEN
+        KPOIND=0
+        MELEM1=MELEMS
+        MELEME=MELEMS
+        ELSEIF(KPOIND.EQ.2)THEN
+        MELEM1=MELEMC
+        MELEME=MELEMC
+        ELSEIF(KPOIND.EQ.0)THEN
+        MELEM1=MELEMS
+        MELEME=MELEMS
+        ELSEIF(KPOIND.NE.2.AND.KPOIND.NE.0)THEN
+C        Option %m1:8 incompatible avec les données
+            MOTERR( 1: 8) = '  EF    '
+            CALL ERREUR(803)
+            RETURN
+        ENDIF
+
+      ELSEIF(KFORM.EQ.1)THEN
+        IF(KPOIND.EQ.99)THEN
+        KPOIND=0
+        MELEM1=MELEMS
+        MELEME=MELEMZ
+        ELSEIF(KPOIND.EQ.0)THEN
+        MELEM1=MELEMS
+        MELEME=MELEMZ
+        ELSEIF(KPOIND.EQ.2)THEN
+        MELEM1=MELEMC
+        MELEME=MELEMC
+        ELSEIF(KPOIND.NE.2.AND.KPOIND.NE.0)THEN
+C        Option %m1:8 incompatible avec les données
+            MOTERR( 1: 8) = '  EF    '
+            CALL ERREUR(803)
+            RETURN
+        ENDIF
+
+      ELSEIF(KFORM.EQ.2)THEN
+        IF(KPOIND.EQ.99)THEN
+        KPOIND=2
+        MELEM1=MELEMC
+        MELEME=MELEMC
+        ELSEIF(KPOIND.EQ.2)THEN
+        MELEM1=MELEMC
+        MELEME=MELEMC
+        ELSEIF(KPOIND.NE.2)THEN
+C        Option %m1:8 incompatible avec les données
+            MOTERR( 1: 8) = '  VF    '
+            CALL ERREUR(803)
+            RETURN
+        ENDIF
+
+      ELSEIF(KFORM.EQ.3)THEN
+        IF(KPOIND.EQ.99.OR.KPOIND.EQ.2)THEN
+        KPOIND=2
+        MELEM1=MELEMC
+        MELEME=MELEMC
+        ELSEIF(KPOIND.EQ.3.AND.(MACRO.NE.0.OR.MQUAD.NE.0))THEN
+        CALL LEKTAB(MTABZ,'CENTREP0',MELEMC)
+        MELEM1=MELEMC
+        MELEME=MELEMC
+        ELSEIF(KPOIND.EQ.4.AND.(MACRO.NE.0.OR.MQUAD.NE.0))THEN
+        CALL LEKTAB(MTABZ,'CENTREP1',MELEMC)
+        CALL LEKTAB(MTABZ,'ELTP1NC',MELEMQ)
+        MELEM1=MELEMC
+        MELEME=MELEMQ
+           IF(MACRO.NE.0)MELEMO=MELEMI
+           IF(MQUAD.NE.0)MELEMO=MELEMZ
+C       ELSEIF(KPOIND.NE.2.AND.KPOIND.NE.3.AND.KPOIND.NE.4)THEN
+        ELSE
+C        Option %m1:8 incompatible avec les données
+            MOTERR( 1: 8) = '  EFMC  '
+            CALL ERREUR(803)
+            RETURN
+        ENDIF
+
+      ENDIF
+C
+C- Récupération du nombre d'inconnues et du nom de l'inconnue NOMI
+C
+      TYPE = 'LISTMOTS'
+      CALL ACMO(MTABX,'LISTINCO',TYPE,MLMOTS)
+      IF (IERR.NE.0) RETURN
+      SEGACT MLMOTS
+      NBINC = MOTS(/2)
+      IF (NBINC.LE.0.OR.NBINC.GE.3) THEN
+C        Indice %m1:8 : contient plus de %i1 %m9:16
+         MOTERR( 1:8) = 'LISTINCO'
+         INTERR(1) = 2
+         MOTERR(9:16) = ' MOTS   '
+         CALL ERREUR(799)
+         RETURN
+      ENDIF
+      NOMI = MOTS(1)
+      IF (NBINC.EQ.2) THEN
+         IF (MOTS(1).NE.MOTS(2)) THEN
+C           Indice %m1:8 : contient plus de %i1 %m9:16
+            MOTERR( 1:8) = 'LISTINCO'
+            INTERR(1) = 1
+            MOTERR(9:16) = ' MOT    '
+            CALL ERREUR(799)
+            RETURN
+         ENDIF
+      ENDIF
+      SEGDES MLMOTS
+C
+C- Récupération de l'inconnue
+C
+      TYPE = ' '
+      CALL ACMO(KINC,NOMI,TYPE,MCHPOI)
+      IF (TYPE.NE.'CHPOINT ') THEN
+C        Indice %m1:8 : ne contient pas un objet de type %m9:16
+         MOTERR( 1: 8) = 'INC '//NOMI
+         MOTERR( 9:16) = 'CHPOINT '
+         CALL ERREUR(800)
+         RETURN
+      ELSE
+         CALL LICHT(MCHPOI,IZTU1,TYPC,MELEMD)
+         NINKO = IZTU1.VPOCHA(/2)
+         IF (NINKO.NE.1.AND.NINKO.NE.IDIM) THEN
+C        Indice %m1:8 : Le %m9:16 n'a pas le bon nombre de composantes
+            MOTERR( 1: 8) = 'INC '//NOMI
+            MOTERR( 9:16) = 'CHPOINT '
+            CALL ERREUR(784)
+            RETURN
+         ENDIF
+      ENDIF
+C
+C*************************************************************************
+C Le domaine de definition est donne par le SPG  de la premiere inconnue
+C Les inconnues suivantes devront posseder ce meme pointeur
+C On verifie que les points de la zone sont tous inclus dans ce SPG
+
+      CALL KRIPAD(MELEMD,MLENT1)
+       IPADS=MLENT1
+       IF(MELEMD.NE.MELEMS)CALL KRIPAD(MELEMS,IPADS)
+       IPADU=IPADS
+       MLENTI=MLENT1
+       IF(MELEM1.NE.MELEMD)CALL KRIPAD(MELEM1,MLENTI)
+
+      CALL VERPAD(MLENT1,MELEM1,IRET)
+      IF (IRET.NE.0) THEN
+C     Indice %m1:8 : L'objet %m9:16 n'a pas le bon support géométrique
+         MOTERR(1: 8) = 'INC '//NOMI
+         MOTERR(9:16) = 'CHPOINT '
+         CALL ERREUR(788)
+         RETURN
+      ENDIF
+C      write(6,*)' Verif MLENT1,MLENTI,IPADS=',MLENT1,MLENTI,IPADS
+C
+C- Test du nombre d'arguments
+C
+      CALL ACME(MTABX,'IARG',IARG)
+      IF (IDCENV.EQ.1) THEN
+         IF (IARG.NE.3.AND.IARG.NE.5) THEN
+C           Indice %m1:8 : nombre d'arguments incorrect
+            MOTERR(1:8) = 'IARG    '
+            CALL ERREUR(804)
+            RETURN
+         ENDIF
+      ELSE
+         IF (IARG.NE.5) THEN
+C           Indice %m1:8 : nombre d'arguments incorrect
+            MOTERR(1:8) = 'IARG    '
+            CALL ERREUR(804)
+            RETURN
+         ENDIF
+      ENDIF
+C
+C- Lecture du coefficient multiplicateur SCAL CENTRE ou SCAL SOMMET
+C
+      IXV(1) = MELEMC
+      IXV(2) = 1
+      IXV(3) = 0
+      IXV(4) = MELEMS
+      IRET   = 4
+      CALL LEKCOF(' Operateur DFDT :',
+     &           MTABX,KINC,1,IXV,MRO,IZRO,NPT1,NC1,IK1,IRET)
+      IF (IRET.EQ.0) RETURN
+C
+C- Lecture de l'inconnue au pas de temp précédant
+C
+      IF (NINKO.EQ.1) THEN
+         IXV(1) = MELEMD
+      ELSE
+         IXV(1) =-MELEMD
+      ENDIF
+      IXV(2) = 0
+      IXV(3) = 0
+      CALL LEKCOF(' Operateur DFDT :',
+     &           MTABX,KINC,2,IXV,IZTG2,IZTGG2,NPT2,NC2,IK2,IRET)
+      IF (IRET.EQ.0) RETURN
+C
+C- Lecture du pas de temps
+C
+
+      TYPE=' '
+      CALL ACMO(MTABX,'ARG3',TYPE,KK)
+      IF(TYPE.EQ.'FLOTTANT')THEN
+      CALL ACMF(MTABX,'ARG3',DTR)
+      IF(KINT.NE.0)CALL ECMF(KINT,'DELTAT',DTR)
+      ELSEIF(TYPE.EQ.'MOT')THEN
+      CALL ACMM(MTABX,'ARG3',NOMDT)
+      IF(NOMDT.NE.'DELTAT')THEN
+
+      IXV(1) = 0
+      IXV(2) = 1
+      IXV(3) = 0
+      CALL LEKCOF(' Operateur DFDT :',
+     &           MTABX,KINC,3,IXV,IZTG3,DT,NPT3,NC3,IK3,IRET)
+      IF (IRET.EQ.0) RETURN
+      DTR = DT.VPOCHA(1,1)
+      IF(KINT.NE.0)CALL ECMF(KINT,'DELTAT',DTR)
+
+      ELSE
+      IF(KINT.EQ.0)THEN
+C Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = 'PASDETPS'
+         MOTERR( 9:16) = 'PASDETPS'
+         MOTERR(17:24) = '  EQEX  '
+         CALL ERREUR(786)
+         RETURN
+      ENDIF
+      CALL ACMF(KINT,'DELTAT',DTR)
+      CALL ACMF(MTAB1,'ALFA',ALFA)
+C     write(6,*)' DFDT nomdt=',nomdt,' DTR=',dtr,alfa,(DTR*ALFA)
+      DTR=DTR*ALFA
+      ENDIF
+      ENDIF
+C
+C- Lecture des données pour le décentrement
+C-    Champ de vitesse et viscosité
+C
+      IKU=1
+      MZUN=IZTU1
+      MZMU=IZRO
+      IKMU=1
+
+      IF (IARG.EQ.5) THEN
+         IXV(1) =-MELEMS
+         IXV(2) = 0
+         IXV(3) = 1
+         CALL LEKCOF(' Operateur DFDT :',
+     &              MTABX,KINC,4,IXV,MUN,MZUN,NPTU,NCU,IKU,IRET)
+         IF (IRET.EQ.0) RETURN
+         IF (IKU.EQ.2) IKU=1
+C
+         IXV(1) = MELEMC
+         IXV(2) = 1
+         IXV(3) = 0
+         IXV(4) = MELEMS
+         IRET   = 4
+         CALL LEKCOF(' Operateur DFDT :',
+     &              MTABX,KINC,5,IXV,MMU,MZMU,NPTMU,NCMU,IKMU,IRET)
+         IF (IRET.EQ.0) RETURN
+      ENDIF
+C
+C- Transformation éventuelle des arguments du SOMMET vers le CENTRE
+C
+      IF (IK1.EQ.4) THEN
+         CALL COSOCE(MELEMC,MELEMS,MELEMZ,IZRO,MPOVAL)
+         IZRO = MPOVAL
+         IK1  = 0
+         IK1DETR = 1
+      ELSE
+         IK1DETR = 0
+      ENDIF
+      IF (IKMU.EQ.4) THEN
+         CALL COSOCE(MELEMC,MELEMS,MELEMZ,MZMU,MPOVAL)
+         MZMU = MPOVAL
+         IKMU = 0
+         IKMUDETR = 1
+      ELSE
+         IKMUDETR = 0
+      ENDIF
+C
+C- Récupération de caractéristiques géométriques dans le cas EF
+C- ou du volume de chaque élément dans le cas VF
+C
+
+      IF (KPOIND.EQ.0) THEN
+         CALL LEKTAB(MTABZ,'XXDXDY',MCHPOI)
+         IF (MCHPOI.EQ.0) THEN
+C Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+            MOTERR( 1: 8) = ' XXDXDY '
+            MOTERR( 9:16) = ' XXDXDY '
+            MOTERR(17:24) = 'DOMAINE '
+            CALL ERREUR(786)
+         ENDIF
+         CALL LICHT(MCHPOI,IZTCO,TYPC,IGEOM)
+         NELZ=IZTCO.VPOCHA(/1)
+      ELSEIF (KPOIND.EQ.2) THEN
+         CALL LEKTAB(MTABZ,'XXVOLUM',MCHPOI)
+         IF (IERR.NE.0) RETURN
+         CALL LICHT(MCHPOI,MPOVAL,TYPC,IGEOM)
+      ELSEIF (KPOIND.EQ.3.AND.MACRO.EQ.0) THEN
+         CALL LEKTAB(MTABZ,'XXVOLUM',MCHPOI)
+         IF (IERR.NE.0) RETURN
+         CALL LICHT(MCHPOI,MPOVAL,TYPC,IGEOM)
+      ELSEIF (KPOIND.EQ.3.AND.MACRO.NE.0) THEN
+         CALL LEKTAB(MTABZ,'VOLUMAC',MCHPOI)
+         IF (IERR.NE.0) RETURN
+         CALL LICHT(MCHPOI,MPOVAL,TYPC,IGEOM)
+      ENDIF
+C
+C- Récupération/Construction du chapeau de l'objet MATRIK
+C
+      TYPE = ' '
+      CALL ACMO(MTABX,'MATELM',TYPE,MATRIK)
+      IF (TYPE.EQ.'MATRIK'.AND.KMACO.NE.0) THEN
+         SEGACT MATRIK
+         NMATRI = IRIGEL(/2)
+         MELEME = IRIGEL(1,1)
+         SEGACT MELEME
+         IMATRI = IRIGEL(4,1)
+         SEGACT IMATRI
+         NBME   = LIZAFM(/2)
+         NINKO  = NBME
+         NBSOUS = LIZAFM(/1)
+         MELEM1 = KSPGP
+      ELSE
+         NRIGE  = 7
+         NKID   = 9
+         NKMT   = 7
+         NMATRI = 1
+         SEGINI MATRIK
+         IRIGEL(1,1) = MELEME
+         IRIGEL(2,1) = MELEME
+
+         IF (KFORM.EQ.0.OR.KFORM.EQ.2) THEN
+C                 EFM1  ou    VF  -> Diagonale
+            IRIGEL(7,1) = 5
+         ELSEIF (KFORM.EQ.1) THEN
+C                 EF  matrice pleine  sym si centree non sinon
+            IF (IDCENV.EQ.1) THEN
+               IRIGEL(7,1) = 0
+            ELSE
+               IRIGEL(7,1) = 2
+            ENDIF
+         ELSEIF (KFORM.EQ.3) THEN
+            IF(KPOIND.EQ.2.OR.KPOIND.EQ.3)THEN
+               IRIGEL(7,1) = 5
+            ELSEIF(KPOIND.EQ.4)THEN
+               IRIGEL(7,1) = 0
+            ENDIF
+         ENDIF
+
+         NBME = NINKO
+         SEGACT MELEME
+         NBSOUS = LISOUS(/1)
+         IF (NBSOUS.EQ.0) NBSOUS=1
+         SEGINI IMATRI
+         IRIGEL(4,1) = IMATRI
+         KSPGP = MELEM1
+         KSPGD = MELEM1
+         IF (NBME.EQ.1) THEN
+            LISPRI(1) = NOMI(1:4)//'    '
+            LISDUA(1) = NOMI(1:4)//'    '
+         ELSE
+            DO 10 I=1,NBME
+               WRITE(NOM,FMT='(I1,A7)')I,NOMI(1:7)
+               LISPRI(I) = NOM(1:4)//'    '
+               LISDUA(I) = NOM(1:4)//'    '
+ 10         CONTINUE
+         ENDIF
+      ENDIF
+C
+C- Construction des segments IZAFM contenant les matrices élémentaires
+C
+      IF (KMACO.NE.2) THEN
+         DO 30 L=1,NBSOUS
+            IPT1 = MELEME
+            IF (NBSOUS.NE.1) IPT1=LISOUS(L)
+            SEGACT IPT1
+            NP   = IPT1.NUM(/1)
+            MP   = NP
+            NBEL = IPT1.NUM(/2)
+            SEGDES IPT1
+            DO 20 I=1,NBME
+               SEGINI IZAFM
+               LIZAFM(L,I) = IZAFM
+  20        CONTINUE
+  30     CONTINUE
+      ENDIF
+C
+C---------------------
+C Calcul des matrices
+C---------------------
+C
+      IF (KMACO.NE.2) THEN
+C
+C--------------------------------------------------
+C-- Cas ou l'inconnue est au SOMMET (EF ou EFM1) --
+C--------------------------------------------------
+C
+       IF (KPOIND.EQ.0) THEN
+          K0 = 0
+          IF (KFORM.EQ.0) THEN
+             MELEME = MELEMZ
+             SEGACT MELEME
+             NBSOUS = LISOUS(/1)
+             IF (NBSOUS.EQ.0) NBSOUS=1
+          ENDIF
+          DO 140 L=1,NBSOUS
+             IPT1 = MELEME
+             IF (NBSOUS.NE.1) IPT1=LISOUS(L)
+             SEGACT IPT1
+             NP   = IPT1.NUM(/1)
+             NBEL = IPT1.NUM(/2)
+             NOM0 = NOMS(IPT1.ITYPEL)//'    '
+             CALL KALPBG(NOM0,'FONFORM ',IZFFM)
+             IF (IZFFM.EQ.0) THEN
+C Echec lors de la lecture des fonctions de forme d'un élément
+                CALL ERREUR(662)
+                RETURN
+             ENDIF
+             SEGACT IZFFM
+             IZHR = KZHR(1)
+             SEGACT IZHR*MOD
+             NPG  = GR(/3)
+             NES  = GR(/1)
+C
+C- Traitement des éléments par paquets de LRV éléments
+C
+             NNN  = MOD(NBEL,LRV)
+             IF (NNN.EQ.0) THEN
+                NPACK = NBEL / LRV
+             ELSE
+                NPACK = 1 + (NBEL-NNN)/LRV
+             ENDIF
+             KPACKD = 1
+             KPACKF = NPACK
+             DO 130 KPACK=KPACKD,KPACKF
+                KDEB = 1 + (KPACK-1)*LRV
+                KFIN = MIN(NBEL,KDEB+LRV-1)
+C
+C- Réduction des coefficients sur les éléments du paquet
+C
+                DO 40 K=KDEB,KFIN
+                   KP  = K - KDEB + 1
+                   NK  = K + K0
+                   NKR = (1-IK1)*(NK-1) + 1
+                   NKM = (1-IKMU)*(NK-1) + 1
+                   COEFK(KP) = IZRO.VPOCHA(NKR,1)/DTR
+              ANUK(KP)  = MZMU.VPOCHA(NKM,1)/(IZRO.VPOCHA(NKR,1)+XPETIT)
+                   AL(KP)    = IZTCO.VPOCHA(NK,1)
+                   AH(KP)    = IZTCO.VPOCHA(NK,2)
+                   IF (IDIM.EQ.3) AP(KP)=IZTCO.VPOCHA(NK,3)
+  40            CONTINUE
+                DO 120 N=1,NBME
+C
+C- Récupération de la fonction de projection suivant IDCEN
+C
+             CALL KSUPG(FN,GR,PG,XYZ,HR,PGSQ,RPG,
+     &            NES,NP,NPG,IAXI,XCOOR,
+     &            WT,WS,HK,PGSK,RPGK,AIRE,
+     &            UMJ,DUMJ,KDEB,KFIN,LRV,NPX,NPGX,
+     &            IZTU1.VPOCHA(1,N),MLENT1.LECT,MZUN.VPOCHA,IPADU.LECT,
+     &            NPTU,NELZ,ANUK,
+     &            IDCENV,IPT1.NUM,
+     &            AL,AH,AP,
+     &            DTM1,DTX,DTT1,DTT2,DIAEL,NUEL)
+C
+C- Matrice masse consistante
+C
+                   IF (KFORM.EQ.1) THEN
+                      IZAFM = LIZAFM(L,N)
+                      DO 80 K=KDEB,KFIN
+                         KP = K - KDEB + 1
+                         DO 70 I=1,NP
+                            DO 60 J=1,NP
+                               UU = 0.D0
+                               DO 50 LG=1,NPG
+                               UU=UU+FN(I,LG)*WT(KP,J,LG)*PGSK(KP,LG)
+  50                           CONTINUE
+                               AM(K,I,J)=UU*COEFK(KP)
+  60                        CONTINUE
+  70                     CONTINUE
+  80                  CONTINUE
+C
+C- Matrice masse condensée
+C
+                   ELSE
+                      IZAFM = LIZAFM(1,N)
+                      DO 110 K=KDEB,KFIN
+                         KP = K - KDEB + 1
+
+                         DO 100 J=1,NP
+                            UU = 0.D0
+                            DO 90 LG=1,NPG
+                               UU = UU + WT(KP,J,LG)*PGSK(KP,LG)
+  90                        CONTINUE
+
+                            KJ = MLENTI.LECT(IPT1.NUM(J,K))
+                            AM(KJ,1,1)=AM(KJ,1,1) + UU*COEFK(KP)
+ 100                   CONTINUE
+ 110                 CONTINUE
+                   ENDIF
+ 120            CONTINUE
+ 130         CONTINUE
+             K0 = K0 + NBEL
+ 140      CONTINUE
+C
+C--------------------------------------------------
+C-- Cas ou l'inconnue est au CENTRE (VF ou EFM1) --
+C--------------------------------------------------
+C
+       ELSEIF (KPOIND.EQ.2) THEN
+          DO 160 N=1,NBME
+             IZAFM = LIZAFM(1,N)
+             DO 150 I=1,NBEL
+                NKR = (1-IK1)*(I-1) + 1
+                AM(I,1,1) = VPOCHA(I,1) * IZRO.VPOCHA(NKR,1) / DTR
+ 150          CONTINUE
+ 160      CONTINUE
+C
+C------------------------------------------------------------
+C-- Cas ou l'inconnue est au CENTREP0 (EFMC MACRO ou QUAD) --
+C------------------------------------------------------------
+C
+       ELSEIF (KPOIND.EQ.3) THEN
+          DO 163 N=1,NBME
+             IZAFM = LIZAFM(1,N)
+             DO 153 I=1,NBEL
+                NKR = (1-IK1)*(I-1) + 1
+                AM(I,1,1) = VPOCHA(I,1) * IZRO.VPOCHA(NKR,1) / DTR
+ 153          CONTINUE
+ 163      CONTINUE
+C
+C------------------------------------------------------------
+C-- Cas ou l'inconnue est au CENTREP1 (EFMC MACRO ou QUAD) --
+C------------------------------------------------------------
+C
+       ELSEIF (KPOIND.EQ.4) THEN
+
+          DO 164 N=1,NBME
+             IZAFM = LIZAFM(1,N)
+
+          SEGACT MELEMO
+          NBSOUS=MELEMO.LISOUS(/1)
+          IF(NBSOUS.EQ.0)NBSOUS=1
+          DO 164 LS=1,NBSOUS
+          IPT1=MELEMO
+          IF(NBSOUS.NE.1)IPT1=MELEMO.LISOUS(LS)
+          SEGACT IPT1
+          NP1=IPT1.NUM(/1)
+          NBEL1=IPT1.NUM(/2)
+          IF(MQUAD.NE.0)THEN
+          WRITE(NOM0,FMT='(A8)')NOMS(IPT1.ITYPEL)//'PRP1'
+          ELSEIF(MACRO.NE.0)THEN
+          WRITE(NOM0,FMT='(A8)')NOMS(IPT1.ITYPEL)//'MCP1'
+          ENDIF
+          CALL KALPBG(NOM0,'FONFORM ',IZFFM)
+
+          SEGACT IZFFM*MOD
+          IZHR=KZHR(1)
+          SEGACT IZHR*MOD
+          NES=GR(/1)
+          NPG=GR(/3)
+          IZF1=KTP(1)
+          SEGACT IZF1*MOD
+          MP=IZF1.FN(/1)
+
+          NKR=1
+
+          DO 164 K=1,NBEL
+
+          DO 159 I1=1,NP1
+          J1=IPT1.NUM(I1,K)
+          DO 159 ND=1,IDIM
+          XYZ(ND,I1)=XCOOR((J1-1)*(IDIM+1)+ND)
+ 159      CONTINUE
+          CALL CALJBC(FN,GR,PG,XYZ,HR,PGSQ,RPG,NES,
+     &    IDIM,NP1,NPG,IAXI,AIRE)
+
+          DO 154 I=1,MP
+          DO 155 J=1,MP
+          U=0.D0
+          DO 157 L=1,NPG
+          U=U+IZF1.FN(I,L)*IZF1.FN(J,L)*PGSQ(L)
+ 157      CONTINUE
+          AM(K,I,J)=U*IZRO.VPOCHA(NKR,1) / DTR
+ 155      CONTINUE
+          NKR = NKR + (1-IK1)
+ 154      CONTINUE
+ 164      CONTINUE
+       ENDIF
+      ENDIF
+C
+C--------------------------
+C Création du second-membre
+C--------------------------
+C Saturation de la matrice calculée ci-dessus par l'inconnue
+C au pas de temps précédent
+C
+C
+C- Construction du chapeau de l'objet CHAMPOIN qui contiendra le RHS
+C
+      NAT    = 2
+      NSOUPO = 1
+      SEGINI MCHPO1
+      MCHPO1.IFOPOI    = IFOMOD
+      MCHPO1.MOCHDE    = TITREE
+      MCHPO1.MTYPOI    = 'SMBR'
+      MCHPO1.JATTRI(1) = 2
+      NC     = NINKO
+      SEGINI MSOUP1
+      MCHPO1.IPCHP(1)  = MSOUP1
+      DO 170 N=1,NINKO
+      MSOUP1.NOCOMP(N) = LISDUA(N)(1:4)
+ 170  CONTINUE
+      MSOUP1.IGEOC  = MELEM1
+      SEGACT MELEM1
+      N = MELEM1.NUM(/2)
+      SEGINI MPOVA1
+      MSOUP1.IPOVAL = MPOVA1
+      SEGACT MELEM1
+      NBSOUS = LIZAFM(/1)
+C
+      MELEME = IRIGEL(1,1)
+      DO 220 L=1,NBSOUS
+         IPT1 = MELEME
+         IF (NBSOUS.NE.1) IPT1=LISOUS(L)
+         SEGACT IPT1
+         NP   = IPT1.NUM(/1)
+         NBEL = IPT1.NUM(/2)
+         DO 210 N=1,NINKO
+            IZAFM = LIZAFM(L,N)
+            SEGACT IZAFM
+            DO 200 K=1,NBEL
+               DO 190 J=1,NP
+                  UU = 0.D0
+                  IU = LECT(IPT1.NUM(J,K))
+                  DO 180 I=1,NP
+                     IK = MLENT1.LECT(IPT1.NUM(I,K))
+                     UU = UU + AM(K,I,J)*IZTGG2.VPOCHA(IK,N)
+ 180              CONTINUE
+                  MPOVA1.VPOCHA(IU,N) = MPOVA1.VPOCHA(IU,N) + UU
+ 190           CONTINUE
+ 200        CONTINUE
+ 210     CONTINUE
+ 220  CONTINUE
+C
+C- Sauvegarde de l'objet MATRIK à l'indice MATELM de la table KIZX et du
+C- second-membre à l'indice SMBR de la table EQEX (assemblage éventuel)
+C
+        CALL ECMO(MTABX,'MATELM','MATRIK',MATRIK)
+        TYPE = ' '
+        CALL ACMO(MTAB1,'SMBR',TYPE,MCHPO2)
+        IF (TYPE.NE.'CHPOINT ') THEN
+           CALL ECMO(MTAB1,'SMBR','CHPOINT ',MCHPO1)
+        ELSE
+           CALL ECROBJ('CHPOINT ',MCHPO2)
+           CALL ECROBJ('CHPOINT ',MCHPO1)
+           CALL PRFUSE
+           CALL LIROBJ('CHPOINT ',MCHPOI,1,IRET)
+           CALL ECMO(MTAB1,'SMBR','CHPOINT ',MCHPOI)
+        ENDIF
+
+C
+C- Désactivation et ménage
+C
+      SEGDES MCHPO1,MSOUP1,MPOVA1
+      SEGDES IZTGG2
+      SEGDES IMATRI,MATRIK*NOMOD
+      IF (IK1DETR.EQ.1) SEGSUP IZRO
+      IF (IKMUDETR.EQ.1) SEGSUP MZMU
+
+      IF(IPADS.NE.MLENT1)SEGSUP IPADS
+      IF(MLENTI.NE.MLENT1)SEGSUP MLENTI
+      SEGSUP MLENT1
+
+      RETURN
+ 1002 FORMAT(10(1X,1PE11.4))
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

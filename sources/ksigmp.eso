@@ -1,0 +1,1452 @@
+C KSIGMP    SOURCE    CB215821  18/09/21    21:16:06     9930
+
+      SUBROUTINE KSIGMP(IPMODL,IPCHE1,IPCHE2,IFLAM, IPRIGG)
+
+c_______________________________________________________________________
+c
+c
+c     construction de la matrice de raideur geometrique a partir d'un
+c     mchaml de contraintes
+c
+c     entr{es:
+c     ________
+c
+c       ipmodl  pointeur sur un mmodel
+c       ipche1  pointeur sur un mchaml de contraintes
+c       ipche2  pointeur sur un mchaml de caracteristiques
+c       iflam   flag de flambage
+c
+c     sorties:
+c     ________
+c
+c       iprigg  pointeur sur un objet rigidite
+c               = 0 en cas d'erreur
+c_______________________________________________________________________
+c
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCHAMP
+-INC CCREEL
+
+-INC SMCHAML
+-INC SMCOORD
+-INC SMELEME
+-INC SMINTE
+-INC SMMODEL
+-INC SMRIGID
+C
+      INTEGER oooval
+
+      SEGMENT NOTYPE
+        CHARACTER*16 TYPE(NBTYPE)
+      ENDSEGMENT
+C
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS)    ,NSOF(NS)
+        INTEGER      IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+c
+      SEGMENT MWRK1
+        REAL*8 REL(LRE,LRE) ,XE(3,NBBB) ,XSTRS(NSTRS)
+      ENDSEGMENT
+C
+      SEGMENT MWRK2
+        REAL*8 SHPWRK(6,NBNO) ,BGENE(NSTRS,LRE)
+      ENDSEGMENT
+C
+      SEGMENT MWRK3
+        REAL*8 WORK(LW)
+      ENDSEGMENT
+C
+      SEGMENT MWRK4
+        REAL*8 BPSS(3,3) ,XEL(3,NBBB)
+      ENDSEGMENT
+C
+      SEGMENT MWRK5
+        REAL*8 GEOM(20), tabw(6,9), tabrot(4,9), XX(3), YY(3)
+      ENDSEGMENT
+C
+C   segment pour shb8
+      SEGMENT MWRK7
+        REAL*8 PROPEL(1),out(1),d(1), work1(30)
+      ENDSEGMENT
+C
+      character*6 msorse
+      CHARACTER*8 CMATE
+      CHARACTER*(NCONCH) CONM
+      PARAMETER ( NINF=3 )
+      INTEGER INFOS(NINF)
+      LOGICAL lsupfo,lsupde,lsupco
+      INTEGER ISUP1,ISUP2
+
+      ISUP1 = 0
+      ISUP2 = 0
+
+      IPRIGG = 0
+
+      IDIMP1 = IDIM+1
+C
+C      verification du lieu support du mchaml de contraintes
+C
+      CALL QUESUP(IPMODL,IPCHE1,3,0,ISUP1,IRET1C)
+      IF (ISUP1.GT.1) RETURN
+C
+C      verification du lieu support du mchaml de caracteristiques
+C
+      IF (IPCHE2.NE.0) THEN
+        CALL QUESUP(IPMODL,IPCHE2,3,0,ISUP2,iret2c)
+        IF (ISUP2.GT.1) RETURN
+      ENDIF
+c
+c_______________________________________________________________________
+c
+c     initialisation du chapeau de l objet rigidite
+c_______________________________________________________________________
+c
+      NRIGEL = 0
+      SEGINI,MRIGID
+      IFORIG = IFOMOD
+c*    IFORIG = IFOUR
+      ICHOLE = 0
+      IMGEO1 = 0
+      IMGEO2 = 0
+      ISUPEQ = 0
+      IF (IFLAM.NE.0) THEN
+        MTYMAT = 'MASSE'
+      ELSE
+        MTYMAT = 'RIGIDITE'
+      ENDIF
+c
+c_______________________________________________________________________
+c
+c     activation du modele
+c_______________________________________________________________________
+c
+      MMODEL = IPMODL
+      SEGACT,MMODEL
+      NSOUS = KMODEL(/1)
+c
+c      boucle sur les modeles elementaires
+c
+      DO 500 ISOUS = 1,NSOUS
+c
+c     traitement du modele
+c
+        IMODEL = KMODEL(ISOUS)
+        IF (FORMOD(1).EQ.'CHARGEMENT') GOTO 500
+        SEGACT,IMODEL
+C
+C     INITIALISATIONS
+C
+        IPMINT = 0
+        IPMIN1 = 0
+
+        MOSTRS = 0
+        MOCARA = 0
+        MOTYPS = 0
+        MOTYPC = 0
+
+        MODEPL = 0
+        MOFORC = 0
+        lsupde = .false.
+        lsupfo = .false.
+        lsupco = .false.
+
+        IDESCR = 0
+
+C- Recuperation d'informations sur le maillage elementaire
+        IPT1 = IMAMOD
+        SEGACT,IPT1
+        NBNOE1 = IPT1.NUM(/1)
+        NBELE1 = IPT1.NUM(/2)
+
+C- Quelques informations sur le modele
+        IIPDPG = imodel.IPDPGE
+        IIPDPG = IPTPOI(IIPDPG)
+
+        CONM  = CONMOD
+        CMATE = CMATEE
+        MATE  = IMATEE
+c*        INAT  = INATUU
+
+        IRTD = 1
+        CALL IDENT(IPT1,CONM,IPCHE1,IPCHE2, INFOS,IRTD)
+        IF (IRTD.EQ.0) GOTO 599
+C
+C- Recuperation d'informations sur l'element fini
+        MELE  = NEFMOD
+c  pour l'el. timo on utilise l'el. barr
+c         IF (MELE .EQ. 84) MELE = 46
+c  bp: comme il n y a plus elquoi, ce n'est pas ici que ca intervient...
+
+c   coque integree ou pas ?
+        IF (INFMOD(/1).NE.0)THEN
+          NPINT = INFMOD(1)
+          IF (NPINT.NE.0) THEN
+            CALL ERREUR(615)
+            GOTO 599
+          ENDIF
+        ELSE
+          NPINT = 0
+        ENDIF
+
+        LHOOK = INFELE(10)
+c*        LHOO2 = LHOOK*LHOOK
+        NSTRS = INFELE(16)
+        MFR   = INFELE(13)
+        LW    = INFELE(7)
+        NDDL  = INFELE(15)
+        LRE   = INFELE(9)
+        IPORE = INFELE(8)
+        NHRM  = NIFOUR
+
+        IPPORE = 0
+        IF (MFR.EQ.33) IPPORE = NBNOE1
+
+c_______________________________________________________________________
+C   segments d'integration     *
+c_______________________________________________________________________
+C  minte : 1er  segment d'integration, il existe pour tous les e.f.
+C  minte1: 2eme segment d'integration, uniquement pour certains e.f.
+C          en particulier pour coq6 et coq8
+C  nbpg:nb de points de gauss = nbpgau du segment minte
+C  iele:no d'element geometrique associe a l'e.f. mele
+C  nbff:nb de fonctions de forme = nbno du segment minte
+        NBPGAU = INFELE(  6)
+        IELE   = INFELE( 14)
+c*        ICARA  = INFELE(  5)
+        IPMINT = INFMOD(5)
+c*        IPMINT  = INFELE(11)
+        IPMIN1 = INFMOD(8)
+        MINTE = IPMINT
+        IF (IPMINT.NE.0) SEGACT,MINTE
+
+c_______________________________________________________________________
+c
+C  initialisation du segment descr, segment descripteur des *
+C  des inconnues relatives a la matrice de rigidite         *
+c_______________________________________________________________________
+        if (lnomid(1).ne.0) then
+          MODEPL = lnomid(1)
+        else
+          lsupde = .true.
+          CALL IDPRIM(IMODEL,MFR,MODEPL,NDEPL,NDUM)
+        endif
+        nomid = MODEPL
+        segact,nomid
+        ndepl = lesobl(/2)
+c*        ndum  = lesfac(/2)
+
+        if (lnomid(2).ne.0) then
+          moforc = lnomid(2)
+        else
+          lsupfo=.true.
+          CALL IDDUAL(IMODEL,MFR,MOFORC,NFORC,NDUM)
+        endif
+        nomid = MOFORC
+        segact,nomid
+        nforc = lesobl(/2)
+c*        ndum  = lesfac(/2)
+C
+        IF (NDEPL.EQ.0.OR.NFORC.EQ.0.OR.NDEPL.NE.NFORC) THEN
+          CALL ERREUR(5)
+          GOTO 598
+        ENDIF
+C
+C   REMPLISSAGE DU SEGMENT DESCRIPTEUR
+C
+        NLIGRP = LRE
+        NLIGRD = LRE
+
+        SEGINI DESCR
+c
+        NCOMP=NDEPL
+        NBNNS=NBNOE1
+        IF (MFR.EQ.33) NCOMP=NDEPL-1
+        IF (MFR.EQ.19.OR.MFR.EQ.21) NBNNS = NBNOE1/2
+        IDDL = 1
+        DO 1004 INOEUD=1,NBNNS
+          DO 1005 ICOMP=1,NCOMP
+            NOMID=MODEPL
+            LISINC(IDDL)=LESOBL(ICOMP)
+            NOMID=MOFORC
+            LISDUA(IDDL)=LESOBL(ICOMP)
+            NOELEP(IDDL)=INOEUD
+            NOELED(IDDL)=INOEUD
+            IDDL=IDDL+1
+ 1005     CONTINUE
+ 1004   CONTINUE
+C
+C           cas des milieux poreux
+C
+C         if (mfr.eq.33) then
+C           ipos = nspos(iele)
+C           do 1104 inoeud=1,nbsom(iele)
+C             nomid=modepl
+C             lisinc(iddl)=lesobl(ndepl)
+C             nomid=moforc
+C             lisdua(iddl)=lesobl(ndepl)
+C             i = ibsom(ipos+inoeud-1)
+C             noelep(iddl)=i
+C             noeled(iddl)=i
+C             iddl=iddl+1
+C 1104      continue
+C         endif
+C
+C           cas des element raccord
+C
+        IF (MFR.EQ.19.OR.MFR.EQ.21) THEN
+          CALL IDPRIM(IMODEL,MFR+1000,MODPL1,NDEPL,NDUM)
+          CALL IDDUAL(IMODEL,MFR+1000,MOFRC1,NFORC,NDUM)
+          DO 1106 INOEUD=NBNNS+1,NBNOE1
+            DO 1107 ICOMP=1,NDEPL
+              NOMID=MODPL1
+              LISINC(IDDL)=LESOBL(ICOMP)
+              NOMID=MOFRC1
+              LISDUA(IDDL)=LESOBL(ICOMP)
+              NOELEP(IDDL)=INOEUD
+              NOELED(IDDL)=INOEUD
+              IDDL=IDDL+1
+1107        continue
+1106      continue
+          NOMID=MODPL1
+          SEGSUP,NOMID
+          NOMID=MOFRC1
+          SEGSUP,NOMID
+        ENDIF
+
+        SEGDES,DESCR
+        IDESCR = DESCR
+c_______________________________________________________________________
+c
+C  composantes de contraintes necessaires                      *
+c_______________________________________________________________________
+        if (lnomid(4).ne.0) then
+          MOSTRS = lnomid(4)
+        else
+          lsupco=.true.
+          CALL IDCONT(IMODEL,IFOUR,MOSTRS,NSTR,NFAC)
+        endif
+        nomid = MOSTRS
+        segact,nomid
+        nstr=lesobl(/2)
+c*        nfac=lesfac(/2)
+c*        write(6,*) 'mostrts',mostrs,nstr,nfac
+        nbtype = 1
+        SEGINI,notype
+        TYPE(1)='REAL*8'
+        MOTYPS = notype
+
+        ifai = 1
+        if (mele.eq.260.and.IRET1C.eq.5) ifai = 0
+        ISUP1L = 0
+        IF (ISUP1.EQ.1.AND.ifai.eq.1) ISUP1L = 1
+
+c____________________________________________________________________
+c
+C  traitement des champs de caracteristiques                   *
+c____________________________________________________________________
+        NBROBL = 0
+        NBRFAC = 0
+        IVECT  = 0
+        notype = 0
+        nomid  = 0
+C
+C       v1x v1y dans le cas de la coque dst orthotrope
+C
+        IF (MFR.EQ.9) THEN
+          IF (MELE.EQ.93.AND.CMATE.NE.'ISOTROPE')THEN
+            NBROBL=2
+            SEGINI NOMID
+            LESOBL(1)='V1X '
+            LESOBL(2)='V1Y '
+C
+            NBTYPE=1
+            SEGINI NOTYPE
+            TYPE(1)='REAL*8'
+          ENDIF
+C
+C  epaisseur dans le cas massif et coq2 en contraintes planes
+C
+        ELSE IF ( (MFR.EQ.1.OR.MFR.EQ.3.OR.MFR.EQ.31) .AND.
+     +            IFOUR.EQ.-2 .AND. IPCHE2.NE.0) THEN
+          NBRFAC=1
+          SEGINI NOMID
+          LESFAC(1)='DIM3'
+C
+          NBTYPE=1
+          SEGINI NOTYPE
+          TYPE(1)='REAL*8'
+C
+C  epaisseur et excentrement dans le cas des coques epaisses
+C
+        ELSE IF (MFR.EQ.5 .OR. (MFR.EQ.3.AND.IFOUR.NE.-2)) THEN
+          NBROBL=1
+          NBRFAC=1
+          SEGINI NOMID
+          LESOBL(1)='EPAI'
+          LESFAC(1)='EXCE'
+
+          NBTYPE=1
+          SEGINI NOTYPE
+          TYPE(1)='REAL*8'
+C
+C  caracteristiques pour les poutres
+C
+        ELSE IF (MFR.EQ.7 ) THEN
+          IF (IFOUR.EQ.-2.OR.IFOUR.EQ.-1.OR.IFOUR.EQ.-3) THEN
+            NBROBL=2
+            NBRFAC=1
+            SEGINI NOMID
+            LESOBL(1)='SECT'
+            LESOBL(2)='INRZ'
+            LESFAC(1)='SECY'
+C
+            NBTYPE=1
+            SEGINI NOTYPE
+            TYPE(1)='REAL*8'
+          ELSE
+            NBROBL=4
+            NBRFAC=6
+            IVECT =1
+            SEGINI NOMID
+            LESOBL(1)='TORS'
+            LESOBL(2)='INRY'
+            LESOBL(3)='INRZ'
+            LESOBL(4)='SECT'
+            LESFAC(1)='SECY'
+            LESFAC(2)='SECZ'
+            LESFAC(3)='VECT'
+            LESFAC(4)='VX  '
+            LESFAC(5)='VY  '
+            LESFAC(6)='VZ  '
+C
+            NBTYPE=10
+            SEGINI NOTYPE
+            TYPE(1)='REAL*8'
+            TYPE(2)='REAL*8'
+            TYPE(3)='REAL*8'
+            TYPE(4)='REAL*8'
+            TYPE(5)='REAL*8'
+            TYPE(6)='REAL*8'
+            TYPE(7)='POINTEURPOINT   '
+            TYPE(8)='REAL*8'
+            TYPE(9)='REAL*8'
+            TYPE(10)='REAL*8'
+          ENDIF
+C
+C  caracteristiques pour les tuyaux
+C
+        ELSE IF (MFR.EQ.13) THEN
+          NBROBL = 2
+          NBRFAC = 6
+          IVECT  = 1
+          SEGINI NOMID
+          LESOBL(1)='EPAI'
+          LESOBL(2)='RAYO'
+          LESFAC(1)='RACO'
+          LESFAC(2)='CISA'
+          LESFAC(3)='VECT'
+          LESFAC(4)='VX  '
+          LESFAC(5)='VY  '
+          LESFAC(6)='VZ  '
+C
+          NBTYPE = 8
+          SEGINI NOTYPE
+          TYPE(1)='REAL*8'
+          TYPE(2)='REAL*8'
+          TYPE(3)='REAL*8'
+          TYPE(4)='REAL*8'
+          TYPE(5)='POINTEURPOINT   '
+          TYPE(6)='REAL*8'
+          TYPE(7)='REAL*8'
+          TYPE(8)='REAL*8'
+        ENDIF
+C
+        MOCARA = NOMID
+        MOTYPC = NOTYPE
+        NCARA = NBROBL
+        NCARF = NBRFAC
+        NCARR = NCARA+NCARF
+
+        IF (MOCARA.NE.0 .AND. IPCHE2.EQ.0) THEN
+          MOTERR(1:8)  = 'CARACTER'
+          MOTERR(9:12) = NOMTP(MELE)
+          MOTERR(13:20)= 'KSIGMA'
+          CALL ERREUR(145)
+          GOTO 598
+        ENDIF
+
+        ifai = 1
+        IF (mele.EQ.260) ifai = 0
+        ISUP2L = 0
+        IF (ISUP2.EQ.1.AND.ifai.eq.1) ISUP2L = 1
+
+C- Partionnement si necessaire de la matrice de capacite
+C- determinant ainsi le nombre d'objets elementaires de MRIGID
+        LTRK = oooval(1,4)
+        IF (LTRK.EQ.0) LTRK = oooval(1,1)
+C  Ajout a la taille en mots de la matrice des infos du segment
+        LSEG = LRE*LRE*NBELE1 + 16
+        NBLPRT = (LSEG-1)/LTRK + 1
+        NBLMAX = (NBELE1-1)/NBLPRT + 1
+        NBLPRT = (NBELE1-1)/NBLMAX + 1
+C         write(ioimp,*) ' capa1 : nblprt nblmax = ',nblprt,nblmax,nbele1
+
+C Ajout de la matrice a la matrice globale
+C ========================================
+        NRIGE0 =  IRIGEL(/2)
+C         NRIGEL = NRIGE0 + NBLPRT
+C         SEGADJ,MRIGID
+
+        descr  = IDESCR
+        meleme = IPT1
+        NBNN   = NBNOE1
+        nbelem = NBELE1
+        nbsous = 0
+        nbref  = 0
+C
+C ***********************************************************************
+C                           P H A S E   2
+C
+C  Boucle sur les PARTITIONS elementaires de la matrice
+C
+C ***********************************************************************
+        DO irige = 1, NBLPRT
+
+          IF (NBLPRT.GT.1) THEN
+C- Partitionnement du maillage support de la matrice elementaire
+C- (IPT1 peut etre desactive suite a l'appel a KOMCHA !)
+            SEGACT,IPT1
+            ielem = (irige-1)*NBLMAX
+            nbelem = MIN(NBLMAX,NBELE1-ielem)
+C           write(ioimp,*) ' creation segment ',nbnn,nbelem
+            SEGINI,meleme
+            itypel = IPT1.itypel
+            DO ielt = 1, nbelem
+              jelt = ielt + ielem
+              DO inoe = 1, NBNN
+                num(inoe,ielt) = IPT1.NUM(inoe,jelt)
+              ENDDO
+              icolor(ielt) = IPT1.ICOLOR(jelt)
+            ENDDO
+C- Recopie du descripteur
+            des1 = IDESCR
+            SEGINI,descr=des1
+            SEGDES,descr
+          ENDIF
+
+          ipmail = meleme
+          ipdesc = descr
+
+C- Initialisation de la matrice de rigidite elementaire (xmatri)
+          NELRIG = nbelem
+          SEGINI,xmatri
+          ipmatr = xmatri
+
+C- Recuperation des valeurs des contraintes et proprietes geometriques
+          IVASTR = 0
+          IVACAR = 0
+          IVECTL = IVECT
+          NCARR1 = NCARR
+C
+          CALL KOMCHA(IPCHE1,ipmail,CONM,MOSTRS,MOTYPS,1,INFOS,3,IVASTR)
+          IF (IERR.NE.0) GOTO 597
+          IF (ISUP1L.EQ.1) THEN
+            CALL VALCHE(IVASTR,NSTR,IPMINT,IPPORE,MOSTRS,MELE)
+            IF (IERR.NE.0) THEN
+              ISUP1L = 0
+              GOTO 597
+            ENDIF
+          ENDIF
+
+          IF (MOCARA.NE.0)  THEN
+            CALL KOMCHA(IPCHE2,ipmail,CONM,MOCARA,MOTYPC,1,
+     &                  INFOS,3,IVACAR)
+            IF (IERR.NE.0) GOTO 597
+            IF (ISUP2L.EQ.1) THEN
+              CALL VALCHE(IVACAR,NCARR,IPMINT,IPPORE,MOCARA,MELE)
+              IF (IERR.NE.0) THEN
+                ISUP2L = 0
+                GOTO 597
+              ENDIF
+            ENDIF
+            IF (IVECT.EQ.1) THEN
+              MPTVAL = IVACAR
+              NCARR1 = NCARR - 3
+              IF (IVAL(NCARR1).EQ.0) IVECTL = 2
+            ENDIF
+          ENDIF
+
+c_______________________________________________________________________
+c
+c     numero des etiquettes      :
+c     etiquettes de 1 a 98 pour traitement specifique a l element
+c     dans la zone specifique a chaque element commencant par :
+c     5  continue
+c     element 5   etiquettes 1005 2005 3005 4005   ...
+c     44 continue
+c     element 44  etiquettes 1044 2044 3044 4044   ...
+c_______________________________________________________________________
+
+          IF (MELE.LE.100) THEN
+      GOTO (99,99,99, 4,99, 4,99, 4,99, 4,99,99,99, 4, 4, 4, 4,99,99,99,
+     1      99,99, 4, 4, 4, 4,27,28,29,99,99,99,99,99,99,99,99,99,99,99,
+     2      41,29,43,44,99,46,99,99,49,99,51,99,99,99,99,41,99,99,99,99,
+     3      99,99,99,99,99,99,99,99, 4, 4, 4, 4,99,99,99,99,99,99,99,99,
+     4      99,99,99,29,99,99,99,99,99,99,99,99,28,99,46,99,99,99,99,99
+     5     ),MELE
+          ELSE IF (MELE.LE.200) THEN
+      GOTO (99,99,99,99,99,99,99,99,99,99, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+     1       4, 4,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,
+     2      99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,
+     3      99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,
+     4      99,99, 4, 4,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99
+     5     ),MELE-100
+          ELSE IF (MELE.LE.300) THEN
+      GOTO (99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,
+     1      99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,
+     2      99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,
+     &      260,
+     3      99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,
+     4      99,99, 4, 4,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99
+     5     ),MELE-200
+          ENDIF
+c
+ 99       CONTINUE
+C           MOTERR(1:4)  = NOMTP(MELE)
+C           MOTERR(5:12) = 'KSIGMP  '
+C          CALL ERREUR(86)
+          GOTO 510
+c
+c_______________________________________________________________________
+c
+c     secteur de calcul pour les elements massifs
+c_______________________________________________________________________
+ 4        CONTINUE
+          NBNO = NBNN
+          NBBB = NBNN
+          SEGINI,MWRK1,MWRK2
+c   recuperation de l'epaisseur
+          DIM3 = 1.D0
+          MEPDI3 = 0
+c*         IF (IFOUR.EQ.-2.AND.IPCHE2.NE.0) THEN
+          IF (IVACAR.NE.0) THEN
+            MPTVAL = IVACAR
+            MEPDI3 = IVAL(1)
+          ENDIF
+
+          DO 3004 IB=1,NBELEM
+c
+c     on cherche  les coordonnees des noeuds de l element ib
+c
+            CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+            CALL ZERO(REL,LRE,LRE)
+c
+c     boucle sur les points de gauss
+c
+            ISDJC = 0
+            DO 4004 IGAU=1,NBPGAU
+c
+c   recuperation de l'epaisseur
+              IF (MEPDI3.NE.0) THEN
+                MELVAL = MEPDI3
+                IGMN=MIN(IGAU,VELCHE(/1))
+                IBMN=MIN(  IB,VELCHE(/2))
+                DIM3=VELCHE(IGMN,IBMN)
+              ENDIF
+c
+              DO 100 IA=1,NBNN
+                DO 100 IO=1,IDIMP1
+                  SHPWRK(IO,IA)=SHPTOT(IO,IA,IGAU)
+ 100          CONTINUE
+              CALL DEVOLU(XE,SHPWRK,MFR,NBNN,IFOUR,NIFOUR,IDIM,DIM3,
+     &                    RR,DJAC)
+c
+c     verification du signe du jacobien
+c
+              IF (DJAC.LT.0.) ISDJC=ISDJC+1
+              DJAC = ABS(DJAC)
+              IF (DJAC.LT.XPETIT) THEN
+                INTERR(1) = IB
+                CALL ERREUR(259)
+                GOTO 9004
+              ENDIF
+              DJAC = DJAC * POIGAU(IGAU)
+c
+c     on recupere les contraintes
+c
+              MPTVAL=IVASTR
+              DO 5004 ICOMP=1,NSTR
+                MELVAL=IVAL(ICOMP)
+                IGMN = MIN(IGAU,VELCHE(/1))
+                IBMN = MIN(IB  ,VELCHE(/2))
+                XSTRS(ICOMP)=VELCHE(IGMN,IBMN)
+ 5004         CONTINUE
+c
+              IF (IFOUR.EQ.1) THEN
+                IF (NIFOUR.EQ.0) THEN
+                  CALL THSIG1(SHPWRK,DJAC,XSTRS,NBNN,LRE,REL,RR)
+                ELSE
+                  CALL THSIG2(SHPWRK,DJAC,XSTRS,NBNN,LRE,REL,NIFOUR,RR)
+                ENDIF
+              ELSE IF (IFOUR.EQ.0) THEN
+                CALL THSIG3(SHPWRK,DJAC,XSTRS,NBNN,LRE,REL,RR)
+              ELSE
+                CALL THSIGH(SHPWRK,DJAC,XSTRS,NBNN,IDIM,LRE,REL)
+              ENDIF
+c
+ 4004       CONTINUE
+
+            IF (ISDJC.NE.0.AND.ISDJC.NE.NBPGAU) THEN
+              INTERR(1) = IB
+              CALL ERREUR(195)
+              GOTO 9004
+            ENDIF
+c
+c     remplissage de xmatri
+c
+            CALL REMPMT(REL,LRE,RE(1,1,ib))
+c
+ 3004     CONTINUE
+
+ 9004     CONTINUE
+          SEGSUP MWRK1,MWRK2
+          GOTO 510
+c
+c_______________________________________________________________________
+c
+ccccccccccccccccccc element coq3
+c_______________________________________________________________________
+ 27       CONTINUE
+          NBBB = NBNN
+          SEGINI,MWRK1,MWRK3,MWRK4
+
+          DO 3027 IB = 1, NBELEM
+c
+c     on cherche les coordonnees des noeuds de l element ib
+c
+            CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+c
+            CALL ZERO(REL,LRE,LRE)
+c
+c     on cherche les contraintes
+c
+            MPTVAL=IVASTR
+            DO 5027 ICOMP=1,NSTR
+              MELVAL=IVAL(ICOMP)
+              IBMN=MIN(IB  ,VELCHE(/2))
+              XSTRS(ICOMP)=VELCHE(1,IBMN)
+ 5027       CONTINUE
+c
+ccccccc   on calcule k(sigma)
+c
+            CALL COQ3KS(REL,XSTRS,XE,1.D0,WORK)
+c
+c     remplissage de xmatri
+c
+            CALL REMPMT(REL,LRE,RE(1,1,ib))
+
+ 3027     CONTINUE
+
+C 9027     CONTINUE
+          SEGSUP,MWRK1,MWRK3,MWRK4
+          GOTO 510
+c
+c_______________________________________________________________________
+c
+c     element dkt , dst
+c_______________________________________________________________________
+ 28       CONTINUE
+          DIM3 = 1.D0
+          NBNO = NBNN
+          IDI2=IDIM-1
+          NBBB=NBNN
+          SEGINI MWRK1,MWRK2,MWRK4,MWRK5
+          XX(1)=.5D0
+          XX(2)=.0D0
+          XX(3)=.5D0
+          YY(1)=.0D0
+          YY(2)=.5D0
+          YY(3)=.5D0
+C Pour la recuperation de l'epaisseur des elements DKT
+          IEPDKT = 0
+          IF (MFR.EQ.3 .AND. IFOUR.NE.-2) IEPDKT = IVACAR
+c*of 2011/06/22 : Quid de l'epaisseur pour les DST ????? EPAI = 0 ici !!
+C Pour la recuperation des axes d'orthotropie des elements DST
+          IAODST = 0
+          IF (MELE.EQ.93.AND.CMATE.NE.'ISOTROPE') IAODST = IVACAR
+
+          DO 3028  IB=1,NBELEM
+
+c     on cherche les coordonnees des noeuds de l element ib
+c
+            CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+
+            CALL ZERO(REL,LRE,LRE)
+            CALL VPAST(XE,BPSS)
+c     bpss    stocke la matrice de passage
+            CALL VCORLC (XE,XEL,BPSS)
+c
+c     boucle sur les points de gauss
+c
+            DO 4028 IGAU=1,NBPGAU
+c
+c   recuperation de l'epaisseur (element DKT)
+              IF (IEPDKT.NE.0) THEN
+                MPTVAL=IEPDKT
+                MELVAL=IVAL(1)
+                IGMN=MIN(IGAU,VELCHE(/1))
+                IBMN=MIN(IB,VELCHE(/2))
+                EPAI=VELCHE(IGMN,IBMN)
+              ELSE
+                EPAI = XZERO
+              ENDIF
+c
+              call DKTSHP(IGAU,XEL,tabw,DJAC)
+              call GEOCST(XEL,GEOM)
+              call BBGFDK(XX(IGAU),YY(IGAU),GEOM,tabrot)
+
+              DO 6028 IC=1,NBNN
+                DO 6028 ID=1,6
+                  SHPWRK(ID,IC)=SHPTOT(ID,IC,IGAU)
+ 6028         CONTINUE
+
+              CALL DEVOLU(XEL,SHPWRK,MFR,NBNN,IFOUR,NIFOUR,IDI2,DIM3,
+     &                    RR,DJAC)
+              DJAC=DJAC*POIGAU(IGAU)
+c
+c     on cherche les contraintes
+c
+              MPTVAL=IVASTR
+              DO 5028 ICOMP=1,NSTRS
+                MELVAL=IVAL(ICOMP)
+                IGMN=MIN(IGAU,VELCHE(/1))
+                IBMN=MIN(IB  ,VELCHE(/2))
+                XSTRS(ICOMP)=VELCHE(IGMN,IBMN)
+C                 write(6,*)' xstrs(icomp)',icomp,XSTRS(ICOMP)
+ 5028         CONTINUE
+
+C Recuperation des axes d'orthotropie (element DST)
+              IF (IAODST.NE.0) THEN
+                MPTVAL=IAODST
+                MELVAL=IVAL(1)
+                IBMN=MIN(IB  ,VELCHE(/2))
+                IGMN=MIN(IGAU,VELCHE(/1))
+                COSA=VELCHE(IGMN,IBMN)
+                MELVAL=IVAL(2)
+                IBMN=MIN(IB  ,VELCHE(/2))
+                IGMN=MIN(IGAU,VELCHE(/1))
+                SINA=VELCHE(IGMN,IBMN)
+                CC=COSA*COSA
+                SS=SINA*SINA
+                CS=SINA*COSA
+C
+C        chgt d'axes
+C
+                SIG1=CC*XSTRS(1)+SS*XSTRS(2)-2.D0*CS*XSTRS(3)
+                SIG2=CC*XSTRS(2)+SS*XSTRS(1)+2.D0*CS*XSTRS(3)
+                SIG3=CS*(XSTRS(1)-XSTRS(2))+(CC-SS)*XSTRS(3)
+                XSTRS(1)=SIG1
+                XSTRS(2)=SIG2
+                XSTRS(3)=SIG3
+              ENDIF
+c
+              CALL DKTHSH(SHPWRK,tabw,tabrot,DJAC,XSTRS,REL,EPAI)
+ 4028       CONTINUE
+
+            CALL TRANSK(REL,BPSS,LRE,3,1)
+c
+c     remplissage de xmatri
+c
+            CALL REMPMT(REL,LRE,RE(1,1,ib))
+c
+ 3028     CONTINUE
+
+C 9028     CONTINUE
+          SEGSUP,MWRK1,MWRK2,MWRK4,MWRK5
+          GOTO 510
+
+c_______________________________________________________________________
+c
+c  element poutre
+c_______________________________________________________________________
+ 29       CONTINUE
+          NBBB = NBNN
+          SEGINI,MWRK1,MWRK3
+
+          DO 3029 IB=1,NBELEM
+c
+c  on cherche les coordonnees des noeuds de l elementib
+c
+            CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+c
+c  il faudrait aussi modifier le vecteur local de la poutre
+c
+c  mise a zero de la raideur geometrique
+c
+            CALL ZERO(REL,LRE,LRE)
+c
+c     rangement des caracteristiques dans work
+c
+            MPTVAL=IVACAR
+            DO 6029 IC=1,NCARR
+              WORK(IC)=XZERO
+              IF (IVAL(IC).NE.0) THEN
+                MELVAL=IVAL(IC)
+                IBMN=MIN(IB,VELCHE(/2))
+                DO 4029 IGAU=1,NBNN
+                  IGMN=MIN(IGAU,VELCHE(/1))
+                  IF (IGMN.GT.0.AND.IBMN.GT.0) THEN
+                    WORK(IC)=WORK(IC)+VELCHE(IGMN,IBMN)
+                  ENDIF
+ 4029           CONTINUE
+                WORK(IC)=WORK(IC)/NBNN
+              ENDIF
+ 6029       CONTINUE
+c
+c  cas ou on a lu le mot vecteur
+c
+            IF (IVECTL.EQ.1) THEN
+              MELVAL=IVAL(NCARR1)
+              IBMN=MIN(IB,IELCHE(/2))
+              IREF=(IELCHE(1,IBMN)-1)*(IDIM+1)
+              DO 6129 IC=1,IDIM
+                WORK(NCARR1+IC-1) = XCOOR(IREF+IC)
+ 6129         CONTINUE
+c
+c  cas du chamelem comverti
+c
+            ELSE IF (IVECT.EQ.2) THEN
+              DO 6429 IC=NCARR1+1,NCARR1+IDIM
+                MELVAL=IVAL(IC)
+                IF (MELVAL.NE.0) THEN
+                  IBMN=MIN(IB,VELCHE(/2))
+                  WORK(IC)=VELCHE(1,IBMN)
+                ENDIF
+ 6429         CONTINUE
+            ENDIF
+c
+c  cas des tuyaux  -  on calcule les caracteristiques de la poutre
+c                     equivalente
+c
+            IF (MELE.EQ.42) THEN
+              CISA=WORK(4)
+              VX=WORK(5)
+              VY=WORK(6)
+              VZ=WORK(7)
+              CALL TUYCAR(WORK,CISA,VX,VY,VZ,KERRE,0)
+              IF (KERRE.EQ.77) THEN
+                CALL ERREUR(77)
+                GOTO 9029
+              ENDIF
+            ENDIF
+c
+c  on cherche les contraintes - on les met dans work
+c
+            IE = 9
+            MPTVAL=IVASTR
+            DO 7029 ID=1,2
+              ID2=ID
+              IF (NBPGAU.EQ.1.AND.ID.EQ.2) ID2=1
+              DO 7029 ICOMP=1,NSTR
+                IE = IE+1
+                MELVAL=IVAL(ICOMP)
+                IGMN=MIN(ID2 ,VELCHE(/1))
+                IBMN=MIN(IB  ,VELCHE(/2))
+                WORK(IE)=VELCHE(IGMN,IBMN)
+ 7029       CONTINUE
+c
+c  on calcule la rigidite geometrique
+c
+            IF (IFOUR.EQ.-2.OR.IFOUR.EQ.-1.OR.IFOUR.EQ.-3) THEN
+              CALL POUKS2(REL,LRE,WORK(10),WORK,XE,WORK(22),KERRE)
+            ELSE
+              CALL POUKSG(REL,LRE,WORK(10),WORK,XE,WORK(22),KERRE)
+            ENDIF
+
+            IF (KERRE.NE.0) THEN
+              INTERR(1)=ISOUS
+              INTERR(2)=IB
+              CALL ERREUR(128)
+              GOTO 9029
+            ENDIF
+c
+c  remplissage de xmatri
+c
+            CALL REMPMT(REL,LRE,RE(1,1,ib))
+C
+ 3029     CONTINUE
+c
+ 9029     CONTINUE
+          SEGSUP,MWRK1,MWRK3
+c
+          GOTO 510
+c_______________________________________________________________________
+c
+c  elements coq8 et coq6
+c_______________________________________________________________________
+ 41       CONTINUE
+          NBBB=NBNN
+          LRI =NBNN*5
+          SEGINI,MWRK1,MWRK3
+c
+          MINTE1 = IPMIN1
+          SEGACT,MINTE1
+c
+          DO 3041 IB=1,NBELEM
+c
+c  on cherche les coordonnees des noeuds de l elementib
+c
+            CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+
+            CALL ZERO(REL,LRE,LRE)
+c
+c  on cherche les caracteristiques de l element ib
+c
+            MPTVAL = IVACAR
+            MELVAL = IVAL(1)
+            IF (MELVAL.NE.0) THEN
+              IBMN = MIN(IB  ,VELCHE(/2))
+              DO IGAU = 1, NBNN
+                IGMN = MIN(IGAU,VELCHE(/1))
+                WORK(IGAU) = VELCHE(IGMN,IBMN)
+              ENDDO
+            ELSE
+              DO IGAU = 1, NBNN
+                WORK(IGAU)=XZERO
+              ENDDO
+            ENDIF
+c
+c  on cherche les contraintes - on les met dans work
+c
+            IE = 9
+            MPTVAL=IVASTR
+            DO 7041 IGAU=1,NBPGAU
+              DO 7041 ICOMP=1,NSTRS
+                MELVAL=IVAL(ICOMP)
+                IGMN=MIN(IGAU,VELCHE(/1))
+                IBMN=MIN(IB  ,VELCHE(/2))
+                WORK(IE)=VELCHE(IGMN,IBMN)
+                IE=IE+1
+ 7041       CONTINUE
+c
+c  on calcule la rigidite geometrique
+c
+            CALL COQ8KS(REL,XE,SHPTOT,MINTE1.SHPTOT,
+     &                  NBPGAU,POIGAU,DZEGAU,
+     &                  WORK(1),WORK(9),NBNN,LRE,LRI,WORK(51))
+c
+c  remplissage de xmatri
+c
+            CALL REMPMT(REL,LRE,RE(1,1,ib))
+C
+ 3041     CONTINUE
+
+C 9041     CONTINUE
+          SEGDES,MINTE1
+          SEGSUP,MWRK1,MWRK3
+          GO TO 510
+c_______________________________________________________________________
+c
+c     tuyau fissure
+c_______________________________________________________________________
+ 43       CONTINUE
+c     ksigma n a pas de sens evident pour cet element
+c     on cree une matrice nulle
+c          DO 3043 IB=1,NBELEM
+c            do 4043 ic=1,lval
+c              re(ic,ic,ib)=XZERO
+c 4043       continue
+c 3043     CONTINUE
+          GOTO 510
+c
+c_______________________________________________________________________
+c
+c     element coq2
+c_______________________________________________________________________
+c
+ 44       CONTINUE
+          DIM3=1.D0
+          NBBB=NBNN
+          SEGINI MWRK1,MWRK3,MWRK4
+c
+          DO 3044 IB=1,NBELEM
+c
+c     on cherche les coordonnees des noeuds de  l element ib
+c
+            CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+
+            CALL ZERO(REL,LRE,LRE)
+c
+c   recuperation de l'epaisseur
+c
+            IF (IFOUR.EQ.-2.AND.IPCHE2.NE.0) THEN
+              MPTVAL=IVACAR
+              MELVAL=IVAL(1)
+              IF (MELVAL.NE.0) THEN
+                IBMN=MIN(IB,VELCHE(/2))
+                DIM3=VELCHE(1,IBMN)
+              ELSE
+                DIM3 = 1.D0
+              ENDIF
+            ENDIF
+c
+c     on cherche les contraintes on les met dans work...
+c
+            JC = 0
+            MPTVAL=IVASTR
+            DO 5044 IGAU=1,NBPGAU
+              DO 5044 ICOMP=1,NSTRS
+                MELVAL=IVAL(ICOMP)
+                IGMN=MIN(IGAU,VELCHE(/1))
+                IBMN=MIN(IB  ,VELCHE(/2))
+                JC=JC+1
+                WORK(JC)=VELCHE(IGMN,IBMN)
+ 5044       CONTINUE
+c
+c     appel a coque2 ksigma...
+c
+            AN=NHRM
+            CALL CQ2KSG(XE,1.D0,DIM3,IFOUR,AN,NBPGAU,WORK(1),WORK(19),
+     1                  WORK(22),QSIGAU,POIGAU,WORK(25),WORK(30),
+     2                  WORK(35),WORK(42),WORK(49),WORK(113),WORK(177),
+     3                  WORK(241),WORK(305),LRE,REL)
+c
+c     remplissage de xmatri
+c
+            CALL REMPMT(REL,LRE,RE(1,1,ib))
+c
+ 3044     CONTINUE
+c
+C 9044     CONTINUE
+          SEGSUP,MWRK1,MWRK3,MWRK4
+          GOTO 510
+c
+c_______________________________________________________________________
+c
+c  elements barre et cercle (et TIMO)
+c_______________________________________________________________________
+ 46       CONTINUE
+C Cas particulier :
+          IF (MELE.EQ.95.AND.IFOUR.NE.0.AND.IFOUR.NE.1) GOTO 99
+C
+          NBBB = NBNN
+          SEGINI MWRK1,MWRK3
+c
+          DO 3046 IB=1,NBELEM
+c
+c  on cherche les coordonnees des noeuds de l elementib
+c
+            CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+c
+c  mise a zero de la raideur geometrique
+c
+            CALL ZERO(REL,LRE,LRE)
+c
+c  on cherche l'effort
+c
+            MPTVAL=IVASTR
+            MELVAL=IVAL(1)
+            NBPTEL=VELCHE(/1)
+            IBMN=MIN(IB,VELCHE(/2))
+c
+            IF (NBPTEL.EQ.1) THEN
+              EFFORT=VELCHE(1,IBMN)
+            ELSE IF (NBPTEL.EQ.2) THEN
+              EFF1=VELCHE(1,IBMN)
+              EFF2=VELCHE(2,IBMN)
+              EFFORT=0.5D0*(EFF1+EFF2)
+            ENDIF
+c
+c  on calcule la rigidite geometrique
+c
+            IF (MELE.EQ.46.or.MELE.eq.84)
+     &         CALL BARKSG(REL,LRE,EFFORT,XE,KERRE)
+            IF (MELE.EQ.95) CALL CERKSG(REL,LRE,EFFORT,XE,KERRE)
+            IF (KERRE.NE.0) THEN
+              INTERR(1)=ISOUS
+              INTERR(2)=IB
+              CALL ERREUR(128)
+              GO TO 9046
+            ENDIF
+c
+c  remplissage de xmatri
+c
+c           cas particulier TIMO : on saute les ddls de rotation
+            IF (MELE.EQ.84) THEN
+              NCOMPU=NCOMP/2
+              ii=0
+              iii=0
+              DO 841 INOEUD=1,NBNNS
+              DO 842 ICOMP=1,NCOMP
+                ii=ii+1
+                if(ii.gt.NCOMPU) goto 842
+                iii=iii+1
+                jj=0
+                jjj=0
+                DO 843 JNOEUD=1,NBNNS
+                DO 844 JCOMP=1,NCOMP
+                  jj=jj+1
+                  if(jj.gt.ii) goto 842
+                  if(jj.gt.NCOMPU) goto 844
+                  jjj=jjj+1
+                  RE(ii,jj,ib)=REL(iii,jjj)
+                  RE(jj,ii,ib)=REL(iii,jjj)
+ 844            CONTINUE
+ 843            CONTINUE
+ 842          CONTINUE
+ 841          CONTINUE
+            ELSE
+              CALL REMPMT(REL,LRE,RE(1,1,ib))
+            ENDIF
+C
+ 3046     CONTINUE
+
+ 9046     CONTINUE
+          SEGSUP,MWRK1,MWRK3
+          GOTO 510
+
+c_______________________________________________________________________
+c
+c     element coq4
+c_______________________________________________________________________
+ 49       CONTINUE
+          NBBB=NBNN
+          NBNO=NBNN
+          SEGINI,MWRK1,MWRK2,MWRK4
+
+          DO 3049 IB=1,NBELEM
+c
+c     on cherche les coordonnees des noeuds de  l element ib
+c
+            CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+
+            CALL ZERO(REL,LRE,LRE)
+            CALL CQ4LOC(XE,XEL,BPSS,IRRT,0)
+C
+C   attention  :  rien de prevu en cas d'excentrement
+C
+            CALL BCOQ4(5,XEL,SHPTOT,SHPWRK,BGENE,DJAC,XZERO,0,IRRT,0)
+c
+            MPTVAL=IVASTR
+            DO 5049 ICOMP=1,NSTRS
+              MELVAL=IVAL(ICOMP)
+              IGMN=MIN(5,VELCHE(/1))
+              IBMN=MIN(IB  ,VELCHE(/2))
+              XSTRS(ICOMP)=VELCHE(IGMN,IBMN)
+ 5049       CONTINUE
+c
+            CALL CQ4KSG(DJAC,XSTRS,SHPWRK, REL)
+            CALL TRANSK(REL,BPSS,LRE,4,0)
+c
+c     remplissage de xmatri
+c
+            CALL REMPMT(REL,LRE,RE(1,1,ib))
+C
+ 3049     CONTINUE
+
+C 9049     CONTINUE
+          SEGSUP,MWRK1,MWRK2,MWRK4
+          GOTO 510
+
+c_______________________________________________________________________
+c
+c     element cof3
+c_______________________________________________________________________
+c
+ 51       CONTINUE
+c
+          NBBB=NBNN
+          SEGINI,MWRK1,MWRK3,MWRK4
+c
+          CALL ERREUR(19)
+          GOTO 9051
+
+C          DO 3051 IB=1,NBELEM
+Cc
+Cc     on cherche les coordonnees des noeuds de  l element ib
+Cc
+C            CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+C
+C            CALL ZERO(REL,LRE,LRE)
+C
+C            MPTVAL=IVACAR
+C            MELVAL=IVAL(1)
+C            IF (MELVAL.NE.0) THEN
+C              IBMN=MIN(IB  ,VELCHE(/2))
+C              EPAI=VELCHE(1,IBMN)
+C            ELSE
+C              EPAI=XZERO
+C            ENDIF
+Cc
+Cc     on cherche les contraintes on les met dans work...
+Cc
+C            JC=0
+C            MPTVAL=IVASTR
+C            DO 5051 IGAU=1,NBPGAU
+C              DO 5051 ICOMP=1,NSTRS
+C                MELVAL=IVAL(ICOMP)
+C                IGMN=MIN(IGAU,VELCHE(/1))
+C                IBMN=MIN(IB  ,VELCHE(/2))
+C                JC=JC+1
+C                WORK(JC)=VELCHE(IGMN,IBMN)
+C 5051       CONTINUE
+Cc
+Cc     appel a coque2 ksigma...
+Cc
+C            AN=NHRM
+CC             call cq3ksg(xe,epai,an,nbpgau,work(1),work(19),work(22),
+CC     1                   work(25),work(30),work(35),work(42),work(49),
+CC     2                   work(113),work(177),work(241),work(305),rel)
+Cc
+Cc     remplissage de xmatri
+Cc
+C            CALL REMPMT(REL,LRE,RE(1,1,ib))
+Cc
+C 3051     CONTINUE
+
+ 9051     CONTINUE
+          SEGSUP MWRK1,MWRK3,MWRK4
+          GOTO 510
+
+c_______________________________________________________________________
+c
+c     element shb8
+c_______________________________________________________________________
+ 260      CONTINUE
+          NBBB=NBNN
+          SEGINI,MWRK1,MWRK7
+C           write(6,*) ' nbnn nbpgau nstrs lre' , NBNN,nbpgau,nstrs,lre
+
+          DO 3260 IB=1,NBELEM
+c
+c     on cherche les coordonnees des noeuds de  l element ib
+c
+            CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+
+            MPTVAL=IVASTR
+            IE=0
+            do 3268 igau=1,nbpgau
+              DO 3268 ICOMP=1,NSTRS
+                iE=IE+1
+                MELVAL=IVAL(ICOMP)
+                IGMN=MIN(IGAU,VELCHE(/1))
+                IBMN=MIN(IB  ,VELCHE(/2))
+                work1(ie)=VELCHE(IGMN,IBMN)
+C                 write(6,*)' xstrs(icomp)',icomp,XSTRS(ICOMP)
+ 3268       CONTINUE
+            propel(1)=0.
+            call shb8 (9,xe,D,propel,work1,rel,out)
+
+C      remplissage de xmatri
+            CALL REMPMT(REL,LRE,RE(1,1,ib))
+C
+ 3260     CONTINUE
+c
+C 9260     CONTINUE
+          SEGSUP,MWRK1,MWRK7
+          GOTO 510
+
+c_______________________________________________________________________
+c
+c     desactivation des segments propres a la zone geometrique isous
+c_______________________________________________________________________
+c
+ 510      CONTINUE
+ 597      CONTINUE
+          IF (ISUP1L.EQ.1 .OR. nblprt.GT.1) THEN
+            CALL DTMVAL(IVASTR,3)
+          ELSE
+            CALL DTMVAL(IVASTR,1)
+          ENDIF
+          IF (ISUP2L.EQ.1 .OR. nblprt.GT.1) THEN
+            CALL DTMVAL(IVACAR,3)
+          ELSE
+            CALL DTMVAL(IVACAR,1)
+          ENDIF
+          xmatri = ipmatr
+          SEGDES,xmatri
+          IF (NBLPRT.GT.1) THEN
+            meleme = ipmail
+C            SEGDES,meleme
+          ENDIF
+C- Sortie prematuree en cas d'erreur
+          IF (IERR.NE.0) GOTO 598
+
+C- Stockage de la matrice
+          nrigel=irigel(/2) +1
+          segadj,mrigid
+C           jrige = NRIGE0 + irige
+          jrige=nrigel
+          COERIG(jrige)   = 1.
+          IRIGEL(1,jrige) = ipmail
+          IRIGEL(2,jrige) = 0
+          IRIGEL(3,jrige) = ipdesc
+          IRIGEL(4,jrige) = ipmatr
+          IRIGEL(5,jrige) = NIFOUR
+          IRIGEL(6,jrige) = 0
+          IRIGEL(7,jrige) = 0
+          IRIGEL(8,jrige) = 0
+
+        ENDDO
+C- Fin de la boucle sur les partitions
+C
+ 598    CONTINUE
+        IF (MOSTRS.NE.0) THEN
+          nomid = MOSTRS
+C          SEGDES,nomid
+          IF (lsupco) SEGSUP,nomid
+          notype = MOTYPS
+          SEGSUP,notype
+        ENDIF
+        IF (MOCARA.NE.0) THEN
+          NOMID = MOCARA
+          SEGSUP,NOMID
+          notype = MOTYPC
+          SEGSUP,notype
+        ENDIF
+C
+        NOMID=MODEPL
+C        SEGDES,NOMID
+        IF (lsupde) SEGSUP,NOMID
+        NOMID = MOFORC
+C        SEGDES,NOMID
+        IF (lsupfo) SEGSUP,NOMID
+
+ 599    CONTINUE
+        IF (IPMINT.NE.0) SEGDES,MINTE
+C        SEGDES,IPT1
+C        SEGDES,IMODEL
+
+        IF (IERR.NE.0) GOTO 999
+C
+ 500  CONTINUE
+C* Fin de la boucle sur les modeles elementaires
+
+ 999  CONTINUE
+      IF (IERR.NE.0) THEN
+        ktrace = -1
+        CALL DERIGI(MRIGID,ktrace,msorse)
+        SEGSUP,MRIGID
+        IPRIGG = 0
+      ELSE
+        if( irigel(/2).eq.0) then
+          call erreur (86)
+          return
+        endif
+        SEGDES,MRIGID
+        IPRIGG = MRIGID
+      ENDIF
+
+C      SEGDES,MMODEL
+
+      RETURN
+      END
+
+
+
+

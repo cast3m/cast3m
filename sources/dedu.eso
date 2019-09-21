@@ -1,0 +1,889 @@
+C DEDU      SOURCE    CB215821  17/05/12    21:15:00     9434
+
+C-----------------------------------------------------------------------
+C 1ere possibilite
+C            OBJ1  =  DEDU OBJ2 MAIT_ANC MAIT_NOU (REGU)
+C Deduction d'un maillage a partir d'un autre et du deplacement de
+C noeuds maitres
+C  AUTEUR : PV
+C-----------------------------------------------------------------------
+C 2eme possibilite
+C            OBJ2 = OBJ1 DEDU 'TRAN' GEO1 GEO2
+C 3eme possibilite
+C            OBJ2 = OBJ1 DEDU FLOT1 POIN1 (POIN2) 'ROTA' GEO1 GEO2
+C OBJ1 : type POINT, MAILLAGE, CHPOINT, MCHAML, MMODEL
+C Passage du support de OBJ1 a celui de OBJ2 comme celui de GEO1 a GEO2
+C Les points du support de OBJ1 doivent appartenir a GEO1
+C On realise eventuellement la rotation des composantes (envoi a PROPER)
+C  AUTEUR : KICH
+C-----------------------------------------------------------------------
+C  10/2003 : Prise en compte du cas IDIM=1 et des modes associes.
+C-----------------------------------------------------------------------
+C  Remarques :
+C  -----------
+C    DEDU est appele par l'operateur DEPL (deplac.eso) avec ICAS=1.
+C    Ce cas correspond a une transformation affine de l'espace (noeuds
+C    maitres = un maillage a (IDIM+1) points).
+C-----------------------------------------------------------------------
+
+      SUBROUTINE DEDU(ICAS)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCREEL
+-INC SMCOORD
+-INC SMELEME
+-INC CCGEOME
+-INC SMRIGID
+-INC SMCHPOI
+-INC SMMODEL
+-INC SMCHAML
+-INC SMTEXTE
+      DIMENSION iuniq(10)
+      CHARACTER*4 mcle(5),strcomp
+
+      SEGMENT kon(nkon,numnp,2)
+      SEGMENT xkon(nkon+1,numnp)
+      SEGMENT ipxkon(nkon+1,numnp)
+      SEGMENT ikon(numnp)
+      SEGMENT icpr(xcoor(/1)/(IDIM+1))
+      SEGMENT icp2(xcoor(/1)/(IDIM+1))
+      SEGMENT idcp(numnp)
+      SEGMENT icorr(numnp)
+      SEGMENT xxtra
+        REAL*8 xdep(3,4),xarr(3,4),ved1(3),ved2(3),ved3(3),vea1(3),
+     .         vea2(3),vea3(3),pa(3,3),pa2(2,2),pa3(3,3),vb(3)
+      END SEGMENT
+
+      DATA mcle / 'REGU','ELIM','TRAN','ROTA','ADAP' /
+
+      idimp1=IDIM+1
+
+C  Mot cle optionnel REGU : coordonnees barycentriques identiques
+      CALL LIRMOT(mcle,5,iregu,0)
+
+C  2eme possibilite : option TRAN
+C --------------------
+      IF (iregu.EQ.3) THEN
+        CALL PROPER(4)
+        RETURN
+      ENDIF
+C  3eme possibilite : option ROTA
+C --------------------
+C  Option non disponible en dimension 1 (pas de signification)
+      IF (iregu.EQ.4) THEN
+        IF (IDIM.EQ.1) THEN
+          MOTERR(1:4)=mcle(iregu)
+          INTERR(1)=IDIM
+          CALL ERREUR(971)
+        ELSE
+          CALL PROPER(5)
+        ENDIF
+        RETURN
+      ENDIF
+C  5eme possibilite : option ADAP
+C  On passe la main à la procédure DEDUADAP
+C --------------------
+      IF (iregu.EQ.5) THEN
+         SEGINI MTEXTE
+         LTT=8
+         MTEXT(1:LTT) ='DEDUADAP'
+         NCART=8
+         SEGDES MTEXTE
+         CALL ECROBJ('TEXTE',MTEXTE)
+         RETURN
+      ENDIF
+
+C  Par defaut : option ELIM (ignore les parties concaves)
+C  Correspond au cas ICAS=1 (operateur DEPL 'DEDU')
+      IF (iregu.EQ.0) iregu=2
+
+C  1ere possibilite : options REGU et ELIM / appel par DEPLAC
+C --------------------
+C  Lecture du maillage initial
+      CALL LIROBJ('MAILLAGE',ipt1,1,iretou)
+      IF (ierr.NE.0) RETURN
+C  Lecture des points maitres initiaux
+      CALL LIROBJ('MAILLAGE',ipt2,0,iretou)
+      IF (iretou.NE.0) THEN
+        ichpo=0
+C  lecture ddes points maitres finaux
+        CALL LIROBJ('MAILLAGE',ipt3,1,iretou)
+         IF (ierr.NE.0) RETURN
+      ELSE
+C  Lecture d'un chpoint de deplacement
+        ichpo=1
+        CALL LIROBJ('CHPOINT ',mchpoi,1,iretou)
+        IF (ierr.NE.0) RETURN
+C  Création de ipt2 et ipt3 pour se ramener au cas précédent
+        nbpts=xcoor(/1)/idimp1
+        nbpts0=nbpts
+C  Comptage des points du chpoint concernes par UX UY UZ UR
+        SEGACT mchpoi
+        jatan=jattri(1)
+        nbpcon=0
+        DO nso=1,ipchp(/1)
+          msoupo=ipchp(nso)
+          SEGACT msoupo
+          ipt6=igeoc
+          SEGACT ipt6
+          ipc=0
+          DO i=1,nocomp(/2)
+            strcomp=nocomp(i)
+            IF ((strcomp.EQ.'UX  ').OR.(strcomp.EQ.'UR  ').OR.
+     .          ((strcomp.EQ.'UY  ').AND.(IDIM.NE.1)).OR.
+     .          ((strcomp.EQ.'UZ  ').AND.(IDIM.NE.1))) ipc=ipc+i
+          ENDDO
+          IF (ipc.NE.0) nbpcon=nbpcon+ipt6.num(/2)
+        ENDDO
+C  Test sur nbpcon=0 a ecrire
+        nbref=0
+        nbsous=0
+        nbelem=nbpcon
+        nbnn=1
+        SEGINI ipt2
+        SEGINI ipt3
+        ipt2.itypel=1
+        ipt3.itypel=1
+C  Remplissage de ipt2 et ipt3 - Creation des points de ipt3
+        idej=0
+        DO 9 nso=1,ipchp(/1)
+          msoupo=ipchp(nso)
+          ipt6=igeoc
+          ipox=0
+          ipoy=0
+          ipoz=0
+          DO i=1,nocomp(/2)
+            strcomp=nocomp(i)
+            IF ((strcomp.EQ.'UX  ').OR.(strcomp.EQ.'UR  ')) ipox=i
+            IF ((strcomp.EQ.'UY  ').AND.(IDIM.NE.1)) ipoy=i
+            IF (strcomp.EQ.'UZ  ') THEN
+              IF (IDIM.EQ.2) THEN
+                ipoy=i
+              ELSE IF (IDIM.GE.3) THEN
+                ipoz=i
+              ENDIF
+            ENDIF
+          ENDDO
+          IF ((ipox+ipoy+ipoz).EQ.0) GOTO 9
+          mpoval=ipoval
+          SEGACT mpoval
+          nbpan=xcoor(/1)/idimp1
+          nbpts=nbpts+ipt6.num(/2)
+          SEGADJ mcoord
+          DO nel=1,ipt6.num(/2)
+            iep=ipt6.num(1,nel)
+            ipt2.num(1,idej+nel)=iep
+            ipt3.num(1,idej+nel)=nbpan+nel
+            irefep=(iep-1)*idimp1
+            iref=(nbpan+nel-1)*idimp1
+            IF (ipox.NE.0) THEN
+              xcoor(iref+1)=xcoor(irefep+1)+vpocha(nel,ipox)
+            ELSE
+              xcoor(iref+1)=xcoor(irefep+1)
+            ENDIF
+            IF (ipoy.NE.0) THEN
+              xcoor(iref+2)=xcoor(irefep+2)+vpocha(nel,ipoy)
+            ELSE
+              IF (IDIM.GE.2) xcoor(iref+2)=xcoor(irefep+2)
+            ENDIF
+            IF (ipoz.NE.0) THEN
+              xcoor(iref+3)=xcoor(irefep+3)+vpocha(nel,ipoz)
+            ELSE
+              IF (IDIM.GE.3) xcoor(iref+3)=xcoor(irefep+3)
+            ENDIF
+            xcoor(iref+idimp1)=xcoor(irefep+idimp1)
+          ENDDO
+          idej=idej+ipt6.num(/2)
+          SEGDES ipt6,mpoval,msoupo
+ 9      CONTINUE
+        SEGDES mchpoi
+      ENDIF
+
+C  Verification compatibilite points maitres initiaux et finaux
+C  Cas ichpo = 0 : cette verification est a faire lorsque la
+C  transformation est definie par deux maillages.
+C  Cas ichpo = 1 : les points maitres initiaux et finaux sont crees
+C  en parallele de la meme maniere a partir du CHPO donne. La veri-
+C  fication est donc inutile.
+      IF (ichpo.EQ.1) GOTO 100
+      SEGACT ipt2,ipt3
+      IF (ipt2.lisous(/1).NE.ipt3.lisous(/1)) THEN
+        CALL ERREUR(16)
+        SEGDES ipt2,ipt3
+        RETURN
+      ENDIF
+      ipt7=ipt2
+      ipt8=ipt3
+      DO i=1,MAX(1,ipt2.lisous(/1))
+        IF (ipt2.lisous(/1).NE.0) ipt7=ipt2.lisous(i)
+        IF (ipt3.lisous(/1).NE.0) ipt8=ipt3.lisous(i)
+        SEGACT ipt7,ipt8
+        moterr=' '
+        IF (ipt7.num(/1).NE.ipt8.num(/1)) moterr(1:8)='noeuds'
+        IF (ipt7.num(/2).NE.ipt8.num(/2)) moterr(1:8)='elements'
+        SEGDES ipt7,ipt8
+        IF (moterr.NE.' ') THEN
+          CALL ERREUR(550)
+          RETURN
+        ENDIF
+      ENDDO
+
+ 100  SEGACT MCOORD*MOD
+C  Creation du tableau de correspondance icpr donnant pour chaque
+C  noeud de ipt2 son noeud image de ipt3
+      SEGACT ipt2,ipt3
+      SEGINI icpr
+      numnp=0
+      ipt7=ipt2
+      ipt8=ipt3
+      DO i=1,MAX(1,ipt2.lisous(/1))
+        IF (ipt2.lisous(/1).NE.0) ipt7=ipt2.lisous(i)
+        IF (ipt3.lisous(/1).NE.0) ipt8=ipt3.lisous(i)
+        SEGACT ipt7,ipt8
+        DO k=1,ipt7.num(/2)
+          DO l=1,ipt7.num(/1)
+            ip=ipt7.num(l,k)
+            IF (icpr(ip).EQ.0) THEN
+              numnp=numnp+1
+              icpr(ip)=ipt8.num(l,k)
+            ENDIF
+          ENDDO
+        ENDDO
+        SEGDES ipt7,ipt8
+      ENDDO
+      SEGDES ipt2,ipt3
+
+C  Est-ce une transformation affine ?
+      IF (numnp.LE.idimp1) THEN
+        SEGINI xxtra
+        numnp=0
+        DO i=1,icpr(/1)
+          IF (icpr(i).NE.0) THEN
+            numnp=numnp+1
+            iref=(i-1)*idimp1
+            irefep=(icpr(i)-1)*idimp1
+            DO j=1,idim
+              xdep(j,numnp)=xcoor(iref+j)
+              xarr(j,numnp)=xcoor(irefep+j)
+            ENDDO
+          ENDIF
+        ENDDO
+        SEGSUP icpr
+C  Faut-il creer de nouveaux points ?
+        IF (numnp.EQ.1) THEN
+C  On en cree un par translation en x
+          numnp=numnp+1
+          DO j=1,IDIM
+            xdep(j,numnp)=xdep(j,numnp-1)
+            xarr(j,numnp)=xarr(j,numnp-1)
+          ENDDO
+          xdep(1,numnp)=xdep(1,numnp)+1.
+          xarr(1,numnp)=xarr(1,numnp)+1.
+        ENDIF
+        DO j=1,IDIM
+          ved1(j)=xdep(j,2)-xdep(j,1)
+          vea1(j)=xarr(j,2)-xarr(j,1)
+        ENDDO
+        IF (numnp.EQ.2) THEN
+C  En 1D, on ne fait rien.
+C  En 2D, on cherche un point sur la perpendiculaire a la droite
+C  definie par les deux premiers points, passant par le premier
+C  point et a une distance unite (formant un repere orthonorme direct).
+C  En 3D, on prend un point dans la direction y.
+          numnp=numnp+1
+          IF (IDIM.EQ.2) THEN
+            xdep(1,3)=ved1(2)
+            xdep(2,3)=-ved1(1)
+            aa=1./SQRT(xdep(1,3)*xdep(1,3)+xdep(2,3)*xdep(2,3))
+            xdep(1,3)=xdep(1,1)+xdep(1,3)*aa
+            xdep(2,3)=xdep(2,1)+xdep(2,3)*aa
+            xarr(1,3)=vea1(2)
+            xarr(2,3)=-vea1(2)
+            aa=1./SQRT(xarr(1,3)*xarr(1,3)+xarr(2,3)*xarr(2,3))
+            xarr(1,3)=xarr(1,1)+xarr(1,3)*aa
+            xarr(2,3)=xarr(2,1)+xarr(2,3)*aa
+          ELSE IF (IDIM.EQ.3) THEN
+            xdep(1,3)=xdep(1,1)
+            xdep(2,3)=xdep(2,1)+1.
+            xdep(3,3)=xdep(3,1)
+            xarr(1,3)=xarr(1,1)
+            xarr(2,3)=xarr(2,1)+1.
+            xarr(3,3)=xarr(3,1)
+          ENDIF
+        ENDIF
+        IF (IDIM.NE.1) THEN
+          DO j=1,IDIM
+            ved2(j)=xdep(j,3)-xdep(j,1)
+            vea2(j)=xarr(j,3)-xarr(j,1)
+          ENDDO
+        ENDIF
+C  En 3D, il faut encore un point hors du plan forme par les 3 points
+        IF (numnp.LT.idimp1) THEN
+          ved3(1)=ved1(2)*ved2(3)-ved1(3)*ved2(2)
+          ved3(2)=ved1(3)*ved2(1)-ved1(1)*ved2(3)
+          ved3(3)=ved1(1)*ved2(2)-ved1(2)*ved2(1)
+          aa=1./SQRT(ved3(1)*ved3(1)+ved3(2)*ved3(2)+ved3(3)*ved3(3))
+          vea3(1)=vea1(2)*vea2(3)-vea1(3)*vea2(2)
+          vea3(2)=vea1(3)*vea2(1)-vea1(1)*vea2(3)
+          vea3(3)=vea1(1)*vea2(2)-vea1(2)*vea2(1)
+          bb=1./SQRT(vea3(1)*vea3(1)+vea3(2)*vea3(2)+vea3(3)*vea3(3))
+          DO j=1,3
+            ved3(j)=ved3(j)*aa
+            vea3(j)=vea3(j)*bb
+            xdep(j,4)=xdep(j,1)+ved3(j)
+            xarr(j,4)=xarr(j,1)+vea3(j)
+          ENDDO
+        ENDIF
+        IF (IDIM.EQ.3) THEN
+          DO j=1,3
+            ved3(j)=xdep(j,4)-xdep(j,1)
+            vea3(j)=xarr(j,4)-xarr(j,1)
+          ENDDO
+        ENDIF
+C  Calcul de la matrice de passage pa du repere ved au repere vea
+C  On traite le cas IDIM=1 a part (sinon reso33 serait a modifier).
+        IF (IDIM.EQ.1) THEN
+          IF ((ved1(1).EQ.0.).OR.(vea1(1).EQ.0.)) THEN
+            CALL ERREUR(21)
+            SEGSUP xxtra
+            IF (ichpo.EQ.1) THEN
+              nbpts=nbpts0
+              SEGADJ mcoord
+              SEGSUP ipt2,ipt3
+            ENDIF
+            RETURN
+          ENDIF
+          pa(1,1)=vea1(1)/ved1(1)
+        ELSE
+          DO j=1,IDIM
+            vb(1)=vea1(j)
+            vb(2)=vea2(j)
+            IF (IDIM.EQ.3) vb(3)=vea3(j)
+            pa3(1,1)=ved1(1)
+            pa3(1,2)=ved1(2)
+            pa3(2,1)=ved2(1)
+            pa3(2,2)=ved2(2)
+            IF (IDIM.EQ.3) THEN
+              pa3(1,3)=ved1(3)
+              pa3(2,3)=ved2(3)
+              pa3(3,1)=ved3(1)
+              pa3(3,2)=ved3(2)
+              pa3(3,3)=ved3(3)
+            ENDIF
+            CALL reso33(pa3,vb,3,IDIM,kerr)
+C  Erreur : en 2D -> 3 points alignes, en 3D -> 4 points coplanaires
+            IF (kerr.NE.0) THEN
+              CALL ERREUR(21)
+              SEGSUP xxtra
+              IF (ichpo.EQ.1) THEN
+                nbpts=nbpts0
+                SEGADJ mcoord
+                SEGSUP ipt2,ipt3
+              ENDIF
+              RETURN
+            ENDIF
+            pa(j,1)=vb(1)
+            pa(j,2)=vb(2)
+            IF (IDIM.EQ.3) pa(j,3)=vb(3)
+          ENDDO
+        ENDIF
+C  Fabrication de la liste des points a transformer et du maillage
+C  resultat (segment MELEME)
+        SEGINI icpr
+        nbpan=xcoor(/1)/idimp1
+        SEGACT ipt1
+        SEGINI,ipt4=ipt1
+        nbnn=ipt4.num(/1)
+        nbelem=ipt4.num(/2)
+        nbsous=ipt4.lisous(/1)
+        nbref=ipt4.lisref(/1)
+        IF (ICAS.NE.1) THEN
+          nbref=0
+          SEGADJ ipt4
+        ENDIF
+        ipt8=ipt1
+        ipt5=ipt4
+        numnp=0
+        DO i=1,MAX(1,ipt1.lisous(/1))
+          IF (ipt1.lisous(/1).NE.0) THEN
+            ipt8=ipt1.lisous(i)
+            SEGACT ipt8
+            SEGINI,ipt5=ipt8
+            nbnn=ipt5.num(/1)
+            nbelem=ipt5.num(/2)
+            nbsous=ipt5.lisous(/1)
+            nbref=ipt5.lisref(/1)
+            IF (ICAS.NE.1) THEN
+              nbref=0
+              SEGADJ ipt5
+            ENDIF
+            ipt4.lisous(i)=ipt5
+          ENDIF
+          DO iel=1,ipt8.num(/2)
+            DO inn=1,ipt8.num(/1)
+              ipt=ipt8.num(inn,iel)
+              IF (icpr(ipt).EQ.0) THEN
+                IF (ICAS.EQ.1) THEN
+                  icpr(ipt)=ipt
+                ELSE
+                  numnp=numnp+1
+                  icpr(ipt)=numnp+nbpan
+                ENDIF
+              ENDIF
+              ipt5.num(inn,iel)=icpr(ipt)
+            ENDDO
+          ENDDO
+          SEGDES ipt8,ipt5
+        ENDDO
+        SEGDES ipt4,ipt1
+        IF (ICAS.EQ.0) THEN
+          nbpts=numnp+nbpan
+          SEGADJ mcoord
+        ENDIF
+        DO ipt=1,nbpan
+          IF (icpr(ipt).NE.0) THEN
+            jno=(ipt-1)*idimp1
+            ino=(icpr(ipt)-1)*idimp1
+            DO i=1,IDIM
+              vb(i)=xcoor(jno+i)-xdep(i,1)
+            ENDDO
+            DO i=1,IDIM
+              aa=xarr(i,1)
+              DO j=1,IDIM
+                aa=aa+pa(i,j)*vb(j)
+              ENDDO
+              xcoor(ino+i)=aa
+            ENDDO
+            xcoor(ino+idimp1)=xcoor(jno+idimp1)
+          ENDIF
+        ENDDO
+        SEGSUP icpr,xxtra
+        CALL ECROBJ('MAILLAGE',ipt4)
+        IF (ichpo.EQ.1) THEN
+          SEGSUP ipt2,ipt3
+        ENDIF
+        RETURN
+      ENDIF
+
+C  Cas d'une transformation non affine
+C  Interdit dans le cas ICAS=1 (appel par deplac, operateur DEPL 'DEDU')
+C  On recupere le maillage initial si ichpo=1.
+      IF (ICAS.EQ.1) THEN
+        CALL ERREUR(21)
+        IF (ichpo.EQ.1) THEN
+          nbpts=nbpts0
+          SEGADJ mcoord
+          SEGSUP ipt2,ipt3
+        ENDIF
+        RETURN
+      ENDIF
+C  CHOIX : Pour l'instant, cas non implemente en DIMEnsion 1.
+      IF (IDIM.EQ.1) THEN
+        MOTERR(1:4)=mcle(iregu)
+        INTERR(1)=IDIM
+        CALL ERREUR(971)
+        IF (ichpo.EQ.1) THEN
+          nbpts=nbpts0
+          SEGADJ mcoord
+          SEGSUP ipt2,ipt3
+        ENDIF
+        RETURN
+      ENDIF
+C  Creation d'un tableau de stockage contenant pour chaque point les
+C  aretes des elements le touchant sauf celles qui le contiennent
+      SEGACT ipt1
+      SEGINI icpr
+      numnp=0
+      ipt8=ipt1
+      DO i=1,MAX(1,ipt1.lisous(/1))
+        IF (ipt1.lisous(/1).NE.0) ipt8=ipt1.lisous(i)
+        SEGACT ipt8
+        DO iel=1,ipt8.num(/2)
+          DO inn=1,ipt8.num(/1)
+            ipt=ipt8.num(inn,iel)
+            IF (icpr(ipt).EQ.0) THEN
+              numnp=numnp+1
+              icpr(ipt)=numnp
+            ENDIF
+          ENDDO
+        ENDDO
+      ENDDO
+      SEGINI idcp
+      DO i=1,icpr(/1)
+        IF (icpr(i).NE.0) idcp(icpr(i))=i
+      ENDDO
+      nkon=5
+      SEGINI kon,ikon
+      DO i=1,MAX(1,ipt1.lisous(/1))
+        IF (ipt1.lisous(/1).NE.0) ipt8=ipt1.lisous(i)
+        DO iel=1,ipt8.num(/2)
+          DO inn=1,ipt8.num(/1)
+            ip=ipt8.num(inn,iel)
+            ipc=icpr(ip)
+            DO 41 inp=1,ipt8.num(/1)
+              kpt1=ipt8.num(inp,iel)
+              IF (kpt1.EQ.ip) GOTO 41
+              inps=inp+1
+              IF (inps.GT.ipt8.num(/1)) inps=1
+              kpt2=ipt8.num(inps,iel)
+              IF (kpt2.EQ.ip) GOTO 41
+              DO idj=1,ikon(ipc)
+                IF ((kon(idj,ipc,1).EQ.kpt1).AND.
+     .              (kon(idj,ipc,2).EQ.kpt2)) GOTO 41
+                IF ((kon(idj,ipc,1).EQ.kpt2).AND.
+     .              (kon(idj,ipc,2).EQ.kpt1)) GOTO 41
+              ENDDO
+              ikon(ipc)=ikon(ipc)+1
+              IF (ikon(ipc).GT.nkon) THEN
+                nkon=ikon(ipc)
+                SEGADJ kon
+              ENDIF
+              kon(ikon(ipc),ipc,1)=kpt1
+              kon(ikon(ipc),ipc,2)=kpt2
+  41        CONTINUE
+          ENDDO
+        ENDDO
+      ENDDO
+C  Fermeture du contour si necessaire (avec 1 segment supplementaire)
+      DO 80 ipc=1,kon(/2)
+        iuni=0
+        DO iko=1,ikon(ipc)
+          kpt1=kon(iko,ipc,1)
+          kpt2=kon(iko,ipc,2)
+          DO ikq=1,ikon(ipc)
+            IF (ikq.NE.iko) THEN
+              IF (kpt1.EQ.kon(ikq,ipc,1)) GOTO 86
+              IF (kpt1.EQ.kon(ikq,ipc,2)) GOTO 86
+            ENDIF
+          ENDDO
+C  kpt1 unique
+          iuni=iuni+1
+          iuniq(iuni)=kpt1
+  86      DO 88 ikq=1,ikon(ipc)
+            IF (ikq.EQ.iko) GOTO 88
+            IF (kpt2.EQ.kon(ikq,ipc,1)) GOTO 90
+            IF (kpt2.EQ.kon(ikq,ipc,2)) GOTO 90
+  88      CONTINUE
+C  kpt1 unique
+          iuni=iuni+1
+          iuniq(iuni)=kpt2
+  90      CONTINUE
+        ENDDO
+        IF (iuni.EQ.0) GOTO 80
+        ikon(ipc)=ikon(ipc)+1
+        IF (ikon(ipc).GT.nkon) THEN
+          nkon=ikon(ipc)
+          SEGADJ kon
+        ENDIF
+        kon(ikon(ipc),ipc,1)=iuniq(1)
+        kon(ikon(ipc),ipc,2)=iuniq(2)
+  80  CONTINUE
+C  Calcul des coordonnees barycentriques
+      SEGINI xkon,ipxkon
+      DO i=1,kon(/2)
+        ipcour=0
+        jp=idcp(i)
+        ipcini=ipcour
+  58    CONTINUE
+        DO ipc=ipcini+1,ipcour
+          ipxkon(ipc,i)=0
+          xkon(ipc,i)=0.
+        ENDDO
+        ipcour=ipcini
+        DO 59 j=1,ikon(i)
+C  Creation d'un angle
+          IF (kon(j,i,1).EQ.0) GOTO 59
+          ip1=kon(j,i,1)
+          ip2=kon(j,i,2)
+          DO 60 k=j+1,ikon(i)
+            IF (kon(k,i,1).EQ.0) GOTO 60
+            jp1=0
+            IF (ip1.EQ.kon(k,i,1)) THEN
+              jp1=ip1
+              jp2=ip2
+              jp3=kon(k,i,2)
+            ELSE IF (ip1.EQ.kon(k,i,2)) THEN
+              jp1=ip1
+              jp2=ip2
+              jp3=kon(k,i,1)
+            ELSE IF (ip2.EQ.kon(k,i,1)) THEN
+              jp1=ip2
+              jp2=ip1
+              jp3=kon(k,i,2)
+            ELSE IF (ip2.EQ.kon(k,i,2)) THEN
+              jp1=ip2
+              jp2=ip1
+              jp3=kon(k,i,1)
+            ELSE
+              GOTO 60
+            ENDIF
+*  jp le point en cours de travail
+*  jp1 le sommet jp2 et jp3 les deux autres points
+            xp=xcoor((jp-1)*idimp1+1)
+            yp=xcoor((jp-1)*idimp1+2)
+            zp=0.
+            IF (IDIM.EQ.3) zp=xcoor((jp-1)*idimp1+3)
+            xp1=xcoor((jp1-1)*idimp1+1)
+            yp1=xcoor((jp1-1)*idimp1+2)
+            zp1=0.
+            IF (IDIM.EQ.3) zp1=xcoor((jp1-1)*idimp1+3)
+            xp2=xcoor((jp2-1)*idimp1+1)
+            yp2=xcoor((jp2-1)*idimp1+2)
+            zp2=0.
+            IF (IDIM.EQ.3) zp2=xcoor((jp2-1)*idimp1+3)
+            xp3=xcoor((jp3-1)*idimp1+1)
+            yp3=xcoor((jp3-1)*idimp1+2)
+            zp3=0.
+            IF (IDIM.EQ.3) zp3=xcoor((jp3-1)*idimp1+3)
+*  le  sinus (trafique)
+            xv1=xp2-xp1
+            yv1=yp2-yp1
+            zv1=zp2-zp1
+
+            aa=SQRT(xv1*xv1+yv1*yv1+zv1*zv1)
+            IF (aa .LT. XPETIT) THEN
+              xv1=0.D0
+              yv1=0.D0
+              zv1=0.D0
+            ELSE
+              xv1=xv1/aa
+              yv1=yv1/aa
+              zv1=zv1/aa
+            ENDIF
+            xv2=xp3-xp1
+            yv2=yp3-yp1
+            zv2=zp3-zp1
+
+            aa=SQRT(xv2*xv2+yv2*yv2+zv2*zv2)
+            IF (aa .LT. XPETIT) THEN
+              xv2=0.D0
+              yv2=0.D0
+              zv2=0.D0
+            ELSE
+              xv2=xv2/aa
+              yv2=yv2/aa
+              zv2=zv2/aa
+            ENDIF
+            xv=yv1*zv2-zv1*yv2
+            yv=zv1*xv2-xv1*zv2
+            zv=xv1*yv2-yv1*xv2
+
+*  provisoirement on prend le signe positif
+            sinp=MAX(1.D-15,SQRT(xv*xv+yv*yv+zv*zv))
+*  recherche du signe comparaison avec jp jp1 vect jp2 jp3
+            xw1=xp-xp1
+            yw1=yp-yp1
+            zw1=zp-zp1
+            aa=SQRT(xw1*xw1+yw1*yw1+zw1*zw1)
+            IF (aa .LT. XPETIT) THEN
+              xw1=0.D0
+              yw1=0.D0
+              zw1=0.D0
+            ELSE
+              xw1=xw1/aa
+              yw1=yw1/aa
+              zw1=zw1/aa
+            ENDIF
+            xw2=xp3-xp2
+            yw2=yp3-yp2
+            zw2=zp3-zp2
+
+            aa=SQRT(xw2*xw2+yw2*yw2+zw2*zw2)
+            IF (aa .LT. XPETIT) THEN
+              xw2=0.D0
+              yw2=0.D0
+              zw2=0.D0
+            ELSE
+              xw2=xw2/aa
+              yw2=yw2/aa
+              zw2=zw2/aa
+            ENDIF
+            xw=yw1*zw2-zw1*yw2
+            yw=zw1*xw2-xw1*zw2
+            zw=xw1*yw2-yw1*xw2
+
+            IF (iregu.NE.2) THEN
+              IF ((xv*xw+yv*yw+zv*zw).LT.0.) sinp=-sinp
+            ELSE
+              IF ((xv*xw+yv*yw+zv*zw).LT.-1.D-15) then
+* Essai si le signe est negatif on supprime le coin pour ne travailler
+* que dans un convexe
+                kon(k,i,1)=0
+                kon(k,i,2)=0
+                kon(j,i,1)=jp2
+                kon(j,i,2)=jp3
+                GOTO 58
+              ENDIF
+            ENDIF
+            ipcour=ipcour+1
+            ipxkon(ipcour,i)=jp1
+*  les distances aux cotes
+            xv=xp-xp1
+            yv=yp-yp1
+            zv=zp-zp1
+            scal=xv*xv1+yv*yv1+zv*zv1
+            xv=xv-scal*xv1
+            yv=yv-scal*yv1
+            zv=zv-scal*zv1
+            dis1=MAX(1.D-20,SQRT(xv*xv+yv*yv+zv*zv))
+            xv=xp-xp1
+            yv=yp-yp1
+            zv=zp-zp1
+            scal=xv*xv2+yv*yv2+zv*zv2
+            xv=xv-scal*xv2
+            yv=yv-scal*yv2
+            zv=zv-scal*zv2
+            dis2=MAX(1.D-20,SQRT(xv*xv+yv*yv+zv*zv))
+C  la coordonnee barycentrique :
+            xkon(ipcour,i)=sinp/(dis1*dis2)
+            IF (iregu.EQ.1) xkon(ipcour,i)=1.D0
+  60      CONTINUE
+  59    CONTINUE
+*  on normalise
+        skon=0.
+        DO j=1,ikon(i)+1
+          skon=skon+xkon(j,i)
+        ENDDO
+        DO j=1,ikon(i)+1
+        xkon(j,i)=xkon(j,i)/skon
+        ENDDO
+      ENDDO
+      SEGSUP kon,ikon
+*  OK on a les coefficients barycentriques.
+*  On duplique le maillage puis on cree les nouveaux noeuds
+*  Mais d'abord voir les points imposes
+      SEGACT ipt2,ipt3
+      SEGINI icp2
+      ipt7=ipt2
+      ipt8=ipt3
+      DO isous=1,MAX(1,ipt2.lisous(/1))
+        IF (ipt2.lisous(/1).NE.0) ipt7=ipt2.lisous(isous)
+        IF (ipt3.lisous(/1).NE.0) ipt8=ipt3.lisous(isous)
+        SEGACT ipt7,ipt8
+        DO i=1,ipt7.num(/1)
+          DO j=1,ipt7.num(/2)
+            ip=ipt7.num(i,j)
+            IF (icp2(ip).EQ.0) icp2(ip)=ipt8.num(i,j)
+          ENDDO
+        ENDDO
+        SEGDES ipt7,ipt8
+      ENDDO
+      SEGDES ipt2,ipt3
+      SEGINI icorr
+      DO 210 i=1,icpr(/1)
+        IF (icpr(i).EQ.0) GOTO 210
+        IF (icp2(i).EQ.0) THEN
+          nbpts=xcoor(/1)/idimp1+1
+          SEGADJ mcoord
+          icorr(icpr(i))=nbpts
+          DO j=1,idimp1
+            xcoor((nbpts-1)*idimp1+j)=xcoor((i-1)*idimp1+j)
+          ENDDO
+        ELSE
+          icorr(icpr(i))=icp2(i)
+        ENDIF
+ 210  CONTINUE
+*  On duplique les maillages
+      SEGINI,ipt4=ipt1
+      nbref=0
+      nbsous=ipt4.lisous(/1)
+      nbnn=ipt4.num(/1)
+      nbelem=ipt4.num(/2)
+      SEGADJ ipt4
+      ipt7=ipt1
+      ipt8=ipt4
+      DO isous=1,MAX(1,ipt1.lisous(/1))
+        IF (ipt1.lisous(/1).NE.0) THEN
+          ipt7=ipt1.lisous(isous)
+          SEGINI,ipt8=ipt7
+          ipt4.lisous(isous)=ipt8
+        ENDIF
+        DO i=1,ipt8.num(/1)
+          DO j=1,ipt8.num(/2)
+            ipt8.num(i,j)=icorr(icpr(ipt8.num(i,j)))
+          ENDDO
+        ENDDO
+        SEGDES ipt7,ipt8
+      ENDDO
+      SEGDES ipt1,ipt4
+C  Maintenant on peut deplacer les points
+      nfois=50
+      CALL LIRENT(nfois,0,iretou)
+      DO ifois=1,nfois
+        DO i=1,numnp
+          IF (icp2(idcp(i)).EQ.0) THEN
+            DO j=1,IDIM
+              xaux=0.
+              DO k=1,nkon+1
+                IF (ipxkon(k,i).NE.0) xaux=xaux+xkon(k,i)
+     .                  *xcoor((icorr(icpr(ipxkon(k,i)))-1)*idimp1+j)
+              ENDDO
+              xcoor((icorr(i)-1)*idimp1+j)=xaux
+            ENDDO
+          ENDIF
+        ENDDO
+      ENDDO
+
+      IF (ichpo.EQ.0) THEN
+         CALL ECROBJ('MAILLAGE',ipt4)
+      ELSE
+C  Sortie d'un CHPOINT, les points concernes sont reperes dans icpr
+        SEGSUP ipt2,ipt3
+        nbelem=icorr(/1)
+        nbnn=1
+        nbsous=0
+        nbref=0
+        SEGINI ipt2
+        ipt2.itypel=1
+        nat=1
+        nsoupo=1
+        SEGINI mchpo1
+        mchpo1.jattri(1)=jatan
+        IF (IDIM.EQ.1) nc=1
+        IF (IDIM.EQ.2) nc=2
+        IF (IDIM.EQ.3) nc=3
+        SEGINI msoupo
+        mchpo1.ipchp(1)=msoupo
+        igeoc=ipt2
+        n=nbelem
+        SEGINI mpoval
+        ipoval=mpoval
+        IF (IDIM.EQ.1) THEN
+          IF (NIFOUR.LE.9) THEN
+            nocomp(1)='UX'
+          ELSE
+            nocomp(1)='UR'
+          ENDIF
+        ELSE IF (IDIM.EQ.2) THEN
+          IF (IFOUR.GE.0) THEN
+            nocomp(1)='UR'
+            nocomp(2)='UZ'
+          ELSE
+            nocomp(1)='UX'
+            nocomp(2)='UY'
+          ENDIF
+        ELSE IF (IDIM.EQ.3) THEN
+          nocomp(1)='UX'
+          nocomp(2)='UY'
+          nocomp(3)='UZ'
+        ENDIF
+        SEGDES msoupo
+        DO i=1,idcp(/1)
+          ipt2.num(1,i)=idcp(i)
+          ifi=(icorr(i)-1)*idimp1
+          ide=(idcp(i)-1)*idimp1
+          DO j=1,IDIM
+            vpocha(i,j)=xcoor(ifi+j)-xcoor(ide+j)
+          ENDDO
+        ENDDO
+        SEGDES mpoval,ipt2,mchpo1
+        CALL ECROBJ('CHPOINT ',mchpo1)
+      ENDIF
+      SEGSUP icpr,idcp,xkon,ipxkon,icp2,icorr
+
+      RETURN
+      END
+

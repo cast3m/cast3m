@@ -1,0 +1,890 @@
+C PROM      SOURCE    FD218221  14/01/31    21:15:12     7936
+
+      SUBROUTINE PROM(IPMODE,IPCHE,IPCHT,ISUP,IPOUT)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+      EXTERNAL SHAPE
+*-------------------------------------------------------------------- *
+*                                                                     *
+*   Sous-programme appelé par l'opérateur   PROI                      *
+*   Projection d'un chamelem sur le support d un modele  par          *
+*   minimisation de l integrale   (Ue-Us)**2 ds  sur chaque element   *
+*    Ue evalue a partir des fonctions de formes du modele associe     *
+*        au champ d origine si il est  fourni ( sinon a partir des    *
+*        fonctions de transformation geometriques de l element)       *
+*                                                                     *
+*    L integrale est exprime à partir des fonctions de forme associees*
+*    au modèle support recepteur                                      *
+*---------------------------------------------------------------------*
+*                                                                     *
+*   ENTREE :                                                          *
+*          IPMODE  modele sur lequel on va projeter                   *
+*          IPCHE   MCHAML de caracteristique (si le maodele comprends *
+*                  des coques)                                        *
+*         IPCHT   MCHAML a projeter (obligatoirement defini aux noeuds)
+*         ISUP    remis  a 1  pour le moment (on travaille aux noeuds)*
+*                                                                     *
+*   SORTIE :                                                          *
+*          IPOUT   MCHAML resultat                                    *
+*                                                                     *
+*---------------------------------------------------------------------*
+*
+-INC CCOPTIO
+-INC SMCOORD
+-INC SMMODEL
+-INC SMCHAML
+-INC SMELEME
+-INC SMCHPOI
+-INC SMLCHPO
+-INC SMLMOTS
+-INC TMTRAV
+-INC SMINTE
+-INC CCREEL
+*
+        PARAMETER ( O1=1.D0,O2=2.D0)
+        character*4 nomm
+        segment snomip
+        character*4 nomip(0)
+        endsegment
+*        SEGMENT MDATA
+*         INTEGER IPCA(*),IPEXI(*)
+*        ENDSEGMENT
+        segment ipcb(nsschp)
+        segment icpr(2,xcoor(/1)/idim+1)
+        segment icpr1(xcoor(/1)/idim+1)
+C
+      segment info
+      integer infell(JG)
+      endsegment
+C
+        segment sicoq
+        integer icocoq(nbsous),imfr(nbsous),iiele(nbsous)
+        integer iminte(nbsous),imint1(nbsous),ibnap(nbsous)
+        integer inbg(nbsous),ibbas(nbsous)
+        endsegment
+C
+       segment WRK5
+        REAL*8 W(200),A(NBN1,NBN1),B(NBN1,NBN1),XPU(3),RHS(NBN1)
+        REAL*8 SHPXXX(6,NBNN,200),XX(3,200),VAL(NBN1),POIDS(200)
+        INTEGER NDD
+        endsegment
+C
+      SEGMENT WRK4
+       REAL*8 BPSS(3,3),XEL(3,NBN1),XU(3),SHP(6,NBN1),S(6)
+       REAL*8 TXR(3,3,NBN1),XE(3,NBG)
+      ENDSEGMENT
+      SEGMENT VECT
+        REAL*8  VEC1(IDIM)
+        REAL*8  VEC2(IDIM)
+        REAL*8  VECN(IDIM,ibbas(isous))
+      ENDSEGMENT
+
+C= Logique a TRUE si mode de calcul est axisymetrique 1D/2D ou Fourier
+      LOGICAL LOGAXI
+C= Quelques constantes (2.Pi et 4.Pi)
+      PARAMETER (X2Pi =6.283185307179586476925286766559D0)
+      PARAMETER (X4Pi=12.566370614359172953850573533118D0)
+
+C   on   remet  isup a 1  pour le moment
+      ISUP=1
+      MMODEL=IPMODE
+      SEGACT,MMODEL
+      NSOUS=KMODEL(/1)
+C
+      ndec=0
+      call lirent(ndec,0,iret)
+      if(ndec.eq.0) ndec = 3
+*
+      NBNOE = XCOOR(/1)/(IDIM+1)
+
+      if(ipche.NE.0) then
+      MCHELM=IPCHE
+      segact MCHELM
+      NCHAM=ICHAML(/1)
+      endif
+*
+*     Création du maillage provisoire support pour interpolation
+*
+      NBSOUS = NSOUS
+      NBREF = 0
+      NBELEM = 0
+      NBNN =  0
+C ipt2  contiendra les super couche ou points de gauss
+      SEGINI IPT2
+      SEGINI SICOQ
+c listmots des phases
+      ilphmo = -1
+      jgn = 8
+      jgm = nsous
+      segini mlmots
+      ilphmo = mlmots
+      jgm = 1
+*
+* Boucle sur l'ensemble des sous zones du modeles sur lequel on va
+*   projetter   pour   initialisations
+        nponou=0
+        npcoq =0
+      DO 30 ISOUS = 1, NSOUS
+*
+        IMODEL = KMODEL(ISOUS)
+        SEGACT,IMODEL
+        MELEME = IMAMOD
+        SEGACT MELEME
+        MELE = NEFMOD
+        NBELE1= NUM(/2)
+        NBN1 = NUM(/1)
+        ibnap(isous)=1
+C
+C   COQUE INTEGREE OU PAS ?
+C
+      IF(INFMOD(/1).NE.0)THEN
+          NPINT=INFMOD(1)
+          if( npint.ne.0)IBNAP(isous) =NPINT
+      ELSE
+          NPINT=0
+C          ibnap(isous)=1
+      ENDIF
+
+      if( infmod(/1).lt.2+isup) then
+      call elquoi(mele,npint,isup,ipinf,imodel)
+      if (ierr.ne.0) then
+        segdes imodel,mmodel
+        segsup mchelm
+        iret=0
+        return
+      endif
+        info=ipinf
+        mfr  =infell(13)
+        iele =infell(14)
+        minte=infell(11)
+        minte1=infell(12)
+        nbg=infell(6)
+        segsup info
+         else
+        minte=infmod(isup+2)
+        minte1=infMOD(12)
+        nbg=infele(6)
+        mfr  =infele(13)
+        iele =infele(14)
+        endif
+        imfr(isous)=mfr
+        iiele(isous)=iele
+        iminte(isous)=minte
+        imint1(isous)=minte1
+        inbg(isous)=nbg
+*       write(6,*) 'mfr iele mele minte minte1 nbg',mfr,iele,
+*     & mele,minte,minte1,nbg
+        NBSOUS = 0
+        NBREF = 0
+        NBELEM = NBELE1
+
+      IF(mfr.eq.3.or.mfr.eq.5.or.mfr.eq.9) THEN
+C------------------coques
+      IF(IPCHE.eq.0) THEN
+C  pour le coques il faut les caracteristiques
+      call erreur(404)
+      segdes meleme ,imodel,mmodel
+*      segsup info
+      return
+      ENDIF
+C
+      icocoq(isous)=1
+      nbnn = ndec*ndec
+      if(iele.lt.4) nbnn=ndec
+      ibbas(isous)= nbnn
+       if(idim.eq.3.or.(iele.lt.4.and.idim.eq.2))  then
+       ibnap(isous)=ndec
+       nbnn= nbnn*ndec
+       inbg(isous)=nbnn
+       endif
+
+      ELSE
+C--------------- massifs
+
+        IF (mfr.EQ.1) THEN
+          IF (IDIM.EQ.3) THEN
+            NBNN=ndec*ndec*ndec
+          ELSE IF (IDIM.EQ.2) THEN
+            NBNN=ndec*ndec
+C*        ELSE IF (IDIM.EQ.1) THEN
+          ELSE
+            NBNN=ndec
+          ENDIF
+        ELSE
+          NBNN=ndec*ndec
+        ENDIF
+
+C    petite rectif utile pour les elements speciaux
+        if(iele.eq.32) then
+C   les    polygones
+        nbnn =nbnn*nbn1
+        elseif(iele.eq.25.or.iele.eq.26) then
+C  les pyramides
+        nbnn = nbnn*4
+        endif
+C
+        inbg(isous)= NBNN
+      ENDIF
+*
+        SEGINI IPT1
+        IPT1.ITYPEL = 28
+        ipt2.lisous(isous) = ipt1
+        segdes ipt1
+        nponou=nponou+nbnn*nbelem
+
+        if (isous.eq.1) then
+         mots(1) = conmod(17:24)
+        else
+         do ipl = 1,jgm
+          if (mots(ipl).eq.conmod(17:24)) goto 27
+         enddo
+         jgm = jgm + 1
+         mots(jgm) = conmod(17:24)
+ 27      continue
+        endif
+
+        segdes meleme,imodel
+*        segsup info
+30    CONTINUE
+      segadj mlmots
+C-----------------------------------------------------------
+C
+C
+C   on va fabriquer des points support provisoires a l interieur
+C        de chaque element des maillages du modele  recepteur
+C
+C
+C----------------------------------------------------------
+C        write(6,*) ' nombre de points crees ' ,nponou
+C (DIP) ajustement de MCOORD pour les noeuds provisoires
+C       il sera remis a sa taille initiale a la fin du programme
+         NBPTS = NBNOE + nponou
+         SEGADJ MCOORD
+*-----------------------------------------------------------
+*     Boucle sur l'ensemble des sous zones du modeles
+*------------------------------------------------------------
+        inupo =NBNOE
+      DO 100 ISOUS = 1,NSOUS
+        IMODEL = KMODEL(ISOUS)
+        segact imodel
+        MELEME = IMAMOD
+        segact meleme
+        nbele1= num(/2)
+        nbn1 = num(/1)
+        ipt1=ipt2.lisous(isous)
+        segact ipt1*mod
+        NNB = ibbas(isous)
+        NBG = inbg(isous)
+        SEGINI WRK4
+            MELVA1 = 0
+            MELVA2 = 0
+      IF(icocoq(isous).ne.0) THEN
+C  -------------------------------la sz est une coque ------
+
+           NUCHA = 0
+       DO 15, NUCH = 1, NCHAM
+*
+            IF ( CONCHE(NUCH).EQ.CONMOD.AND.
+     &           IMACHE(NUCH).EQ.IMAMOD) NUCHA = NUCH
+*
+  15      CONTINUE
+*
+          IF (NUCHA.NE.0) THEN
+            MCHAML=ICHAML(NUCHA)
+            SEGACT,MCHAML
+*
+            MELVA1 = 0
+            MELVA2 = 0
+            NCOMP = IELVAL(/1)
+            DO 20, I = 1, NCOMP
+              IF (NOMCHE(I)(1:4).EQ.'EPAI') THEN
+                MELVA1 = IELVAL(I)
+                SEGACT, MELVA1
+              ELSEIF (NOMCHE(I)(1:4).EQ.'EXCE') THEN
+                MELVA2 = IELVAL(I)
+                SEGACT, MELVA2
+              ENDIF
+  20        CONTINUE
+          ENDIF
+      ENDIF
+C
+      MELE = NEFMOD
+c   coque integree ou pas ?
+        if(infmod(/1).ne.0)then
+        npint=infmod(1)
+        else
+        npint=0
+        endif
+C
+        nbnap=ibnap(isous)
+        mfr  =imfr(isous)
+        iele =iiele(isous)
+        minte=iminte(isous)
+        minte1=imint1(isous)
+        nbg = inbg(isous)
+C
+        segact minte
+        if(mfr.eq.5) segact minte1
+
+        nnb = ibbas(isous)
+C
+       ipo=0
+*-------------------------------------------------------------------
+*   Pavage de l element de reference
+*-------------------------------------------------------------------
+       NBNN = inbg(isous)
+       segini WRK5
+       iwkr= wrk5
+       iele=iiele(isous)
+       CALL PAVPOI(WRK5,iele,ndec,nbn1)
+       segini vect
+*-------------------------------------------------------------------
+*  Boucle sur les elements de la sous zone du modele
+*-------------------------------------------------------------------
+
+      DO IEL=1,NBELE1
+      CALL DOXE(XCOOR,IDIM,NBN1,NUM,IEL,XEL)
+
+C   si c est une coque pouvant etre excentree
+C     recherche des normales  aux noeuds
+      if(icocoq(isous).ne.0)  then
+C
+       IF(IELE.EQ.4) THEN
+C    --------coq3   dkt  dst   ----------------
+      do 98 i=1,idim
+      VEC1(i)=xel(i,2)-xel(i,1)
+98    VEC2(i)=xel(i,3)-xel(i,1)
+      vecn(1,1) = vec1(2)*vec2(3)-vec1(3)*vec2(2)
+      vecn(2,1) = vec1(3)*vec2(1)-vec1(1)*vec2(3)
+      vecn(3,1) = vec1(1)*vec2(2)-vec1(2)*vec2(1)
+      vnor =sqrt(vecn(1,1)*vecn(1,1)+vecn(2,1)*vecn(2,1)
+     & +vecn(3,1)*vecn(3,1))
+      do 91 i=1,idim
+91    vecn(i,1)=vecn(i,1)/vnor
+      do 99 i=1,idim
+      do 99 j=2,ibbas(isous)
+99    vecn(i,j)=vecn(i,1)
+                ELSEIF (IELE.EQ.8) THEN
+C    --------------- coq4 ----------------
+      call cq4loc(xel,xe,BPSS,irrt,1)
+C  ici c est une estimation du plan moyen
+*     write(6,fmt='(3E12.5)') ((bpss(i,j),i=1,3),j=1,3)
+      do i=1,3
+      do ip=1,ibbas(isous)
+      vecn(i,ip)=bpss(3,i)
+      enddo
+      enddo
+        ELSEIF(IELE.eq.2) THEN
+C   ---------------- coq2 --------------
+        vnor=0.D0
+        do 92 i=1,idim
+        VEC1(i)=xel(i,2)-xel(i,1)
+92      vnor=vnor + vec1(i)*vec1(i)
+        vnor = sqrt(vnor)
+        vecn(1,1)=-vec1(2)/vnor
+        vecn(2,1)=vec1(1)/vnor
+        vecn(1,2)=vecn(1,1)
+        vecn(2,2)=vecn(2,1)
+        ELSEIF (iele.eq.5.or.iele.eq.10) THEN
+C  preparation pour coques integrees
+         SURFX=XZERO
+         SURFY=XZERO
+         SURFZ=XZERO
+                 ENDIF
+      endif
+C -------------------  boucle sur les points d integration
+      inuo=inupo
+C      write(6,*) ' ndd et inupo ' ,ndd,inupo
+      do igau=1,ndd
+C
+      do j=1,idim
+      xpu(j)=xx(j,igau)
+      enddo
+C      write(6,*)(xpu(J),j=1,idim)
+C
+      if(mele.GE.111.and.mele.le.122) then
+C  les plolygones
+      call shpoly(xpu(1),xpu(2),xpu(3),nbn1,mele,shp,iret)
+      else
+      CALL SHAPE(xpu(1),xpu(2),xpu(3),iele,shp,iret)
+      endif
+
+C       PROJECTION  DANS L ELEMENT REEL
+      DO 501 IK = 1,IDIM
+      XU(IK)= XZERO
+      DO 501 JK = 1,nbn1
+      XU(IK) = XU(IK) + SHP(1,JK)*(XEL(IK,JK))
+501   CONTINUE
+C
+      if ( mfr.eq.5) then
+C             coques integrees ds l epaisseur
+            DO I=1,6
+               S(I)=XZERO
+            CONTINUE
+            ENDDO
+            DO INOE=1,NBN1
+               S(1)=S(1)+SHP(2,INOE)*XEL(2,INOE)
+               S(2)=S(2)+SHP(3,INOE)*XEL(3,INOE)
+               S(3)=S(3)+SHP(3,INOE)*XEL(2,INOE)
+               S(4)=S(4)+SHP(2,INOE)*XEL(3,INOE)
+               S(5)=S(5)+SHP(3,INOE)*XEL(1,INOE)
+               S(6)=S(6)+SHP(2,INOE)*XEL(1,INOE)
+            ENDDO
+            SURFX=S(1)*S(2)-S(3)*S(4)
+            SURFY=S(4)*S(5)-S(2)*S(6)
+            SURFZ=S(6)*S(3)-S(5)*S(1)
+            SURF=SQRT(SURFX**2+SURFY**2+SURFZ**2)
+C      write(6,*) ' normales au pt igau du plan de base '
+        vecn(1,igau)=surfx/surf
+        vecn(2,igau)=surfy/surf
+        vecn(3,igau)=surfz/surf
+      endif
+C
+      IF(ICOCOQ(ISOUS).EQ.0) THEN
+C   elements  standards
+      inupo=inupo+1
+      ipt1.num(igau,iel)=inupo
+      do i=1,idim
+      xcoor((inupo-1)*(idim+1)+i)=XU(i)
+      enddo
+C      write(6,3335) (xu(i),i=1,idim)
+C3335  format(3e12.5)
+      ELSE
+C   traitement special des coques
+        if(melva1.ne.0) then
+        ibmn =MIN(iel,melva1.velche(/2))
+        igmn =MIN(igau,melva1.velche(/1))
+        epai = melva1.velche(igmn,ibmn)
+        else
+        epai =xzero
+        endif
+C
+        if(melva2.ne.0) then
+        ibmn =MIN(iel,melva2.velche(/2))
+        igmn =MIN(igau,melva2.velche(/1))
+        exce = melva2.velche(igmn,ibmn)
+        else
+        exce =xzero
+        endif
+
+      dp = epai/ibnap(isous)
+      dnor = exce -(epai + dp)/2.D0
+C
+      do inap=1,ibnap(isous)
+      dnor=dnor+dp
+      ipos = (inap-1)*ibbas(isous)+igau
+      ipt1.num(ipos,iel)=inuo+ipos
+      do i=1,idim
+      xcoor((inuo+ipos-1)*(idim+1)+i)= XU(i)+dnor*vecn(i,igau)
+      enddo
+      enddo
+      inupo=inupo+ibnap(isous)
+      ENDIF
+
+C ---------------fin de la boucle sur les points de d integration
+      enddo
+
+C  fin de la boucle sur les elements
+      enddo
+       segsup wrk5,vect
+       segdes minte
+       if(mfr.eq.5) segdes minte1
+       if(icocoq(isous).ne.0) SEGDES,MCHAML
+       if (melva1.ne.0) segdes melva1
+       if (melva2.ne.0) segdes melva2
+      segdes meleme,imodel
+      segdes ipt1
+      SEGSUP WRK4
+*      segsup info
+*
+ 100  CONTINUE
+C   fin de creation des noeuds supports provisoires
+2003   format(3I4,2X,4e12.5,I4)
+C--------------//////////////////////////////////------------------
+C  maintenant in faut un meleme poi1  de tous les points sur lesquels
+C          on doit interpoler une valeur
+        segini icpr1
+        ipt5=ipt2
+         nbelem=0
+        do io=1,max(1,ipt2.lisous(/1))
+         if (ipt2.lisous(/1).ne.0) ipt5=ipt2.lisous(io)
+         segact ipt5
+         do ip=1,ipt5.num(/1)
+         do il=1,ipt5.num(/2)
+          ipt=ipt5.num(ip,il)
+          if (icpr1(ipt).eq.0) then
+           nbelem=nbelem+1
+           icpr1(ipt)=nbelem
+          endif
+         enddo
+         enddo
+**       segdes ipt5
+        enddo
+**      segdes ipt2
+        nbnn=1
+        nbsous=0
+        nbref=0
+**      write (6,*) ' nbelem ',nbelem
+        segini ipt4
+        ipgeom=ipt4
+        nbelem=0
+        do i=1,icpr1(/1)
+         if (icpr1(i).ne.0) then
+          nbelem=nbelem+1
+**        write (6,*) ' i nbelem icpr ',i,nbelem,icpr1(i)
+          ipt4.num(1,nbelem)=i
+         endif
+        enddo
+        segsup icpr1
+C----------------------------------------------------------------
+C----------------------------------------------------------------
+*-------------on est pret a faire l interpolation sur ipgeom ----
+C
+*write(6,*) ' maillage apres changer poi1 ' ,ipgeom
+C          call ecmail(ipgeom)
+         isort=0
+          CALL PRO2(IPGEOM,IPCHT,isort,IPOUT,ilphmo)
+         if (ierr.ne.0) return
+C----------------------------------------------------------------
+C----------------------------------------------------------------
+C
+C Definition de "constantes" selon le mode de calcul
+C Modes de calcul 1D/2D axisymetrique
+      IF (IFOMOD.EQ.0.OR.IFOMOD.EQ.4) THEN
+        LOGAXI=.TRUE.
+        CteAxi=X2Pi
+C Mode de calcul 2D Fourier
+      ELSE IF (IFOMOD.EQ.1) THEN
+        LOGAXI=.TRUE.
+        IF (NIFOUR.EQ.0) THEN
+          CteAxi=X2Pi
+        ELSE
+          CteAxi=XPi
+        ENDIF
+      ELSE
+        LOGAXI=.FALSE.
+      ENDIF
+C----------------------------------------------------------------
+C  ---      il faut maintenant reconstituer les MCHAML
+C  ---       a partir du chpo  construit  sur ipgeom ----------------
+       mlchpo = ipout
+       segact mlchpo
+        mchel5= ipcht
+        segact mchel5
+        N1=NSOUS
+        L1=12
+        N3=6
+        SEGINI MCHEL1
+*        MCHEL1.TITCHE='SCALAIRE'
+        MCHEL1.TITCHE = mchel5.titche
+        MCHEL1.IFOCHE=IFOUR
+        segdes mchel5
+*//////////////////////////////
+
+* boucle phases modele
+       DO 7000 IPHAS = 1,JGM
+*         write(6,*) 'iphas ',iphas
+        segini icpr,snomip
+*        mdata=isort
+*        segact mdata
+        mchpoi=ichpoi(iphas)
+        segact mchpoi
+        nsschp=ipchp(/1)
+        segini ipcb
+
+C        ip=0
+        do i=1,nsschp
+*        mchpoi=ipca(i)
+C        call ecchpo(mchpoi)
+*        segact mchpoi
+        msoupo=ipchp(i)
+        ipcb(i)=msoupo
+        segact msoupo
+        mpoval=ipoval
+        segact mpoval
+        nc = nocomp(/2)
+C
+C tableau des general des composantes
+        do ic = 1,nc
+        nomm= nocomp(ic)
+        if(nomip(/2).eq.0) then
+        nomip(**)=nomm
+        else
+        do  k=1,nomip(/2)
+        if(nomm.eq.nomip(k)) goto 4322
+        enddo
+        nomip(**)=nomm
+4322    continue
+        endif
+        enddo
+*       write(6,*) (nomip(l),l=1,nomip(/2))
+*    reperage de la position  ses points dans le chpo
+        ipt5=igeoc
+        segact ipt5
+*        ip=0
+        do j=1,ipt5.num(/2)
+*        ip=ip+1
+        icpr(1,ipt5.num(1,j))=j
+        icpr(2,ipt5.num(1,j))= i
+        enddo
+        enddo
+C  i=icpr(2,k)   point k venant du msoupo du msoupo i  dans ipcb
+
+        inupo=0
+        segact ipt2
+        DO 2100 isous = 1,nsous
+        imodel= KMODEL(isous)
+        segact imodel
+         if (conmod(17:24).ne.mots(iphas)) goto 2100
+        meleme = imamod
+        segact meleme
+        idi2=idim
+        ipt5=ipt2.lisous(isous)
+        segact ipt5
+        if(icocoq(isous).ne.0) idi2 = idim-1
+        mfr=imfr(isous)
+*             création du nouveau segment MCHAML
+          N2=nomip(/2)
+              SEGINI MCHAML
+              MCHEL1.IMACHE(isous)=MELEME
+              MCHEL1.ICHAML(isous)=MCHAML
+              MCHEL1.CONCHE(isous)=CONMOD
+              MCHEL1.INFCHE(isous,1)=0
+              MCHEL1.INFCHE(isous,2)=0
+              MCHEL1.INFCHE(isous,3)=NIFOUR
+              MCHEL1.INFCHE(isous,4)=0
+              MCHEL1.INFCHE(isous,5)=0
+              MCHEL1.INFCHE(isous,6)=1
+*
+        N1EL=NUM(/2)
+        N2PTEL=0
+        N2EL=0
+C--------------------------------------------------------
+C       boucle sur les composantes
+C--------------------------------------------------------
+        NBNN=num(/1)
+        N1PTEL= NBNN
+        NBN1=NBNN
+
+C
+        SEGINI WRK5,wrk4
+      iele = iiele(isous)
+      iwrk= wrk5
+      CALL PAVPOI(WRK5,iele,ndec,nbnn)
+C  -----  remplissage de shpxxx  ( shptot)
+      DO IGAU=1,NDD
+        do j=1,idim
+        xpu(j)=xx(j,igau)
+        enddo
+        if(mele.GE.111.and.mele.le.122) then
+        call shpoly(xpu(1),xpu(2),xpu(3),nbn1,mele,shp,iret)
+        else
+        call shape(xpu(1),xpu(2),xpu(3),iele,shp,iret)
+        endif
+      do  id=1,6
+      do  no=1,nbnn
+      shpxxx(id,no,igau)=shp(id,no)
+      enddo
+      enddo
+      ENDDO
+      N1PTEL=NBNN
+C ----------- creation des melvals recepteurs -----
+      DO   icomp=1,NOMIP(/2)
+        SEGINI MELVAL
+        NOMCHE(icomp)=nomip(icomp)
+        TYPCHE(icomp)='REAL*8'
+        IELVAL(icomp)=MELVAL
+      ENDDO
+C--------------------------------------------------
+C--------  boucle sur les elements       ----------
+        AXIS=O1
+        DO 2210 iel=1,num(/2)
+        CALL DOXE(XCOOR,IDIM,NBNN,NUM,IEL,XEL)
+        CALL ZERO(A,NBNN,NBNN)
+C       SSOM1=XZERO
+C
+C
+        DO inap=1,ibnap(isous)
+        DO 40 IGAU=1,ndd
+         do i=1,idim
+         xpu(i)=xx(i,igau)
+         enddo
+         if(mele.GE.111.and.mele.le.122) then
+C  les plolygones
+         call shpoly(xpu(1),xpu(2),xpu(3),nbn1,mele,shp,iret)
+         else
+         call shape(xpu(1),xpu(2),xpu(3),iele,shp,iret)
+         endif
+         CALL JACOBI(XEL,SHP,IDI2,NBNN,DJAC)
+C Modes de calcul 1D/2D axisymetrique et 2D Fourier
+         IF (LOGAXI) THEN
+           CALL DISTRR(XEL,SHP,NBNN,RR)
+           AXIS=CteAxi*RR
+C Mode de calcul 1D spherique
+         ELSE IF (IFOMOD.EQ.5) THEN
+           CALL DISTRR(XEL,SHP,NBNN,RR)
+           AXIS=X4Pi*RR*RR
+         ENDIF
+C
+C   on veut calculer la fonction au point d integration  projete
+C           PROJECTION
+      DO IK = 1,IDIM
+      XU(IK)= XZERO
+      DO  JK = 1,NBNN
+      XU(IK) = XU(IK) + SHP(1,JK)*(XEL(IK,JK))
+      ENDDO
+      ENDDO
+C
+            CPZA=poids(igau)*DJAC*AXIS
+            DO 50 INO1=1,NBNN
+            DO 60 INO2=1,NBNN
+            Q = SHPXXX(1,INO1,IGAU)*SHPXXX(1,INO2,IGAU)*CPZA
+CCC         Q = SHPXXX(1,INO1,IGAU)*SHPXXX(1,INO2,IGAU)
+CCC  1              *poids(igau)*DJAC*AXIS
+            A(INO1,INO2)=A(INO1,INO2)+Q
+ 60         CONTINUE
+ 50         CONTINUE
+ 40         CONTINUE
+         enddo
+C
+C  ----  fin preparation matrice 'masse ' sur element courant
+C         do i=1,NBNN
+C        do j=1,NBNN     garder eventuellement pour calculer
+C        B(i,j)=A(i,j)   la difference sur les integrales
+C        enddo
+C        enddo
+C
+         call invalm(A,NBNN,NBNN,KERRE,1.D-10)
+C  ------------------  boucle  sur les composantes
+        DO 2220 icomp=1,nomip(/2)
+        idebco = inupo
+        do i=1,nbnn
+        RHS(i) =XZERO
+        enddo
+C  ---------  boucle  sur les points d integration
+C
+        AXIS = O1
+        DO 42 inap=1,ibnap(isous)
+        DO 41 IGAU=1,ndd
+         do i=1,idim
+         xpu(i)=xx(i,igau)
+         enddo
+            CALL SHAPE(xpu(1),xpu(2),xpu(3),iele,shp,iret)
+         CALL JACOBI(XEL,SHP,IDI2,NBNN,DJAC)
+C Modes de calcul 1D/2D axisymetrique et 2D Fourier
+         IF (LOGAXI) THEN
+           CALL DISTRR(XEL,SHP,NBNN,RR)
+           AXIS=CteAxi*RR
+C Mode de calcul 1D spherique
+         ELSE IF (IFOMOD.EQ.5) THEN
+           CALL DISTRR(XEL,SHP,NBNN,RR)
+           AXIS=X4Pi*RR*RR
+         ENDIF
+
+       ipop=(inap-1)*ndd+igau
+       inupo=ipt5.num(ipop,iel)
+
+       jh=icpr (1,inupo)
+       ipa=icpr(2,inupo)
+C  il faut verifier si vpocha existe pour ce point
+       msoupo = ipcb(ipa)
+       mpoval=ipoval
+                do l=1,nocomp(/2)
+       if(nocomp(l).eq.nomip(icomp)) then
+       vvv=vpocha(jh,icomp)
+       goto  4555
+       endif
+                enddo
+       vvv=XZERO
+4555   continue
+C       write(6,7777) inupo,jh,poids(igau),vvv
+C
+        melval=ielval(icomp)
+        CPZA=vvv*poids(igau)*DJAC*AXIS
+         DO INO1 = 1,NBNN
+           RHS(ino1)=RHS(ino1)+CPZA*SHPXXX(1,ino1,igau)
+CCC      RHS(ino1)=RHS(ino1)+vvv*poids(igau)*
+CCC  1          DJAC*SHPXXX(1,INO1,IGAU)*AXIS
+         ENDDO
+41       continue
+42       continue
+
+7777  format(2I4,2X,2E12.5)
+C           SSOM1 =SSOM1+SURF*poids(igau)*vvv
+C
+         do i=1,NBNN
+         val(i)=XZERO
+         do j=1,NBNN
+         val(i)=val(i)+A(i,j)*RHS(J)
+         enddo
+         enddo
+C
+         do I=1,NBNN
+         velche(i,iel)=val(i)
+         enddo
+C
+*         if(icomp.lt.nomip(/2)) inupo =idebco
+C  ----  fin de la boucle sur les composantes
+2220    continue
+C    fin de la boucle sur les elements
+2210     continue
+C
+        do i=1,ielval(/1)
+          ipc1 = ielval(i)
+          call comred(ipc1)
+          melval = ipc1
+          segdes melval
+        enddo
+        segdes meleme,mchaml
+
+C----------------  fin du traitement des massifs
+        segsup wrk5,wrk4,ipt5
+
+C       segsup ipt3
+        segdes imodel,meleme
+C    fin de la boucle sur les sous zones du modele
+2100    continue
+C  destruction des chpo intermediaires
+        do i=1,ipcb(/1)
+          msoupo=ipcb(i)
+cgf          ipt5= igeoc (correction 7284)
+          mpoval= ipoval
+*          mchpoi=ipca(i)
+          segsup mpoval,msoupo
+cgf          segsup ipt5 (correction 7284)
+        enddo
+        segsup mchpoi
+        segsup ipcb,snomip
+        segsup icpr
+ 7000   CONTINUE
+C (fdp) re-ajustement de MCOORD a sa taille initiale
+        NBPTS = NBNOE
+        SEGADJ MCOORD
+C       retrait des maillages temporaires du pre-conditionnement
+c       (leurs numero de noeuds depasse la taille de MCOOR)
+        call crech1b
+        segdes mchel1,mmodel
+C (fdp) suppression du maillage temporaire IPT1
+        ipt1=ipgeom
+        segsup ipt1
+        segact ipt2
+        do io=1,ipt2.lisous(/1)
+          ipt5=ipt2.lisous(io)
+*         segsup ipt5
+        enddo
+        segsup ipt2
+        segsup ipt4
+        if(ipche.ne.0) then
+          mchelm=ipche
+          segdes mchelm
+        endif
+        IPOUT=MCHEL1
+        segsup sicoq
+
+        return
+      END
+
+
+
+
+

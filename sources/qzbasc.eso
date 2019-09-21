@@ -1,0 +1,381 @@
+C QZBASC    SOURCE    CB215821  17/04/20    21:15:27     9406
+      SUBROUTINE QZBASC (ALFR, ALFI, BETA, MATZ, MELEME, MCOMP,
+     &     IPBC,ERR,NWANTED)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+*
+************************************************************************
+*        CREATION D'UNE BASE DE MODES PROPRES COMPLEXES POUR VIBC
+* ______________________________________________________________________
+*
+*    AUTEUR : Nicolas BENECH, 13 avril 1995
+*    MODIF : BP, 2016-01-15 on reecrit tout
+* ______________________________________________________________________
+*
+*     MODULE(S) APPELANT(S) : VIBRAC
+*
+*     MODULE(S) APPELE(S) : CRTABL, ACCTAB, ECCTAB, CREPO1, MUCHPO
+* ______________________________________________________________________
+*
+*     EN ENTREE :
+*            -ALFR : partie reelle des valeurs propres
+*            -ALFI : partie imaginaire des valeurs propres
+*            -BETA : denominateur (reel) des valeurs propres
+*                      (denominateur nul --> valeur propre infinie)
+*            -MATZ : vecteurs propres complexes
+*            -MELEME : maillage support des chpoints
+*            -MCOMP : liste des composantes des chpoints
+* ______________________________________________________________________
+*
+*     EN SORTIE :
+*            -IPBC : base de modes complexes
+* ______________________________________________________________________
+*
+*     REMARQUE : la variable SEUIL definie au début des données générales
+*                permet d'identifier les valeurs propres infinies, et
+*                d'annuler le mode correspondant.
+*                Sa valeur a ete fixee a 100 x EPSLON(1.0D0) pour le moment
+************************************************************************
+*
+-INC CCREEL
+*-
+-INC CCOPTIO
+-INC SMELEME
+-INC SMLCHPO
+-INC SMLMOTS
+-INC SMCHPOI
+-INC SMRIGID
+-INC SMTABLE
+-INC SMLREEL
+-INC SMLENTI
+-INC SMCOORD
+*     segment de travail = MTRAV modifie pour NNCHPO chpoints
+      SEGMENT MTRAV
+       CHARACTER*4    INCO(NNIN)
+       REAL*8         BB(NNCHPO,NNIN,NNNOE)
+       INTEGER        IBIN(NNIN,NNNOE),IGEO(NNNOE),NHAR(NNIN)
+      ENDSEGMENT
+*
+* ********   INCO(NNIN) CONTIENT LE NOMS DES NNIN INCONNUES DIFFERENTES.
+*
+* ********   BB(I,J) EST LA VALEUR DE LA IEME INCONNUE DU CHAMP POUR
+* ********   LE JEME NOEUD DU TABLEAU IGEO.
+*
+* ********   IBIN(I,J)=1 OU 0. 1 INDIQUE QUE LA I EME INCONNUE DU CHAMP
+* ********   EXISTE POUR LE J EME NOEUD DU TABLEAU IGEO.
+*
+* ********   IGEO(I) EST LE NUMERO A METTRE DANS UN OBJET MELEME POUR
+* ********   REFERENCER LE IEME NOEUD
+*
+* ********   NHAR(I)  EST LE NUMERO D'HARMONIQUE SI CALCUL AXI OU
+* ********   SIGNIFIE CONTRAINTE PLANE,DEFORMATION PLANE OU DEF PLAN GEN
+*
+      SEGMENT ICPR(XCOOR(/1)/(IDIM+1))
+*
+      REAL*8 XVAL,SEUIL
+      INTEGER I, J, K, IC, NUMAFF,ERR
+      LOGICAL MODANN, MODREL, AFFICH,CONV
+      CHARACTER*4 NOMDDL
+*
+      POINTEUR ALFR.MLREEL, ALFI.MLREEL, BETA.MLREEL
+      POINTEUR MATZ.XMATRI
+      POINTEUR MCOMP.MLMOTS
+*
+
+************************************************************************
+*           DONNEES GENERALES                                          *
+************************************************************************
+
+*     Ecriture des messages pour verification
+
+      AFFICH = IIMPI.GE.21
+c       AFFICH = .TRUE.
+*
+      IF (AFFICH)
+     & WRITE (IOIMP,*) 'QZBASC: Extraction des donnees generales...'
+*
+*     seuil pour le denominateur d'une valeur propre
+
+*      SEUIL = (EPSLON(1.0D0)*100)
+      SEUIL = 1.D-99
+
+*     nombre de modes calcules
+      NBMOD1=ALFR.PROG(/1)
+
+
+****  si on souhaite un nombre de modes inferieur, on devra alors trier
+
+      IF(NWANTED.GT.0.AND.NWANTED.LT.NBMOD1) THEN
+c       tri selon 1/module**2 : il faut le calculer explicitement
+        SEGINI,MLREEL=BETA
+        I=1
+  88    IF(I.GT.NBMOD1) GOTO 22
+          PROG(I) = (PROG(I)**2) / (ALFI.PROG(I)**2 + ALFR.PROG(I)**2)
+c         bp : si c'est un complexe, on force l egalite du module
+c         comme le tri d'ORDON1 est stable, les complexes i et i+1
+c         resteront a des indices successifs
+          IF(ABS(ALFI.PROG(I)).NE. 0.0D0) THEN
+            I=I+1
+            PROG(I)=PROG(I-1)
+          ENDIF
+          I=I+1
+          GOTO 88
+  22    CONTINUE
+        IORDRE=1
+        CALL ORDON1(MLREEL,.FALSE.,.TRUE.,IORDRE)
+        segsup,MLREEL
+        MLENTI=IORDRE
+        segact,MLENTI
+      ELSE
+        IORDRE=0
+        NWANTED=NBMOD1
+      ENDIF
+
+
+****  preparation des CHPOINTs deformees *******************************
+
+*     nombre de ddls (=dimension de MELEME = dimension de MCOMP)
+      SEGACT,MELEME,MCOMP
+      NDDL=MELEME.NUM(/2)
+
+*     on cree ICPR
+      SEGINI,ICPR
+*     on dimensionne au maxi MTRAV
+      NNIN=NDDL
+      NNNOE=NDDL
+      NNCHPO=NBMOD1
+      SEGINI,MTRAV
+      NNIN=0
+      NNNOE=0
+
+*---- traitement de chaque ddl ----------------------------------
+      DO 100 J=1,NDDL
+
+c     - NOEUD
+        IP=NUM(1,J)
+        JNOE=ICPR(IP)
+c       nouveau noeud #IP de numero local #JNOE
+        IF(JNOE.EQ.0) THEN
+          NNNOE=NNNOE+1
+          JNOE=NNNOE
+          ICPR(IP)=JNOE
+          IGEO(JNOE)=IP
+        ENDIF
+
+c     - COMPOSANTE
+        NOMDDL=MCOMP.MOTS(J)
+        IF(NNIN.EQ.0) GOTO 111
+        DO 110 JIN=1,NNIN
+          IF(NOMDDL.EQ.INCO(JIN)) GOTO 112
+c         NOMDDL trouvee dans INCO(JIN)
+ 110    CONTINUE
+
+ 111    CONTINUE
+c       NOMDDL pas trouvee dans INCO(JIN) -> on l'ajoute a la fin
+        NNIN=NNIN+1
+        JIN=NNIN
+        INCO(JIN)=NOMDDL
+c       bp : pour l'instant on laisse NHAR=NIFOUR, mais il faudrait
+c            recuperer IRIGEL(5,:) des rigidites d'entree ou autre ...?
+        NHAR(JIN)=NIFOUR
+
+ 112    CONTINUE
+c       NOMDDL trouvee dans INCO(JIN) et noeud #IP dans IGEO(JNOE)
+
+c       Remplissage de IBIN et BB
+        IBIN(JIN,JNOE)=J
+        DO I=1,NBMOD1
+          BB(I,JIN,JNOE)=MATZ.RE(J,I,1)
+        ENDDO
+
+ 100  CONTINUE
+*---- fin de la boucle sur les ddl ----------------------------------
+
+      SEGSUP,MCOMP,ICPR
+      SEGDES,MELEME
+      SEGADJ,MTRAV
+c       write(*,*) 'IGEO=',(IGEO(iou),iou=1,NNNOE)
+c       write(*,*) 'INCO=',(INCO(iou),iou=1,NNIN)
+c     on va generer N1 chpoints en 1 passage dans une copie de CRECHP
+      N1=NBMOD1
+      SEGINI,MLCHPO
+      CALL CRECH4(MTRAV,MLCHPO)
+      SEGSUP,MTRAV
+
+
+*******************************************
+*    Creation de la table BASE_DE_MODES   *
+*******************************************
+*
+      IF (AFFICH) WRITE(IOIMP,*) 'Creation de la table BASE_DE_MODES...'
+*
+      CALL CRTABL(IPTAB2)
+      CALL ECCTAB(IPTAB2,'MOT',0,0.0D0,'SOUSTYPE',.TRUE.,0,
+     &     'MOT',0,0.0D0,'BASE_DE_MODES',.TRUE.,0)
+      CALL ECCTAB(IPTAB2,'MOT',0,0.0D0,'MAILLAGE',.TRUE.,0,
+     &     'MAILLAGE',0,0.0D0,' ',.TRUE.,MELEME)
+
+
+************************************************************************
+*     BOUCLE SUR LES MODES                                             *
+************************************************************************
+*
+      III=1
+ 80   IF (III .GT. NWANTED) GOTO 20
+
+*     selection des NWANTED plus petits modes
+      IF(IORDRE.NE.0) THEN
+        I = LECT(III)
+      ELSE
+        I = III
+      ENDIF
+*
+      MODREL = (ABS(ALFI.PROG(I)).EQ. 0.0D0)
+      IF (AFFICH) THEN
+        IF (MODREL) THEN
+          WRITE (IOIMP,*) III,': MODE ',I,' REEL',ALFI.PROG(I),
+     &                  '-i',ALFR.PROG(I),' / 2pi',BETA.PROG(I)
+        ELSE
+          WRITE (IOIMP,*) III,': MODE ',I,' COMPLEXE',ALFI.PROG(I),
+     &                  '-i',ALFR.PROG(I),' / 2pi',BETA.PROG(I)
+        ENDIF
+      ENDIF
+*
+* ---- frequence infinie ?
+*
+      MODANN = (ABS(BETA.PROG(I)).LT.SEUIL)
+
+* ---- oui
+      IF (MODANN) THEN
+ 90      WRITE (IOIMP,*) 'Attention !!! Mode ',I,
+     &        ' annule : frequence infinie.'
+         CALL CRTABL(MTAB1)
+         CALL ECCTAB(MTAB1,'MOT',0,0.0D0,'SOUSTYPE', .TRUE.,0,
+     &        'MOT',0,0.0D0,'MODE_ANNULE',.TRUE.,0)
+         CALL ECCTAB(IPTAB2,'ENTIER',I,0.0D0,' ',.TRUE.,0,
+     &        'TABLE', 0, 0.0D0,' ',.TRUE.,MTAB1)
+         IF (.NOT. MODREL) THEN
+            MODREL = .TRUE.
+            III = III + 1
+            GO TO 90
+         ENDIF
+
+* ---- non
+      ELSE
+*
+*------- Deformees reelle (1) et imaginaire (2) du mode i
+
+* Recup des CHPOINTs :
+         MCHPO1=ICHPOI(I)
+
+* Cas reel : il faut un chpoint nul -> on crée un chpoint vide
+         IF (MODREL) THEN
+            NAT=1
+            NSOUPO=0
+            SEGINI,MCHPO2
+            MCHPO2.IFOPOI=IFOMOD
+            MCHPO2.MOCHDE='CHPOINT CREE PAR QZBASC'
+* Cas complexe : on fait la Recup
+         ELSE
+           MCHPO2=ICHPOI(I+1)
+         ENDIF
+c          write(*,*) '>>> mode',I,'phiR=',MCHPO1,'phiI=',MCHPO2
+*
+*
+************************************************
+*           Creation de la table MODE          *
+************************************************
+*
+*----- valeur propre (reelle ou complexe)
+*
+* Attention : on enregistre f = w/2pi
+*           avec iw = landa donc w=-i landa !!!
+*
+         IF (AFFICH) WRITE (*,*) 'Construction de la table MODE ...'
+*
+         CALL CRTABL(MTAB1)
+         CALL ECCTAB(MTAB1,'MOT',0,0.0D0,'SOUSTYPE',.TRUE.,0,
+     &        'MOT',0,0.0D0,'MODE_COMPLEXE',.TRUE.,0)
+*
+         CALL ECCTAB(MTAB1,'MOT',0,0.0D0,'NUMERO_MODE',.TRUE.,0,
+     &        'ENTIER',I,0.0D0,' ',.TRUE.,0)
+         CALL CREPO1(0.0D0,0.0D0,0.0D0,IPOIN)
+         CALL ECCTAB(MTAB1,'MOT',0,0.0D0,'POINT_REPERE',.TRUE.,0,
+     &        'POINT',0,0.0D0,' ',.TRUE.,IPOIN)
+         XVAL=(-1*ALFR.PROG(I))/(2.*XPI*BETA.PROG(I))
+         CALL ECCTAB(MTAB1,'MOT',0,0.0D0,'FREQUENCE_IMAGINAIRE',.TRUE.,0
+     $        ,'FLOTTANT',0,XVAL,' ',.TRUE.,0)
+         XVAL=(ALFI.PROG(I))/(2.*XPI*BETA.PROG(I))
+         CALL ECCTAB(MTAB1,'MOT',0,0.0D0,'FREQUENCE_REELLE',.TRUE.,0,
+     &        'FLOTTANT',0,XVAL,' ',.TRUE.,0)
+*
+         CALL ECCTAB(MTAB1,'MOT',0,0.0D0,'DEFORMEE_MODALE_REELLE',
+     &        .TRUE.,0,'CHPOINT',0,0.0D0,' ',.TRUE.,MCHPO1)
+         CALL ECCTAB(MTAB1,'MOT',0,0.0D0,'DEFORMEE_MODALE_IMAGINAIRE',
+     &        .TRUE.,0,'CHPOINT',0,0.0D0,' ',.TRUE.,MCHPO2)
+*
+         CALL ECCTAB(IPTAB2,'ENTIER',III,0.0D0,' ',.TRUE.,0,'TABLE',
+     &        0,0.0D0,' ',.TRUE.,MTAB1)
+*
+         IF (MODREL) GOTO 70
+*
+*----- Valeur propre complexe conjuguee
+*
+*
+         SEGINI, MTAB2=MTAB1
+         SEGDES, MTAB2
+         III = III + 1
+         IF (AFFICH) WRITE (*,*) 'Mode conjugue, no : ',I
+         CALL ECCTAB(MTAB2,'MOT',0,0.0D0,'NUMERO_MODE',.TRUE.,0,
+     &        'ENTIER',I,0.0D0,' ',.TRUE.,0)
+         CALL ECCTAB(MTAB2,'MOT',0,0.0D0,'FREQUENCE_REELLE',.TRUE.,0,
+     &        'FLOTTANT',0,-1.*XVAL,' ',.TRUE.,0)
+         XVAL=-1.D0
+         CALL MUCHPO(MCHPO2,XVAL,IRET,1)
+         CALL ECCTAB(MTAB2,'MOT',0,0.0D0,'DEFORMEE_MODALE_REELLE',
+     &        .TRUE.,0,'CHPOINT',0,0.0D0,' ',.TRUE.,MCHPO1)
+         CALL ECCTAB(MTAB2,'MOT',0,0.0D0,'DEFORMEE_MODALE_IMAGINAIRE',
+     &        .TRUE.,0,'CHPOINT',0,0.0D0,' ',.TRUE.,IRET)
+*
+         CALL ECCTAB(IPTAB2,'ENTIER',III,0.0D0,' ',.TRUE.,0,'TABLE',
+     &        0,0.0D0,' ',.TRUE.,MTAB2)
+*
+         IF (AFFICH) WRITE (*,*) 'Construction du conjugue ok'
+ 70      CONTINUE
+      ENDIF
+
+
+      III = III + 1
+      GOTO 80
+************************************************************************
+*     FIN DE BOUCLE SUR LES MODES                                      *
+************************************************************************
+ 20   CONTINUE
+
+
+***** MENAGE ***********************************************************
+
+      SEGSUP, ALFR, ALFI, BETA
+      SEGSUP, MATZ
+      IF(IORDRE.GT.0) SEGSUP,MLENTI
+
+*
+********************************************
+*    Creation de la table BASE_MODALE      *
+********************************************
+*
+      IF (AFFICH) WRITE (*,*) 'Creation de la table BASE_MODALE...'
+*
+      CALL CRTABL(IPBC)
+      CALL ECCTAB(IPBC,'MOT',0,0.0D0,'SOUSTYPE',.TRUE.,0,
+     &     'MOT',0,0.0D0,'BASE_MODALE',.TRUE.,0)
+      CALL ECCTAB(IPBC,'MOT',0,0.0D0,'MODES',.TRUE.,0,
+     &     'TABLE',0,0.0D0,' ',.TRUE.,IPTAB2)
+cbp : on ajoute un indicateur de succes (en plus du message dans vibrac)
+      CONV=ERR.eq.0
+      CALL ECCTAB(IPBC,'MOT',0,0.0D0,'CONVERGENCE',.TRUE.,0,
+     &     'LOGIQUE ',0,0.0D0,' ',CONV,0)
+*
+      RETURN
+      END
+

@@ -1,0 +1,302 @@
+C PART6     SOURCE    PV        18/11/19    21:15:21     9995
+
+      subroutine part6(NBZON,mmodel,itab,ireter,kescl)
+C_______________________________________________________________________
+C
+C                       PARTITIONNEMENT DE MMODEL
+C                       -------------------------
+C HISTORIQUE :
+C   CB215821 : Parallelisation du partitionnement des MMODEL
+C              Reprise de la methode employee dans part5.eso
+C              qui traite le partitionnement de MELEME
+C   JCARDO   : Ajout du parametre kescl
+C_______________________________________________________________________
+
+
+      implicit integer (i-n)
+      implicit real*8(a-h,o-z)
+
+-INC CCOPTIO
+-INC SMELEME
+-INC SMMODEL
+-INC SMTABLE
+-INC CCASSIS
+-INC CCPRECO
+
+        SEGMENT SSREF
+C         NBZON   : Nombre de ZONES demandees
+C         NBSM    : Nombre de IMODEL du MMODEL
+C         ISREF   : Tableau indiquant si la sous-zone contient ou non des elements
+C         IMELE   : Tableau avec les references des MELEME SIMPLES de chaque ZONE
+C         IMODE   : Tableau avec les references des IMODEL ELEMENTAIRES de chaque ZONE
+C         NBELE   : Tableau indiquant le nombre d'elements reellement present dans le MELEME SIMPLE en COURS
+C         MTA     : Tableau avec les references des MMODEL de chaque ZONE
+C         IPOS    : Tableau indiquant le nombre de IMODEL contenus dans les MMODEL de chaque ZONE
+          INTEGER ISREF(NBZON,NBSM)
+          INTEGER IMELE(NBZON,NBSM)
+          INTEGER IMODE(NBZON,NBSM)
+          INTEGER NBELE(NBZON)
+          INTEGER MTA  (NBZON)
+          INTEGER IPOS (NBZON)
+        ENDSEGMENT
+
+C     Declaration du COMMON pour le travail en parallele
+      COMMON/part6c/NBTHR,SSREF,JA,IPT2,NBNN,NBELEM,ISOUS,NBZONE
+
+      EXTERNAL part6i
+      LOGICAL  BTHRD
+
+      character*1 cha
+      logical bool
+
+      ireter=0
+      itab  =0
+      bool = .FALSE.
+      cha ='O'
+
+C     Verification que le MMODEL n'est pas deja dans le CCPRECO
+      DO IIMOD1 = 1, NMOPAR
+        IF (PARMOD(IIMOD1) .EQ. 0) GOTO 1
+        IF (MMODEL .EQ. PARMOD(IIMOD1)) THEN
+          itab = PESCLA(IIMOD1)
+C          PRINT *,'PART6, CCPRECO :', IIMOD1
+C         Mise a jour du preconditionnement dans CCPRECO : Deplacement en position 1
+          IF (IIMOD1 .EQ. 1) RETURN
+          DO IIMOD2 = IIMOD1,2,-1
+            PARMOD(IIMOD2) = PARMOD(IIMOD2 - 1)
+            PESCLA(IIMOD2) = PESCLA(IIMOD2 - 1)
+          ENDDO
+          PARMOD(1) = MMODEL
+          PESCLA(1) = itab
+          RETURN
+        ENDIF
+      ENDDO
+
+ 1    CONTINUE
+      SEGACT,MMODEL
+      n1=kmodel(/1)
+      N1INI = n1
+      NBSM=MAX(1,n1)
+
+      NBZMAX = 0
+
+C     Initialisation du SEGMENT de travail
+      SEGINI,SSREF
+
+
+C     Creation de la TABLE resultat
+      m=NBZON
+      IF (KESCL.GT.0) M=M+2
+      NBZONE=NBZON
+      segini,mtable
+      itab=mtable
+
+
+C     Mise a jour du preconditionnement dans CCPRECO
+C     Glissement des valeurs vers le bas
+      DO IIMOD = NMOPAR,2,-1
+        PARMOD(IIMOD) = PARMOD(IIMOD - 1)
+        PESCLA(IIMOD) = PESCLA(IIMOD - 1)
+      ENDDO
+      PARMOD(1) = MMODEL
+      PESCLA(1) = itab
+
+      IF (KESCL.GT.0) THEN
+         CALL ECCTAB(mtable,'MOT',0,0.D0,'SOUSTYPE',bool,0
+     &                     ,'MOT',0,0.D0,'ESCLAVE' ,bool,0)
+         CALL ECCTAB(mtable,'MOT',0,0.D0,'CREATEUR',bool,0
+     &                     ,'MOT',0,0.D0,'PART' ,bool,0)
+      ENDIF
+
+
+
+      IF (NBZON .EQ. 1) THEN
+C       Cas trivial de travail
+        SEGINI,mmode1=MMODEL
+            call ecctab(mtable,'ENTIER',1,0.D0,cha,bool, 0
+     &                        ,'MMODEL',0 ,0.D0,cha,bool,mmode1)
+        SEGDES,MMODEL,MMODE1,MTABLE
+        SEGSUP,SSREF
+        RETURN
+      ENDIF
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C     Initialisations et Dimensionnement des MELEME, MMODEL, IMODEL
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+      JA  = 0
+      DO 10 ISOUS=1,N1INI
+        imodel= kmodel(isous)
+        SEGACT,imodel
+
+C       Recuperation du MAILLAGE ELEMENTAIRE du MODELE ELEMENTAIRE
+        IPT2  = imamod
+        SEGACT,IPT2
+        NBEL0 =IPT2.NUM(/2)
+        NF    = MIN(NBEL0,NBZON)
+
+        NBZMAX= MAX(NBZMAX,NF)
+
+C       Dimentionnement des MELEME SIMPLES a 1 element pres
+        if(MOD(NBEL0,NBZON) .EQ. 0)then
+          nbelem= NBEL0 / NBZON
+        else
+          nbelem=(NBEL0 / NBZON) + 1
+        endif
+
+        nbnn   = IPT2.NUM(/1)
+        nbsous = 0
+        nbref  = 0
+
+        DO 20 II=1,NF
+          SEGINI,IPT5
+          IPT5.ITYPEL = IPT2.ITYPEL
+
+          SEGINI,IMODE1=IMODEL
+C          write(ioimp,*) conmod(/1), imode1.conmod(/1)
+C          write(ioimp,*)' imode1 ' , imode1
+C          write(ioimp,*) ' conmod imode1.conmod ',conmod,imode1.conmod
+          IMODE1.IMAMOD=IPT5
+          if (IMODE1.INFMOD(/1) .GE. 2) IMODE1.INFMOD(2) = 0
+
+
+C         Sauvegarde des Informations dans le SEGMENT
+          IZ              = MOD(II + JA - 1,NBZON) + 1
+          IMELE(IZ,ISOUS) = IPT5
+          IMODE(IZ,ISOUS) = IMODE1
+          ISREF(IZ,ISOUS) = 1
+          IPOS (IZ)       = IPOS(IZ)+1
+
+          NBZMAX = MAX(NBZMAX,IZ)
+
+          IF( MTA(IZ) .EQ. 0 ) THEN
+            SEGINI,mmode1
+            call ecctab(mtable,'ENTIER',IZ,0.D0,cha,bool, 0
+     &                        ,'MMODEL',0 ,0.D0,cha,bool,mmode1)
+            MTA(IZ) = mmode1
+          ELSE
+            mmode1 = MTA(IZ)
+          ENDIF
+
+          mmode1.kmodel(IPOS(IZ))=IMODE1
+ 20     CONTINUE
+        JA  = JA + NF
+
+ 10   CONTINUE
+
+
+C     Ajustement des MMODEL de chacune des ZONES
+      DO IZ=1,NBZON
+        N1 = IPOS(IZ)
+        IF(N1 .GT. 0) THEN
+          mmode1 = MTA(IZ)
+          IF(N1 .LT. N1INI) THEN
+            SEGADJ,MMODE1
+          ENDIF
+
+          SEGDES,MMODE1
+        ENDIF
+      ENDDO
+
+C     Ajustement de la TABLE
+      MM=NBZMAX
+      IF (KESCL.GT.0) MM=MM+2
+      IF (MM .LT. M) THEN
+        M = MM
+        SEGADJ,mtable
+        MLOTAB = M
+      ENDIF
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C     Debut du travail de repartition
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+      JA    = 0
+      DO 30 ISOUS=1,N1INI
+C       Chargement des infos sans SEGACT car deja fait au-dessus
+        imodel= kmodel(isous)
+        IPT2  = imamod
+        NBELEM=IPT2.NUM(/2)
+        NBNN  =IPT2.NUM(/1)
+        NF    = MIN(NBELEM,NBZON)
+
+C       Reinitialisation du nombre d'element de ce type
+        DO IZ = 1,NBZMAX
+          NBELE(IZ) = 0
+        ENDDO
+
+        NBTHR = MIN(NBELEM,NBTHRS)
+        ITH = 0
+        IF (NBESC .NE. 0) ith=oothrd
+
+        IF ((NBTHR .LE. 1) .OR. (NBTHRS .EQ. 1) .OR. (ITH .GT. 0)) THEN
+          BTHRD = .FALSE.
+        ELSE
+          BTHRD = .TRUE.
+          CALL THREADII
+        ENDIF
+
+        IF (BTHRD) THEN
+          DO ith=2,NBTHR
+            CALL THREADID(ith,part6i)
+          ENDDO
+          CALL part6i(1)
+
+          DO ith=2,NBTHR
+            CALL THREADIF(ith)
+          ENDDO
+
+          CALL THREADIS
+
+        ELSE
+          CALL part6i(1)
+        ENDIF
+
+        DO 40 IZ = 1,NBZMAX
+          JF    = NBELE(IZ)
+          IF (JF .EQ. 0) GOTO 40
+          IPT5    = IMELE(IZ,ISOUS)
+          IMODE1  = IMODE(IZ,ISOUS)
+
+C         Ajustement des MELEME SIMPLE  si besoin
+          IF (JF .NE. 0) THEN
+            NBELEM  = IPT5.NUM(/2)
+
+            IF(JF .EQ. (NBELEM - 1))THEN
+              NBNN   = IPT5.NUM(/1)
+              NBELEM = JF
+              NBREF  = 0
+              NBSOUS = 0
+              SEGADJ,IPT5
+            ENDIF
+
+C           Recherche du numero de FORMULATION associee aux XFEM
+            IF (NUMMFR(nefmod) .EQ. 63) THEN
+              CALL PARTXR(IMODEL,0,IMODE1)
+            ENDIF
+          ENDIF
+          SEGDES,IMODE1,IPT5
+ 40     CONTINUE
+        JA  = JA + NF
+ 30   CONTINUE
+
+C     Desactivation des IMAMOD apres (pas avant car 2 SOUS-ZONES peuvent
+C     partager le même MELEME...)
+      DO 50 ISOUS=1,N1INI
+C       Chargement des infos sans SEGACT car deja fait au-dessus
+        imodel= kmodel(isous)
+        IPT2  = imamod
+        SEGDES,IMODEL,IPT2
+ 50   CONTINUE
+      SEGDES,MMODEL,MTABLE
+      SEGSUP,SSREF
+
+      return
+      end
+
+
+
+
+
+
+
+
+

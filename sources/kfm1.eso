@@ -1,0 +1,484 @@
+C KFM1      SOURCE    CHAT      06/08/24    21:46:35     5529
+      SUBROUTINE KFM1
+C************************************************************************
+C
+C PROJET            :  CASTEM 2000
+C
+C NOM               :  KFM1
+C
+C DESCRIPTION       :  Subroutine appellée par KONV1
+C
+C                      Modelisation 2D/3D des equations d'Euler
+C
+C                      Free matrix method: calcul d'un stationaire
+C                      avec un jacobi par point, un jacobi par ligne,
+C                      un jacobi avec 2 sweeps
+C
+C LANGAGE           :  FORTRAN 77 + ESOPE 2000 (avec estensions CISI)
+C
+C AUTEUR            :  A. BECCANTINI, DRN/DMT/SEMT/LTMF
+C
+C************************************************************************
+C
+C APPELES (Calcul)  :
+C
+C************************************************************************
+C
+C*** SYNTAXE
+C
+C  Discrétisation en VF "cell-centered" des équations d'Euler pour
+C  un gaz parfait mono-constituent polytropique
+C  Inconnues: densité, quantité de mouvement, énergie totale par
+C  unité de volumes (variables conservatives UN)
+C
+C  A(UN) '*' DUN_L = RES(UN) + B(UN) - B(UN_L)
+C
+C  ou
+C
+C  RES(UN) est calculé avec ('KONV' 'VF' 'PERFMONO')
+C  UN_0 = UN
+C  UN_L = UN + DUN_L
+C
+C  Ici on calcule DU
+C
+C  DUN = 'KONV' 'VF' 'PMON1FMM' 'JACOBI'  LMOT1
+C         MOD1 MCHPO0 MCHPO1 MCHPO2 MCHPO3 MCHPO4 FLOT0 FLOT1
+C         ENT1 ('CLIM' LMOT2 MCHPO5 MCHPO7) MCHPO6 ;
+C
+C
+C LMOT1   : Il contient dans l'ordre suivant: le noms de la densité,
+C           de la qdm, de l'énergie totale par unité de volume
+C
+C MOD1    : objet modele de type EULER
+C
+C MCHPO0   : CHPOINT  contenant le residu explicite; composantes =
+C            LMOT1, SPG = (DOMA MOD1 'CENTRE').
+C
+C MCHPO1   : CHPOINT  contenant la masse volumique (en kg/m^3; une
+C           composante, 'SCAL', SPG =(DOMA MOD1 'CENTRE')).
+C
+C MCHPO2   : CHPOINT  contenant les débits (en  kg/s/m^2; deux
+C           composantes en 2D, 'UX  ','UY  ', trois composantes
+C           en 3D, 'UX  ','UY  ', 'UZ  ', SPG =(DOMA MOD1 'CENTRE')).
+C
+C MCHPO3   : CHPOINT  contenant l'énergie totale par unité de volume
+C        (en J/m^3; une composante, 'SCAL', SPG =(DOMA MOD1 'CENTRE')).
+C
+C MCHPO4   : CHPOINT  contenant le "gamma" du gaz (une composante,
+C           'SCAL', SPG =(DOMA MOD1 'CENTRE')).
+C
+C LMOT2   : Il contient dans l'ordre suivant: le noms de la densité,
+C           de la vitesse, de la pression.
+C
+C FLOT0   : pas de temps physique
+C
+C FLOT1   : facteur de securité (double de la CFL) pour le pas de temps
+C           dual
+C
+C ENT1    : iterations dans le jacobi
+C
+C MCHPO5   : CHPOINT  contenant les conditions aux limites
+C            (composantes en LMOT2).
+C
+C MCHPO6   : CHPOINT  contenant le coeff pour le calcul du rayon
+C            spectral visc. (une composante,
+C            'SCAL', SPG =(DOMA MOD1 'CENTRE')).
+C
+C MCHPO7   : CHPOINT  contenant les types de conditions aux limites
+C
+C************************************************************************
+C
+C HISTORIQUE (Anomalies et modifications éventuelles)
+C
+C HISTORIQUE : crée le 30/04/02
+C              Janvier 2003: implementation de condition aux limites
+C
+C HISTORIQUE : rajouts par T. KLOCZKO entre 2003 et 2006
+C
+C                 Deux types de méthodes de relaxation disponibles
+C
+C                 - Point Jacobi ou PJ            (kfm11.eso (2D) et kfm13.eso (3D))
+C                 - Symmetric Gauss-Seidel ou SGS (kfm12.eso (2D) et kfm14.eso (3D))
+C
+C************************************************************************
+C
+      IMPLICIT INTEGER(I-N)
+-INC CCOPTIO
+-INC SMLMOTS
+-INC SMCHPOI
+      POINTEUR MLMVIT.MLMOTS
+C
+C**** Variables de COOPTIO
+C
+C      INTEGER IPLLB, IERPER, IERMAX, IERR, INTERR
+C     &        ,IOTER,   IOLEC,  IOIMP,     IOCAR,  IOACQ
+C     &        ,IOPER,   IOSGB,  IOGRA,     IOSAU,  IORES
+C     &        ,IECHO,   IIMPI,  IOSPI
+C     &        ,IDIM
+C     &        ,MCOORD
+C     &        ,IFOMOD, NIFOUR, IFOUR, NSDPGE, IONIVE
+C     &        ,NGMAXY, IZROSF, ISOTYP, IOSCR,LTEXLU
+C     &        ,NORINC,NORVAL,NORIND,NORVAD
+C     &        ,NUCROU, IPSAUV, IFICLE, IPREFI, IREFOR, ISAFOR
+CC
+      INTEGER ICOEF, IDOMA, IRET, MELEF, MELEC, MELEFL, ICHPSU, INDIC
+     &       , NBCOMP, ICHPDI, IRN, IGN, IRETN, IGAMN, ICHPVO, ILIINC
+     &       , IDU, JGN, JGM, INORM, INEFMD, ICOND, MMODEL
+     &       , ICHLIM, MELLIM, ILIINP, NSOUPO, NJAC, IRES, IPROBL
+     &       , IVCO, MELTFA, ICOEV
+C
+      REAL*8 DCFL, DTPS
+C
+      CHARACTER*4 MOT
+      CHARACTER*8 TYPE, LJACO(4)
+      CHARACTER*(40) MESERR
+C
+      DATA LJACO/'PJACO   ','LJACOF  ','LJACOB  ','LJACOFB '/
+C
+      CALL LIRMOT(LJACO,4,ICOEF,1)
+      IF(IERR .NE. 0)GOTO 9999
+C
+C**********************************
+C**** Lecture de l'objet MODELE ***
+C**********************************
+C
+      ICOND = 1
+      CALL QUETYP(TYPE,ICOND,IRET)
+
+      IF((IRET.EQ.0).AND.(TYPE.NE.'MMODEL'))THEN
+         MOTERR(1:40)='MMODEL                                  '
+         CALL ERREUR(471)
+         GOTO 9999
+      ENDIF
+      CALL LIROBJ('MMODEL',MMODEL,ICOND,IRET)
+      IF(IERR.NE.0)GOTO 9999
+      CALL LEKMOD(MMODEL,IDOMA,INEFMD)
+      IF(IERR.NE.0)GOTO 9999
+C
+C**** CENTRE, FACE, FACEL, ELTFA
+C
+      CALL LEKTAB(IDOMA,'CENTRE',MELEC)
+      IF(IERR .NE. 0) GOTO 9999
+C
+      CALL LEKTAB(IDOMA,'FACE',MELEF)
+      IF(IERR .NE. 0) GOTO 9999
+C
+      CALL LEKTAB(IDOMA,'FACEL',MELEFL)
+      IF(IERR .NE. 0) GOTO 9999
+C
+      CALL LEKTAB(IDOMA,'ELTFA',MELTFA)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Lecture du CHPOINT contenant les surfaces des faces.
+C
+      CALL LEKTAB(IDOMA,'XXSURFAC',ICHPSU)
+      IF(IERR .NE. 0) GOTO 9999
+      INDIC = 1
+      NBCOMP = 1
+      MOT = 'SCAL'
+      CALL QUEPOI(ICHPSU, MELEF, INDIC, NBCOMP, MOT)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Lecture du CHPOINT contenant les diametres minimums.
+C
+      CALL LEKTAB(IDOMA,'XXDIEMIN',ICHPDI)
+      IF(IERR .NE. 0) GOTO 9999
+      INDIC = 1
+      NBCOMP = 1
+      MOT = 'SCAL'
+      CALL QUEPOI(ICHPDI, MELEC, INDIC, NBCOMP, MOT)
+      IF(IERR .NE. 0) GOTO 9999
+
+C
+C**** Lecture du CHPOINT contenant les normales aux faces
+C
+      IF(IDIM .EQ. 2)THEN
+C        Que les normales
+         CALL LEKTAB(IDOMA,'XXNORMAF',INORM)
+         IF(IERR .NE. 0) GOTO 9999
+         JGN = 4
+         JGM = 2
+         SEGINI MLMVIT
+         MLMVIT.MOTS(1) = 'UX  '
+         MLMVIT.MOTS(2) = 'UY  '
+         CALL QUEPO1(INORM, MELEF, MLMVIT)
+         SEGSUP MLMVIT
+C
+      ELSE
+C      Les normales et les tangentes
+         TYPE = ' '
+         CALL ACMO(IDOMA,'MATROT',TYPE,INORM)
+         IF (TYPE .NE. 'CHPOINT ') THEN
+            CALL MATRAN(IDOMA,INORM)
+            IF(IERR .NE. 0) GOTO 9999
+         ENDIF
+         JGN = 4
+         JGM = 9
+         SEGINI MLMVIT
+         MLMVIT.MOTS(1) = 'UX  '
+         MLMVIT.MOTS(2) = 'UY  '
+         MLMVIT.MOTS(3) = 'UZ  '
+         MLMVIT.MOTS(4) = 'RX  '
+         MLMVIT.MOTS(5) = 'RY  '
+         MLMVIT.MOTS(6) = 'RZ  '
+         MLMVIT.MOTS(7) = 'MX  '
+         MLMVIT.MOTS(8) = 'MY  '
+         MLMVIT.MOTS(9) = 'MZ  '
+         CALL QUEPO1(INORM, MELEF, MLMVIT)
+         SEGSUP MLMVIT
+      ENDIF
+C
+C**** Lecture du CHPOINT contenant les volumes
+C
+      CALL LEKTAB(IDOMA,'XXVOLUM',ICHPVO)
+      IF(IERR .NE. 0) GOTO 9999
+      INDIC = 1
+      NBCOMP = 1
+      MOT = 'SCAL'
+      CALL QUEPOI(ICHPVO, MELEC, INDIC, NBCOMP, MOT)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C********************************
+C**** Fin table domaine *********
+C********************************
+C
+C**** La list des inconnues
+C
+      TYPE='LISTMOTS'
+      CALL LIROBJ(TYPE,ILIINC,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** On va lire les pointeurs des CHPOINTs
+C     Lecture du CHPOINT residu
+C
+      TYPE='CHPOINT'
+      CALL  LIROBJ(TYPE,IRES,1,IRET)
+      IF(IERR.NE.0) GOTO 9999
+C
+C**** Controle du CHPOINT
+C
+      CALL QUEPO1(IRES, MELEC, ILIINC)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** On va lire les pointeurs des CHPOINTs
+C     Lecture du CHPOINT centre densité
+C
+      TYPE='CHPOINT'
+      CALL  LIROBJ(TYPE,IRN,1,IRET)
+      IF(IERR.NE.0) GOTO 9999
+C
+C**** Controle du CHPOINT
+C
+      INDIC = 1
+      NBCOMP = 1
+      MOT = 'SCAL'
+      CALL QUEPOI(IRN, MELEC, INDIC, NBCOMP, MOT)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Lecture du CHPOINT QDM
+C
+      TYPE='CHPOINT'
+      CALL  LIROBJ(TYPE,IGN,1,IRET)
+      IF(IERR.NE.0) GOTO 9999
+C
+C**** Control du CHPOINT
+C
+      INDIC = 1
+      NBCOMP = IDIM
+      JGN = 4
+      JGM = IDIM
+      SEGINI MLMOTS
+      MLMOTS.MOTS(1) = 'UX  '
+      MLMOTS.MOTS(2) = 'UY  '
+      IF(IDIM .EQ. 3) MLMOTS.MOTS(3) = 'UZ  '
+      CALL QUEPO1(IGN, MELEC, MLMOTS)
+      IF(IERR .NE. 0) GOTO 9999
+      SEGSUP MLMOTS
+C
+C**** Lecture du CHPOINT centre energie totale
+C
+      TYPE='CHPOINT'
+      CALL  LIROBJ(TYPE,IRETN,1,IRET)
+      IF(IERR.NE.0) GOTO 9999
+C
+C**** Controle du CHPOINT
+C
+      INDIC = 1
+      NBCOMP = 1
+      MOT = 'SCAL'
+      CALL QUEPOI(IRETN, MELEC, INDIC, NBCOMP, MOT)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Lecture du CHPOINT centre gamma
+C
+      TYPE='CHPOINT'
+      CALL  LIROBJ(TYPE,IGAMN,1,IRET)
+      IF(IERR.NE.0) GOTO 9999
+C
+C**** Controle du CHPOINT
+C
+      INDIC = 1
+      NBCOMP = 1
+      MOT = 'SCAL'
+      CALL QUEPOI(IGAMN, MELEC, INDIC, NBCOMP, MOT)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Lecture du CHPOINT centre cutoff speed
+C
+      TYPE='CHPOINT'
+      CALL  LIROBJ(TYPE,IVCO,1,IRET)
+      IF(IERR.NE.0) GOTO 9999
+C
+C**** Controle du CHPOINT
+C
+      INDIC = 1
+      NBCOMP = 1
+      MOT = 'SCAL'
+      CALL QUEPOI(IVCO, MELEC, INDIC, NBCOMP, MOT)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Lecture de DTPS
+C
+      CALL LIRREE(DTPS,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Lecture de le double de la CFL pour le temps dual
+C
+      CALL LIRREE(DCFL,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Lecture de nombre d'iterations
+C
+      CALL LIRENT(NJAC,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Lecture de conditions aux limites
+C
+      IRET=0
+      CALL LIRCHA(MOT,0,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+      IF(IRET .NE. 0)THEN
+         IF(MOT  .EQ. 'CLIM')THEN
+C
+            TYPE='LISTMOTS'
+            CALL LIROBJ(TYPE,ILIINP,1,IRET)
+            IF(IERR .NE. 0) GOTO 9999
+            MLMOT1=ILIINP
+C
+            TYPE='CHPOINT'
+            CALL  LIROBJ(TYPE,ICHLIM,1,IRET)
+            IF(IERR.NE.0) GOTO 9999
+C
+            MCHPOI = ICHLIM
+            SEGACT MCHPOI
+            NSOUPO = MCHPOI.IPCHP(/1)
+            IF(NSOUPO .EQ. 0) THEN
+               ICHLIM=0
+               MELLIM=0
+            ELSEIF(NSOUPO .GT. 1)THEN
+               MOTERR(1:8) = 'CHAMPOIN'
+C
+C**************** Message d'erreur standard
+C                 132 2
+C                 On veut un objet %m1:8 élémentaire
+C
+               CALL ERREUR(132)
+               GOTO 9999
+            ELSE
+               MSOUPO=MCHPOI.IPCHP(1)
+               SEGACT MSOUPO
+               MELLIM=MSOUPO.IGEOC
+               SEGDES MSOUPO
+               SEGDES MCHPOI
+               CALL QUEPO1(ICHLIM, MELLIM, MLMOT1)
+               IF(IERR.NE.0) GOTO 9999
+            ENDIF
+C
+         ELSE
+            CALL REFUS
+         ENDIF
+      ELSE
+         ICHLIM=0
+         MELLIM=0
+      ENDIF
+C
+C**** Le coeff. pour le calcul du rayon spectral visc.
+C
+C
+      TYPE='CHPOINT'
+      CALL  LIROBJ(TYPE,ICOEV,1,IRET)
+      IF(IERR.NE.0) GOTO 9999
+C
+C**** Controle du CHPOINT
+C
+      INDIC = 1
+      NBCOMP = 1
+      MOT = 'SCAL'
+      CALL QUEPOI(ICOEV, MELEC, INDIC, NBCOMP, MOT)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Calcul de DUN
+C
+      TYPE='CHPOINT'
+      CALL KRCHP1(TYPE, MELEC, IDU, ILIINC)
+C
+C*** Choix de la procédure de relaxation (PJ ou SGS)
+C
+      IF(ICOEF .EQ. 1)THEN
+         IF(IDIM .EQ. 2)THEN
+C
+C*** Procédure de relaxation PJ
+C
+            CALL KFM11(IRES,IRN,IGN,IRETN,IGAMN,IVCO,
+     &           ICHPSU,ICHPDI,ICHPVO,INORM,
+     &           MELEC,MELEF,MELEFL,DTPS,DCFL,
+     &           MELLIM,ICHLIM,NJAC,ICOEV,
+     &           IDU,IPROBL)
+            IF(IERR .NE. 0)GOTO 9999
+         ELSE
+             CALL KFM13(IRES,IRN,IGN,IRETN,IGAMN,IVCO,
+     &           ICHPSU,ICHPDI,ICHPVO,INORM,
+     &           MELEC,MELEF,MELEFL,DTPS,DCFL,
+     &           MELLIM,ICHLIM,NJAC,ICOEV,
+     &           IDU,IPROBL)
+            IF(IERR .NE. 0)GOTO 9999
+c           251 2
+c           Tentative d'utilisation d'une option non implémentée
+c            CALL ERREUR(251)
+c            GOTO 9999
+         ENDIF
+      ELSE
+         IF(IDIM .EQ. 2)THEN
+C
+C*** Procédure de relaxation SGS
+C
+            CALL KFM12(IRES,IRN,IGN,IRETN,IGAMN,IVCO,
+     &           ICHPSU,ICHPDI,ICHPVO,INORM,
+     &           MELEC,MELEF,MELEFL,MELTFA,DTPS,DCFL,
+     &           MELLIM,ICHLIM,NJAC,ICOEF,ICOEV,
+     &           IDU,IPROBL)
+            IF(IERR .NE. 0)GOTO 9999
+         ELSE
+             CALL KFM14(IRES,IRN,IGN,IRETN,IGAMN,IVCO,
+     &           ICHPSU,ICHPDI,ICHPVO,INORM,
+     &           MELEC,MELEF,MELEFL,MELTFA,DTPS,DCFL,
+     &           MELLIM,ICHLIM,NJAC,ICOEF,ICOEV,
+     &           IDU,IPROBL)
+C           251 2
+C           Tentative d'utilisation d'une option non implémentée
+C            CALL ERREUR(251)
+C            GOTO 9999
+         ENDIF
+      ENDIF
+C
+      CALL ECRENT(IPROBL)
+      TYPE='CHPOINT '
+      CALL ECROBJ(TYPE,IDU)
+C
+ 9999 CONTINUE
+      RETURN
+      END
+
+
+
+

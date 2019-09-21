@@ -1,0 +1,2066 @@
+C SORVTK    SOURCE    JC220346  18/12/14    21:15:13     10041
+C***********************************************************************
+C NOM         : sorvtk.eso
+C DESCRIPTION : Sortie d'objets de type MAILLAGE, CHPOINT et/ou MCHAML
+C               au format VTK
+C REFERENCE   : VTK File Formats for VTK Version 4.2, extrait de
+C               The VTK User's Guide, Kitware
+C               (www.vtk.org/VTK/img/file-formats.pdf)
+C***********************************************************************
+C HISTORIQUE :  18/06/2012 : JCARDO : creation de la subroutine
+C HISTORIQUE :  20/06/2012 : JCARDO : bug impression ITYEL en BINA
+C HISTORIQUE :  16/02/2015 : JCARDO : bug memoire + nouveaux elements
+C HISTORIQUE :  09/03/2015 : JCARDO : autre bug memoire
+C HISTORIQUE :
+C***********************************************************************
+C Priere de PRENDRE LE TEMPS DE COMPLETER LES COMMENTAIRES
+C en cas de modification de ce sous-programme afin de faciliter
+C la maintenance !
+C***********************************************************************
+C APPELE PAR : operateur SORTir (prsort.eso)
+C***********************************************************************
+C ENTREES :: aucune
+C SORTIES :: aucune (sur fichiers uniquement)
+C***********************************************************************
+C SYNTAXE (GIBIANE) :
+C
+C  SORT 'VTK' OBJ1 (MOT1) ... (OBJn) (MOTn)
+C             (|'FORM'|) (|'AUTO'|) ('TEMP' FLOT1) ('DOUBLE_PRECISION')
+C              |'BINA'|   |'NOUV'|
+C              |'ZIP' |   |'SUIT'|
+C                         |'NPVD'|
+C
+C  avec OBJi = [ MAILi | CHPOi | CHMLi | TABi ]
+C
+C***********************************************************************
+      SUBROUTINE SORVTK
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+
+-INC CCGEOME
+-INC CCOPTIO
+-INC SMCOORD
+
+-INC SMELEME
+-INC SMCHPOI
+-INC SMCHAML
+-INC SMLMOTS
+-INC SMTABLE
+
+-INC CCNOYAU
+-INC CCASSIS
+-INC CCFXDR
+
+      EXTERNAL LONG
+
+
+C     OCTETS PRE-DEFINIS A ECRIRE DANS LA SECTION <AppendedData>
+C     ----------------------------------------------------------
+C     IXDR1=representation decimale BigEndian de la chaIne '   _'
+C     IXDR2=representation decimale BigEndian du marqueur End-Of-Record
+      INTEGER IXDR1,IXDR2
+      DATA IXDR1/538976351/
+      DATA IXDR2/10/
+
+
+C     SEGMENTS DE TRAVAIL TEMPORAIRES
+C     -------------------------------
+C     SMAIL  = donnees sur les maillages lus (pointeur et nom)
+C     SCHPO  = donnees sur les champs par points lus (pointeur et nom)
+C     SCHML  = donnees sur les champs par elements lus (pointeur et nom)
+C     ICONN,IOFFS,ITYEL = donnees sur les cellules du maillage courant
+C     IPOL2G|= Tables de correspondance entre la numerotation (globale)
+C     IPOG2L|  des noeuds dans XCOOR et la numerotation (locale) des
+C              noeuds du maillage dans le fichier .vtu
+C     IELL2G = Table de correspondance entre la numerotation (globale)
+C              des cellules du MAILLAGE courant et la numerotation
+C              (locale) des cellules du MCHAML courant
+C     ITYPII = donne le sous-maillage forme d'un type donne d'element
+C     INECUM = donne le nombre cumule d'elements des sous-maillages
+C     TCHCO  = liste des composantes du CHPOINT ou du MCHAML courant
+C     ICOOK  = liste des composantes a sortir (au moins 1 valeur)
+C     SCHPV  = tableau compacte des valeurs du CHPOINT courant
+C     SCHMV  = tableau compacte des valeurs du MCHAML courant
+
+      SEGMENT SMAIL
+          CHARACTER*(LONOM) TMAIL(NBMAIL)
+          INTEGER           IMAIL(NBMAIL)
+          INTEGER           IPART(NBMAIL)
+          INTEGER           KMAIL(NBMAIL)
+      ENDSEGMENT
+      SEGMENT SCHPO
+          INTEGER ICHPO(NBCHPO)
+          CHARACTER*(LONOM) TCHPO(NBCHPO)
+      ENDSEGMENT
+      SEGMENT SCHML
+          INTEGER ICHML(NBCHML)
+          CHARACTER*(LONOM) TCHML(NBCHML)
+      ENDSEGMENT
+
+      SEGMENT IPOL2G(NNO)
+      SEGMENT IPOG2L(NPMAX)
+      SEGMENT IELL2G(NEL2)
+      SEGMENT ICONN(NBCON)
+      SEGMENT IOFFS(NEL)
+      SEGMENT ITYEL(NEL1)
+      SEGMENT ITYPII(NOMBR)
+      SEGMENT INECUM(NBSOU1)
+
+      POINTEUR TCHCO.MLMOTS
+      SEGMENT ICOOK(0)
+
+      SEGMENT SCHPV
+          REAL*8 XPOCHA(NCO,NNO)
+      ENDSEGMENT
+      SEGMENT SCHMV
+          REAL*8 XELCHE(NCO,NEL)
+      ENDSEGMENT
+
+
+C     MOTS-CLES DE L'OPERATEUR
+C     ------------------------
+      PARAMETER(LMCLE=9)
+      CHARACTER*4 MCLE(LMCLE)
+      DATA MCLE/'AUTO','SUIT','NOUV','NPVD',
+     &          'FORM','BINA','ZIP',
+     &          'TEMP',
+     &          'DOUB'/
+
+
+C     VARIABLES BOOLEENNES
+C     --------------------
+C     ZEXIS = vrai si le fichier .pvd existe deja (et est compatible)
+C     ZTEMP = vrai si le pas de temps a ete indique (mot-cle 'TEMP')
+C     ZPART = vrai si plusieurs maillages ont ete transmis
+C     ZOPT1,ZOPT2 = utilises pour s'assurer que plusieurs mots-cles
+C                     d'une meme option n'ont pas ete lus
+C     ZOPEN = vrai si OPTI 'SORT' a bien ete appele au prealable
+C     ZDOUB = vrai si on ecrit les donnees en double precision
+      LOGICAL ZEXIS,ZTEMP,ZPART,ZOPT1,ZOPT2,ZOPEN,ZDOUB
+
+
+C     TABLEAUX DE CORRESPONDANCE entre les elements geometriques de
+C     CAST3M et ceux de VTK (www.vtk.org/VTK/img/file-formats.pdf)
+C     --------------------
+      INTEGER*2 ITYVTK(48)
+      DATA ITYVTK
+C         POI1   SEG2   SEG3   TRI3   TRI4   TRI6   TRI7   QUA4   QUA5
+     .  /    1 ,    3 ,   21 ,    5 ,    0 ,   22 ,   34 ,    9 ,    0 ,
+C         QUA8   QUA9   RAC2   RAC3   CUB8   CU20   PRI6   PR15   LIA3
+     .      23 ,   28 ,    0 ,    0 ,   12 ,   25 ,   13 ,   26 ,    0 ,
+C         LIA4   LIA6   LIA8   MULT   TET4   TE10   PYR5   PY13   ATTA
+     .       0 ,    0 ,    0 ,    0 ,   10 ,   24 ,   14 ,   27 ,    0 ,
+C         SUPE   RAP3   LIP6   LIP8   POLY   CU27   PR21   TE15   PY19
+     .       0 ,    0 ,    0 ,    0 ,    0 ,   29 ,    0 ,    0 ,    0 ,
+C         SEG4   QU16   TR12   PR18   SEG6   TR21   QU36   C216   P126
+     .       0 ,    0 ,    0 ,    0 ,    0 ,    0 ,    0 ,    0 ,    0 ,
+C         TE56   PY91   SURE
+     .       0 ,    0 ,    0 /
+
+C     Correspondance des numerotations pour les elements quadratiques
+      INTEGER*2 INUVTK(27, 14)
+      INTEGER*2 NUSEG3(3), NUTRI6(6), NUQUA8(8),NUTE10(10),NUCU20(20),
+     .          NUPR15(15),NUPY13(13),NUQUA9(9),NUCU27(27),NUTRI7(7)
+      DATA NUSEG3 / 1, 3, 2 /
+      DATA NUTRI6 / 1, 3, 5, 2, 4, 6 /
+      DATA NUQUA8 / 1, 3, 5, 7, 2, 4, 6, 8 /
+      DATA NUTE10 / 1, 3, 5, 10, 2, 4, 6, 7, 8, 9 /
+      DATA NUCU20 / 1, 3, 5, 7, 13, 15, 17, 19, 2, 4, 6, 8, 14, 16, 18,
+     .              20, 9, 10, 11, 12 /
+      DATA NUPR15 / 1, 3, 5, 10, 12, 14, 2, 4, 6, 11, 13, 15, 7, 8, 9 /
+      DATA NUPY13 / 1, 3, 5, 7, 13, 2, 4, 6, 8, 9, 10, 11, 12 /
+      DATA NUQUA9 / 1, 3, 5, 7, 2, 4, 6, 8, 9 /
+      DATA NUCU27 / 1, 3, 5, 7, 13, 15, 17, 19, 2, 4, 6, 8, 14, 16, 18,
+     .              20, 9, 10, 11, 12, 24, 22, 21, 23, 25, 26, 27 /
+      DATA NUTRI7 / 1, 3, 5, 2, 4, 6, 7 /
+      EQUIVALENCE (INUVTK(1,1 ),NUSEG3(1)),
+     .            (INUVTK(1,2 ),NUTRI6(1)),
+     .            (INUVTK(1,3 ),NUQUA8(1)),
+     .            (INUVTK(1,4 ),NUTE10(1)),
+     .            (INUVTK(1,5 ),NUCU20(1)),
+     .            (INUVTK(1,6 ),NUPR15(1)),
+     .            (INUVTK(1,7 ),NUPY13(1)),
+     .            (INUVTK(1,8 ),NUQUA9(1)),
+     .            (INUVTK(1,9 ),NUCU27(1)),
+     .            (INUVTK(1,14),NUTRI7(1))
+
+
+C     AUTRES DECLARATIONS
+C     -------------------
+
+C     Chaines de caracteres generiques
+      CHARACTER*4  CHA4
+      CHARACTER*8  CHA8
+      CHARACTER*9  CHA9
+
+C     Chaine de caracteres destinee a recueillir un nom GIBIANE
+      CHARACTER*(LONOM)  CNOM
+
+C     Chaines de caracteres pour la conversion de nombres
+      CHARACTER*15  CNU1,CNU2
+
+C     Variables pour la manipulation des noms de fichiers
+      CHARACTER*72  NOM1,NOM2,NOM3
+
+C     Variable pour les formats I/O dynamiques
+      CHARACTER*30  MYFMT
+
+C     Buffer utilise lors de la lecture preliminaire du fichier .pvd
+      CHARACTER*200 CBUF
+
+C     Ligne de commentaire ecrite en-tete de tous les fichiers
+      CHARACTER*120 CHEAD
+
+
+C     *****************************************************************
+C     CONTROLE DE LA TAILLE ET DE LA PRECISION DES DONNEES NUMERIQUES
+C     ECRITES SUR LES UNITES DE SORTIE IOXML ET IOBIN
+C     *****************************************************************
+C
+C     /!\ CHOIX NON MODIFIABLES PAR 'DOUBLE_PRECISION' :
+C
+C       - En BINAire :
+C         => les connectivites et offsets des cellules sont ecrits sur
+C            4 octets, ce qui "limite" le nombre de noeuds a 2 milliards
+C         => les types des cellules sont codes sur 1 octet (puis groupes
+C            par 4 pour pouvoir etre ecrits par XDR)
+C         => Le standard VTK impose que la variable NBYTES ci-dessous
+C            soit ecrite sur 4 octets (soit ISIZNB=4)
+C
+C       - En FORMate :
+C         => les CHPOINT et MCHAML sont ecrits sur N colonnes, ou N est
+C            le nombre de composantes : il y aura une erreur si N est
+C            un multiple de 100 car N est ecrit au format I2.
+C
+C     ------------------------------
+
+C     NBYTES=Nombre d'octets ecrits jusqu'alors dans la section AppendedData (hors caractere '_' initial)
+C     ISIZNB=Taille (en octets) sur laquelle ecrire la variable NBYTES
+      INTEGER NBYTES
+      PARAMETER(ISIZNB=4)
+
+C     Formats numeriques predefinis pour l'ecriture de reels
+      CHARACTER*8 FMR4,FMR8
+      PARAMETER(FMR4='E14.6E2 ')
+      PARAMETER(FMR8='E24.15E3')
+
+C     Variables a modifier selon la valeur de ZDOUB
+C      - FMDAT=[FMR4|FMR8]
+C      - FLDAT=['Float32'|'Float64']
+C      - ISIZDA=[4|8]
+      CHARACTER*8 FMDAT
+      CHARACTER*7 FLDAT
+      INTEGER     ISIZDA
+
+C     Variables generiques de precision donnee
+      INTEGER     INT8
+      REAL*4      XRE4,YRE4,ZRE4
+      REAL*8      XRE8,YRE8,ZRE8
+
+
+C     (FIN DES DECLARATIONS)
+C     *****************************************************************
+C     *****************************************************************
+
+C     Numero de la sortie logique vers le fichier .vtu
+C     (le numero de l'eventuel .bin sera renvoye par INITXDR)
+      IOXML=IOPER
+
+C     Nombre max. de noeuds (pour dimensionner les tableaux)
+      IDIM1=IDIM+1
+      NPMAX=XCOOR(/1)/IDIM1
+
+C     Nom de base des fichiers a sortir
+      INQUIRE(UNIT=IOPER,OPENED=ZOPEN)
+      IF (.NOT.ZOPEN) THEN
+          CALL ERREUR(-212)
+          WRITE(IOIMP,*) '(via OPTI "SORT")'
+          MOTERR(1:8)='VTK     '
+          CALL ERREUR(705)
+          RETURN
+      ENDIF
+      INQUIRE(UNIT=IOPER,NAME=NOMFIC)
+      CLOSE(UNIT=IOPER,STATUS='DELETE')
+C     ---------------------------------------
+C /!\ On ferme immediatement le fichier ouvert par OPTI 'SORT'...
+C     CE N'ETAIT PAS L'APPROCHE GENERALEMENT ADOPTEE quand on utilisait
+C     l'operateur SORTir, mais ici il devient beaucoup plus commode de
+C     proceder ainsi, pour plusieurs raisons :
+C     - eventuellement plusieurs fichiers .vtu seront ecrits
+C     - le fichier .pvd peut etre ou ne pas etre ecrit
+C     - les fichiers .vtu peuvent etre en mode ASCII ou BINAIRE
+C     - il faut rajouter l'extension !
+C     ---------------------------------------
+C     UNE AUTRE METHODE PLUS PRAGMATIQUE SERAIT DE RECUPERER LE NOM DE
+C     BASE DIRECTEMENT EN PREMIER ARGUMENT DE L'OPERATEUR SORT :
+C       CALL LIRCHA(NOMFIC,1,LNOM1)
+C       IF (IERR.NE.0) RETURN
+C     ---------------------------------------
+
+C     On isole le nom du repertoire dans NOM1, s'il existe
+C     ON CONSIDERE QUE / ET \ SONT DES SEPARATEURS DE REPERTOIRES
+C     (C'EST BIEN LE CAS SOUS WINDOWS MAIS PAS SOUS LINUX)
+      IREP1=INDEX(NOMFIC,'/'     ,BACK=.TRUE.)
+      IREP2=INDEX(NOMFIC,CHAR(92),BACK=.TRUE.)
+      IREP =MAX(IREP1,IREP2)
+      NOM1='./'
+      IF (IREP.GT.0) THEN
+          NOM1=NOMFIC(1:IREP)
+          NOMFIC=NOMFIC(IREP+1:LONG(NOMFIC))
+      ENDIF
+
+
+
+
+C***********************************************************************
+C***********************************************************************
+C***********************************************************************
+C***********************************************************************
+
+
+
+
+C     +---------------------------------------------------------------+
+C     |                                                               |
+C     |           L E C T U R E   D E S   A R G U M E N T S           |
+C     |                                                               |
+C     +---------------------------------------------------------------+
+
+
+C     NBMAIL :: nombre d'objets 'MAILLAGE' lus
+C     NBCHPO :: nombre d'objets 'CHPOINT' lus
+C     NBCHML :: nombre d'objets 'MCHAML' lus
+      NBMAIL=0
+      NBCHPO=0
+      NBCHML=0
+      SEGINI,SMAIL,SCHPO,SCHML
+
+C     IPVD=0 :: option 'AUTO' => completion du .pvd si possible, creation d'un nouveau sinon
+C     IPVD=1 :: option 'SUIT' => force la completion du .pvd (erreur s'il n'existe pas ou s'il est incompatible)
+C     IPVD=2 :: option 'NOUV' => force l'ecriture d'un nouveau .pvd
+C     IPVD=3 :: option 'NPVD' => pas de fichier .pvd
+      IPVD=0
+
+C     IVTU=0 :: option 'FORMATE' => ecriture du .vtu en formate (ascii)
+C     IVTU=1 :: option 'BINAIRE' => ecriture du .vtu en binaire (section AppendedData)
+C     IVTU=2 :: option 'ZIP'     => idem que 'BINA', avec compression zlib en plus
+      IVTU=1
+
+C     ZTEMP :: option 'TEMP'
+      XTPS=0.D0
+      ZTEMP=.FALSE.
+
+C     ZDOUB :: option 'DOUBLE_PRECISION'
+      ZDOUB=.FALSE.
+      FMDAT=FMR4
+      FLDAT='Float32'
+      ISIZDA=4
+
+C     ZOPT1 evite les ambiguites sur la valeur de IPVD
+C     ZOPT2 evite les ambiguites sur la valeur de IVTU
+      ZOPT1=.FALSE.
+      ZOPT2=.FALSE.
+
+
+
+C     (branchement vers les etiquettes de lecture d'objets =LIROBJ)
+  10  CONTINUE
+
+      CALL QUETYP(CHA8,0,IRETOU)
+      IF (IRETOU.EQ.0) GOTO 99
+
+      ILAB=0
+      IF (CHA8.EQ.'MAILLAGE') ILAB=1
+      IF (CHA8.EQ.'CHPOINT' ) ILAB=2
+      IF (CHA8.EQ.'MCHAML'  ) ILAB=3
+      IF (CHA8.EQ.'TABLE'   ) ILAB=4
+      IF (ILAB.GT.0) GOTO(20,30,40,50),ILAB
+
+      IF (CHA8.EQ.'MOT') THEN
+          CALL LIRCHA(CHA4,1,LCHA)
+          CALL CHRMOT(MCLE,LMCLE,CHA4,ICLE)
+          IF (ICLE.GT.0) GOTO 11
+
+C         ERREUR CRITIQUE 7 (On ne comprend pas le mot %m1:4)
+          MOTERR(1:4)=CHA4
+          CALL ERREUR(7)
+          RETURN
+      ENDIF
+
+C     ERREUR CRITIQUE 39 (On ne veut pas d'objet de type %m1:8)
+      MOTERR(1:8)=CHA8
+      CALL ERREUR(39)
+      RETURN
+
+
+
+C     (branchement vers les etiquettes de traitement des mots-cles)
+  11  GOTO( 70,  70,  70,  70,  71,  71,  71, 72,  73   ),ICLE
+C           AUTO SUIT NOUV NPVD FORM BINA ZIP TEMP DOUB
+
+
+
+C     =============================================
+C     LECTURE ET MEMORISATION D'UN OBJET 'MAILLAGE'
+C     =============================================
+
+  20  CONTINUE
+
+C     Lecture d'un nouveau MELEME
+      CALL LIROBJ('MAILLAGE',IPT1,1,IRETOU)
+      IF (IERR.NE.0) GOTO 999
+
+C     Verification que le MELEME n'est pas deja dans la liste
+      DO I1=1,NBMAIL
+          IF (IMAIL(I1).EQ.IPT1) GOTO 60
+      ENDDO
+      NBMAIL=NBMAIL+1
+
+C     Attribution d'un nom par defaut a l'objet lu
+      CALL QUENOM(CNOM)
+      IF (CNOM(1:1).EQ.'#'.OR.CNOM(1:1).EQ.' ')
+     &  WRITE(CNOM,FMT='("MAILLAGE_",I4.4)') NBMAIL
+C     Memorisation des informations
+      SEGADJ,SMAIL
+      IMAIL(NBMAIL)=IPT1
+      IPART(NBMAIL)=NBMAIL
+      TMAIL(NBMAIL)=CNOM
+      KMAIL(NBMAIL)=0
+
+      GOTO 60
+
+
+C     ============================================
+C     LECTURE ET MEMORISATION D'UN OBJET 'CHPOINT'
+C     ============================================
+
+  30  CONTINUE
+
+C     Lecture d'un nouveau CHPOINT
+      CALL LIROBJ('CHPOINT',MCHPO1,1,IRETOU)
+      IF (IERR.NE.0) GOTO 999
+
+C     Verification que le CHPOINT n'est pas deja dans la liste
+      DO I1=1,NBCHPO
+          IF (ICHPO(I1).EQ.MCHPO1) GOTO 60
+      ENDDO
+      NBCHPO=NBCHPO+1
+
+C     Attribution d'un nom par defaut a l'objet lu
+      CALL QUENOM(CNOM)
+      IF (CNOM(1:1).EQ.'#'.OR.CNOM(1:1).EQ.' ')
+     &  WRITE(CNOM,FMT='("CHPOINT_",I4.4)') NBCHPO
+
+C     Memorisation des informations
+      SEGADJ,SCHPO
+      ICHPO(NBCHPO)=MCHPO1
+      TCHPO(NBCHPO)=CNOM
+
+      GOTO 60
+
+
+C     ===========================================
+C     LECTURE ET MEMORISATION D'UN OBJET 'MCHAML'
+C     ===========================================
+
+  40  CONTINUE
+
+C     Lecture d'un nouveau MCHAML
+      CALL LIROBJ('MCHAML',MCHEL1,1,IRETOU)
+      IF (IERR.NE.0) GOTO 999
+
+C     Verification que le MCHAML n'est pas deja dans la liste
+      DO I1=1,NBCHML
+          IF (ICHML(I1).EQ.MCHEL1) GOTO 60
+      ENDDO
+      NBCHML=NBCHML+1
+
+C     Attribution d'un nom par defaut a l'objet lu
+      CALL QUENOM(CNOM)
+      IF (CNOM(1:1).EQ.'#'.OR.CNOM(1:1).EQ.' ')
+     &  WRITE(CNOM,FMT='("CHAMELEM_",I4.4)') NBCHML
+
+C     Memorisation des informations
+      SEGADJ,SCHML
+      ICHML(NBCHML)=MCHEL1
+      TCHML(NBCHML)=CNOM
+
+      GOTO 60
+
+
+C     ===========================================
+C     LECTURE ET DECOMPOSITION D'UN OBJET 'TABLE'
+C     ===========================================
+
+  50  CONTINUE
+
+C     Lecture d'une TABLE
+      CALL LIROBJ('TABLE',MTABLE,1,IRETOU)
+      IF (IERR.NE.0) GOTO 999
+
+C     Decomposition de la TABLE en objets MAILLAGE, CHPOINT et MCHAML
+      SEGACT,MTABLE
+      DO K=MLOTAB,1,-1
+
+C         Conversion de l'indice en chaine de caracteres
+          CHA4=MTABTI(K)(1:4)
+          IF (CHA4.EQ.'ENTI') WRITE(CNOM,FMT='(I8.8)') MTABII(K)
+          IF (CHA4.EQ.'FLOT') WRITE(CNOM,FMT='(F8.4)') RMTABI(K)
+          IF (CHA4.EQ.'MOT') THEN
+              CNOM=' '
+              IF (NBESC.NE.0) SEGACT IPILOC
+              IMO1=IPCHAR(MTABII(K))
+              IMO2=IPCHAR(MTABII(K)+1)
+              ILON=MIN(LONOM,IMO2-IMO1)
+              CNOM(1:ILON)=ICHARA(IMO1:IMO1+ILON-1)
+              IF (NBESC.NE.0) SEGDES,IPILOC
+          ENDIF
+
+C         Ecriture du nom puis du pointeur vers l'objet
+          IF (MTABTV(K).EQ.'MAILLAGE'.OR.
+     .        MTABTV(K).EQ.'CHPOINT'.OR.
+     .        MTABTV(K).EQ.'MCHAML') THEN
+              CALL ECRCHA(CNOM)
+              CHA8=MTABTV(K)
+              IPOB=MTABIV(K)
+              CALL ECROBJ(CHA8,IPOB)
+          ELSE
+C             ERREUR CRITIQUE 763 (Dans la table %m1:8, l'objet d'indice %m9:16 n'est pas de type %m17:40)
+              CALL QUENOM(CHA8)
+              MOTERR(1:8)=CHA8
+              WRITE(MOTERR(9:16),FMT='("n=",I6)') K
+              MOTERR(17:40)=' MAILLAGE/CHPOINT/MCHAML'
+              CALL ERREUR(763)
+              RETURN
+          ENDIF
+      ENDDO
+      SEGDES,MTABLE
+
+      GOTO 10
+
+
+C     ========================================
+C     ATTRIBUTION D'UN NOM AU DERNIER OBJET LU
+C     ========================================
+
+  60  CONTINUE
+
+      CALL QUETYP(CHA8,0,IRETOU)
+      IF (IRETOU.NE.0.AND.CHA8.EQ.'MOT') THEN
+          CALL LIRCHA(CNOM,0,LCHA)
+          CALL CHRMOT(MCLE,LMCLE,CNOM,ICLE)
+          IF (ICLE.GT.0) GOTO 11
+C         Remarque : On utilise le fait que I1 est incremente au passage sur ENDDO
+C                    Ainsi, I1 reste fige si on sort prematurement, et vaut bien N+1
+C                    si les N iterations se sont deroulees sans encombre
+          IF (ILAB.EQ.1) TMAIL(I1)=CNOM
+          IF (ILAB.EQ.2) TCHPO(I1)=CNOM
+          IF (ILAB.EQ.3) TCHML(I1)=CNOM
+          IF (ILAB.EQ.4) THEN
+              CALL ERREUR(880)
+              RETURN
+          ENDIF
+      ENDIF
+
+      GOTO 10
+
+
+C     ====================
+C     LECTURE D'UN MOT-CLE
+C     ====================
+
+C     Mots-cles 'AUTO, 'NOUV', 'SUIT' ou 'NPVD'
+  70  CONTINUE
+      ICLE1=ICLE-1
+      IF (ZOPT1.AND.IPVD.NE.ICLE1) THEN
+C         ERREUR CRITIQUE 880 (Syntaxe incorrecte, voir notice)
+          CALL ERREUR(880)
+          WRITE(IOIMP,*) '(options ',MCLE(IPVD),' et ',MCLE(ICLE),
+     .                   ' incompatibles)'
+          RETURN
+      ENDIF
+      ZOPT1=.TRUE.
+      IPVD=ICLE1
+      GOTO 10
+
+C     Mots-cles 'FORM, 'BINA' ou 'ZIP'
+  71  CONTINUE
+      ICLE1=ICLE-5
+      IF (ZOPT2.AND.IVTU.NE.ICLE1) THEN
+C         ERREUR CRITIQUE 880 (Syntaxe incorrecte, voir notice)
+          CALL ERREUR(880)
+          WRITE(IOIMP,*) '(options ',MCLE(IVTU+4),' et ',MCLE(ICLE),
+     .                   ' incompatibles)'
+          RETURN
+      ENDIF
+      ZOPT2=.TRUE.
+      IVTU=ICLE1
+
+      IF (IVTU.EQ.2) THEN
+C         ERREUR CRITIQUE 251 (Tentative d'utilisation d'une option non implementee)
+          CALL ERREUR(251)
+          WRITE(IOIMP,*) '(option ZIP indisponible pour le moment)'
+          RETURN
+      ENDIF
+      GOTO 10
+
+C     Mot-cle 'TEMP'
+  72  CONTINUE
+      ZTEMP=.TRUE.
+      CALL LIRREE(XTPS,0,IRETOU)
+      IF (IRETOU.EQ.0) THEN
+C         ERREUR CRITIQUE 166 (Le mot-cle %m1:4 n'est pas suivi de la donnee correspondante)
+          MOTERR(1:4)='TEMP'
+          CALL ERREUR(166)
+          RETURN
+      ENDIF
+      GOTO 10
+
+C     Mot-cle 'DOUB'
+  73  CONTINUE
+      ZDOUB=.TRUE.
+      FMDAT=FMR8
+      FLDAT='Float64'
+      ISIZDA=8
+      GOTO 10
+
+
+
+
+  99  CONTINUE
+
+
+C     Verification : il faut au moins 1 objet MAILLAGE pour continuer
+      IF (NBMAIL.EQ.0) THEN
+C         ERREUR CRITIQUE 37 (On ne trouve pas d'objet de type %m1:8)
+          MOTERR(1:8)='MAILLAGE'
+          CALL ERREUR(37)
+          RETURN
+      ENDIF
+
+C     Il y a-t-il plusieurs objets MAILLAGE ?
+      ZPART=(NBMAIL.GT.1)
+
+
+
+C     IMPRESSIONS POUR DEBOGAGE
+C     #########################
+      IF (IIMPI.NE.0) THEN
+        WRITE(IOIMP,FMT='(I2,A)') NBMAIL,' MAILLAGE(s) lu(s)'
+        WRITE(IOIMP,FMT='(5X,I7,2X,A24)') (IMAIL(I),TMAIL(I),I=1,NBMAIL)
+
+        WRITE(IOIMP,FMT='(I2,A)') NBCHPO,' CHPOINT(s) lu(s)'
+        WRITE(IOIMP,FMT='(5X,I7,2X,A24)') (ICHPO(I),TCHPO(I),I=1,NBCHPO)
+
+        WRITE(IOIMP,FMT='(I2,A)') NBCHML,' MCHAML(s) lu(s)'
+        WRITE(IOIMP,FMT='(5X,I7,2X,A24)') (ICHML(I),TCHML(I),I=1,NBCHML)
+      ENDIF
+C     #########################
+
+
+
+
+C***********************************************************************
+C***********************************************************************
+C***********************************************************************
+C***********************************************************************
+
+
+
+
+C     +---------------------------------------------------------------+
+C     |                                                               |
+C     |      V E R I F I C A T I O N S   D A N S   L E   . P V D      |
+C     |                                                               |
+C     +---------------------------------------------------------------+
+
+
+      NOM3=NOM1(1:LONG(NOM1))//NOMFIC(1:LONG(NOMFIC))//'.pvd'
+
+      INQUIRE(FILE=NOM3,EXIST=ZEXIS)
+
+
+C     Option 'AUTO' ou 'SUIT' : on verifie que le .pvd pre-existant
+C     est compatible avec les donnees que l'on veut rajouter
+C     (cette verification n'a pas vocation a etre infaillible, elle
+C     permet seulement d'eviter aux etourdis de corrompre le .pvd)
+C
+C     Apres lecture du .pvd : ITF=dernier indice enregistre
+C                             XTF=dernier instant enregistre
+      ITF=0
+      IF (IPVD.LT.2.AND.ZEXIS) THEN
+          OPEN(UNIT   = IOXML       ,
+     .         FILE   = NOM3        ,
+     .         STATUS = 'OLD'       ,
+     .         FORM   = 'FORMATTED' ,
+     .         ACCESS = 'SEQUENTIAL',
+     .         IOSTAT = IOS         )
+          CALL FINFIC(IOXML)
+
+
+C         On remonte au-dela des balises de fermeture du .pvd
+          DO NLFOOTER=1,5
+              BACKSPACE(IOXML)
+              READ(UNIT=IOXML,FMT='(A)') CBUF
+              BACKSPACE(IOXML)
+              IF (INDEX(CBUF,'</Collection>').GT.0) GOTO 150
+          ENDDO
+          GOTO 9004
+
+ 150      CONTINUE
+
+
+C      a) Si 'TEMP' est specifie, on verifie que le .pvd contient un
+C         champ 'timestep' et que la chronologie est respectee. Si en
+C         outre plusieurs maillages sont fournis, on verifie que la
+C         partition est identique (verif. du nom et du nombre seult.)
+
+          IF (ZTEMP) THEN
+
+C             On va devoir verifier les NBMAIL derniers items
+              DO I1=1,NBMAIL
+                  BACKSPACE(IOXML)
+              ENDDO
+
+              DO IMAI=1,NBMAIL
+
+C                 Lecture de l'item puis recherche des champs 'timestep', 'part', 'name' et 'file'
+                  READ(UNIT=IOXML,FMT='(A)') CBUF
+                  II1=INDEX(CBUF,'timestep=')
+                  II2=INDEX(CBUF,'part=')
+                  II3=INDEX(CBUF,'name=')
+                  II4=INDEX(CBUF,'file="'//NOMFIC(1:LONG(NOMFIC)))
+
+
+C                 DECLENCHEMENT D'UNE ERREUR SI :
+
+C                 - le champ 'file' ne contient pas le nom du fichier lu => 9004
+                  IF (II4.EQ.0) GOTO 9004
+
+C                 - les NBMAIL derniers items n'ont pas le meme 'timestep'           => 9001
+C                 - pas de champ 'timestep' trouve                                   => 9002
+C                 - le 'timestep' lu est superieur a la valeur specifiee dans 'TEMP' => 9003
+C                 - le format du fichier n'est pas reconnu                           => 9004
+                  IF (II1.GT.0) THEN
+                      WRITE(MYFMT,FMT='("(",A8,")")') FMDAT
+                      II5=II1+INDEX(CBUF(II1+10:),'"')+8
+                      READ(CBUF(II1+10:II5),FMT=MYFMT,IOSTAT=IOS) XTF
+                      IF (IOS.NE.0) GOTO 9004
+                      IF (IMAI.GT.1.AND.XTF1.NE.XTF) GOTO 9001
+                      IF (XTF.GE.XTPS) GOTO 9003
+                      XTF1=XTF
+                  ELSE
+                      GOTO 9002
+                  ENDIF
+
+C                 - un seul maillage specifie alors qu'on a trouve un champ 'part'           => 9001
+C                 - plusieurs maillages specifies alors qu'on ne trouve aucun champ 'part'   => 9001
+C                 - le i-eme champ 'part' n'a pas le meme nom que le i-eme maillage specifie => 9001
+C                 - pas de champ 'name' associe au champ 'part'                              => 9004
+C                 - le format du fichier n'est pas reconnu                                   => 9004
+                  JPART=1
+                  IF (ZPART.AND.(II2.GT.0)) THEN
+                      IF (II3.EQ.0) GOTO 9004
+                      READ(CBUF(II2+6:II3-3),FMT='(A4)',IOSTAT=IOS) CHA4
+                      IF (IOS.NE.0) GOTO 9004
+                      READ(CHA4,FMT='(I4)',IOSTAT=IOS) JPART
+                      IF (IOS.NE.0) GOTO 9004
+                      IF (JPART.GT.NBMAIL) GOTO 9001
+                      WRITE(MYFMT,FMT='("(A",I2,")")') LONOM
+                      CNOM=CBUF(II3+6:)
+                      II5=INDEX(CNOM,'"')
+                      IF (II5.GT.0) CNOM=CNOM(1:II5-1)
+                      IF (CNOM.NE.TMAIL(JPART)) GOTO 9001
+                  ELSEIF (ZPART.OR.(II2.GT.0)) THEN
+                      GOTO 9001
+                  ENDIF
+                  KMAIL(JPART)=1
+
+              ENDDO
+
+C             - un des maillages specifies n'etait pas present dans les fichiers .vtu => 9001
+              DO IMAI=1,NBMAIL
+                 IF (KMAIL(IMAI).EQ.0) GOTO 9001
+              ENDDO
+
+
+C             PAS D'ERREUR : on recupere l'indice du dernier p.d.t.
+              CALL LENCHA(NOMFIC,NC)
+              READ(CBUF(II4+NC+7:II4+NC+15),FMT='(A9)',IOSTAT=IOS) CHA9
+              II4=INDEX(CHA9,'.')-1
+              WRITE(MYFMT,FMT='("(I",I1,".",I1,")")',IOSTAT=IOS) II4,II4
+              READ(CHA9(1:II4),FMT=MYFMT,IOSTAT=IO3) ITF
+              IF (IOS.NE.0.OR.IO3.NE.0.OR.II4.EQ.-1) GOTO 9004
+
+
+C      b) Si 'TEMP' est absent, on verifie que le .pvd ne contient pas de
+C         champ 'timestep' mais uniquement un champ 'part' et un champ 'name'
+          ELSE
+
+C             Lecture du dernier item puis recherche des champs 'timestep', 'part' et 'name'
+              BACKSPACE(IOXML)
+              READ(UNIT=IOXML,FMT='(A)') CBUF
+              II1=INDEX(CBUF,'timestep=')
+              II2=INDEX(CBUF,'part=')
+              II3=INDEX(CBUF,'name=')
+
+C             DECLENCHEMENT D'UNE ERREUR SI :
+C             - un champ 'timestep' est trouve                          => 9005
+C             - 'timestep' est absent mais 'part' et/ou 'name' manquent => 9004
+              IF (II1.GT.0) GOTO 9005
+              IF (II2.EQ.0.OR.II3.EQ.0) GOTO 9004
+
+C             On retient le numero de la derniere 'part' creee
+C             et on incremente les futures partitions en consequence
+              READ(CBUF(II2+6:II3-3),FMT='(A4)',IOSTAT=IOS) CHA4
+              IF (IOS.NE.0) GOTO 9004
+              READ(CHA4,FMT='(I4)',IOSTAT=IOS) OLDPAR
+              IF (IOS.NE.0) GOTO 9004
+              DO IMAI=1,NBMAIL
+                 IPART(IMAI)=IPART(IMAI)+OLDPAR
+              ENDDO
+
+          ENDIF
+
+          CLOSE(UNIT=IOXML)
+      ENDIF
+
+
+C     Pas d'erreur => on passe a la suite
+      GOTO 9000
+
+
+C     MESSAGES D'ERREUR : fichier .pvd incompatible et option 'SUIT'
+C     ***************************************************************
+C     ERREUR CRITIQUE 26 (Tache impossible. Probablement donnees erronees)
+
+ 9001 CONTINUE
+      IF (IPVD.EQ.0) GOTO 9050
+      CALL ERREUR(26)
+      WRITE(IOIMP,*) 'VTK ''SUIT'' : le fichier existe deja et la ',
+     .               'partition specifiee differe du p.d.t. precedent'
+      GOTO 999
+
+ 9002 CONTINUE
+      IF (IPVD.EQ.0) GOTO 9050
+      CALL ERREUR(26)
+      WRITE(IOIMP,*) 'VTK ''SUIT'' : le fichier existe deja et ',
+     .               'n''est pas compatible avec l''option ''TEMP'''
+      GOTO 999
+
+ 9003 CONTINUE
+      IF (IPVD.EQ.0) GOTO 9050
+      CALL ERREUR(26)
+      WRITE(IOIMP,*) 'VTK ''SUIT'' : le fichier existe deja et la ',
+     .               'valeur specifiee pour ''TEMP'' est trop petite'
+      GOTO 999
+
+ 9004 CONTINUE
+      ZEXIS=.FALSE.
+      IF (IPVD.EQ.0) GOTO 9050
+      CALL ERREUR(26)
+      WRITE(IOIMP,*) 'VTK ''SUIT'' : le fichier existe deja mais ',
+     .               'il semble corrompu...'
+      GOTO 999
+
+ 9005 CONTINUE
+      IF (IPVD.EQ.0) GOTO 9050
+      CALL ERREUR(26)
+      WRITE(IOIMP,*) 'VTK ''SUIT'' : le fichier existe deja et ',
+     .               'requiert l''utilisation du mot-cle ''TEMP'''
+      GOTO 999
+C     ***************************************************************
+
+
+C     Fichier .pvd incompatible et option 'AUTO'
+C     => on continue mais le .pvd existant sera ecrase
+ 9050 ZEXIS=.FALSE.
+
+
+
+
+C***********************************************************************
+C***********************************************************************
+C***********************************************************************
+C***********************************************************************
+
+
+
+
+C     +---------------------------------------------------------------+
+C     |                                                               |
+C     |      E C R I T U R E   D E S   F I C H I E R S   . V T U      |
+C     |                                                               |
+C     +---------------------------------------------------------------+
+
+ 9000 CONTINUE
+
+C     Lorsqu'il y a deja deux unites logiques XDR ouvertes (REST et
+C     SAUV en l'occurence), l'ouverture d'une troisieme unite engendre
+C     un bug critique (redemarrage du jeu de donnees !). On s'assure
+C     que le fichier de RESTitution est bien ferme pour eviter cela.
+      IF (IVTU.GT.0.AND.IXDRR.NE.0) THEN
+          IOS= IXDRCLOSE(IXDRR)
+          IXDRR=0
+      ENDIF
+
+
+C     Preparation de l'entete des fichiers
+      CALL GIBDAT(IJOUR,IMOIS,IANNEE)
+      IANNEE=MOD(IANNEE,100)+2000
+      CALL GIBNAM(CHA8)
+      CALL NETCHA(CHA8)
+      WRITE(CHEAD,FMT='(A,I2.2,A1,I2.2,A1,I4,A)')
+     .    '<!-- PROGRAMME=CASTEM/SORVTK'//
+     .      '   UTILISATEUR='//CHA8(1:LONG(CHA8))//
+     .      '   DATE=',IJOUR,'/',IMOIS,'/',IANNEE,
+     .      '   TITRE='//NOMFIC(1:LONG(NOMFIC))//' -->'
+      CALL LENCHA(CHEAD,LHEAD)
+
+
+C     ---------------------
+C     NOM DES FICHIERS .vtu
+C     ---------------------
+C
+C            repetoire/  nom_de_base.XXXXxxxxx.YYYY.vtu
+C           |__________||___________|
+C               NOM1        NOMFIC            |
+C                       |_____________________|        |
+C                                 NOM2                 |
+C                       |______________________________|
+C                                     NOM3
+C
+C     - XXXXxxxx : /!\ SEULEMENT SI L'OPTION 'TEMP' EST PRESENTE
+C                  => entier ecrit sur 4 a 9 caracteres et incremente
+C                     a chaque pas de temps sorti
+C
+C     - YYYY     : /!\ SEULMENT SI PLUSIEURS MAILLAGES SONT FOURNIS
+C                      OU SI ON SORT UN .PVD SANS OPTION 'TEMP'
+C                  => entier ecrit sur 4 caracteres indiquant l'indice
+C                     de la partition geometrie sortie
+C
+      NOM2=NOMFIC
+      IF (ZTEMP) THEN
+          IPDT=ITF+1
+          WRITE(CHA9,FMT='(I9.9)') IPDT
+          LPDT=MAX(4,INT(LOG10(DBLE(IPDT)))+1)
+          NOM2=NOM2(1:LONG(NOM2))//'.'//CHA9(10-LPDT:9)
+      ENDIF
+
+
+C     (BOUCLE SUR LES MAILLAGES)
+      DO 100 IMAI=1,NBMAIL
+
+C         =============================================================
+C          I N I T I A L I S A T I O N   D U   F I C H I E R   . V T U
+C         =============================================================
+
+C         Determination du nom complet du fichier .vtu
+          NOM3=NOM1(1:LONG(NOM1))//NOM2
+          IF ((.NOT.ZTEMP.AND.IPVD.LT.3).OR.ZPART) THEN
+              WRITE(CHA4,FMT='(I4.4)') IPART(IMAI)
+              NOM3=NOM3(1:LONG(NOM3))//'.'//CHA4
+          ENDIF
+          NOM3=NOM3(1:LONG(NOM3))//'.vtu'
+
+
+C         Commande d'ouverture du fichier XML
+          OPEN(UNIT   = IOXML,
+     .         FILE   = NOM3,
+     .         STATUS = 'UNKNOWN',
+     .         FORM   = 'FORMATTED',
+     .         ACCESS = 'SEQUENTIAL',
+     .       IOSTAT   = IOS)
+
+
+C         Commande d'ouverture du fichier binaire
+          IF (IVTU.GT.0) THEN
+              IOBIN=INITXDR(NOM3(1:LONG(NOM3))//'.bin','w',.FALSE.)
+
+C             Debut de la section binaire AppendedData
+              IOS= IXDRINT(IOBIN,IXDR1)
+              IPOS=0
+          ENDIF
+
+
+C         Ecriture des entetes
+          WRITE(UNIT=IOXML,FMT='(A)',IOSTAT=IOS)
+     .    '<?xml version="1.0"?>'
+
+          WRITE(UNIT=IOXML,FMT='(A)',IOSTAT=IOS)
+     .    CHEAD(1:LHEAD)
+
+          IF (IVTU.EQ.0) THEN
+              WRITE(UNIT=IOXML,FMT='(A)',IOSTAT=IOS)
+     .        '<VTKFile type="UnstructuredGrid" version="0.1">'
+          ELSE
+              WRITE(UNIT=IOXML,FMT='(A)',IOSTAT=IOS)
+     .        '<VTKFile type="UnstructuredGrid" version="0.1"'//
+     .                ' byte_order="BigEndian">'
+          ENDIF
+
+          WRITE(UNIT=IOXML,FMT='(4X,A)',IOSTAT=IOS)
+     .    '<UnstructuredGrid>'
+
+
+
+
+C         =============================================================
+C                    D O N N E E S   G E O M E T R I Q U E S
+C         =============================================================
+C         NEL   = nombre d'elements du maillage au total
+C         NNO   = nombre de noeuds du maillage au total
+C         NBSOU = nombre de sous-maillages (un par type d'element)
+
+          IPT1=IMAIL(IMAI)
+          SEGACT,IPT1
+          NBSOU=IPT1.LISOUS(/1)
+          NBSOU1=MAX(1,NBSOU)
+
+C         Pour chaque MAILLAGE passe en argument, on doit :
+C          - remplir les tables de correspondance LOCAL <--> GLOBAL
+C          - determiner le nombre de noeuds au total
+C          - determiner le nombre d'elements au total
+C          - memoriser les caracteristiques des cellules (connectivite,
+C            offset, type d'element VTK)
+C          - si des MCHAML sont a sortir, memoriser le type et le nombre
+C            d'elements dans chaque sous-maillage
+
+          NEL=0
+          NEL1=0
+          NNO=0
+          NBCON=0
+          IOF=0
+          SEGINI,IPOG2L,IOFFS,ITYEL,ICONN
+          IF (NBCHML.GT.0) SEGINI,ITYPII,INECUM
+
+C         (BOUCLE SUR LES SOUS-MAILLAGES)
+          IPT2=IPT1
+          DO ISOU=1,NBSOU1
+              IF (NBSOU.GT.0) THEN
+                  IPT2=IPT1.LISOUS(ISOU)
+                  SEGACT,IPT2
+              ENDIF
+
+C             L'element est-il representable par VTK ?
+              ITYP=IPT2.ITYPEL
+              ITY=ITYVTK(ITYP)
+              IF (ITY.EQ.0) THEN
+C                 ERREUR CRITIQUE 21 (Donnees incompatibles)
+                  CALL ERREUR(21)
+                  WRITE(IOIMP,*) 'Le maillage ',TMAIL(IMAI),
+     .                           ' comporte des elements ',NOMS(ITYP),
+     .                           ' incompatibles avec VTK'
+                  GOTO 999
+              ENDIF
+
+C             On memorise les infos ci-dessous pour aller plus vite
+C             lors du traitement ulterieur des MCHAML
+              IF (NBCHML.GT.0) THEN
+                  ITYPII(ITYP)=ISOU
+                  INECUM(ISOU)=NEL
+              ENDIF
+
+C             (BOUCLE SUR LES ELEMENTS DU SOUS-MAILLAGE)
+              NN1=IPT2.NUM(/1)
+              NN2=IPT2.NUM(/2)
+              NEL=NEL+NN2
+              NEL1=NEL
+              NBCON=NBCON+(NN1*NN2)
+              SEGADJ,ICONN,IOFFS,ITYEL
+
+              DO I2=1,NN2
+                  DO I1=1,NN1
+                      IF (ITY.GE.20) THEN
+C                         Correction pour les elements quadratiques
+                          I3 = INUVTK(I1,ITY-20)
+                      ELSE
+                          I3 = I1
+                      ENDIF
+                      INUM=IPT2.NUM(I3,I2)
+                      IPOG2L(INUM)=1
+                      ICONN(IOF+I1)=INUM
+                  ENDDO
+                  IOF=IOF+NN1
+                  IOFFS(NEL-NN2+I2)=IOF
+                  ITYEL(NEL-NN2+I2)=ITY
+              ENDDO
+
+              IF (NBSOU.GT.0) SEGDES,IPT2
+          ENDDO
+
+
+C         (BOUCLE SUR LA TABLE GLOBALE IPOG2L)
+          NNO=NBCON
+          SEGINI,IPOL2G
+          NNO=0
+          DO I3=1,NPMAX
+              IF (IPOG2L(I3).EQ.1) THEN
+                  NNO=NNO+1
+                  IPOL2G(NNO)=I3
+                  IPOG2L(I3)=NNO
+              ENDIF
+          ENDDO
+          IF (NNO.NE.NBCON) SEGADJ,IPOL2G
+
+c
+
+
+C         ECRITURE DANS LE FICHIER
+C         *************************************************************
+C         *************************************************************
+
+          WRITE(CNU1,FMT='(I15)') NNO
+          WRITE(CNU2,FMT='(I15)') NEL
+          CALL LIMCHA(CNU1,ID1,IF1)
+          CALL LIMCHA(CNU2,ID2,IF2)
+          WRITE(UNIT=IOXML,FMT='(8X,A)',IOSTAT=IOS)
+     .    '<Piece NumberOfPoints="'//CNU1(ID1:IF1)//
+     .         '" NumberOfCells="'//CNU2(ID2:IF2)//'">'
+
+
+
+C         *****************************************************
+C                      S E C T I O N   P O I N T S
+C         *****************************************************
+
+          WRITE(UNIT=IOXML,FMT='(12X,A)',IOSTAT=IOS)
+     .    '<Points>'
+
+C         ===================== FORMATE =====================
+          IF (IVTU.EQ.0) THEN
+              WRITE(UNIT=IOXML,FMT='(16X,A)',IOSTAT=IOS)
+     .        '<DataArray type="'//FLDAT//'" NumberOfComponents="3" '//
+     .        'format="ascii">'
+
+              DO IK=1,NNO
+                  II=IPOL2G(IK)-1
+
+                  XRE8=XCOOR(II*IDIM1+1)
+                  YRE8=XCOOR(II*IDIM1+2)
+                  ZRE8=0.D0
+                  IF (IDIM.EQ.3) ZRE8=XCOOR(II*IDIM1+3)
+
+                  WRITE(MYFMT,FMT='("(20X,3",A8,")")') FMDAT
+                  WRITE(UNIT=IOXML,FMT=MYFMT,IOSTAT=IOS)
+     .            XRE8,YRE8,ZRE8
+              ENDDO
+
+              WRITE(UNIT=IOXML,FMT='(16X,A)',IOSTAT=IOS)
+     .        '</DataArray>'
+
+
+C         ===================== BINAIRE =====================
+          ELSE
+
+              NBYTES=(3*NNO)*ISIZDA
+
+              WRITE(CNU1,FMT='(I15)') IPOS
+              IPOS=IPOS+ISIZNB+NBYTES
+
+              CALL LIMCHA(CNU1,ID1,IF1)
+              WRITE(UNIT=IOXML,FMT='(16X,A)',IOSTAT=IOS)
+     .        '<DataArray type="'//FLDAT//'" NumberOfComponents="3" '//
+     .        'format="appended" offset="'//CNU1(ID1:IF1)//'" />'
+
+              IOS= IXDRINT(IOBIN,NBYTES)
+
+              IF (ZDOUB) THEN
+                  DO IK=1,NNO
+                      II=IPOL2G(IK)-1
+
+                      XRE8=XCOOR(II*IDIM1+1)
+                      YRE8=XCOOR(II*IDIM1+2)
+                      ZRE8=0.D0
+                      IF (IDIM.EQ.3) ZRE8=XCOOR(II*IDIM1+3)
+
+                      IOS= IXDRDOUBLE(IOBIN,XRE8)
+                      IOS= IXDRDOUBLE(IOBIN,YRE8)
+                      IOS= IXDRDOUBLE(IOBIN,ZRE8)
+                  ENDDO
+              ELSE
+                  DO IK=1,NNO
+                      II=IPOL2G(IK)-1
+
+                      XRE4=REAL(XCOOR(II*IDIM1+1),4)
+                      YRE4=REAL(XCOOR(II*IDIM1+2),4)
+                      ZRE4=REAL(0.D0)
+                      IF (IDIM.EQ.3) ZRE4=REAL(XCOOR(II*IDIM1+3),4)
+
+                      IOS= IXDRREAL(IOBIN,XRE4)
+                      IOS= IXDRREAL(IOBIN,YRE4)
+                      IOS= IXDRREAL(IOBIN,ZRE4)
+                  ENDDO
+              ENDIF
+
+          ENDIF
+
+          WRITE(UNIT=IOXML,FMT='(12X,A)',IOSTAT=IOS)
+     .    '</Points>'
+
+
+C         *****************************************************
+C                       S E C T I O N   C E L L S
+C         *****************************************************
+
+          WRITE(UNIT=IOXML,FMT='(12X,A)',IOSTAT=IOS)
+     .    '<Cells>'
+
+C         ===================== FORMATE =====================
+          IF (IVTU.EQ.0) THEN
+              WRITE(UNIT=IOXML,FMT='(16X,A)',IOSTAT=IOS)
+     .        '<DataArray type="Int32" Name="connectivity" '//
+     .        'format="ascii">'
+
+              WRITE(UNIT=IOXML,FMT='(20X,8I10)',IOSTAT=IOS)
+     .        ((IPOG2L(ICONN(K))-1),K=1,ICONN(/1))
+
+              WRITE(UNIT=IOXML,FMT='(16X,A)',IOSTAT=IOS)
+     .        '</DataArray>'
+
+C             ----------------------
+
+              WRITE(UNIT=IOXML,FMT='(16X,A)',IOSTAT=IOS)
+     .        '<DataArray type="Int32" Name="offsets" format="ascii">'
+
+              WRITE(UNIT=IOXML,FMT='(20X,8I10)',IOSTAT=IOS)
+     .        (IOFFS(K),K=1,NEL)
+
+              WRITE(UNIT=IOXML,FMT='(16X,A)',IOSTAT=IOS)
+     .        '</DataArray>'
+
+C             ----------------------
+
+              WRITE(UNIT=IOXML,FMT='(16X,A)',IOSTAT=IOS)
+     .        '<DataArray type="UInt8" Name="types" format="ascii">'
+
+              WRITE(UNIT=IOXML,FMT='(20X,20I4)',IOSTAT=IOS)
+     .        (ITYEL(K),K=1,NEL)
+
+              WRITE(UNIT=IOXML,FMT='(16X,A)',IOSTAT=IOS)
+     .        '</DataArray>'
+
+
+C         ===================== BINAIRE =====================
+          ELSE
+              NBYTES=ICONN(/1)*4
+
+              WRITE(CNU1,FMT='(I15)') IPOS
+              IPOS=IPOS+ISIZNB+NBYTES
+
+              CALL LIMCHA(CNU1,ID1,IF1)
+              WRITE(UNIT=IOXML,FMT='(16X,A)',IOSTAT=IOS)
+     .        '<DataArray type="Int32" Name="connectivity" '//
+     .        'format="appended" offset="'//CNU1(ID1:IF1)//'" />'
+
+              IOS= IXDRINT(IOBIN,NBYTES)
+
+              DO K=1,ICONN(/1)
+                  INT8=IPOG2L(ICONN(K))-1
+                  IOS=IXDRINT(IOBIN,INT8)
+              ENDDO
+
+C             ----------------------
+
+              NBYTES=NEL*4
+
+              WRITE(CNU1,FMT='(I15)') IPOS
+              IPOS=IPOS+ISIZNB+NBYTES
+
+              CALL LIMCHA(CNU1,ID1,IF1)
+              WRITE(UNIT=IOXML,FMT='(16X,A)',IOSTAT=IOS)
+     .        '<DataArray type="Int32" Name="offsets" '//
+     .        'format="appended" offset="'//CNU1(ID1:IF1)//'" />'
+
+              IOS=IXDRINT(IOBIN,NBYTES)
+
+              DO K=1,NEL
+                  INT8=IOFFS(K)
+                  IOS=IXDRINT(IOBIN,INT8)
+              ENDDO
+
+C             ----------------------
+
+C             Groupement de quatre UInt8 en un seul Int32
+C             (pour prendre moins de place !)
+              NBYTES=NEL
+              NBTROP=NEL-(NBYTES/4)*4
+              IF (NBTROP.GT.0) THEN
+                  NEL1=NEL+4-NBTROP
+                  SEGADJ,ITYEL
+                  NBYTES=NEL1
+              ENDIF
+
+              WRITE(CNU1,FMT='(I15)') IPOS
+              IPOS=IPOS+ISIZNB+NBYTES
+
+              CALL LIMCHA(CNU1,ID1,IF1)
+              WRITE(UNIT=IOXML,FMT='(16X,A)',IOSTAT=IOS)
+     .        '<DataArray type="UInt8" Name="types" '//
+     .        'format="appended" offset="'//CNU1(ID1:IF1)//'" />'
+
+              IOS=IXDRINT(IOBIN,NBYTES)
+
+              K20=0
+              DO K2=1,(NBYTES/4)
+                  INT8=0
+                  DO K1=1,4
+                      INT8=INT8+(256**(4-K1))*ITYEL(K20+K1)
+                  ENDDO
+                  IOS=IXDRINT(IOBIN,INT8)
+                  K20=K20+4
+              ENDDO
+
+          ENDIF
+
+          WRITE(UNIT=IOXML,FMT='(12X,A)',IOSTAT=IOS)
+     .    '</Cells>'
+
+C         *************************************************************
+C         *************************************************************
+C         FIN D'ECRITURE DANS LE FICHIER
+
+
+          SEGSUP,IPOL2G,ICONN,IOFFS,ITYEL
+
+
+
+
+
+C         =============================================================
+C           G R A N D E U R S   D E F I N I E S   A U X   N O E U D S
+C         =============================================================
+
+          WRITE(UNIT=IOXML,FMT='(12X,A)',IOSTAT=IOS)
+     .    '<PointData>'
+
+C         (BOUCLE SUR LES CHAMPS PAR POINTS)
+          DO 200 ICHP=1,NBCHPO
+
+              MCHPO1=ICHPO(ICHP)
+              SEGACT,MCHPO1
+
+C             NSOUPO = Nombre de sous-champs
+              NSOUPO=MCHPO1.IPCHP(/1)
+              IF (NSOUPO.EQ.0) GOTO 200
+
+
+C          1) CREATION DE LA LISTE DES COMPOSANTES DANS TCHCO
+C             On cree cette liste avant toute chose et non pas au fur
+C             et a mesure pour eviter de faire des SEGADJ sur le gros
+C             segment SCHPV
+              JGN=4
+              JGM=0
+              SEGINI,TCHCO
+              DO I1=1,NSOUPO
+                  MSOUP1=MCHPO1.IPCHP(I1)
+                  SEGACT,MSOUP1
+                  NC=MSOUP1.NOCOMP(/2)
+                  JGM1=JGM
+                  DO 210 I2=1,NC
+                      CHA4=MSOUP1.NOCOMP(I2)
+                      DO I3=1,JGM1
+                          IF (TCHCO.MOTS(I3).EQ.CHA4) GOTO 210
+                      ENDDO
+                      JGM=JGM+1
+                      SEGADJ,TCHCO
+                      TCHCO.MOTS(JGM)=CHA4
+  210             CONTINUE
+                  SEGDES,MSOUP1
+              ENDDO
+
+
+C          2) CONCATENATION DE TOUS LES VPOCHA DANS XPOCHA
+C             - on ecrase la structure compliquee du CHPOINT dans un simple tableau (no.comp.;no.noeud)
+C             - on passe de la numerotation globale a la numerotation locale
+              NCO=JGM
+              SEGINI,SCHPV,ICOOK
+              DO 220 ISOU=1,NSOUPO
+                  MSOUP1=MCHPO1.IPCHP(ISOU)
+                  SEGACT,MSOUP1
+
+                  MPOVA1=MSOUP1.IPOVAL
+                  IF (MPOVA1.EQ.0) GOTO 219
+                  SEGACT,MPOVA1
+
+                  IPT2=MSOUP1.IGEOC
+                  IF (IPT2.EQ.0) GOTO 218
+                  SEGACT,IPT2
+
+                  NN1=MPOVA1.VPOCHA(/1)
+                  NC1=MPOVA1.VPOCHA(/2)
+
+                  DO I1=1,NC1
+C                     Recherche de la composante dans la liste TCHCO
+                      CHA4=MSOUP1.NOCOMP(I1)
+                      DO ICO=1,NCO
+                          IF (TCHCO.MOTS(ICO).EQ.CHA4) GOTO 240
+                      ENDDO
+
+C                     MISE A JOUR DE SCHPV
+C                     - si un noeud du support du SOUPO n'appartient pas au maillage courant, on passe au suivant
+C                     - si un noeud du MAILLAGE courant n'est pas present dans le support du SOUPO, sa valeur reste a zero
+  240                 NTROUV=0
+                      DO 250 I2=1,NN1
+                          INO=IPOG2L(IPT2.NUM(1,I2))
+                          IF (INO.EQ.0) GOTO 250
+                          SCHPV.XPOCHA(ICO,INO)=SCHPV.XPOCHA(ICO,INO)
+     &                                         +MPOVA1.VPOCHA(I2,I1)
+                          NTROUV=1
+  250                 CONTINUE
+                      IF (NTROUV.EQ.1) CALL AJOU(ICOOK,ICO)
+                  ENDDO
+
+                  SEGDES,IPT2
+  218             SEGDES,MPOVA1
+  219             SEGDES,MSOUP1
+  220         CONTINUE
+
+              SEGDES,MCHPO1
+
+
+C             S'il n'y a rien a sortir, on passe au CHPOINT suivant
+              NCOK=ICOOK(/1)
+              IF (NCOK.EQ.0) GOTO 299
+              IF (NCOK.LT.NCO) CALL ORDO02(ICOOK(1),NCOK,.TRUE.)
+
+
+
+C             ECRITURE DANS LE FICHIER
+C             *********************************************************
+C             *********************************************************
+
+              CNOM=TCHPO(ICHP)
+
+C             ===================== FORMATE =====================
+              IF (IVTU.EQ.0) THEN
+
+                  WRITE(CNU1,FMT='(I15)') NCOK
+                  CALL LIMCHA(CNU1,ID1,IF1)
+
+                  WRITE(UNIT=IOXML,
+     .                  FMT='(16X,A)',
+     .                  IOSTAT=IOS,
+     .                  ADVANCE="NO")
+     .              '<DataArray type="'//FLDAT//'" '//
+     .              'Name="'//CNOM(1:LONG(CNOM))//'" '//
+     .              'NumberOfComponents="'//CNU1(ID1:IF1)//'" '
+
+                  DO K=1,NCOK
+                      CHA4=TCHCO.MOTS(ICOOK(K))
+                      CALL LIMCHA(CHA4,ID4,IF4)
+                      WRITE(UNIT=IOXML,
+     .                      FMT='(A,I0,A,A,A)',
+     .                      IOSTAT=IOS,
+     .                      ADVANCE="NO")
+     .                  'ComponentName',K-1,'="',CHA4(ID4:IF4),'" '
+                  ENDDO
+
+                  WRITE(UNIT=IOXML,FMT='(A)',IOSTAT=IOS)
+     .            'format="ascii">'
+
+                  WRITE(MYFMT,FMT='("(20X,",I2,A8,")")') NCOK,FMDAT
+                  WRITE(UNIT=IOXML,FMT=MYFMT,IOSTAT=IOS)
+     .            ((SCHPV.XPOCHA(ICOOK(K),J),K=1,NCOK),J=1,NNO)
+
+                  WRITE(UNIT=IOXML,FMT='(16X,A)',IOSTAT=IOS)
+     .            '</DataArray>'
+
+
+C             ===================== BINAIRE =====================
+              ELSE
+                  NBYTES=(NCOK*NNO)*ISIZDA
+
+                  WRITE(CNU1,FMT='(I15)') IPOS
+                  IPOS=IPOS+ISIZNB+NBYTES
+
+                  WRITE(CNU2,FMT='(I15)') NCOK
+                  CALL LIMCHA(CNU1,ID1,IF1)
+                  CALL LIMCHA(CNU2,ID2,IF2)
+
+                  WRITE(UNIT=IOXML,
+     .                  FMT='(16X,A)',
+     .                  IOSTAT=IOS,
+     .                  ADVANCE="NO")
+     .              '<DataArray type="'//FLDAT//'" '//
+     .              'Name="'//CNOM(1:LONG(CNOM))//'" '//
+     .              'NumberOfComponents="'//CNU2(ID2:IF2)//'" '
+
+                  DO K=1,NCOK
+                      CHA4=TCHCO.MOTS(ICOOK(K))
+                      CALL LIMCHA(CHA4,ID4,IF4)
+                      WRITE(UNIT=IOXML,
+     .                      FMT='(A,I0,A,A,A)',
+     .                      IOSTAT=IOS,
+     .                      ADVANCE="NO")
+     .                  'ComponentName',K-1,'="',CHA4(ID4:IF4),'" '
+                  ENDDO
+
+                  WRITE(UNIT=IOXML,FMT='(A)',IOSTAT=IOS)
+     .            'format="appended" offset="'//CNU1(ID1:IF1)//'" />'
+
+                  IOS=IXDRINT(IOBIN,NBYTES)
+
+                  IF (ZDOUB) THEN
+                      DO J=1,NNO
+                          DO K=1,NCOK
+                              XRE8=SCHPV.XPOCHA(ICOOK(K),J)
+                              IOS=IXDRDOUBLE(IOBIN,XRE8)
+                          ENDDO
+                      ENDDO
+                  ELSE
+                      DO J=1,NNO
+                          DO K=1,NCOK
+                              XRE4=REAL(SCHPV.XPOCHA(ICOOK(K),J),4)
+                              IOS=IXDRREAL(IOBIN,XRE4)
+                          ENDDO
+                      ENDDO
+                  ENDIF
+              ENDIF
+
+C             *********************************************************
+C             *********************************************************
+C             FIN D'ECRITURE DANS LE FICHIER
+
+
+  299         SEGSUP,SCHPV,TCHCO,ICOOK
+
+
+  200     CONTINUE
+C         (FIN DE LA BOUCLE SUR LES CHAMPS PAR POINTS)
+
+          WRITE(UNIT=IOXML,FMT='(12X,A)',IOSTAT=IOS)
+     .    '</PointData>'
+
+
+          SEGSUP,IPOG2L
+
+
+
+
+
+C         =============================================================
+C          G R A N D E U R S   D E F I N I E S   P A R   E L E M E N T
+C         =============================================================
+
+          WRITE(UNIT=IOXML,FMT='(12X,A)',IOSTAT=IOS)
+     .    '<CellData>'
+
+C         (BOUCLE SUR LES CHAMPS PAR ELEMENTS)
+          DO 300 ICHE=1,NBCHML
+
+              MCHEL1=ICHML(ICHE)
+              SEGACT,MCHEL1
+
+C             NSOCHA = Nombre de sous-champs
+              NSOCHA=MCHEL1.ICHAML(/1)
+              IF (NSOCHA.EQ.0) GOTO 300
+
+
+C          1) CREATION DE LA LISTE DES COMPOSANTES DANS TCHCO
+C             On cree cette liste avant toute chose et non pas au fur
+C             et a mesure pour eviter de faire des SEGADJ sur le gros
+C             segment SCHMV
+C             + VERIFICATIONS SUR LE TYPE DE MCHAML
+              JGN=8
+              JGM=0
+              SEGINI,TCHCO
+              DO I1=1,NSOCHA
+                  MCHAM1=MCHEL1.ICHAML(I1)
+                  SEGACT,MCHAM1
+
+                  NC1=MCHAM1.IELVAL(/1)
+                  JGM1=JGM
+                  DO 310 I2=1,NC1
+
+C                     VERIFICATION 1 : composante de type scalaire ?
+                      IF (MCHAM1.TYPCHE(I2).NE.'REAL*8') THEN
+C                         ERREUR CRITIQUE 679 (Le type de la composante %m1:8 du MCHAML est incorrect)
+                          MOTERR(1:8)=MCHAM1.NOMCHE(I2)
+                          CALL ERREUR(679)
+                          WRITE(IOIMP,*) '(le champ par elements "',
+     .                                   TCHML(ICHE),'" contient des ',
+     .                                   'composantes non scalaires'
+                          GOTO 999
+                      ENDIF
+
+C                     VERIFICATION 2 : une seule valeur par cellule ?
+                      MELVA1=MCHAM1.IELVAL(I2)
+                      SEGACT,MELVA1
+                      IF (MELVA1.VELCHE(/1).NE.1) THEN
+C                         ERREUR CRITIQUE 707 (Le MCHAML doit contenir une valeur (de chaque composante) par element)
+                          CALL ERREUR(707)
+                          WRITE(IOIMP,*) '(le champ par elements "',
+     .                                   TCHML(ICHE),'" n''est pas de',
+     .                                   ' type "GRAVITE")'
+                          GOTO 999
+                      ENDIF
+                      SEGDES,MELVA1
+
+C                     CREATION DE LA LISTE TCHCO
+                      CHA8=MCHAM1.NOMCHE(I2)
+                      DO I3=1,JGM1
+                          IF (TCHCO.MOTS(I3).EQ.CHA8) GOTO 310
+                      ENDDO
+                      JGM=JGM+1
+                      SEGADJ,TCHCO
+                      TCHCO.MOTS(JGM)=CHA8
+  310             CONTINUE
+
+                  SEGDES,MCHAM1
+              ENDDO
+
+
+
+C          2) CONCATENATION DE TOUS LES VELCHE DANS XELCHE
+C             - on ecrase la structure compliquee du MCHAML dans un simple tableau (no.comp.;no.cell.)
+C             - on passe de la numerotation globale a la numerotation locale
+              NCO=JGM
+              SEGINI,SCHMV,ICOOK
+              DO 320 I1=1,NSOCHA
+                  MCHAM1=MCHEL1.ICHAML(I1)
+                  SEGACT,MCHAM1
+
+C                 IPT2 = SUPPORT DU SOUS-CHAMP DU MCHAML
+                  IPT2=MCHEL1.IMACHE(I1)
+                  SEGACT,IPT2
+                  ITYP2=IPT2.ITYPEL
+                  ITY2=ITYVTK(ITYP2)
+                  IF (ITY2.EQ.0) THEN
+C                     ERREUR CRITIQUE 21 (Donnees incompatibles)
+                      CALL ERREUR(21)
+                      WRITE(IOIMP,*) 'Le champ "',TCHML(ICHE),
+     .                               '" s''appuye sur des elements ',
+     .                             NOMS(ITYP),' incompatibles avec VTK'
+                      GOTO 999
+                  ENDIF
+                  NEL2=IPT2.NUM(/2)
+
+
+C                 IPT3 = SOUS-MELEME DU MAILLAGE COURANT CONSTITUE DU
+C                        MEME TYPE D'ELEMENTS QUE IPT2
+                  I3=ITYPII(ITYP2)
+                  IF (I3.EQ.0) GOTO 319
+                  IPT3=IPT1
+                  IF (NBSOU.GT.0) THEN
+                      IPT3=IPT1.LISOUS(I3)
+                      SEGACT,IPT3
+                  ENDIF
+                  NNN3=IPT3.NUM(/1)
+                  NEL3=IPT3.NUM(/2)
+
+
+C                 On cherche pour chaque element de IPT2 un element de
+C                 IPT3 qui possede les memes noeuds, dans le meme ordre
+                  SEGINI,IELL2G
+                  DO 330 IEL2=1,NEL2
+                      DO 331 IEL3=1,NEL3
+                          DO INO=1,NNN3
+                              INUM2=IPT2.NUM(INO,IEL2)
+                              INUM3=IPT3.NUM(INO,IEL3)
+                              IF (INUM2.NE.INUM3) GOTO 331
+                          ENDDO
+
+C                         ON A TROUVE UN ELEMENT COMMUN A IPT2 ET IPT3
+                          IELL2G(IEL2)=INECUM(I3)+IEL3
+                          GOTO 330
+  331                 CONTINUE
+  330             CONTINUE
+
+
+C                 Remplissage de SCHMV pour chaque composante du SOCHA
+                  DO 340 J1=1,NCO
+                      MELVA1=MCHAM1.IELVAL(J1)
+                      IF (MELVA1.EQ.0) GOTO 340
+                      SEGACT,MELVA1
+                      NBVAL=MELVA1.VELCHE(/2)
+
+C                     Recherche de la composante dans la liste TCHCO
+                      CHA8=MCHAM1.NOMCHE(J1)
+                      DO ICO=1,NCO
+                          IF (TCHCO.MOTS(ICO).EQ.CHA8) GOTO 350
+                      ENDDO
+
+C                     MISE A JOUR DE SCHMV
+C                     - si une cellule du support du SOCHA n'appartient pas au maillage courant, on passe a la suivante
+C                     - si une cellule du MAILLAGE courant n'est pas presente dans le support du SOCHA, sa valeur reste a zero
+  350                 NTROUV=0
+                      DO 360 J2=1,NEL2
+                          IEL=IELL2G(J2)
+                          IF (IEL.EQ.0) GOTO 360
+                          IF (NBVAL.EQ.1) THEN
+C                             ATTENTION, le MELVA1 est uniforme !
+                              SCHMV.XELCHE(ICO,IEL)=MELVA1.VELCHE(1,1)
+                          ELSE
+                              SCHMV.XELCHE(ICO,IEL)=MELVA1.VELCHE(1,J2)
+                          ENDIF
+                          NTROUV=1
+  360                 CONTINUE
+                      IF (NTROUV.EQ.1) CALL AJOU(ICOOK,ICO)
+
+                      SEGDES,MELVA1
+  340             CONTINUE
+
+
+                  SEGSUP,IELL2G
+
+C             /!\ IPT2 et IPT3 peuvent etre egaux a IPT1, or IPT1 doit rester actif !!
+                  IF (NBSOU.GT.0) SEGDES,IPT3
+  319             IF (IPT2.NE.IPT1) SEGDES,IPT2
+
+                  SEGDES,MCHAM1
+
+  320         CONTINUE
+
+              SEGDES,MCHEL1
+
+
+C             S'il n'y a rien a sortir, on passe au MCHAML suivant
+              NCOK=ICOOK(/1)
+              IF (NCOK.EQ.0) GOTO 399
+              IF (NCOK.LT.NCO) CALL ORDO02(ICOOK(1),NCOK,.TRUE.)
+
+
+
+
+C             ECRITURE DANS LE FICHIER
+C             *********************************************************
+C             *********************************************************
+
+              CNOM=TCHML(ICHE)
+
+C             ===================== FORMATE =====================
+              IF (IVTU.EQ.0) THEN
+
+                  WRITE(CNU1,FMT='(I15)') NCOK
+                  CALL LIMCHA(CNU1,ID1,IF1)
+C
+                  WRITE(UNIT=IOXML,
+     .                  FMT='(16X,A)',
+     .                  IOSTAT=IOS,
+     .                  ADVANCE="NO")
+     .              '<DataArray type="'//FLDAT//'" '//
+     .              'Name="'//CNOM(1:LONG(CNOM))//'" '//
+     .              'NumberOfComponents="'//CNU1(ID1:IF1)//'" '
+
+                  DO K=1,NCOK
+                      CHA8=TCHCO.MOTS(ICOOK(K))
+                      CALL LIMCHA(CHA8,ID4,IF4)
+                      WRITE(UNIT=IOXML,
+     .                      FMT='(A,I0,A,A,A)',
+     .                      IOSTAT=IOS,
+     .                      ADVANCE="NO")
+     .                  'ComponentName',K-1,'="',CHA8(ID4:IF4),'" '
+                  ENDDO
+
+                  WRITE(UNIT=IOXML,FMT='(A)',IOSTAT=IOS)
+     .            'format="ascii">'
+
+                  WRITE(MYFMT,FMT='("(20X,",I2,A8,")")') NCOK,FMDAT
+                  WRITE(UNIT=IOXML,FMT=MYFMT,IOSTAT=IOS)
+     .            ((SCHMV.XELCHE(ICOOK(K),J),K=1,NCOK),J=1,NEL)
+
+                  WRITE(UNIT=IOXML,FMT='(16X,A)',IOSTAT=IOS)
+     .            '</DataArray>'
+
+
+C             ===================== BINAIRE =====================
+              ELSE
+                  NBYTES=(NCOK*NEL)*ISIZDA
+
+                  WRITE(CNU1,FMT='(I15)') IPOS
+                  IPOS=IPOS+ISIZNB+NBYTES
+
+                  WRITE(CNU2,FMT='(I15)') NCOK
+                  CALL LIMCHA(CNU1,ID1,IF1)
+                  CALL LIMCHA(CNU2,ID2,IF2)
+
+                  WRITE(UNIT=IOXML,
+     .                  FMT='(16X,A)',
+     .                  IOSTAT=IOS,
+     .                  ADVANCE="NO")
+     .              '<DataArray type="'//FLDAT//'" '//
+     .              'Name="'//CNOM(1:LONG(CNOM))//'" '//
+     .              'NumberOfComponents="'//CNU2(ID2:IF2)//'" '
+
+                  DO K=1,NCOK
+                      CHA8=TCHCO.MOTS(ICOOK(K))
+                      CALL LIMCHA(CHA8,ID4,IF4)
+                      WRITE(UNIT=IOXML,
+     .                      FMT='(A,I0,A,A,A)',
+     .                      IOSTAT=IOS,
+     .                      ADVANCE="NO")
+     .                  'ComponentName',K-1,'="',CHA8(ID4:IF4),'" '
+                  ENDDO
+
+                  WRITE(UNIT=IOXML,FMT='(A)',IOSTAT=IOS)
+     .            'format="appended" offset="'//CNU1(ID1:IF1)//'" />'
+
+                  IOS=IXDRINT(IOBIN,NBYTES)
+
+                  IF (ZDOUB) THEN
+                      DO J=1,NEL
+                          DO K=1,NCOK
+                              XRE8=SCHMV.XELCHE(ICOOK(K),J)
+                              IOS=IXDRDOUBLE(IOBIN,XRE8)
+                          ENDDO
+                      ENDDO
+                  ELSE
+                      DO J=1,NEL
+                          DO K=1,NCOK
+                              XRE4=REAL(SCHMV.XELCHE(ICOOK(K),J),4)
+                              IOS=IXDRREAL(IOBIN,XRE4)
+                          ENDDO
+                      ENDDO
+                  ENDIF
+              ENDIF
+
+C             *********************************************************
+C             *********************************************************
+C             FIN D'ECRITURE DANS LE FICHIER
+
+
+  399         SEGSUP,SCHMV,TCHCO,ICOOK
+
+
+  300     CONTINUE
+C         (FIN DE LA BOUCLE SUR LES CHAMPS PAR ELEMENTS)
+
+          WRITE(UNIT=IOXML,FMT='(12X,A)',IOSTAT=IOS)
+     .    '</CellData>'
+
+
+
+          SEGDES,IPT1
+          IF (NBCHML.GT.0) SEGSUP,ITYPII,INECUM
+
+
+
+
+C         =============================================================
+C               F E R M E T U R E   D U   F I C H I E R   . V T U
+C         =============================================================
+
+          WRITE(UNIT=IOXML,FMT='(8X,A)',IOSTAT=IOS)
+     .    '</Piece>'
+
+          WRITE(UNIT=IOXML,FMT='(4X,A)',IOSTAT=IOS)
+     .    '</UnstructuredGrid>'
+
+
+C         CAS DES FICHIERS BINAIRES (OPTIONS 'BINA' OU 'ZIP')
+C         On doit recopier le contenu du fichier .bin dans la balise
+C         <AppendedData> du fichier .vtu
+          IF (IVTU.GT.0) THEN
+
+              WRITE(UNIT=IOXML,FMT='(4X,A)',IOSTAT=IOS)
+     .        '<AppendedData encoding="raw">'
+
+C             Changement de mode d'ecriture ASCII->BINAIRE pour le .vtu
+              CLOSE(UNIT=IOXML)
+              IOBIN2=INITXDR(NOM3,'a',.FALSE.)
+
+C             Relecture et copie du fichier binaire
+C             (par paquets de 4 octets, "brique de base" de XDR)
+              IOS=IXDRCLOSE(IOBIN)
+              IOBIN=INITXDR(NOM3(1:LONG(NOM3))//'.bin','r',.FALSE.)
+              DO I=1,(1+(IPOS/4))
+                  IOS=IXDRINT(IOBIN ,INT8)
+                  IOS=IXDRINT(IOBIN2,INT8)
+              ENDDO
+
+C             Suppression du fichier binaire temporaire
+              IOS=IXDRCLOSE(IOBIN)
+              OPEN(UNIT = IOBIN,
+     .             FILE = NOM3(1:LONG(NOM3))//'.bin')
+              CLOSE(UNIT=IOBIN,STATUS='DELETE')
+
+C             Insertion des marqueurs EOR et EOF pour que le contenu de
+C             la section binaire ne soit pas ecrase lors de la fermeture
+C             de la balise </AppendedData> (effectuee ci-apres)
+              IOS=IXDRINT(IOBIN2,IXDR2)
+              IOS=IXDRINT(IOBIN2,IXDR2)
+
+C             Changement de mode d'ecriture BINAIRE->ASCII pour le .vtu
+              IOS=IXDRCLOSE(IOBIN2)
+              OPEN(UNIT   = IOXML        ,
+     .             FILE   = NOM3         ,
+     .             STATUS = 'UNKNOWN'    ,
+     .             FORM   = 'FORMATTED'  ,
+     .             ACCESS = 'SEQUENTIAL' ,
+     .             IOSTAT = IOS          )
+              CALL FINFIC(IOXML)
+
+              WRITE(UNIT=IOXML,FMT='(4X,A)',IOSTAT=IOS)
+     .        '</AppendedData>'
+
+          ENDIF
+
+          WRITE(UNIT=IOXML,FMT='(A)',IOSTAT=IOS)
+     .    '</VTKFile>'
+
+
+          CLOSE(UNIT=IOXML)
+
+
+  100 CONTINUE
+C (FIN DE LA BOUCLE SUR LES MAILLAGES)
+
+
+
+
+
+C***********************************************************************
+C***********************************************************************
+C***********************************************************************
+C***********************************************************************
+
+
+
+
+C     +---------------------------------------------------------------+
+C     |                                                               |
+C     |        E C R I T U R E   D U   F I C H I E R   . P V D        |
+C     |                                                               |
+C     +---------------------------------------------------------------+
+
+C     Nom du fichier .pvd
+      NOM3=NOM1(1:LONG(NOM1))//NOMFIC(1:LONG(NOMFIC))//'.pvd'
+
+
+C  1) Option 'NPVD'
+C     => fin de la subroutine
+      IF (IPVD.EQ.3) GOTO 999
+
+
+C  2) Option 'AUTO' ou 'SUIT' quand le .pvd existe et est compatible
+C     => on complete le .pvd
+
+      IF (IPVD.LT.2.AND.ZEXIS) THEN
+
+C         On se place a la fin du fichier existant puis...
+          OPEN(UNIT   = IOXML        ,
+     .         FILE   = NOM3         ,
+     .         STATUS = 'OLD'        ,
+     .         FORM   = 'FORMATTED'  ,
+     .         ACCESS = 'SEQUENTIAL' ,
+     .         IOSTAT = IOS          )
+          CALL FINFIC(IOXML)
+
+C         ...on recule de NLFOOTER enregistrements pour ecraser les
+C            balises de fermeture
+          DO I1=1,NLFOOTER
+              BACKSPACE(IOXML)
+          ENDDO
+
+
+C  3) Option 'NOUV', ou pas de fichier existant et compatible
+C     => on cree le .pvd (ou on l'ecrase)
+      ELSE
+          OPEN(UNIT   = IOXML        ,
+     .         FILE   = NOM3         ,
+     .         STATUS = 'UNKNOWN'    ,
+     .         FORM   = 'FORMATTED'  ,
+     .         ACCESS = 'SEQUENTIAL' ,
+     .         IOSTAT = IOS          )
+          REWIND(IOXML)
+
+          WRITE(UNIT=IOXML,FMT='(A)',IOSTAT=IOS)
+     .    '<?xml version="1.0"?>'
+
+          WRITE(UNIT=IOXML,FMT='(A)',IOSTAT=IOS)
+     .    CHEAD(1:LHEAD)
+
+          WRITE(UNIT=IOXML,FMT='(A)',IOSTAT=IOS)
+     .    '<VTKFile type="Collection" version="0.1">'
+
+          WRITE(UNIT=IOXML,FMT='(4X,A)',IOSTAT=IOS)
+     .    '<Collection>'
+      ENDIF
+
+
+      DO IMAI=1,NBMAIL
+
+C         Indice de la partition mis sous forme d'une chaine de 4 caracteres
+          WRITE(CHA4,FMT='(I4.4)') IPART(IMAI)
+
+C         Nom de chaque fichier .vtu cree par cette execution de la subroutine
+          NOM3=NOM2
+          IF ((.NOT.ZTEMP.AND.IPVD.LT.3).OR.ZPART) THEN
+              NOM3=NOM3(1:LONG(NOM3))//'.'//CHA4
+          ENDIF
+          NOM3=NOM3(1:LONG(NOM3))//'.vtu'
+
+C         ECRITURE DE LA LIGNE CORRESPONDANTE DANS LA COLLECTION
+C         - champ 'timestep' : seulement avec l'option 'TEMP'
+C         - champ 'part'     : en l'absence de 'TEMP', ou si plusieurs maillages etaient fournis
+C         - champ 'name'     : idem que 'part'
+C         - champ 'file'     : toujours !!
+          IF (ZTEMP) THEN
+
+              WRITE(MYFMT,FMT='("(",A8,")")') FMDAT
+              WRITE(CNU1,FMT=MYFMT,IOSTAT=IOS) XTPS
+              CALL LIMCHA(CNU1,ID1,IF1)
+
+              IF (ZPART) THEN
+                  CNOM=TMAIL(IMAI)
+                  WRITE(UNIT=IOXML,FMT='(8X,A)',IOSTAT=IOS)
+     .            '<DataSet timestep="'//CNU1(ID1:IF1)//'" '//
+     .                     'part="'//CHA4//'" '//
+     .                     'name="'//CNOM(1:LONG(CNOM))//'" '//
+     .                     'file="'//NOM3(1:LONG(NOM3))//'"/>'
+              ELSE
+                  WRITE(UNIT=IOXML,FMT='(8X,A)',IOSTAT=IOS)
+     .        '<DataSet timestep="'//CNU1(ID1:IF1)//'" '//
+     .                     'file="'//NOM3(1:LONG(NOM3))//'"/>'
+              ENDIF
+          ELSE
+              CNOM=TMAIL(IMAI)
+              WRITE(UNIT=IOXML,FMT='(8X,A)',IOSTAT=IOS)
+     .        '<DataSet part="'//CHA4//
+     .               '" name="'//CNOM(1:LONG(CNOM))//
+     .               '" file="'//NOM3(1:LONG(NOM3))//'"/>'
+          ENDIF
+      ENDDO
+
+
+      WRITE(UNIT=IOXML,FMT='(4X,A)',IOSTAT=IOS) '</Collection>'
+      WRITE(UNIT=IOXML,FMT='(A)',IOSTAT=IOS)    '</VTKFile>'
+
+      CLOSE(UNIT=IOXML)
+
+
+
+
+C***********************************************************************
+C***********************************************************************
+C***********************************************************************
+C***********************************************************************
+
+
+
+
+C     +---------------------------------------------------------------+
+C     |                                                               |
+C     |            F I N   D E   L A   S U B R O U T I N E            |
+C     |                                                               |
+C     +---------------------------------------------------------------+
+
+
+  999 CONTINUE
+      SEGDES,SMAIL,SCHPO,SCHML
+
+
+      RETURN
+
+      END
+
+
+
+
+
+
+
+
+

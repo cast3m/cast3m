@@ -1,0 +1,347 @@
+C CONVMA    SOURCE    PV        18/09/29    21:15:01     9939
+
+C=======================================================================
+C=                            C O N V M A                              =
+C=                            -----------                              =
+C=                                                                     =
+C=  Fonction :                                                         =
+C=  ----------                                                         =
+C=   Calcul des flux nodaux equivalents a une condition de convection  =
+C=   forcee. Sousprogramme appele par CONVEC (convec.eso).             =
+C=                                                                     =
+C=  Parametres :  (E)=Entree   (S)=Sortie                              =
+C=  ------------                                                       =
+C=   IPMODE   (E)   Pointeur sur le segment MMODEL                     =
+C=   IPCHEL   (E)   Pointeur sur le segment MCHELM de CARACTERISTIQUES =
+C=   IPCHPO   (E)   Pointeur sur le CHPOINT contenant la temperature   =
+C=                  exterieure le long de la surface de convection     =
+C=   IPCONV   (S)   Pointeur sur le champ des flux equivalents         =
+C=                                                                     =
+C=  Variables locales :                                                =
+C=  -------------------                                                =
+C=   IPGEOM   Pointeur sur un MAILLAGE elementaire du CHPOINT          =
+C=   IPOGEO   Pointeur sur un MAILLAGE commun au CHPOINT et au MASSIF  =
+C=                                                                     =
+C=  Denis ROBERT, le 28 avril 1988.                                    =
+C=                                                                     =
+C=  CORRECTIONS                                                        =
+C=   CB215821 24/02/2016 : Correction d'une erreur dans les COQx       =
+C=                         Mauvaise utilisation de MATMOD              =
+C=                         Ajout d'une erreur 1050                     =
+C=======================================================================
+
+      SUBROUTINE CONVMA (IPMODE,IPCHEL,IPCHPO,IPCONV)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCHAMP
+-INC SMCHAML
+-INC SMCHPOI
+-INC SMMODEL
+-INC SMELEME
+      logical ltelq
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS),NSOF(NS),IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+      SEGMENT NOTYPE
+        CHARACTER*16 TYPE(NBTYPE)
+      ENDSEGMENT
+      PARAMETER (NINF=3)
+      INTEGER INFOS(NINF)
+      CHARACTER*(NCONCH) CONM
+      CHARACTER*4 nomatt,nomcq
+      CHARACTER*10 PEAU
+
+      IPCONV=0
+
+C  1 - QUELQUES TRANSFORMATIONS SUR LES DONNEES
+C ==============================================
+C  1.1 - Changement de support du MCHAML de caracteristiques (noeuds ->
+C        points de Gauss) puis transformation de ce MCHAML en CHPOINT
+C =====
+C       IPCHE1=0
+C       IPCHCA=0
+C       CALL CHASUP(IPMODE,IPCHEL,IPCHE1,iOK,1)
+C       IF (iOK.NE.0) THEN
+C         CALL ERREUR(iOK)
+C *        RETURN
+C       ENDIF
+C       CALL CHAMPO(IPCHE1,1,IPCHCA,iOK)
+C       CALL DTCHAM(IPCHE1)
+C       IF (iOK.EQ.0) RETURN
+C =====
+C  1.2 - Creation d'un objet MAILLAGE contenant une seule fois tous les
+C        points du CHPOINT IPCHPO (fusion des maillages supports de tous
+C        les MSOUPO)
+C =====
+      MCHPOI=IPCHPO
+      SEGACT,MCHPOI
+      MSOUPO=IPCHP(1)
+      SEGACT,MSOUPO
+      IPGEOM=IGEOC
+C      SEGDES,MSOUPO
+      DO i=2,IPCHP(/1)
+        MSOUPO=IPCHP(i)
+        SEGACT,MSOUPO
+        IGEO1=IGEOC
+C        SEGDES,MSOUPO
+        ltelq=.false.
+        CALL FUSE(IPGEOM,IGEO1,IRET,ltelq)
+        IF (IERR.NE.0) GOTO 100
+        IPGEOM=IRET
+      ENDDO
+C      SEGDES,MCHPOI
+C =====
+C  1.3 - Activation du MMODEL
+C =====
+      MMODEL=IPMODE
+C      SEGACT,MMODEL
+      NSOUS=KMODEL(/1)
+
+C  2 - BOUCLE SUR LES ZONES ELEMENTAIRES DU MODELE (iSou)
+C ========================================================
+C      IRRT=0
+      DO iSou=1,NSOUS
+        iOK=0
+C =====
+C  2.1 - Activation du sous-modele (iSou)
+C =====
+        IMODEL=KMODEL(iSou)
+        SEGACT,IMODEL
+        PEAU='          '
+C    RECUPERATION DES CARACTERISTIQUES D'INTEGRATION
+        NEF=NEFMOD
+        NLG=NUMGEO(NEF)
+        CALL TSHAPE(NLG,'GAUSS',IPINTE)
+        IF (IERR.NE.0) THEN
+          CALL ERREUR(251)
+          RETURN
+        ENDIF
+
+        IF (NEF.EQ.44.OR.NEF.EQ.27.OR.NEF.EQ.56.OR.NEF.EQ.49.OR.
+     .      NEF.EQ.41) THEN
+C         Formulation COQx (COQ2,COQ3,COQ4,COQ6,COQ8)
+          IF (MATMOD(/2) .LT. 3) THEN
+            MOTERR(1:4)=NOMTP(NEF)
+            CALL ERREUR(1050)
+            RETURN
+          ENDIF
+
+          PEAU=MATMOD(3)
+          IF     (PEAU .EQ. 'INFERIEURE') THEN
+            nomatt='TINF'
+            nomcq ='QINF'
+          ELSEIF (PEAU .EQ. 'SUPERIEURE') THEN
+            nomatt='TSUP'
+            nomcq ='QSUP'
+          ELSE
+            MOTERR(1:8) ='MOT     '
+            MOTERR(9:16)=PEAU(1:8)
+            CALL ERREUR(11)
+            RETURN
+          ENDIF
+
+        ELSE
+C         Formulation STANDARD (pas COQx)
+          nomatt='T   '
+          nomcq ='Q   '
+        ENDIF
+
+C   ON RECUPERE LES MAILLAGES ELEMENTAIRES DU MODELE, QUI SONT
+C   APPUYES STRICTEMENT SUR LE CHPOINT
+C         ITGEOM=IMAMOD
+C         CALL ECROBJ('MAILLAGE',IPGEOM)
+C         CALL ECRCHA('STRI')
+C         CALL ECRCHA('APPU')
+C        CALL ECROBJ('MAILLAGE',ITGEOM)
+C        CALL EXTREL(IRR,0,i)
+C   ON N'A PAS TROUVE DE MAILLAGE COMMUN A CETTE PARTIE DE
+C   L'ENVELOPPE ET DU CHPOINT
+C         IF (IRR.NE.0) THEN
+C           IRRT=IRRT+1
+C           iOK=1
+C           GOTO 50
+C         ENDIF
+C         CALL LIROBJ('MAILLAGE',IPOGEO,1,IRET)
+C         IF (IERR.NE.0) GOTO 50
+C     ON DESIRE CONNAITRE LES CARACTERISTIQUES DE CES MAILLAGES
+C         IPT3=IPOGEO
+C         SEGACT,IPT3
+C         ipt3=imamod
+C         NSOU3=IPT3.LISOUS(/1)
+C         IF (NSOU3.EQ.0) THEN
+C           NBN2=IPT3.NUM(/1)
+C         ENDIF
+C     BOUCLE SUR LES ZONES DE CET OBJET GEOMETRIQUE
+C         DO IMAIL=1,MAX(1,NSOU3)
+C           iOK=0
+C           IF (NSOU3.NE.0) THEN
+C             IPT2=IPT3.LISOUS(IMAIL)
+C             SEGACT,IPT2
+C             IPOGEO=IPT2
+C             NBN2=IPT2.NUM(/1)
+C             SEGDES,IPT2
+C           ENDIF
+C     ON GENERE UN CHAMELEM ELEMENTAIRE A PARTIR DU CHPOINT
+C     DE SOURCE ET DU MAILLAGE ELEMENTAIRE DE POINTEUR IPOGEO
+
+
+          IPMAIL=IMAMOD
+          CONM=CONMOD
+          CALL CHAME1(IPMAIL,0,IPCHPO,' ',ICHELS,1)
+          MCHEL1=ICHELS
+          IF (IERR.NE.0) GOTO 30
+C          SEGACT,MCHEL1
+          MCHAM1=MCHEL1.ICHAML(1)
+C          SEGACT,MCHAM1
+C  recherche de la bonne composante (meme si il n'y en a qu'une, on ne sait jamais)
+          ivfr=0
+          DO i=1,mcham1.ielval(/1)
+            IF (mcham1.NOMCHE(i)(1:4).EQ.nomatt) ivfr=i
+          ENDDO
+          IF (ivfr.EQ.0) THEN
+            MOTERR(1:4)= nomatt
+            MOTERR(5:30)='de TEMPERATURE exterieure'
+            CALL ERREUR(77)
+            RETURN
+          ENDIF
+          IPTEMP=MCHAM1.IELVAL(ivfr)
+C      RECUPERATION DU COEFFICIENT D'ECHANGE
+C      ON GENERE UN CHAMELEM ELEMENTAIRE A PARTIR DU CHPOINT
+C      DE CARACTERISTIQUES ET DU MAILLAGE ELEMENTAIRE IPOGEO
+      CALL IDENT(IPMAIL,CONM,IPCHEL,0,INFOS,IOK)
+      NBROBL=1
+      NBRFAC=0
+      SEGINI,NOMID
+      LESOBL(1)='H   '
+      NBTYPE=1
+      SEGINI,NOTYPE
+      TYPE(1)='REAL*8'
+      MOMATR=NOMID
+      MOTYPE=NOTYPE
+      CALL KOMCHA(IPCHEL,IPMAIL,CONM,MOMATR,MOTYPE,1,INFOS,3,IVAMAT)
+      IF(IERR .NE. 0) RETURN
+      SEGSUP,NOTYPE
+      IF (IERR.NE.0) GOTO 20
+      MPTVAL=IVAMAT
+      MELVAL=IVAL(1)
+C      IVEL1=VELCHE(/1)
+C      IVEL2=VELCHE(/2)
+      IPCOEF=MELVAL
+      segsup, mptval,nomid,notype
+
+C           CALL CHAME1(IPOGEO,0,IPCHCA,' ',ICHELC,1)
+C           MCHEL3=ICHELC
+C           IF (IERR.NE.0) GOTO 20
+C           SEGACT,MCHEL3
+C           MCHAM3=MCHEL3.ICHAML(1)
+C           SEGACT,MCHAM3
+C           NCOELE=MCHAM3.NOMCHE(/2)
+C           CALL PLACE(MCHAM3.NOMCHE,NCOELE,IPOSI,'H   ')
+C           IF (IPOSI.EQ.0) THEN
+C             MOTERR(1:4)='H   '
+C             MOTERR(5:8)='CARA'
+C             CALL ERREUR(77)
+C             RETURN
+C           ENDIF
+C           IPCOEF=MCHAM3.IELVAL(IPOSI)
+
+C    PRODUIT DES SEGMENTS ELEMENTAIRES CONTENANT LA
+C    TEMPERATURE EXTERIEURE ET LE COEFFICIENT D'ECHANGE
+          CALL PRCHA1(IPTEMP,IPCOEF,IPSONO)
+C    CHAMELEM ELEMENTAIRE DES CHALEURS NODALES EQUIVALENTES
+          L1=7
+          N1=1
+          N3=3
+          SEGINI,MCHEL2
+          MCHEL2.TITCHE='CHALEUR'
+          MCHEL2.IMACHE(1)=IPMAIL
+          MCHEL2.CONCHE(1)=' '
+C*        MCHEL2.IFOCHE=IFOMOD
+          MCHEL2.IFOCHE=IFOUR
+          MCHEL2.INFCHE(1,3)=NIFOUR
+          IPCHE2=MCHEL2
+          N2=1
+          SEGINI,MCHAM2
+          MCHAM2.NOMCHE(1)='CHALEUR'
+          MCHAM2.TYPCHE(1)='REAL*8'
+          MCHEL2.ICHAML(1)=MCHAM2
+
+C     CALCUL DES FLUX NODAUX EQUIVALENTS
+          IF (NLG.EQ.1) THEN
+            CALL INTCN0(IPSONO,IPMAIL,IPINTE,IPCHEQ)
+          ELSE IF (NLG.EQ.2.OR.NLG.EQ.3) THEN
+            CALL INTCN1(IPSONO,IPMAIL,IPINTE,IPCHEQ)
+          ELSE IF (NLG.EQ.4.OR.NLG.EQ.6.OR.NLG.EQ.8.OR.
+     .             NLG.EQ.10) THEN
+            CALL INTCN2(IPSONO,IPMAIL,IPINTE,IPCHEQ)
+          ENDIF
+          IF (IERR.NE.0) GOTO 10
+          MCHAM2.IELVAL(1)=IPCHEQ
+
+C       ON TRANSFORME LE CHAMELEM EN CHPOINT
+          CALL CHAMPO(IPCHE2,0,IPCH1,IDUM)
+          melval=ipcheq
+C         segsup melval
+          IF (IERR.NE.0) GOTO 10
+          MCHPOI=IPCH1
+          DO i=1,IPCHP(/1)
+            MSOUPO=IPCHP(i)
+            segact msoupo*mod
+            NOCOMP(1)=nomcq
+            segact msoupo
+          ENDDO
+C     ON REGROUPE,LE CAS ECHEANT,LES DIFFERENTS CHPOINTS
+          IF (iSou.GT.1) THEN
+
+            CALL ADCHPO(IPCH1,IPCONV,IRET,1.D0,1.D0)
+            CALL DTCHPO(IPCH1)
+            CALL DTCHPO(IPCONV)
+C             write(6,*) ' isou iret',isou,iret
+            IF (IRET.EQ.0) GOTO 10
+            IPCONV=IRET
+          ELSE
+            IPCONV=IPCH1
+          ENDIF
+
+          CALL ACTOBJ('CHPOINT ',IPCONV,1)
+
+          iOK=1
+ 10       SEGSUP,MCHAM2,MCHEL2
+ 20       continue
+          melval=ipsono
+          segsup melval
+  30       call dtchel(mchel1)
+          IF (iOK.EQ.0) GOTO 40
+          meleme=imamod
+C          segdes meleme
+C          segdes imodel
+        ENDDO
+        iOK=1
+  40    CONTINUE
+C  40     SEGDES,IPT3
+C 50     SEGDES,IMODEL
+        IF (iOK.EQ.0) GOTO 100
+C       ENDDO
+
+C   LES SUPPORTS GEOMETRIQUES DU CHPOINT ET DE L'OBJET MODELE
+C   SONT INCOMPATIBLES
+C       IF (IRRT.EQ.NSOUS) THEN
+C         MOTERR(1:8)='MODELE  '
+C         MOTERR(9:16)='CHPOINT '
+C         CALL ERREUR(135)
+C         RETURN
+C       ENDIF
+  100  CONTINUE
+C  100  CALL DTCHPO(IPCHCA)
+C      SEGDES,MMODEL
+
+      RETURN
+      END
+
+
+
+

@@ -1,0 +1,454 @@
+C APPUI     SOURCE    BP208322  15/06/22    21:15:17     8543
+
+C=======================================================================
+C=                             A P P U I                               =
+C=                             ---------                               =
+C=                                                                     =
+C=  OPERATEUR CAST3M 'APPUI' :                                         =
+C=  --------------------------                                         =
+C=   RIG1  =  'APPUI'  |  MOT1 ... MOTn  |  RAI1  MAI1  ;              =
+C=                     |  'DEPL'         |                             =
+C=                     |  'ROTA'         |                             =
+C=   Cet operateur fabrique des appuis (ressort de raideur RAI1) ou    =
+C=   des masses additionnelles (de valeur RAI1) en un point ou sur     =
+C=   tous les points d'un maillage et pour un ou plusieurs ddl.        =
+C=                                                                     =
+C=  ARGUMENTS :                                                        =
+C=  -----------                                                        =
+C=   MAI1   (MAILLAGE/POINT)   Lieu d'application du ressort/masse     =
+C=   RAI1         (FLOTTANT)   Valeur de la raideur/masse              =
+C=   MOT1...MOTn       (MOT)   DDL concernes par le ressort/masse      =
+C=   Le mot 'DEPL' (resp. 'ROTA') indique que tous les ddls de depla-  =
+C=   cement (resp. rotation) sont concernes par le ressort/masse.      =
+C=                                                                     =
+C=  RESULTAT :                                                         =
+C=  ----------                                                         =
+C=   RIG1         (RIGIDITE)   Rigidite associee aux appuis/masses     =
+C=======================================================================
+
+      SUBROUTINE APPUI (IMILL)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCHAMP
+-INC SMELEME
+-INC SMCOORD
+-INC SMRIGID
+
+      SEGMENT MSWBLO
+        CHARACTER*4 MOTDDL(0)
+      ENDSEGMENT
+
+      DIMENSION XNOR(3),U1(3),U2(3)
+
+      CHARACTER*4 MOTBLO(4)
+      CHARACTER*4 MODEPL(6),MODEDU(6)
+      CHARACTER*4 MORODU(5),MOROTA(5)
+      CHARACTER*4 MODE1D(2),MOFO1D(2)
+
+      DATA EPSI / 1.D-12 /
+      DATA LMOBLO / 4 /
+      DATA MOTBLO / 'DEPL','ROTA','RADI','DIRE' /
+      DATA MODEPL / 'UX  ','UY  ','UZ  ','UR  ','UZ  ','UT  ' /
+      DATA MODEDU / 'FX  ','FY  ','FZ  ','FR  ','FZ  ','FT  ' /
+      DATA MOROTA / 'RX  ','RY  ','RZ  ','RT  ','RS  ' /
+      DATA MORODU / 'MX  ','MY  ','MZ  ','MT  ','MS  ' /
+C Tableaux MODE1D et MOFO1D sont utilises pour certains modes 1D
+      DATA MODE1D / 'UX  ','UZ  ' /
+      DATA MOFO1D / 'FX  ','FZ  ' /
+
+C  Quelques initialisations selon le type de probleme
+      idimp1=IDIM+1
+C  Cas IDIM = 1 :
+C  ISPE1D = 1 si IDIM=1 et IFOUR=9 ou 10, car les noms de DDL primaux et
+C  variables duales ne sont pas dans l'ordre "classique" (un traitement
+C  specifique est alors necessaire).
+      ISPE1D=0
+C  Deformations planes ou contraintes planes ou defo. plane gene :
+      IF (IFOUR.EQ.-3.OR.IFOUR.EQ.-2.OR.IFOUR.EQ.-1) THEN
+        LDEPL=2
+        IADEPL=0
+        LROTA=1
+        IAROTA=2
+C  Axisymetrique :
+      ELSE IF (IFOUR.EQ.0) THEN
+        LDEPL=2
+        IADEPL=3
+        LROTA=1
+        IAROTA=3
+C  Fourier :
+      ELSE IF (IFOUR.EQ.1) THEN
+        LDEPL=3
+        IADEPL=3
+        LROTA=1
+        IAROTA=3
+C  Tridimensionnel :
+      ELSE IF (IFOUR.EQ.2) THEN
+        LDEPL=3
+        LROTA=3
+        IADEPL=0
+        IAROTA=0
+C  Massif 1D (IDIM=1) :
+      ELSE IF (IFOUR.GE.3.AND.IFOUR.LE.15) THEN
+        IF (IFOUR.LE.6) THEN
+          LDEPL=1
+          IADEPL=0
+        ELSE IF (IFOUR.GE.7.AND.IFOUR.LE.10) THEN
+          LDEPL=2
+          IADEPL=0
+          IF (IFOUR.EQ.9.OR.IFOUR.EQ.10) ISPE1D=1
+        ELSE IF (IFOUR.EQ.11) THEN
+          LDEPL=3
+          IADEPL=0
+        ELSE IF (IFOUR.EQ.15) THEN
+          LDEPL=2
+          IADEPL=3
+        ELSE
+          LDEPL=1
+          IADEPL=3
+        ENDIF
+        LROTA=0
+        IAROTA=0
+C  Autres cas :
+      ELSE
+        LDEPL=0
+        IADEPL=0
+        LROTA=0
+        IAROTA=0
+      ENDIF
+
+C  Initialisation de la liste des ddls MOTDDL (segment MSWBLO)
+      SEGINI,MSWBLO
+
+C-----------------------------------------------------------------------
+C  Lecture eventuelle des MOTS autres que des DDLS
+C-----------------------------------------------------------------------
+C  Lecture eventuelle de 'DEPL' et/ou 'ROTA'
+C --------------------
+      IDEPL=0
+      IROTA=0
+ 481  CALL LIRMOT(MOTBLO,2,IMOT,0)
+      IF (IMOT.EQ.1) IDEPL=1
+      IF (IMOT.EQ.2) IROTA=1
+      IF (IMOT.NE.0) GOTO 481
+C  Lecture eventuelle de 'RADI' ou 'DIRE'
+C --------------------
+      IRADIA=0
+      IDIREC=0
+ 4480 CALL LIRMOT(MOTBLO(3),2,IMOT,0)
+      IF (IMOT.EQ.0) THEN
+        IF (IDEPL.EQ.1) GOTO 44801
+        IF (IROTA.EQ.1) GOTO 44802
+        IBDDL=MOTDDL(/2)
+        IF (IBDDL.NE.0) GOTO 449
+        IF (IBDDL.EQ.0) GOTO 445
+      ENDIF
+C  En DIMENSION 1, les mots-cles 'RADI' et 'DIRE' sont interdits.
+      IF (IDIM.EQ.1) THEN
+        INTERR(1)=IDIM
+        MOTERR(1:4)=MOTBLO(2+IMOT)
+        CALL ERREUR(971)
+        GOTO 100
+      ENDIF
+      GOTO (44803,44804),IMOT
+C  Traitement des mots-cles : Mise a jour de MOTDDL
+C ----------------------------
+C  On a trouve le mot DEPLAcement
+44801 IDEPL=0
+C  Cas particulier pour certains modes de IDIM=1
+      IF (ISPE1D.EQ.1) THEN
+        DO i=1,LDEPL
+          MOTDDL(**)=MODE1D(IADEPL+i)
+          MOTDDL(**)=MOFO1D(IADEPL+i)
+        ENDDO
+C  Cas general
+      ELSE
+        DO i=1,LDEPL
+          MOTDDL(**)=MODEPL(IADEPL+i)
+          MOTDDL(**)=MODEDU(IADEPL+i)
+        ENDDO
+      ENDIF
+      GOTO 4480
+C  On a trouve le mot ROTAtion
+44802 IROTA=0
+      DO i=1,LROTA
+        MOTDDL(**)=MOROTA(IAROTA+i)
+        MOTDDL(**)=MORODU(IAROTA+i)
+      ENDDO
+      GOTO 4480
+C  On a trouve le mot RADial
+44803 IRADIA=1
+      CALL LIROBJ('POINT',KPOINT,1,IRETOU)
+      IF (IRETOU.EQ.0) GOTO 100
+      j=(KPOINT-1)*idimp1
+      DO i=1,IDIM
+        U1(i)=XCOOR(j+i)
+      ENDDO
+C  Lecture du 2nd point de l'axe (en 3D)
+      IF (IDIM.EQ.3) THEN
+        CALL LIROBJ('POINT',KPOINT,1,IRETOU)
+        IF (IRETOU.EQ.0) GOTO 100
+        j=(KPOINT-1)*idimp1
+        YL=0.
+        DO i=1,IDIM
+          U2(i)=XCOOR(j+i)-U1(i)
+          YL=YL+U2(i)*U2(i)
+        ENDDO
+C  Calcul du vecteur directeur unitaire de l'axe (U2)
+        IF (YL.LT.EPSI) THEN
+          CALL ERREUR(237)
+          GOTO 100
+        ENDIF
+        YL=1./SQRT(YL)
+        DO i=1,IDIM
+          U2(i)=U2(i)*YL
+        ENDDO
+      ENDIF
+      GOTO 449
+C  On a trouve le mot DIREction
+44804 IDIREC=1
+      CALL LIROBJ('POINT',KPOINT,1,IRETOU)
+      IF (IRETOU.EQ.0) GOTO 100
+      j=(KPOINT-1)*idimp1
+      YL=0.
+      DO i=1,IDIM
+        XNOR(i)=XCOOR(j+i)
+        YL=YL+XNOR(i)*XNOR(i)
+      ENDDO
+      IF (YL.LT.EPSI) THEN
+        CALL ERREUR(239)
+        GOTO 100
+      ENDIF
+      YL=1./SQRT(YL)
+      DO i=1,IDIM
+        XNOR(i)=XNOR(i)*YL
+      ENDDO
+      GOTO 449
+
+C  Lecture eventuelle de DDLs :
+C ------------------------------
+C  La liste des ddls autorises NOMDD est dans BDATA.ESO
+C  On doit lire au moins 1 ddl (car sinon MOTDDL est vide !)
+ 445  LACOND=1
+      LMOT=9
+ 446  CALL LIRMOT(NOMDD,LMOT,IMOT,LACOND)
+      IF (IERR.NE.0) GOTO 100
+      IF (IMOT.EQ.0) GOTO 449
+      MOTDDL(**)=NOMDD(IMOT)
+      MOTDDL(**)=NOMDU(IMOT)
+      LACOND=0
+      GOTO 446
+
+ 449  IBDDL=MOTDDL(/2)
+C  Verification que le nombre de DDLs a bloquer n'est pas nul
+C     IF (IBDDL.EQ.0) GOTO 100
+C-----------------------------------------------------------------------
+C  Fin de la lecture des mots (DEPL,ROTA...) ou des DDLs
+C-----------------------------------------------------------------------
+
+C  Recherche du maillage MELEME de type POINT :
+C ----------------------------------------------
+C  On cherche d'abord si on a un POINT que l'on transformera en POI1
+C  sinon on cherche un maillage que l'on transforme en POI1 si besoin
+      CALL LIROBJ('POINT',KPOINT,0,IRETOU)
+      IF (IRETOU.EQ.0) THEN
+        CALL LIROBJ('MAILLAGE',KOBJET,1,IRETOU)
+        IF (IRETOU.EQ.0) GOTO 100
+        MELEME=KOBJET
+        SEGACT,MELEME
+        IF (ITYPEL.NE.1) CALL CHANGE(MELEME,1)
+        NBPOIN=NUM(/2)
+      ELSE
+C  On pourrait faire appel a CRELEM(KPOINT)
+        NBNN=1
+        NBELEM=1
+        NBREF=0
+        NBSOUS=0
+        SEGINI,MELEME
+        ITYPEL=1
+        NUM(1,1)=KPOINT
+        NBPOIN=1
+      ENDIF
+
+C  LECTURE DE LA RAIDEUR DU RESSORT (FLOTTANT)
+C -------------------------------------------
+      CALL LIRREE(RIG,1,IRETOU)
+      IF (IERR.NE.0) GOTO 110
+
+C  Determination du nombre de multiplicateurs NNMAT par noeud de MELEME
+C  NNMAT correspond au nombre de DDLs a bloquer par noeud = nombre de
+C  multiplicateurs a creer par noeud (1 multiplicateur) = NRIGEL
+C  Dans les cas RADIal et DIREction, on a une seule matrice par noeud.
+C  Dans les autres cas, autant de matrices que MOTDDL(/1)/2.
+      NNMAT=1
+      IF (IDIREC+IRADIA.EQ.0) NNMAT=IBDDL/2
+
+C  Initialisation de l'objet RIGIDITE associe aux BLOCAGES
+      NRIGE=8
+      NRIGEL=NNMAT
+      SEGINI,MRIGID
+C*    IFORIG=IFOMOD
+      IFORIG=IFOUR
+      IF (IMILL.EQ.1) THEN
+        MTYMAT='RIGIDITE'
+      ELSE IF (IMILL.EQ.2) THEN
+        MTYMAT='MASSE'
+      ENDIF
+      ICHOLE=0
+      IMGEO1=0
+      IMGEO2=0
+      KRIGI=MRIGID
+
+C Boucle sur le nombre de DDLs a bloquer
+      DO IAA=1,NNMAT
+C  Creation des RAIDEURS associees au IAA-eme multplicateur (DDL)
+        IRIGEL(1,IAA)=MELEME
+        IRIGEL(2,IAA)=0
+        IRIGEL(5,IAA)=NIFOUR
+        IRIGEL(6,IAA)=0
+C**     IRIGEL(7,IAA)=0
+C**     IRIGEL(8,IAA)=0
+C  Remplissage du tableau des DESCripteurs de RIG
+        NLIGRP=1
+        IF (IDIREC+IRADIA.NE.0) NLIGRP=LDEPL
+        NLIGRD=NLIGRP
+        SEGINI,DESCR
+        IRIGEL(3,IAA)=DESCR
+        IF (IDIREC+IRADIA.EQ.0) THEN
+          NOELEP(1)=1
+          NOELED(1)=1
+          j=2*(IAA-1)
+          LISINC(1)=MOTDDL(j+1)
+          LISDUA(1)=MOTDDL(j+2)
+        ELSE
+          DO i=1,LDEPL
+            NOELEP(i)=1
+            NOELED(i)=1
+            IF (IROTA.NE.1) THEN
+              LISINC(i)=MODEPL(i+IADEPL)
+              LISDUA(i)=MODEDU(i+IADEPL)
+            ELSE
+              LISINC(i)=MOROTA(i+IADEPL)
+              LISDUA(i)=MORODU(i+IADEPL)
+            ENDIF
+          ENDDO
+        ENDIF
+        SEGDES,DESCR
+C**     NLIGRP=1
+C**     IF (IDIREC+IRADIA.NE.0) NLIGRP=IDIM
+C**     NLIGRD=NLIGRP
+        NELRIG=NBPOIN
+        SEGINI,xMATRI
+        IRIGEL(4,IAA)=xMATRI
+        COERIG(IAA)=1.
+
+C  Remplissage de  la matrice de rigidite RE :
+C  Il faut distinguer les cas IRADIA et IDIREC
+C  IRADIA : Il faut calculer la DIREction puis identique a IDIREC
+C  IDIREC : La DIRECTION est stockee dans le vecteur norme XNOR
+C  AUTRES : La matrice est predefinie dans RIG
+C  Option RADIAL : Calcul prealable de la direction pour chaque noeud
+        IF (IRADIA.EQ.1) THEN
+          DO IB=1,NBPOIN
+            j=(NUM(1,IB)-1)*idimp1
+            DO i=1,IDIM
+              XNOR(i)=XCOOR(j+i)-U1(i)
+            ENDDO
+            IF (IDIM.EQ.2) THEN
+              YL=XNOR(1)*XNOR(1)+XNOR(2)*XNOR(2)
+              IF (YL.LT.EPSI) THEN
+                CALL ERREUR(238)
+                GOTO 110
+              ENDIF
+              YL=1./SQRT(YL)
+              XNOR(1)=XNOR(1)*YL
+              XNOR(2)=XNOR(2)*YL
+            ELSE
+              YL=XNOR(1)*U2(1)+XNOR(2)*U2(2)+XNOR(3)*U2(3)
+              XL=0.
+              DO i=1,3
+                XNOR(i)=XNOR(i)-YL*U2(i)
+                XL=XL+XNOR(i)*XNOR(i)
+              ENDDO
+              IF (XL.LT.EPSI) THEN
+                CALL ERREUR(238)
+                GOTO 110
+              ENDIF
+              XL=1./SQRT(XL)
+              XNOR(1)=XNOR(1)*XL
+              XNOR(2)=XNOR(2)*XL
+              XNOR(3)=XNOR(3)*XL
+            ENDIF
+C  XNOR contient la direction normee
+*            SEGINI,XMATRI
+*            IMATTT(IB)=XMATRI
+            RE(1,1,ib)=RIG*XNOR(1)*XNOR(1)
+            RE(2,1,ib)=RIG*XNOR(1)*XNOR(2)
+            RE(1,2,ib)=RE(2,1,ib)
+            RE(2,2,ib)=RIG*XNOR(2)*XNOR(2)
+            IF (IDIM.EQ.3) THEN
+              RE(1,3,ib)=RIG*XNOR(1)*XNOR(3)
+              RE(3,1,ib)=RE(1,3,ib)
+              RE(2,3,ib)=RIG*XNOR(2)*XNOR(3)
+              RE(3,2,ib)=RE(2,3,ib)
+              RE(3,3,ib)=RIG*XNOR(3)*XNOR(3)
+            ENDIF
+*            SEGDES,XMATRI
+          ENDDO
+          SEGDES,xMATRI
+C  Option DIRECTION
+        ELSE IF (IDIREC.EQ.1) THEN
+*          SEGINI,XMATRI
+          RE(1,1,1)=RIG*XNOR(1)*XNOR(1)
+          RE(2,1,1)=RIG*XNOR(1)*XNOR(2)
+          RE(1,2,1)=RE(2,1,1)
+          RE(2,2,1)=RIG*XNOR(2)*XNOR(2)
+          IF (IDIM.EQ.3) THEN
+            RE(1,3,1)=RIG*XNOR(1)*XNOR(3)
+            RE(3,1,1)=RE(1,3,1)
+            RE(2,3,1)=RIG*XNOR(2)*XNOR(3)
+            RE(3,2,1)=RE(2,3,1)
+            RE(3,3,1)=RIG*XNOR(3)*XNOR(3)
+          ENDIF
+          DO i=2,NBPOIN
+             do io=1,re(/2)
+               do iu=1,re(/1)
+                 re(iu,io,i)=re(iu,io,1)
+               enddo
+             enddo
+          ENDDO
+          SEGDES,XMATRI
+*          SEGDES,IMATRI
+C  Autres options :
+        ELSE
+*          SEGINI,XMATRI
+*          IXMATR=XMATRI
+*          RE(1,1)=RIG
+*          SEGDES,XMATRI
+          DO i=1,NBPOIN
+            RE(1,1,i)=RIG
+*            IMATTT(i)=IXMATR
+          ENDDO
+          SEGDES,xMATRI
+        ENDIF
+      ENDDO
+C  Fin de la boucle sur les IAA DDLs a bloquer
+
+      SEGDES,MRIGID
+      CALL ECROBJ('RIGIDITE',KRIGI)
+
+ 110  SEGDES,MELEME
+ 100  SEGSUP,MSWBLO
+
+      RETURN
+      END
+
+
+
+
+
+
+
+

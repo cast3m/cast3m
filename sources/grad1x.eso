@@ -1,0 +1,578 @@
+C GRAD1X    SOURCE    BP208322  18/04/12    21:15:06     9802
+C
+      subroutine GRAD1X (IMODEL,IVADEP,LRE,IVAGRA,NGRA,
+     &                   MINT1,MINT2,IIPDPG,IOK)
+c
+c     CALCUL DU GRADIENT DANS LE CAS D'ELEMENTS XFEM (MFR=63)
+c
+c     largement inspiré de epsix.eso + bgrmas.eso
+C
+C
+C*********************************************************
+C       PARTIE DECLARATIVE
+C*********************************************************
+
+C
+      IMPLICIT REAL*8(A-H,O-Z)
+C
+      PARAMETER  (NDDLMAX=30,NBNIMAX=10)
+C
+      PARAMETER  (NBENRMAX=5)
+      DIMENSION  MLRE(NBENRMAX+1)
+C
+-INC CCOPTIO
+-INC SMCOORD
+-INC SMMODEL
+-INC SMCHAML
+-INC SMINTE
+-INC SMELEME
+-INC SMLREEL
+C
+      POINTEUR    MCHEX1.MCHELM,MINT1.MINTE,MINT2.MINTE
+C
+      SEGMENT WRK1
+       REAL*8 XE(3,NBBB)
+       REAL*8 XDDL(LRE),GRADI(NGRA)
+      ENDSEGMENT
+c
+      SEGMENT WRK2
+       REAL*8 SHPWRK(6,NBNO),BGR(NGRA,LRE)
+       REAL*8 LV7WRK(NBENRMA2,2,6,NBBB)
+      ENDSEGMENT
+C
+      SEGMENT MPTVAL
+        INTEGER      IPOS(NS),NSOF(NS)
+        INTEGER      IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+C
+      SEGMENT MRACC
+         INTEGER TLREEL(NBENRMA2,NBI)
+      ENDSEGMENT
+C
+C      write (*,*) '############################'
+C      write (*,*) '#####  DEBUT DE GRAD1X  #####'
+C      write (*,*) '############################'
+C
+C
+C*********************************************************
+c
+C       RECUPERATION + ACTIVATIONS + VALEURS UTILES
+c
+C*********************************************************
+c
+      IOK = 0
+C++++ Recup de la geometrie deja activée par grad1 ++++++
+      MELEME= IMAMOD
+C     nbre de noeuds par element, nbre d elements
+      NBNN1 = NUM(/1)
+      NBEL1 = NUM(/2)
+
+
+C++++ RECUP DES INFOS EF ++++++++++++++++++++++++++++++++
+      MELE = NEFMOD
+      NGAU1 = MINT1.POIGAU(/1)
+c C     sous decoupage et points de Gauss de l element geometrique de base
+c       IF(MINT2.NE.0) SEGACT,MINT2
+c       NGAU2 = MINT2.POIGAU(/1)
+
+
+C++++ Recup des infos d enrichissement +++++++++++++++++++
+c     recup du MCHEX1 d'enrichissement
+      MCHAM1 = 0
+      NOBMO1 = IVAMOD(/1)
+      if (NOBMO1.ne.0) then
+       do iobmo1=1,NOBMO1
+        if ((TYMODE(iobmo1)).eq.'MCHAML') then
+         MCHEX1 = IVAMOD(iobmo1)
+         segact,MCHEX1
+          if ((MCHEX1.TITCHE).eq.'ENRICHIS') then
+            MCHAM1 = MCHEX1.ICHAML(1)
+            segact,MCHAM1
+            segdes,MCHEX1
+            goto 1000
+          endif
+         segdes,MCHEX1
+        endif
+       enddo
+       write(*,*) 'Le modele est vide (absence d enrichissement)'
+      else
+      write(*,*) 'Il n y a pas de MCHEML enrichissement dans le Modele'
+      endif
+
+ 1000 continue
+c     niveau d enrichissement(s) du modele (ddls std u exclus)
+c     NBENR1= 0 si std, 1 si H seul,  2 si H+F1,  3 si H+F1+F2, etc...
+      if (MCHAM1.ne.0) then
+        NBENR1= MCHAM1.IELVAL(/1)
+      else
+        NBENR1 = 0
+      endif
+C      write(*,*) 'niveau d enrichissement(s) du modele',NBENR1
+c
+C
+C
+C*********************************************************
+C       INITIALISATIONS...
+C*********************************************************
+c
+c     preparation des tables avec:
+
+      if (NBENR1.ne.0) then
+      do ienr=1,NBENR1
+c        -le nombre d'inconnues de chaque sous-zone
+c         determinee depuis le nombre de fonction de forme
+c ienr=  1: U+H(1+1=2), 2: U+H+F1(2+4=6), 3: U+H+F1+F2(6+4=10)
+         nbniJ = 2 + ((ienr-1)*4)
+         MLRE(1+ienr) = IDIM*NBNN1*nbniJ
+      enddo
+      endif
+C     Tables + longues car 1er indice correspond au fontion de forme std
+      MLRE(1)    = IDIM*NBNN1*1
+
+      if (NBENR1.lt.(NBENRMAX+1)) then
+        do ienr=(NBENR1+1),(NBENRMAX)
+           MLRE(1+ienr) = 0
+        enddo
+      endif
+c
+c      ...DU SEGMENT WRK1
+      NBENRMA2 = NBENRMAX
+      NBBB = NBNN1
+      SEGINI,WRK1
+
+c      ...DU SEGMENT WRK2
+c      NBNO = NBNI
+      NBNO = LRE/IDIM
+      SEGINI,WRK2
+C
+c      ...DU SEGMENT MRACC
+      NBENRMA2 = NBENRMAX
+      NBI = NBNN1
+      segini,MRACC
+C
+C     du nombre d erreur sur le noms de composantes
+      NBERR1=0
+
+
+
+C*********************************************************
+C
+C>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>  BOUCLE SUR LES ELEMENTS
+C
+      DO 2000 J=1,NBEL1
+C      write(*,*) '========= EF',J,' /',NBEL1,'========='
+C
+C
+C*********************************************************
+C     POUR CHAQUE ELEMENT, ...
+C*********************************************************
+C
+C++++ ON RECUPERE LES COORDONNEES DES NOEUDS DE L ELEMENT
+      CALL DOXE(XCOOR,IDIM,NBNN1,NUM,J,XE)
+C
+c
+C++++ NBENRJ = niveau d enrichissement de l element ++++
+C     =0 si EF std   =1 si U+H   =2 si U+H+F1   =3 si U+H+F1+F2
+      NBENRJ=0
+      if(NBENR1.ne.0) then
+      do IENR=1,NBENR1
+        MELVA1 = MCHAM1.IELVAL(IENR)
+        segact,MELVA1
+        N2PTEL=MELVA1.IELCHE(/1)
+        N2EL  =MELVA1.IELCHE(/2)
+        do I=1,NBNN1
+         IF    (N2PTEL.EQ.1 .AND. N2EL.EQ.1)THEN
+C          Cas du champ constant sur tout le MAILLAGE support
+           mlree1 = MELVA1.IELCHE(1,1)
+         ELSEIF(N2PTEL.EQ.1)THEN
+C          Cas du champ constant par element
+           mlree1 = MELVA1.IELCHE(1,J)
+         ELSE
+C          Cas du champ variable sur les noeuds et les elements
+           mlree1 = MELVA1.IELCHE(I,J)
+         ENDIF
+
+C        on en profite pour remplir MRACC table de raccourcis pour cet element
+         TLREEL(IENR,I) = mlree1
+         if (mlree1.ne.0)  then
+            NBENRJ = max(NBENRJ,IENR)
+C           et on active la listreel
+            segact,mlree1
+         endif
+        enddo
+        segdes,MELVA1
+      enddo
+      endif
+      if (NBENRMA2.gt.NBENR1) then
+        do IENR2=(NBENR1+1),NBENRMA2
+        do I=1,NBNN1
+           TLREEL(IENR2,I) = 0
+        enddo
+        enddo
+      endif
+C
+c
+c++++ quelques indices pour dimensionner au plus juste
+c     nbre total de ddl de l'élément considéré
+c       NLIGRD = MLRE(1+NBENRJ)
+c       NLIGRD = MLRE(1+NBENRJ)
+      NDDL = MLRE(1+NBENRJ)
+c     nbre fonction de forme=((Ni_std+Ni_enrichi)*nbnoeud)=Ninconnues/idim
+      NBNI = (MLRE(1+NBENRJ)) / IDIM
+*     nbre d inconnue / noeud
+      NCOMP = NDDL/NBNN1
+C      write(6,*) 'EF',J,' NBENRJ=',NBENRJ,
+C     &'donc',NDDL,' ddls et ',NBNI,' fonctions de forme'
+c
+c
+C
+C++++ ON CALCULE XDDL ++++
+      MPTVAL = IVADEP
+      NCOSOU = IVAL(/1)
+C
+      INITOT = 0
+C-->> BOUCLE SUR LES niveaux d'ENRICHISSEMENTS (0:U 1:A 2:BCDE1 3:BCDE2)
+      DO IENR=0,NBENRJ
+*nbre de fonction(s) de ce niveau d'enrichissement (=1 si std ou H, =4 pour F1,2,...)
+        if (IENR .le. 1) then
+         NBNIENR = 1
+        else
+         NBNIENR = 4
+        endif
+C---->> BOUCLE SUR LES fonctions de forme de ce type d'enrichissement
+        DO INI=1,NBNIENR
+          INITOT = INITOT + 1
+C------>> BOUCLE SUR LA DIMENSION
+          DO 2220 KDIM=1,IDIM
+            ICOMP = (INITOT-1)*IDIM + KDIM
+
+c         --cas ou on n'a pas trouvé assez de composantes--
+            if(ICOMP.GT.NCOSOU) GOTO 2221
+
+            MELVAL = IVAL(ICOMP)
+c         --cas ou on a pas trouvé cette composante dans cette zone du
+c           chpoint solution devenu mchaml  --
+            if(MELVAL.eq.0)then
+c             Avait on besoin de cette composante?
+c             oui, si c'est une composante obligatoire
+              if(IENR.eq.0) goto 2991
+c             oui, si l'un des noeuds est enrichi
+              do I=1,NBNN1
+                if(TLREEL(IENR,I).ne.0) goto 2991
+              enddo
+c             non, si c'est facultatif et qu'on n'est pas enrichi -> on saute
+              goto 2220
+c           ->AVERTISSEMENT puis on saute
+ 2991         NBERR1=NBERR1+1
+              if(IIMPI.lt.1) goto 2220
+c               write(IOIMP,*) 'PB OPERATEUR GRAD :'
+              write(IOIMP,991) ICOMP,IENR,INI,KDIM
+  991         format(2X,'ABSENCE DANS LE CHPOINT DEPLACEMENT DE LA ',I3,
+     $                  'ieme COMPOSANTE (enrichissement',I3,
+     $                   ', fonction',I3,', direction ',I3,
+     $                   ') NECESSAIRE POUR L UN DES NOEUDS SUIVANTS :')
+              write(IOIMP,*)'  noeuds :',(NUM(iou,J),iou=1,NBNN1)
+              goto 2220
+            endif
+
+C---------->> BOUCLE SUR LES NOEUDS
+            N1PTEL = VELCHE(/1)
+            N1EL   = VELCHE(/2)
+            DO I=1,NBNN1
+              IQ = ((INITOT-1)*NBNN1*IDIM) + ((I-1)*IDIM) + KDIM
+              IF    (N1PTEL.EQ.1 .AND. N1EL.EQ.1)THEN
+C               Cas du champ constant sur tout le MAILLAGE support
+                XDDL(IQ) = VELCHE(1,1)
+              ELSEIF(N1PTEL.EQ.1) THEN
+C               Cas du champ constant par element
+                XDDL(IQ) = VELCHE(1,J)
+              ELSE
+C               Cas du champ variable sur les noeuds et les elements
+                XDDL(IQ) = VELCHE(I,J)
+              ENDIF
+            ENDDO
+
+ 2220     CONTINUE
+        ENDDO
+      ENDDO
+
+c   --cas normal (toutes les composantes souhaitees etaient presentes)--
+      GOTO 2223
+
+c   --cas ou on n'a pas trouvé assez de composantes--
+ 2221 CONTINUE
+      if (IIMPI.ge.1) then
+        WRITE(IOIMP,2222) J,NCOSOU,NCOMP
+ 2222   FORMAT('OPERATEUR GRAD : ELEMENT ',I6,
+     &  ' LE CHAMP DE DEPLACEMENT CONTIENT ',I3,' COMPOSANTES',
+     &  ' PAR NOEUD AU LIEU DE ',I3,' ATTENDUES')
+      endif
+      NDDL=NCOSOU*NBNN1
+      NBENRJ=IENR
+
+ 2223 CONTINUE
+c   --cas ou on a une ou des erreurs--
+      IF (NBERR1.gt.0.and.J.eq.NBEL1) THEN
+        write(IOIMP,*) 'OPERATEUR GRAD : ABSENCE DANS LE CHPOINT ',
+     &   'DEPLACEMENT DE CERTAINES INCONNUES ATTENDUES PAR LE MODELE'
+      ENDIF
+
+c
+c
+c rem: il serait probablement interessant au niveau du tems cpu
+c  d'utiliser moins de pts de Gauss lorsque l element est élastique
+c  On pourrait par ex. utiliser MINT2 = infell(12) qui contient
+c  le segment d'integration de l'EF std (QUA4 par ex.)
+*      if((NBENRJ.eq.0).and.(MINT2.ne.0)) then
+*         MINTE = MINT2
+*         NBPGAU= NGAU2
+*      else
+         MINTE = MINT1
+         NBPGAU= NGAU1
+*      endif
+c
+C
+C*********************************************************
+C
+C>>>>>>>>>>  BOUCLE SUR LES POINTS DE GAUSS
+C
+      DO 2500 KGAU=1,NBPGAU
+C
+C*********************************************************
+C     Initialisation à 0
+C*********************************************************
+
+c ZERO ne serait-il pas facultatif?
+      CALL ZERO(SHPWRK,6,NBNO)
+      XGAU = 0.D0
+      YGAU = 0.D0
+      ZGAU = 0.D0
+C
+      i6zz = 3
+      IF(IDIM.EQ.3) i6zz = 4
+C
+      do ienr7=1,NBENRJ
+       do inod7=1,NBNN1
+        do i6=1,i6zz
+           LV7WRK(ienr7,1,i6,inod7) = 0.D0
+           LV7WRK(ienr7,2,i6,inod7) = 0.D0
+        enddo
+       enddo
+      enddo
+
+
+c*********************************************************
+c     Calcul des fonction de forme std dans repere local
+c*********************************************************
+
+ccccc BOUCLE SUR LES NOEUDS ccccccccccccccccccccccccccccc
+c     (et donc sur les Ni std)
+      DO 2510 I=1,NBNN1
+
+C++++ Calcul des Ni std
+c     (rappel: 1:Ni  2:Ni,qsi  3:Ni,eta  avec i=1,4)
+      SHPWRK(1,I) = SHPTOT(1,I,KGAU)
+      SHPWRK(2,I) = SHPTOT(2,I,KGAU)
+      SHPWRK(3,I) = SHPTOT(3,I,KGAU)
+      IF(IDIM.EQ.3) SHPWRK(4,I) = SHPTOT(4,I,KGAU)
+
+C++++ Calcul des coordonnees dans le repere global
+      XGAU = XGAU + (SHPWRK(1,I)*XE(1,I))
+      YGAU = YGAU + (SHPWRK(1,I)*XE(2,I))
+      IF(IDIM.EQ.3) ZGAU = ZGAU + (SHPWRK(1,I)*XE(3,I))
+
+ 2510 CONTINUE
+ccccc fin de BOUCLE SUR LES NOEUDS ccccccccccccccccccccccc
+c      if(J.eq.77) write(6,*) 'xgau_',KGAU,' =',XGAU,YGAU,ZGAU
+
+
+
+c*********************************************************
+c     Passage des fonctions de forme std dans repere global
+c*********************************************************
+
+C++++ CALCUL DES  Ni,x Ni,y (i=1,4) + CALCUL DE det(J)
+      CALL JACOBI(XE,SHPWRK,IDIM,NBNN1,DJAC)
+c       if(J.eq.1.and.KGAU.eq.1)
+c      & write(*,*) 'Ni(i=1,4)=',(SHPWRK(1,iou),iou=1,NBNN1)
+
+c*********************************************************
+c     Si on est pas du tout enrichi on peut sauter une grosse partie
+c*********************************************************
+      if(NBENRJ.eq.0) goto 2999
+
+c*********************************************************
+c     Calcul des level set + leurs derivees dans repere global
+c*********************************************************
+
+ccccc BOUCLE SUR LES enrichissements ccccccccccccccccccc
+      do 2520 ienr=1,NBENRJ
+
+c       MELVA1=MCHAM1.IELVAL(IENR)
+c       segact,MELVA1
+
+ccccc  BOUCLE SUR LES NOEUDS ccccccccccccccccccccccccccc
+       DO 2521 I=1,NBNN1
+
+C++++ Le I eme noeud est-il ienr-enrichi?
+        mlree1= TLREEL(IENR,I)
+c        if(J.eq.77) write(6,*) 'ienr,I',ienr,I,' mlree1=',mlree1
+        if(mlree1.eq.0)  goto 2521
+
+
+c       Calcul du repere local de fissure(=PSI,PHI)
+c       (rappel: 1,1:psi  1,2:phi  2,1 psi,x  ...etc...)
+        do 2522 inode=1,NBNN1
+c         pour le H-enrichissement, on n a pas gardé PSI (inutile)
+          if (ienr.ne.1) then
+c          valeur de PSI au inode^ieme noeud
+           xpsi1 = mlree1.PROG(inode)
+c          qu on multiplie par la valeur de Ni^std au pt de G considéré
+           LV7WRK(ienr,1,1,I)= LV7WRK(ienr,1,1,I)
+     &      + (SHPWRK(1,inode)*xpsi1)
+           LV7WRK(ienr,1,2,I)= LV7WRK(ienr,1,2,I)
+     &      + (SHPWRK(2,inode)*xpsi1)
+           LV7WRK(ienr,1,3,I)= LV7WRK(ienr,1,3,I)
+     &      + (SHPWRK(3,inode)*xpsi1)
+      IF(IDIM.EQ.3) LV7WRK(ienr,1,4,I)= LV7WRK(ienr,1,4,I)
+     &      + (SHPWRK(4,inode)*xpsi1)
+c          valeur de PHI au inode^ieme noeud
+           xphi1 = mlree1.PROG(NBNN1+inode)
+          else
+           xphi1 = mlree1.PROG(inode)
+          endif
+          LV7WRK(ienr,2,1,I)= LV7WRK(ienr,2,1,I)
+     &      + (SHPWRK(1,inode)*xphi1)
+          LV7WRK(ienr,2,2,I)= LV7WRK(ienr,2,2,I)
+     &      + (SHPWRK(2,inode)*xphi1)
+          LV7WRK(ienr,2,3,I)= LV7WRK(ienr,2,3,I)
+     &      + (SHPWRK(3,inode)*xphi1)
+      IF(IDIM.EQ.3) LV7WRK(ienr,2,4,I)= LV7WRK(ienr,2,4,I)
+     &      + (SHPWRK(4,inode)*xphi1)
+ 2522   continue
+
+ 2521  continue
+ccccc  fin de BOUCLE SUR LES NOEUDS ccccccccccccccccccccccc
+
+
+ 2520 CONTINUE
+ccccc fin de BOUCLE SUR LES enrichissements cccccccccccccccc
+
+c     on a construit
+C     LV7WRK(ienr, PSI/PHI, valeur/deriveeparqsi/pareta, iNOEUD)
+
+
+c*********************************************************
+c     Ajout des fonctions de forme d enrichissement
+c     + leurs derivees dans repere global
+c*********************************************************
+      CALL SHAPX(MELE,LV7WRK,NBENRMAX,NBENRJ,TLREEL,SHPWRK,IRET)
+
+
+
+c     retour a la partie commune aux EF enrichi et non enrichi
+ 2999 continue
+
+C*********************************************************
+C       CALCUL DE BGR
+C*********************************************************
+c ZERO ne serait-il pas facultatif?
+        call ZERO(BGR,9,NDDL)
+        KB=1
+C       boucle sur tous les Ni
+        DO 3001 II=1,NBNI
+
+c         partie commune 2D 3D
+          BGR(1,KB)   = SHPWRK(2,II)
+          BGR(2,KB)   = SHPWRK(3,II)
+          BGR(4,KB+1) = SHPWRK(2,II)
+          BGR(5,KB+1) = SHPWRK(3,II)
+
+c         cas 3D
+          IF (IDIM.EQ.3) THEN
+            BGR(3,KB)   = SHPWRK(4,II)
+            BGR(6,KB+1) = SHPWRK(4,II)
+            BGR(7,KB+2) = SHPWRK(2,II)
+            BGR(8,KB+2) = SHPWRK(3,II)
+            BGR(9,KB+2) = SHPWRK(4,II)
+          ENDIF
+
+c         cas 2D PLAN GENE
+          IF (IFOUR.EQ.-3) THEN
+            IREF=(IIPDPG-1)*(IDIM+1)
+            BGR(9,KB)   = 1.D0
+            BGR(9,KB+1) = XCOOR(IREF+1)-XGAU
+            BGR(9,KB+2) = YGAU-XCOOR(IREF+2)
+          ENDIF
+
+          KB = KB + IDIM
+
+ 3001   CONTINUE
+C
+c
+
+C*********************************************************
+C       CALCUL DE  BGR.q
+C*********************************************************
+
+C  APPEL A LA PROCEDURE DE CALCUL
+        CALL BGRDEP(BGR,NGRA,XDDL,NDDL,GRADI)
+c
+
+C*********************************************************
+C       ECRITURE DES DIFFERENTES COMPOSANTES DU GRADIENT
+C*********************************************************
+        MPTVAL=IVAGRA
+        DO i=1,NGRA
+          MELVAL=IVAL(i)
+          IGMN=MIN(KGAU,VELCHE(/1))
+          IBMN=MIN(J,VELCHE(/2))
+          VELCHE(IGMN,IBMN)=GRADI(i)
+        ENDDO
+c
+c
+ 2500 CONTINUE
+C FIN DE BOUCLE SUR LES POINTS DE GAUSS <<<<<<<<<<<<<<
+C
+c
+c     quelques desactivations
+      do IENR=1,NBENR1
+        do I=1,NBNN1
+         mlree1 = TLREEL(IENR,I)
+         if(mlree1.ne.0)  segdes,mlree1
+        enddo
+      enddo
+c
+c
+c
+ 2000 CONTINUE
+C FIN DE BOUCLE SUR LES ELEMENTS <<<<<<<<<<<<<<<<<<<<<
+c
+c
+
+C*********************************************************
+C       SUPPRESSION ET DESACTIVATION DE SEGMENTS
+C*********************************************************
+C
+      SEGSUP,WRK1,WRK2
+      SEGSUP,MRACC
+
+c      segdes,MINT1 fait dans grad1
+C       if(MINT2.ne.0)  segdes,MINT2
+c     on met mint2 a zero pour eviter pb dans grad1
+      MINT2 = 0
+c
+c     pas de retour en erreur pour linstant
+      IOK=1
+c      write(6,*) 'iok=',IOK
+C
+      RETURN
+      END
+
+
+
+
+
+
+

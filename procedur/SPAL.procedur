@@ -1,0 +1,1016 @@
+$$$$ SPAL
+* SPAL      PROCEDUR  JC220346  18/05/28    21:15:01     9753
+************************************************************************
+* NOM         : SPAL
+* DESCRIPTION : Calcule la viscosité turbulente grâce au modèle de
+*               Spalart-Allmaras
+************************************************************************
+* HISTORIQUE :  6/10/2010 : JCARDO : création de la procédure
+* HISTORIQUE : 28/02/2011 : JCARDO : - ajout de 'DUMP' et 'METHINV'
+*                                    - branchement sur le nouveau PRODT
+*                                    - gestion du cas où DFDT est absent
+*                                    - légère amélioration du Newton
+*                                    - correction de quelques MESS
+* HISTORIQUE :
+* HISTORIQUE :
+************************************************************************
+* Prière de PRENDRE LE TEMPS DE COMPLÉTER LES COMMENTAIRES
+* en cas de modification de ce sous-programme afin de faciliter
+* la maintenance !
+************************************************************************
+* SYNTAXE (cf. opérateur EQEX)
+*
+*         'ZONE' $MD 'OPER' 'SPAL' 'RHO' 'UN' 'MU' ('DT')
+*                                  ('PERIODIC' GEOM1 GEOM2)
+*                                  'INCO' 'NU0'
+*
+************************************************************************
+
+
+DEBP SPAL ;
+ARGU RX*'TABLE' ;
+
+RV  = RX . 'EQEX' ;
+$MD = RX . 'DOMZ' ;
+DG  = DOMA $MD 'XXDIAGSI' ;
+
+NDIM = VALE 'DIME' ;
+
+* Recherche-t-on directement un régime permanent (pas de DFDT) ?
+SI (NON (EXIS RX 'RINSTAT')) ;
+    RX . 'RINSTAT' = FAUX ;
+    REPE BLOCO (DIME (RV . 'LISTOPER')) ;
+      MOPER = EXTR &BLOCO (RV . 'LISTOPER') ;
+      SI (EGA MOPER 'DFDT    ') ;
+          RX . 'RINSTAT' = VRAI ;
+      FINS ;
+    FIN BLOCO ;
+FINS ;
+
+* Impression écran ?
+KIMPR = (RV.'IMPR' > 0) ;
+
+
+
+* +====================================================================+
+* |                                                                    |
+* |             L E C T U R E   D E S   A R G U M E N T S              |
+* |                                                                    |
+* +====================================================================+
+
+
+IARG = RX . 'IARG' ;
+
+SI (RX . 'RINSTAT') ;
+    IREQ  = 4 ;
+SINON ;
+    IREQ  = 3 ;
+FINS ;
+
+SI (IARG < IREQ) ;
+    MESS '******************************************************' ;
+    MESS '/!\ ERREUR dans SPAL :' ;
+    MESS (CHAI '    La procédure SPAL requiert au moins '
+                                        IREQ ' arguments') ;
+    MESS '******************************************************' ;
+    QUIT SPAL ;
+FINS ;
+
+
+
+* +=================+
+* | MASSE VOLUMIQUE |
+* +=================+
+
+RHO  = RX . 'ARG1' ;
+TRHO = TYPE RHO ;
+
+SI (EGA TRHO 'MOT') ;
+    RHO  = RV . 'INCO' . RHO ;
+    TRHO = TYPE RHO ;
+FINS ;
+
+SI ((NEG TRHO 'FLOTTANT') ET (NEG TRHO 'CHPOINT')) ;
+    MESS '******************************************************' ;
+    MESS '/!\ ERREUR dans SPAL :' ;
+    MESS '    INCO."RHO" renvoie à un objet de type incorrect' ;
+    MESS '******************************************************' ;
+    QUIT SPAL ;
+FINS ;
+
+SI (EGA TRHO 'FLOTTANT') ;
+    USRHO = 1. / RHO ;
+SINON ;
+    USRHO = INVE RHO ;
+FINS ;
+
+
+
+* +=====================+
+* | VITESSE D'ADVECTION |
+* +=====================+
+
+UN  = RX . 'ARG2' ;
+TUN = TYPE UN ;
+
+SI (EGA TUN 'MOT') ;
+    UN  = RV . 'INCO' . UN ;
+    TUN = TYPE UN ;
+FINS ;
+
+SI (NEG TUN 'CHPOINT') ;
+    MESS '******************************************************' ;
+    MESS '/!\ ERREUR dans SPAL :' ;
+    MESS '    INCO."UN" doit renvoyer à un objet de type CHPOINT' ;
+    MESS '******************************************************' ;
+    QUIT SPAL ;
+FINS ;
+
+LCO = EXTR UN 'COMP' ;
+NCO = DIME LCO ;
+
+
+
+
+* +=================================+
+* | VISCOSITÉ DYNAMIQUE MOLÉCULAIRE |
+* +=================================+
+
+MU  = RX . 'ARG3' ;
+TMU = TYPE MU ;
+
+SI (EGA TMU 'MOT') ;
+    MU  = RV . 'INCO' . MU ;
+    TMU = TYPE MU ;
+FINS ;
+
+SI ((NEG TMU 'FLOTTANT') ET (NEG TMU 'CHPOINT')) ;
+    MESS '******************************************************' ;
+    MESS '/!\ ERREUR dans SPAL :' ;
+    MESS '    INCO."MU" renvoie à un objet de type incorrect' ;
+    MESS '******************************************************' ;
+    QUIT SPAL ;
+FINS ;
+
+* Viscosité cinématique moléculaire
+NU = MU * USRHO ;
+
+SI (EGA TMU 'FLOTTANT') ;
+    USNU = 1. / NU ;
+SINON ;
+    USNU = INVE NU ;
+FINS ;
+
+
+
+
+* +===============================+
+* | DURÉE DU PAS DE TEMPS COURANT |
+* +===============================+
+
+SI (RX . 'RINSTAT') ;
+    DT  = RX . 'ARG4' ;
+    TDT = TYPE DT ;
+
+    SI (EGA TDT 'MOT') ;
+        DT  = RV . 'INCO' . DT ;
+        TDT = TYPE DT ;
+    FINS ;
+
+    SI (NEG TDT 'FLOTTANT') ;
+        MESS '******************************************************' ;
+        MESS '/!\ ERREUR dans SPAL :' ;
+        MESS '    INCO."DT" renvoie à un objet de type incorrect' ;
+        MESS '******************************************************' ;
+        QUIT SPAL ;
+    FINS ;
+FINS ;
+
+
+
+
+* +===========================+
+* | CONDITIONS DE PERIODICITÉ |
+* +===========================+
+
+B_CYCL = FAUX ;
+SI (IARG > IREQ) ;
+   MCLE = RX . (CHAI 'ARG' (IREQ+1)) ;
+
+   SI (EGA MCLE 'PERIODIC') ;
+      B_CYCL = VRAI ;
+
+      GEOM1 = RX . (CHAI 'ARG' (IREQ+2)) ;
+      GEOM2 = RX . (CHAI 'ARG' (IREQ+3)) ;
+
+      TG1 = TYPE GEOM1 ;
+      TG2 = TYPE GEOM2 ;
+
+      SI ((NEG TG1 'MAILLAGE') OU (NEG TG2 'MAILLAGE')) ;
+         MESS '******************************************************' ;
+         MESS '/!\ ERREUR dans SPAL :' ;
+         MESS '    On attendait 2 objets de type MAILLAGE' ;
+         MESS '******************************************************' ;
+         QUIT SPAL ;
+      FINS ;
+   SINON ;
+      MESS '******************************************************' ;
+      MESS '/!\ ERREUR dans SPAL :' ;
+      MESS '    On attendait le mot-clé "PERIODIC"' ;
+      MESS '******************************************************' ;
+      QUIT SPAL ;
+   FINS ;
+FINS ;
+
+
+
+
+* +=========================================+
+* | NOM DE L'INCONNUE DE VISCOSITÉ MODIFIÉE |
+* +=========================================+
+
+B_INCO = FAUX ;
+SI (EXIS RX 'LISTINCO') ;
+    SI (EGA (DIME (RX . 'LISTINCO')) 1) ;
+        B_INCO = VRAI ;
+    FINS ;
+FINS ;
+
+SI (NON B_INCO) ;
+    MESS '******************************************************' ;
+    MESS '/!\ ERREUR dans SPAL :' ;
+    MESS '    On attendait le nom donné à la seule inconnue du'   ;
+    MESS '    modèle (la viscosité modifiée)'                     ;
+    MESS '******************************************************' ;
+    QUIT SPAL ;
+FINS ;
+
+_NU0 = EXTR (RX . 'LISTINCO') 1 ;
+
+* Valeurs minimales admises pour NU0 et S0 (si B_POSI est VRAI)
+NU0_MIN = NU*1.E-5 ;
+SI (EGA TMU 'CHPOINT') ;
+    NU0_MIN = MINI NU0_MIN ;
+FINS ;
+S0_MIN = 1.E-10 ;
+
+
+
+
+
+
+
+* +====================================================================+
+* |                                                                    |
+* |          I N I T I A L I S A T I O N   D U   M O D È L E           |
+* |                                                                    |
+* +====================================================================+
+*
+* Ces opérations sont effectuées uniquement lors du premier appel à
+* l'opérateur SPAL (ou après que RX.'INITOK' a été détruit) :
+*
+*   - Création/mise à jour de la table RV.'SPALART_ALLMARAS' contenant
+*     les options de calcul personnalisables du modèle
+*
+*   - Création des tables requises par les opérateurs TSCA et DFDT
+*
+*   - Création des matrices pour les conditions de périodicité
+*
+*   - Initialisation éventuelle de la variable interne du modèle
+*     (viscosité modifiée NU0)
+*
+*   - Création d'une sous-table dans 'INCO' qui contient les variables
+*     intermédiaires du modèle si 'DUMP'=VRAI
+*
+
+
+SI (NON (EXIS RX 'INITOK')) ;
+
+
+* +===================================================================+
+* | VALEURS PAR DÉFAUT DES PARAMÈTRES AVANCÉS PERSONNALISABLES        |
+* +===================================================================+
+
+*   Version du modèle à utiliser
+*   ----------------------------
+    KVERS = 'ORIG' ;
+
+
+*   Nom de l'inconnue contenant la viscosité totale
+*   -----------------------------------------------
+    _MUF = 'MUFN' ;
+
+
+*   Constantes du modèle de Spalart-Allmaras
+*   ----------------------------------------
+    KCONST = TABL ;
+    KCONST . 'SIGMA' = 2./3. ;
+    KCONST . 'CB1'   = 0.1355 ;
+    KCONST . 'CB2'   = 0.622 ;
+    KCONST . 'KAPPA' = 0.41 ;
+    KCONST . 'CW1'   = ((KCONST.'CB1')/((KCONST.'KAPPA')**2))
+                       + ((1.+(KCONST.'CB2'))/(KCONST.'SIGMA')) ;
+    KCONST . 'CW2'   = 0.3 ;
+    KCONST . 'CW3'   = 2. ;
+    KCONST . 'CV1'   = 7.1 ;
+
+
+*   Mesure scalaire du tenseur gradient des vitesses
+*   ------------------------------------------------
+    KTGRAD = 'TOROT' ;
+
+
+*   Instant auquel est renvoyé le résultat dans MUFN
+*   ------------------------------------------------
+    KMUFN = 'APRES' ;
+
+
+*   Algorithme de traitement des termes sources
+*   -------------------------------------------
+    KSRC = 'ALGO1' ;
+
+
+*   Configuration de l'algorithme de Newton
+*   ---------------------------------------
+    NEWTON = TABL ;
+    NEWTON . 'CRIT'  = 1.E-10 ;
+    NEWTON . 'IMAX'  = 10 ;
+    NEWTON . 'OMEGA' = 1. ;
+
+
+*   Options de la méthode d'inversion
+*   ---------------------------------
+    METINV = COPI (RV . 'METHINV') ;
+
+
+*   Options de la discrétisation temporelle DFDT
+*   --------------------------------------------
+    KOPT2 = COPI (RX . 'KOPT') ;
+    KOPT2 . 'IDCEN' = 1 ;
+
+
+*   Etat des différents verrous numériques
+*   --------------------------------------
+    VERROU = TABL ;
+    VERROU . 'POSITIF' = VRAI ;
+    VERROU . 'DURBIN'  = FAUX ;
+
+
+*   Sauvegarder les variables internes?
+*   -----------------------------------
+    KDUMP = FAUX ;
+
+
+
+* +===================================================================+
+* | SURCHARGEMENT DES VALEURS PAR DÉFAUT PAR LES VALEURS UTILISATEUR  |
+* +===================================================================+
+*
+* Les valeurs par défaut définies ci-dessus sont placées dans une table
+* temporaire TABSA. Ensuite, la table RV.'SPALART_ALLMARAS' créée par
+* l'utilisateur est parcourue (si elle existe) et toutes ses valeurs
+* viennent surcharger celles de TABSA. Enfin, on met à jour la table
+* RV.'SPALART_ALLMARAS' en la remplaçant par la table TABSA.
+*
+
+    TABSA = TABL ;
+    TABSA . 'KVERS'   = KVERS  ;
+    TABSA . 'NOMMUF'  = _MUF   ;
+    TABSA . 'KCONST'  = KCONST ;
+    TABSA . 'KTGRAD'  = KTGRAD ;
+    TABSA . 'KMUFN'   = KMUFN  ;
+    TABSA . 'KSRC'    = KSRC   ;
+    TABSA . 'NEWTON'  = NEWTON ;
+    TABSA . 'METHINV' = METINV ;
+    TABSA . 'KOPT2'   = KOPT2  ;
+    TABSA . 'VERROU'  = VERROU ;
+    TABSA . 'DUMP'    = KDUMP  ;
+
+    SI (EXIS RV 'SPALART_ALLMARAS') ;
+        RVSA = RV . 'SPALART_ALLMARAS' ;
+
+        SI ((DIME RVSA) > 0) ;
+            TIDX0 = INDE RVSA ;
+            REPE BLOC1 (DIME TIDX0) ;
+                MIDX1 = CHAI TIDX0 . &BLOC1 ;
+                OBJ1  = RVSA . MIDX1 ;
+                SI (EGA (TYPE OBJ1) 'TABLE') ;
+                    SI ((DIME OBJ1) > 0) ;
+                        TIDX1 = INDE OBJ1 ;
+                        REPE BLOC2 (DIME TIDX1) ;
+                            MIDX2 = CHAI TIDX1 . &BLOC2 ;
+                            TABSA . MIDX1 . MIDX2 = OBJ1 . MIDX2 ;
+                        FIN BLOC2 ;
+                    FINS ;
+                SINON ;
+                    TABSA . MIDX1 = OBJ1 ;
+                FINS ;
+            FIN BLOC1 ;
+        FINS ;
+
+    FINS ;
+
+    RV . 'SPALART_ALLMARAS' = TABSA ;
+
+
+
+
+
+* +===================================================================+
+* | CRÉATION DES TABLES DE L'ÉQUATION DE TRANSPORT                    |
+* +===================================================================+
+*
+* Création des tables de type 'KIZX' qui sont fournies à chaque pas de
+* temps aux opérateurs TSCA et DFDT.
+
+
+*   Partie commune aux tables de TSCA et de DFDT
+    RX0 = TABL 'KIZX' ;
+    RX0 . 'EQEX'     = RV        ;
+    RX0 . 'NOMZONE'  = ' '       ;
+    RX0 . 'DOMZ'     = $MD       ;
+    RX0 . 'TDOMZ'    = 0         ;
+    RX0 . 'LISTINCO' = MOTS _NU0 ;
+
+
+*   Table de l'opérateur TSCA
+    RX1 = COPI RX0 ;
+    RX1 . 'NOMOPER'  = MOT 'TSCA_N'  ;
+    RX1 . 'KOPT'     = (RX . 'KOPT') ;
+    RX1 . 'IARG'     = 3             ;
+    RX1 . 'ARG1'     = 'RHO'         ;
+    RX1 . 'ARG2'     = 'UN'          ;
+    RX1 . 'ARG3'     = 'SADIFF'      ;
+
+    RX . 'RX1' = RX1 ;
+
+
+*   Table de l'opérateur DFDT (si résolution instationnaire)
+    SI (RX . 'RINSTAT') ;
+        RX2 = COPI RX0 ;
+        RX2 . 'NOMOPER'  = MOT 'DFDT_N' ;
+        RX2 . 'KOPT'     = (RV . 'SPALART_ALLMARAS' . 'KOPT2') ;
+        RX2 . 'IARG'     = 3 ;
+        RX2 . 'ARG1'     = 'RHO' ;
+        RX2 . 'ARG2'     = _NU0 ;
+        RX2 . 'ARG3'     = 'DT' ;
+
+*       Gestion du décentrement pour DFDT (par défaut on l'a désactivé)
+        IDCEN = (RX2 . 'KOPT' . 'IDCEN') ;
+        SI ((EGA IDCEN 2) OU (EGA IDCEN 3)) ;
+            RX2 . 'IARG' = 5    ;
+            RX2 . 'ARG4' = 'UN' ;
+            RX2 . 'ARG5' = _MUF ;
+        FINS ;
+
+        RX . 'RX2' = RX2 ;
+    FINS ;
+
+
+
+
+
+
+
+* +===================================================================+
+* | CRÉATION DES MATRICES POUR LES CONDITIONS PÉRIODIQUES             |
+* +===================================================================+
+
+    SI (B_CYCL) ;
+        MATC = RELA 'UX' GEOM1 - 'UX' GEOM2 ;
+        STC  = DEPI MATC 0. ;
+        MATC = KOPS 'RIMA' MATC ;
+
+        MATC = KOPS 'CHANINCO' MATC
+                    (MOTS 'LX'  'UX') (MOTS 'LX' _NU0)
+                    (MOTS 'FLX' 'FX') (MOTS 'LX' _NU0) ;
+        STC  = EXCO STC 'FLX' 'LX' ;
+
+        RX . 'MATC' = MATC ;
+        RX . 'STC'  = STC  ;
+    FINS ;
+
+
+
+
+* +===================================================================+
+* | CRÉATION DE L'INCONNUE INTERNE (VISCOSITÉ MODIFIÉE)               |
+* +===================================================================+
+
+    SI (NON (EXIS (RV . 'INCO') _NU0)) ;
+        NU0 = KCHT $MD 'SCAL' 'SOMMET' NU0_MIN ;
+        RV . 'INCO' . _NU0 = NU0 ;
+    FINS ;
+
+
+
+
+
+* +===================================================================+
+* | CRÉATION DE LA TABLE CONTENANT LES VARIABLES INTERNES             |
+* +===================================================================+
+* Cette table ne sera utilisée que si 'DUMP'=VRAI
+
+    SI (NON (EXIS (RV . 'INCO') 'SPAL')) ;
+        RV . 'INCO' . 'SPAL' = TABL ;
+    FINS ;
+
+
+
+
+*   INITIALISATION TERMINÉE!
+    RX . 'INITOK' = 1 ;
+FINS ;
+
+
+
+
+
+
+
+
+
+* +====================================================================+
+* |                                                                    |
+* |           P R É P A R A T I O N   D E S   C A L C U L S            |
+* |                                                                    |
+* +====================================================================+
+*
+
+
+* +===================================================================+
+* | RÉCUPÉRATION DES PARAMÈTRES PERSONNALISABLES                      |
+* +===================================================================+
+
+RVSA = RV . 'SPALART_ALLMARAS' ;
+
+
+* Version du modèle à utiliser
+* ----------------------------
+KVERS = RVSA . 'KVERS' ;
+
+
+* Nom de l'inconnue contenant la viscosité totale
+* -----------------------------------------------
+_MUF = RVSA . 'NOMMUF' ;
+
+
+* Constantes du modèle de Spalart-Allmaras
+* ----------------------------------------
+SIGMA = RVSA . 'KCONST' . 'SIGMA' ;
+CB1   = RVSA . 'KCONST' . 'CB1'   ;
+CB2   = RVSA . 'KCONST' . 'CB2'   ;
+KAPPA = RVSA . 'KCONST' . 'KAPPA' ;
+CW1   = RVSA . 'KCONST' . 'CW1'   ;
+CW2   = RVSA . 'KCONST' . 'CW2'   ;
+CW3   = RVSA . 'KCONST' . 'CW3'   ;
+CV1   = RVSA . 'KCONST' . 'CV1'   ;
+
+
+* Mesure scalaire du tenseur gradient des vitesses
+* ------------------------------------------------
+KTGRAD = RVSA . 'KTGRAD' ;
+
+
+* Instant auquel est renvoyé le résultat dans MUFN
+* ------------------------------------------------
+KMUFN = RVSA . 'KMUFN' ;
+
+* Incompatibilité, car les conditions périodiques ne sont vérifiées
+* qu'après l'équation de transport, soit KMUFN='AVANT' ou KMUFN='APRES'
+SI (B_CYCL ET (EGA KMUFN 'DEMI')) ;
+    MESS '******************************************************' ;
+    MESS '/!\ ERREUR dans SPAL :' ;
+    MESS '    options KMUFN="DEMI" et "PERIODIC" incompatibles' ;
+    MESS '******************************************************' ;
+    QUIT SPAL ;
+FINS ;
+
+
+* Algorithme de traitement des termes sources
+* -------------------------------------------
+KSRC = RVSA . 'KSRC' ;
+
+* Incompatibilité, car l'algorithme 1 est nécessairement instationnaire
+SI ((EGA KSRC 'ALGO1') ET (NON (RX . 'RINSTAT'))) ;
+    MESS '******************************************************' ;
+    MESS '/!\ ERREUR dans SPAL :' ;
+    MESS '    KSRC="ALGO1" requiert la présence de DFDT' ;
+    MESS '******************************************************' ;
+    QUIT SPAL ;
+FINS ;
+
+* Incompatibilité, car il n'y a pas de demi pas de temps avec 'ALGO2'
+SI ((EGA KSRC 'ALGO2') ET (EGA KMUFN 'DEMI')) ;
+    MESS '******************************************************' ;
+    MESS '/!\ ERREUR dans SPAL :' ;
+    MESS '    options KSRC="ALGO2" et KMUFN="DEMI" incompatibles' ;
+    MESS '******************************************************' ;
+    QUIT SPAL ;
+FINS ;
+
+
+* Configuration de l'algorithme de Newton
+* ---------------------------------------
+EPS1  = RVSA . 'NEWTON' . 'CRIT'  ;
+IMAX  = RVSA . 'NEWTON' . 'IMAX'  ;
+OMEGA = RVSA . 'NEWTON' . 'OMEGA' ;
+
+
+* Options de la méthode d'inversion
+* ---------------------------------
+METINV = RVSA . 'METHINV' ;
+
+
+* Etat des différents verrous numériques
+* --------------------------------------
+B_POSI = RVSA . 'VERROU' . 'POSITIF' ;
+*B_DURB = RVSA . 'VERROU' . 'DURBIN'  ;
+
+
+* Sauvegarder les variables internes?
+* -----------------------------------
+KDUMP = RVSA . 'DUMP' ;
+
+
+
+
+* +===================================================================+
+* | RÉCUPÉRATION DES VARIABLES AU PAS DE TEMPS COURANT                |
+* +===================================================================+
+
+* Viscosité modifiée au début du pas de temps
+NU0 = RV . 'INCO' . _NU0 ;
+
+
+
+* Mesure scalaire du tenseur gradient des vitesses
+S = (PRODT $MD KTGRAD UN) ** 0.5 ;
+
+
+
+* Distance à la paroi (peut changer à chaque pas de temps)
+DPAROI = NOMC (RV . 'PAROIS' . 'DIST') 'SCAL' ;
+KPAR   = DPAROI MASQ 'INFE' (5.*(VALE 'PREC')) ;
+
+* /!\ La distance à la paroi intervient uniquement au dénominateur, et
+*     doit donc être strictement positive :
+DPAROI = DPAROI + (KPAR * 1.E-10) ;
+
+* /!\ USLM2, inverse du carré de DPAROI, est donc singulier à la paroi.
+*     Or ce terme apparait toujours multiplié par NU0, qui vaut 0 à la
+*     paroi (condition limite recommandée!).
+*     => C'est ainsi le produit (USLM2*NU0) vaut bien 0 à la paroi.
+*
+*     Mais dans la pratique:
+*       - un limiteur peut empêcher les valeurs strict. nulles dans NU0
+*       - la condition limite à la paroi peut être définie non nulle
+*     Pour éviter que le produit (USLM2*NU0) ne fasse apparaître de
+*     très grandes valeurs, on force donc USLM2=0 sur les parois.
+USLM2  = (1. - KPAR) * (INVE ((KAPPA*DPAROI)**2)) ;
+
+
+
+
+
+* +===================================================================+
+* | RÉCUPÉRATION DES CONDITIONS AUX LIMITES                           |
+* +===================================================================+
+
+* /!\ Les conditions aux limites portent sur la viscosité modifiée !
+*                                               ******************
+SI (EXIS (RV . 'CLIM') _NU0) ;
+   CLVAL = EXCO (RV . 'CLIM') _NU0 ;
+   RV . 'SPALART_ALLMARAS' . 'CLIM' = COPI CLVAL ;
+   RV . 'CLIM' = ENLE (RV . 'CLIM') _NU0 ;
+SINON ;
+   SI (EXIS (RV . 'SPALART_ALLMARAS') 'CLIM') ;
+      CLVAL = RV . 'SPALART_ALLMARAS' . 'CLIM' ;
+   SINON ;
+      SI (NON B_CYCL) ;
+         MESS '******************************************************' ;
+         MESS '/!\ ERREUR dans SPAL :' ;
+         MESS '    Il faut définir les conditions limites pour ' _NU0 ;
+         MESS '******************************************************' ;
+         QUIT SPAL ;
+      FINS ;
+   FINS ;
+FINS ;
+CLSPG = EXTR CLVAL 'MAILLAGE' ;
+
+* Méthode de pénalisation pour imposer les conditions limites
+SI (EGA KSRC 'ALGO1') ;
+    PENAVAL = 1.E30 ;
+    PENAMAT = DG + (REDU (PENAVAL - DG) CLSPG) ;
+    PENAST  = (CLVAL * PENAVAL) ;
+FINS ;
+
+
+
+
+
+
+
+
+
+
+* +====================================================================+
+* |                                                                    |
+* |     T R A I T E M E N T   D E S   T E R M E S   S O U R C E S      |
+* |                                                                    |
+* +====================================================================+
+*
+* Si 'KSRC'='ALGO1', on procède à l'ensemble des itérations internes
+* Si 'KSRC'='ALGO2', on quitte le bloc avant la fin du premier passage
+*
+
+* Initialisation de la variable interne NUD1
+* ==========================================
+
+NUD1 = NU0 ;
+* -------------------- /!\ VERROU NUMÉRIQUE /!\ --------------------
+SI (B_POSI) ;
+    NUD1 = KOPS NUD1 '|<' NU0_MIN ;
+FINS ;
+
+SI (EGA KMUFN 'AVANT') ;
+    NU1 = NUD1 ;
+FINS ;
+
+
+
+* Itérations internes pour résoudre F1(NUD1)=0
+* ============================================
+
+* Dénominateur de la norme infinie utilisée pour le critère de sortie
+DENERR = (MAXI NU0 'ABS') + 1.E-30 ;
+
+REPE BLOC0 IMAX ;
+
+*   Calcul du terme source complet pour l'itération interne courante
+*   ----------------------------------------------------------------
+
+    KSI    = NUD1 * USNU ;
+    FV1    = (KSI**3) * ( INVE ((KSI**3) + (CV1**3)) ) ;
+    DENFV2 = INVE (1. + (FV1*KSI)) ;
+    FV2    = 1. - (KSI*DENFV2) ;
+    FV3    = 1. ;
+    S0     = (S*FV3) + (FV2*NUD1*USLM2) ;
+*   ------------------- /!\ VERROU NUMÉRIQUE /!\ -------------------
+    SI (B_POSI) ;
+        S0 = KOPS S0 '|<' S0_MIN ;
+    FINS ;
+    USS0 = INVE S0 ;
+
+    R = NUD1 * USS0 * USLM2 ;
+*   ------------------- /!\ VERROU NUMÉRIQUE /!\ -------------------
+    R = KOPS R '>|' 10. ;
+    G      = R + (CW2 * ((R**6) - R)) ;
+    DENFW6 = INVE ((G**6) + (CW3**6)) ;
+    GLIM   = ((1.+(CW3**6))*DENFW6) ** (1./6.) ;
+    FW     = G * GLIM ;
+
+*   (B contient la somme des 3 termes non linéaires du second membre)
+    GDNUD1  = KOPS NU0 'GRADS' $MD ;
+*    GDNUD1  = KOPS NUD1 'GRADS' $MD ;
+    LCO1    = EXTR GDNUD1 'COMP' ;
+    B1 = (CB2 / SIGMA) * (PSCA GDNUD1 GDNUD1 LCO1 LCO1) ;
+    B2 = CB1 * S0 * NUD1 ;
+    B3 = CW1 * FW * (NUD1*NUD1) * USLM2*(KAPPA*KAPPA) ;
+    B  = B1 + B2 - B3 ;
+
+
+
+* ALGO2
+***********************************************************************
+***********************************************************************
+*   On n'a pas besoin d'aller plus loin pour 'ALGO2': on sépare juste
+*   les parties positive et négative de B avant de sortir
+    SI (EGA KSRC 'ALGO2') ;
+
+* REMARQUE: Pour le modèle de base, si B_POSI=VRAI et si CW2<1, alors
+*           PROD est du signe de CB1(>0) et DEST de celui de CW1(>0)
+*           => plus besoin de séparer S+ et S-, c'est déjà fait!
+*
+        SI ((EGA KVERS 'ORIG') ET B_POSI ET (CW2 < 1)) ;
+            BPLUS  = B1 + B2 ;
+            BMOINS = B3 ;
+        SINON ;
+            BPLUS  = KOPS (B1 + B2) '|<' 0. ;
+            BMOINS = KOPS B3 '|<' 0. ;
+        FINS ;
+
+*   /!\ SEMBLE TRÈS INSTABLE => NON RECOMMANDÉ
+*       MASK1  = B MASQ 'SUPERIEUR' 0. ;
+*       BPLUS  = B * MASK1 ;
+*       BMOINS = B * (1. - MASK1) ;
+
+        QUIT BLOC0 ;
+
+    FINS ;
+***********************************************************************
+***********************************************************************
+
+
+
+*   Calcul des dérivées exactes des variables précédentes
+*   -----------------------------------------------------
+
+    FV2PRIME = ((3.*KSI*FV1*(1.-FV1)) - 1.) * (DENFV2*DENFV2) ;
+    S0PRIME  = (FV2 + (KSI*FV2PRIME)) * USLM2 ;
+    RPRIME   = (S0 - (NUD1*S0PRIME)) * (USS0*USS0) * USLM2 ;
+    GPRIME   = RPRIME * (1. + (CW2 * ((6.*(R**5)) - 1.))) ;
+    FWPRIME  = GPRIME * GLIM * (CW3**6) * DENFW6 ;
+
+    B2PRIME = CB1 * (S0 + (NUD1*S0PRIME)) ;
+    B3PRIME = CW1 * NUD1 * USLM2*(KAPPA*KAPPA)
+                         * ((2.*FW) + (NUD1*FWPRIME)) ;
+    BPRIME  = B2PRIME - B3PRIME ;
+
+
+
+
+*   Calcul de la nouvelle valeur de NUD1
+*   ------------------------------------
+*   (F1 est la fonction de NUD1 à annuler: elle prend en compte la
+*    discrétisation temporelle et les conditions limites)
+
+    F1      = (PENAMAT*NUD1) - PENAST - (DG * (NU0 + (DT*B))) ;
+    F1PRIME = PENAMAT - (DG * DT * BPRIME) ;
+*   ------------------- /!\ VERROU NUMÉRIQUE /!\ -------------------
+    F1PRIME = F1PRIME + ((F1PRIME MASQ 'EGAL' 0.) * 1.E-30) ;
+
+    NUD2 = NUD1 - (F1 * (INVE F1PRIME)) ;
+*   -------------------- /!\ VERROU NUMÉRIQUE /!\ ------------------
+    SI (B_POSI) ;
+        NUD2 = KOPS NUD2 '|<' NU0_MIN ;
+    FINS ;
+
+
+
+
+*   Critère d'arrêt: fin des itérations internes
+*   --------------------------------------------
+    XERR = (MAXI (NUD2-NUD1) 'ABS') / DENERR ;
+
+*   Mise à jour de la variable interne (avec relaxation éventuelle)
+    NUD1 = (OMEGA * NUD2) + ((1.-OMEGA) * NUD1) ;
+
+
+    SI ((XERR < EPS1) OU (EGA &BLOC0 IMAX)) ;
+        SI KIMPR ;
+            MESS (CHAI 'SPAL [sources]:   iter ' &BLOC0 ' / ' IMAX
+                                 ' :: norm inf = ' XERR) ;
+        FINS ;
+        QUIT BLOC0 ;
+    FINS ;
+
+
+FIN BLOC0 ;
+
+
+* Mise à jour de la table 'INCO' pour l'étape suivante
+* ====================================================
+
+RV . 'INCO' . 'SADIFF' = ((NU + NUD1) * (1./SIGMA)) ;
+RV . 'INCO' . _NU0     = NUD1 ;
+SI (EGA KMUFN 'DEMI') ;
+    NU1 = NUD1 ;
+FINS ;
+
+
+
+
+
+
+* +====================================================================+
+* |                                                                    |
+* |             É Q U A T I O N   D E   T R A N S P O R T              |
+* |                                                                    |
+* +====================================================================+
+*
+
+* Calcul des matrices de l'équation de transport
+* ==============================================
+* /!\ Tout changement dans les options de discrétisation 'KOPT' ne sera
+*     effectif qu'après destruction de l'indice RX.'INITOK'
+
+ST1 MAT1 = TSCA (RX . 'RX1') ;
+SI (RX . 'RINSTAT') ;
+    ST2 MAT2 = DFDT (RX . 'RX2') ;
+    MAT1     = MAT1 ET MAT2 ;
+    ST1      = ST1  ET ST2 ;
+FINS ;
+
+* ALGO2
+***********************************************************************
+***********************************************************************
+SI (EGA KSRC 'ALGO2') ;
+    ST2  = NOMC (BPLUS*DG) _NU0 'NATURE' 'DISCRET' ;
+    BDIA = BMOINS * DG * (INVE NUD1) ;
+    MAT2 = KOPS 'MATDIAGO' (NOMC _NU0 BDIA) 'MATRIK' ;
+
+    MAT1 = MAT1 ET MAT2 ;
+    ST1  = ST1  ET ST2 ;
+FINS ;
+***********************************************************************
+***********************************************************************
+
+
+
+* Récupération des matrices de périodicité
+* ========================================
+SI (B_CYCL) ;
+    MAT1 = MAT1 ET (RX . 'MATC') ;
+    ST1  = ST1  ET (RX . 'STC') ;
+FINS ;
+
+
+
+* Initialisation de l'algorithme d'inversion
+* ==========================================
+METINV . 'MATASS' = MAT1 ;
+METINV . 'MAPREC' = MAT1 ;
+METINV . 'XINIT'  = NOMC NUD1 _NU0 ;
+METINV . 'IMPINV' = 0 ;
+
+
+
+* Résolution de l'équation de transport
+* =====================================
+NUD3 = KRES MAT1 'SMBR' ST1
+                 'CLIM' (NOMC CLVAL _NU0)
+                 'TYPI' METINV
+                 'IMPR' 0 ;
+
+SI (EXIS METINV 'CONVINV') ;
+    LCONV1 = METINV . 'CONVINV' ;
+    NCONV1 = DIME LCONV1 ;
+    SI KIMPR ;
+        MESS (CHAI 'SPAL [transport]: iter ' (NCONV1 / 2) ' / '
+                                          ((METINV.'NITMAX') / 2)
+                        ' :: norm inf = ' (EXTR LCONV1 NCONV1)) ;
+    FINS ;
+FINS ;
+
+NUD3 = EXCO NUD3 _NU0 ;
+*   -------------------- /!\ VERROU NUMÉRIQUE /!\ ------------------
+SI (B_POSI) ;
+    NUD3 = KOPS NUD3 '|<' NU0_MIN ;
+FINS ;
+
+
+
+* Mise à jour de la table 'INCO'
+* ==============================
+RV . 'INCO' . _NU0 = NUD3 ;
+SI (EGA KMUFN 'APRES') ;
+    NU1 = NUD3 ;
+FINS ;
+
+* Sauvegarde des variables internes
+SI (KDUMP) ;
+    RV . 'INCO' . 'SPAL' . 'KSI' = KSI ;
+    RV . 'INCO' . 'SPAL' . 'FV1' = FV1 ;
+    RV . 'INCO' . 'SPAL' . 'FV2' = FV2 ;
+    RV . 'INCO' . 'SPAL' . 'FV3' = FV3 ;
+    RV . 'INCO' . 'SPAL' . 'S'   = S   ;
+    RV . 'INCO' . 'SPAL' . 'S0'  = S0  ;
+    RV . 'INCO' . 'SPAL' . 'R'   = R   ;
+    RV . 'INCO' . 'SPAL' . 'G'   = G   ;
+    RV . 'INCO' . 'SPAL' . 'FW'  = FW  ;
+    RV . 'INCO' . 'SPAL' . 'B1'  = B1  ;
+    RV . 'INCO' . 'SPAL' . 'B2'  = B2  ;
+    RV . 'INCO' . 'SPAL' . 'B3'  = B3  ;
+    SI (EGA KSRC 'ALGO1') ;
+        RV . 'INCO' . 'SPAL' . 'FV2PRIME' = FV2PRIME ;
+        RV . 'INCO' . 'SPAL' . 'S0PRIME'  = S0PRIME  ;
+        RV . 'INCO' . 'SPAL' . 'RPRIME'   = RPRIME   ;
+        RV . 'INCO' . 'SPAL' . 'GPRIME'   = GPRIME   ;
+        RV . 'INCO' . 'SPAL' . 'FWPRIME'  = FWPRIME  ;
+        RV . 'INCO' . 'SPAL' . 'B2PRIME'  = B2PRIME  ;
+        RV . 'INCO' . 'SPAL' . 'B3PRIME'  = B3PRIME  ;
+        RV . 'INCO' . 'SPAL' . 'F1'       = F1       ;
+        RV . 'INCO' . 'SPAL' . 'F1PRIME'  = F1PRIME  ;
+    FINS ;
+FINS ;
+
+* Calcul de la viscosité turbulente effective à l'instant défini par
+* le paramètre KMUFN puis mise à jour de l'indice défini par le
+* paramètre NOMMUF.
+KSI = NU1 * USNU ;
+FV1 = (KSI**3) * ( INVE ((KSI**3) + (CV1**3)) ) ;
+MUF = RHO * (NU + (FV1*NU1)) ;
+MUF = KCHT $MD 'SCAL' 'SOMMET' MUF ;
+RV . 'INCO' . _MUF  = MUF ;
+
+
+
+
+* Fin de la procédure
+ST0 MAT0 = KOPS 'MATRIK' ;
+FINP ST0 MAT0 ;
+
+
+
+

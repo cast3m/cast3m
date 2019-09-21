@@ -1,0 +1,982 @@
+C LIGNE     SOURCE    BP208322  17/03/31    21:15:01     9386
+
+C-----------------------------------------------------------------------
+C  FABRIQUE DES LIGNES CONSTITUES D ELEM A 2 OU 3 NOEUDS
+C
+C  ILIGGI indique quel est le type de la ligne support :
+C    1 = SEGMENT DE DROITE (operateur DROI)
+C    2 =
+C    3 = ARC DE CERCLE (operateur CERC)
+C    4 =
+C    5 = <-- indisponible
+C    6 = <-- indisponible
+C    7 = ARC DE PARABOLE (operateur PARA)
+C    8 = <-- indisponible  : ELLIPSE (operateur ELLI)
+C    9 = PORTION DE CUBIQUE (operateur CUBP)
+C   10 = PORTION DE CUBIQUE (operateur CUBT)
+C   11 = ARC DE CERCLE (operateur CER3)
+C   12 =
+C
+C  09/2003 :
+C    Modifications suite a la mise en place du cas IDIM=1. Ajout de
+C    tests de coherence. Indisponibilite des operateurs PARA,CERC,CER3,
+C    CUBP,CUBT dans le cas IDIM=1. Ajout de commentaires.
+C
+C  BP (2017-03-27) : 3 facons de creer un CERCle
+C    -CENT (option par defaut de CERC) = via  pt init + centre + pt fin
+C    -PASS (ancien CER3) = via pt ini + pt entre ini et fin + pt fin
+C    -ROTA (nouveau inspiré de ROTA) = via pt ini + 2 points definissant
+C                                      l'axe de rotation + angle
+C
+C-----------------------------------------------------------------------
+
+      SUBROUTINE LIGNE(ILIGGI,IFONC,DEN1OX,DEN2OX,INBR)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCREEL
+-INC CCOPTIO
+-INC CCGEOME
+-INC SMELEME
+-INC SMCOORD
+
+      PARAMETER (NITER=5)
+      logical ltelq
+      SEGMENT TABPAR(NBELEM)
+      SEGMENT / STRAV / (DIST2(500),XPOIN(500),YPOIN(500),
+     .     ZPOIN(500),DIST(500),U(NSTRAV,500))
+
+C :::::: AJOUT PIFFARD : 16/01/86 POUR CUBIQUES ET CER3 ::::::::
+      DIMENSION NDP(12)
+      DIMENSION TU(4),CU(4,4),DLONGT(NITER+1),DMOY(NITER)
+      CHARACTER*(4) ITTEMP*8
+      CHARACTER*4 MCLE(2),MCLE2(3)
+      CHARACTER*4 MUNIF(1)
+      REAL*8 NVECT
+c     nombre de points a lire
+c     2 pour DROI, 3 pour CERC PARA et CER3, 4 pour CUBP et CUBT
+      DATA NDP / 2,2,3,3,0,0,3,0,4,4,3,3 /
+      DATA MCLE / 'DINI','DFIN' /
+      DATA MUNIF / 'UNIF' /
+      DATA MCLE2 / 'CENT','PASS','ROTA' /
+C :::::: AJOUT PIFFARD : 16/01/86 POUR CUBIQUES ::::::::
+      DATA CU / 1.D0, 0.D0, -5.5D0, -1.0D0,
+     .          0.D0, 0.D0,  9.0D0,  4.5D0,
+     .          0.D0, 0.D0, -4.5D0, -9.0D0,
+     .          0.D0, 1.D0,  1.0D0,  5.5D0 /
+
+C-----------------------------------------------------------------------
+C     INITIALISATIONS ET VERIFICATIONS
+C-----------------------------------------------------------------------
+
+C  Recup des donnees en entree
+      ILIG=ILIGGI
+      DEN1=DEN1OX
+      DEN2=DEN2OX
+
+C  En DIMEnsion 1, seul l'operateur DROIte peut etre utilise
+      IF ((IDIM.EQ.1).AND.(ILIG.NE.1)) THEN
+        INTERR(1)=IDIM
+        CALL ERREUR(709)
+        RETURN
+      ENDIF
+
+C  Quelques verifications
+      IF (ILCOUR.EQ.0) CALL ERREUR(16)
+C     INOMB = nombre de "points" a lire pour definir la ligne
+      INOMB=NDP(ILIG)
+      IF (INOMB.EQ.0) CALL ERREUR(19)
+      ITYPELT=KDEGRE(ILCOUR)
+C     Pas de verif. sur ITYPELT (2 ou 3 uniquement)
+      IF (ITYPELT.EQ.0) CALL ERREUR(16)
+C     Arc de CUBIQUE (CUBP et CUBT) uniquement en SEG2
+      IF (((ILIG.EQ.9).OR.(ILIG.EQ.10)).AND.(ITYPELT.EQ.3))
+     .  CALL ERREUR(16)
+      IF ((ILIG.EQ.12).AND.(ITYPELT.NE.3)) CALL ERREUR(16)
+      NBNN=NBNNE(ITYPELT)
+      IF (NBNN.EQ.0) CALL ERREUR(16)
+      IF (IERR.NE.0) RETURN
+
+C  Initialisations dans le cas de CUBP et CUBT
+      IF (ILIG.EQ.9.OR.ILIG.EQ.10) THEN
+        DO i=1,NITER
+          DLONGT(i)=0.D0
+          DMOY(i)=0.D0
+        ENDDO
+        DLONGT(NITER+1)=0.D0
+      ENDIF
+
+
+C-----------------------------------------------------------------------
+C     LECTURE DES DONNEES FACULTATIVES (DECOUPAGE, DENSITES...)
+C-----------------------------------------------------------------------
+
+C  Usage en tant que fonction -> on saute
+      IF (IFONC.EQ.0) GOTO 400
+
+C  Y a-t-il un facteur de decoupage ?
+      IF (ILIG.NE.10) THEN
+        INBR=0
+        CALL MESLIR(-172)
+        CALL LIRENT(INBR,0,IRETOU)
+      ELSE
+C       Si CUBIque a vecteurs TGTS, il FAUT un facteur de decoupage.
+        CALL MESLIR(-172)
+        CALL LIRENT(INBR,1,IRETOU)
+        IF (IERR.NE.0) RETURN
+      ENDIF
+
+C   Y a t-il des densites imposees ?
+      IMPOI=0
+      IMPOF=0
+ 413  CALL MESLIR(-171)
+      CALL LIRMOT(MCLE,2,IRETOU,0)
+      IF (IRETOU.EQ.1) THEN
+         CALL MESLIR(-170)
+         CALL LIRREE(DEN1,1,IRETOU)
+         IF (IERR.NE.0) RETURN
+         IMPOI=1
+         GOTO 413
+      ELSEIF (IRETOU.EQ.2) THEN
+         CALL MESLIR(-169)
+         CALL LIRREE(DEN2,1,IRETOU)
+         IF (IERR.NE.0) RETURN
+         IMPOF=1
+         GOTO 413
+      ENDIF
+
+ 400  CONTINUE
+
+
+C-----------------------------------------------------------------------
+C     LECTURE DES DONNEES OBLIGATOIRES (MAILLAGES, POINTS ...)
+C-----------------------------------------------------------------------
+
+C  Y-a-t-il le mot UNIF pour les cubiques ?
+      IUNIF=0
+      IF (ILIG.EQ.9) THEN
+        CALL LIRMOT(MUNIF,1,IUNIF,0)
+      ENDIF
+
+C  Y-a-t-il un mot cle ('CERC', 'PASS' ou 'ROTA') pour les CERCles ?
+      ICLE2=0
+      IF (ILIG.EQ.3) THEN
+        CALL LIRMOT(MCLE2,3,ICLE2,0)
+c       cas CERC ROTA : il faut obligatoirement un angle
+c         IF(ICLE2.NE.0) WRITE(IOIMP,*) 'MOT CLE LU =',MCLE2(ICLE2)
+        IF(ICLE2.EQ.3) THEN
+          CALL MESLIR(-235)
+          CALL LIRREE(ANG,1,IRETOU)
+          IF (IERR.NE.0) RETURN
+          ANG=ANG*XPI/180.D0
+          IF(IDIM.LE.2) INOMB=INOMB-1;
+        ENDIF
+      ENDIF
+
+C  Quel est le type de la premiere donnee (POINT OU LIGNE) ?
+C  IPOIN1 = premier POINT de la ligne a construire
+      IPOIN3=0
+      ITP1=0
+      ITP2=0
+      ITTEMP=' '
+      CALL MESLIR(-168)
+      CALL QUETYP(ITTEMP,1,IRETOU)
+      IF (IERR.NE.0) RETURN
+      CALL MESLIR(-168)
+      CALL LIROBJ(ITTEMP,IPT1,1,IRETOU)
+      IF (ITTEMP.EQ.'MAILLAGE') THEN
+        SEGACT IPT1
+        CALL EXTRPO(IPT1,1,IPOIN1)
+        CALL EXTRPO(IPT1,2,IPOIN3)
+        ITP1=1
+      ELSE
+        IF (ITTEMP.NE.'POINT   ') THEN
+          MOTERR(1:8)=ITTEMP
+          CALL ERREUR(39)
+          RETURN
+        ENDIF
+        IPOIN1=IPT1
+        IPOIN3=IPT1
+      ENDIF
+
+C  Lecture des troisieme et quatrieme POINTs si necessaire
+      IF (INOMB.EQ.2) GOTO 503
+      CALL MESLIR(-167)
+      CALL LIROBJ('POINT   ',IPCEN,1,IRETOU)
+      IF (IERR.NE.0) RETURN
+      IF (INOMB.EQ.3) GOTO 503
+      CALL LIROBJ('POINT   ',IPCEN2,1,IRETOU)
+      IF (IERR.NE.0) RETURN
+
+C  Lecture eventuelle du second POINT ou LIGNE
+C     IPOIN2 = POINT final de la ligne a construire
+ 503  CALL MESLIR(-166)
+      CALL LIROBJ('MAILLAGE',IP2,0,IRETOU)
+      IF (IRETOU.NE.0) THEN
+        IPT6=IP2
+        SEGACT IPT6
+        CALL EXTRPO(IP2,2,IPOIN2)
+        ITP2=1
+      ELSE
+        CALL MESLIR(-166)
+        CALL LIROBJ('POINT   ',IPOIN2,0,IRETOU)
+        IF (IRETOU.EQ.0) THEN
+          IPOIN2=IPOIN3
+          IF (IPOIN1.EQ.IPOIN2) CALL ERREUR(20)
+        ENDIF
+        IF (IPOIN1.EQ.IPOIN2) CALL ERREUR(432)
+      ENDIF
+
+C  Affectation des densites suivant les donnees
+      IBP1=(IDIM+1)*IPOIN1
+      IBP2=(IDIM+1)*IPOIN2
+      IF (IFONC.NE.0) THEN
+        IF (IMPOI.EQ.0) DEN1=XCOOR(IBP1)
+        IF (IMPOF.EQ.0) DEN2=XCOOR(IBP2)
+      ENDIF
+      IF ((INBR.LE.0).AND.((DEN1*DEN2).LE.0.D0)) CALL ERREUR(17)
+      IF (IERR.NE.0) RETURN
+      DENI=DEN1
+      DECA=DEN2-DEN1
+
+
+C-----------------------------------------------------------------------
+C  BRANCHEMENT SUIVANT LE TYPE DE LIGNE
+C-----------------------------------------------------------------------
+
+      GOTO (11,11,13,13,11,11,13,17,18,18,19,13),ILIG
+
+
+C --------------------------
+C  Segment de DROITE (DROI)
+C --------------------------
+
+ 11   XDIS=XCOOR(IBP2-IDIM)-XCOOR(IBP1-IDIM)
+      IF (IDIM.GE.2) THEN
+        YDIS=XCOOR(IBP2-IDIM+1)-XCOOR(IBP1-IDIM+1)
+        ZDIS=0.D0
+        IF (IDIM.GE.3) ZDIS=XCOOR(IBP2-IDIM+2)-XCOOR(IBP1-IDIM+2)
+        DIS=SQRT(XDIS*XDIS+YDIS*YDIS+ZDIS*ZDIS)
+      ELSE
+        DIS=ABS(XDIS)
+      ENDIF
+C  Modif. pour permettre de faire des montagnes
+C  Si decoupage impose, on accepte points confondus
+      IF ((INBR.NE.0).AND.(DIS.EQ.0.D0)) DIS=1.D0
+      IF (DIS.EQ.0.D0) CALL ERREUR(21)
+      IF (IERR.NE.0) RETURN
+      DLONG=DIS
+      DEN1=DEN1/DIS
+      DEN2=DEN2/DIS
+      XIN=XCOOR(IBP1-IDIM)
+      IF (IDIM.EQ.1) THEN
+        YIN=0.D0
+        ZIN=0.D0
+      ELSE IF (IDIM.EQ.2) THEN
+        YIN=XCOOR(IBP1-IDIM+1)
+        ZIN=0.
+      ELSE IF (IDIM.EQ.3) THEN
+        YIN=XCOOR(IBP1-IDIM+1)
+        ZIN=XCOOR(IBP1-IDIM+2)
+      ENDIF
+      GOTO 200
+
+
+C --------------------------------------------
+C  Arc de CERCLE (CERC) ou de PARABOLE (PARA)
+C --------------------------------------------
+
+ 13   CONTINUE
+C     CERC .. 'PASS' ..  (<=>  CER3 ..)  -->  GOTO 19
+      IF(ICLE2.EQ.2) GOTO 19
+C     CERC .. 'ROTA' ..                  -->  GOTO 20
+      IF(ICLE2.EQ.3) GOTO 20
+
+      IBPC=(IDIM+1)*IPCEN
+      XCEN=XCOOR(IBPC-IDIM)
+      YCEN=XCOOR(IBPC-IDIM+1)
+      ZCEN=0.D0
+      IF (IDIM.GE.3) ZCEN=XCOOR(IBPC-IDIM+2)
+C     RECALCUL DU CENTRE DANS LE CAS DE L'ARC DE CERCLE
+C     On ne recalcule pas le centre des paraboles
+      IF (ILIG.NE.7) THEN
+        XVP=XCOOR(IBP2-IDIM)-XCOOR(IBP1-IDIM)
+        XMP=(XCOOR(IBP2-IDIM)+XCOOR(IBP1-IDIM))*0.5D0
+        YVP=XCOOR(IBP2-IDIM+1)-XCOOR(IBP1-IDIM+1)
+        YMP=(XCOOR(IBP2-IDIM+1)+XCOOR(IBP1-IDIM+1))*0.5D0
+        ZVP=0.D0
+        ZMP=0.D0
+        IF (IDIM.GE.3) THEN
+          ZVP=XCOOR(IBP2-IDIM+2)-XCOOR(IBP1-IDIM+2)
+          ZMP=(XCOOR(IBP2-IDIM+2)+XCOOR(IBP1-IDIM+2))*0.5D0
+        ENDIF
+        SNOR=SQRT(XVP*XVP+YVP*YVP+ZVP*ZVP)
+        XVP=XVP/SNOR
+        YVP=YVP/SNOR
+        ZVP=ZVP/SNOR
+        RO=(XMP-XCEN)*XVP+(YMP-YCEN)*YVP+(ZMP-ZCEN)*ZVP
+        XCEN=XCEN+RO*XVP
+        YCEN=YCEN+RO*YVP
+        ZCEN=ZCEN+RO*ZVP
+      ENDIF
+      XV1=XCOOR(IBP1-IDIM)-XCEN
+      XV2=XCOOR(IBP2-IDIM)-XCEN
+      YV1=XCOOR(IBP1-IDIM+1)-YCEN
+      YV2=XCOOR(IBP2-IDIM+1)-YCEN
+      ZV1=0.D0
+      ZV2=0.D0
+      IF (IDIM.GE.3) THEN
+        ZV1=XCOOR(IBP1-IDIM+2)-ZCEN
+        ZV2=XCOOR(IBP2-IDIM+2)-ZCEN
+      ENDIF
+      IF (ILIG.NE.7) THEN
+C  Arc de CERCLE
+c       calcul du rayon moyen
+        RAY1=SQRT(XV1*XV1+YV1*YV1+ZV1*ZV1)
+        RAY2=SQRT(XV2*XV2+YV2*YV2+ZV2*ZV2)
+        IF (RAY1/RAY2.LT.0.99D0.OR.RAY1/RAY2.GT.1.01D0) CALL ERREUR(21)
+        IF (IERR.NE.0) RETURN
+        RAY=SQRT(RAY1*RAY2)
+c       produit scalaire V1*V2 = |V1|.|V2|.cos(ANG)
+        SCAL=XV1*XV2+YV1*YV2+ZV1*ZV2
+c       produit vectoriel V1 PVEC V2 = |V1|.|V2|.sin(ANG)
+        XVECT=YV1*ZV2-YV2*ZV1
+        YVECT=XV2*ZV1-XV1*ZV2
+        ZVECT=XV1*YV2-XV2*YV1
+        VECT=SQRT(XVECT*XVECT+YVECT*YVECT+ZVECT*ZVECT)
+        ANG=ATAN2(VECT,SCAL)
+        IF (IIMPI.EQ.1) WRITE (IOIMP,9143) ANG
+ 9143 FORMAT(' ANGLE DE L ARC EN RADIAN ',G12.5)
+        IF (ABS(ANG).GT.XPI) THEN
+          CALL ERREUR(313)
+          RETURN
+        ENDIF
+        SINA=SIN(ANG)
+c       longueur de la ligne
+        DLONG=ANG*RAY
+        DEN1=DEN1/DLONG
+        DEN2=DEN2/DLONG
+c       vecteur de base orthogonal a V1 et dans le plan (V1,V2)
+        XV3=(YVECT*ZV1-YV1*ZVECT)/(RAY*RAY*SINA)
+        YV3=(XV1*ZVECT-XVECT*ZV1)/(RAY*RAY*SINA)
+        ZV3=(XVECT*YV1-XV1*YVECT)/(RAY*RAY*SINA)
+      ELSE
+C  Arc de PARABOLE
+        XIN=XCOOR(IBP1-IDIM)
+        YIN=XCOOR(IBP1-IDIM+1)
+        XDIS=0.5D0*(XCOOR(IBP2-IDIM)-XIN)
+        YDIS=0.5D0*(XCOOR(IBP2-IDIM+1)-YIN)
+        IF (IDIM.GE.3) THEN
+          ZIN=XCOOR(IBP1-IDIM+2)
+          ZDIS=0.5D0*(XCOOR(IBP2-IDIM+2)-ZIN)
+        ELSE
+          ZIN=0.D0
+          ZDIS=0.D0
+        ENDIF
+        DIS=2*SQRT(XDIS*XDIS+YDIS*YDIS+ZDIS*ZDIS)
+        XIN=XIN+XDIS
+        YIN=YIN+YDIS
+        ZIN=ZIN+ZDIS
+        DLONG=0.5D0*(DIS+SQRT(XV1*XV1+YV1*YV1+ZV1*ZV1)
+     .                  +SQRT(XV2*XV2+YV2*YV2+ZV2*ZV2))
+        DEN1=DEN1/DLONG
+        DEN2=DEN2/DLONG
+        XV=-0.25D0*(XV1+XV2)
+        YV=-0.25D0*(YV1+YV2)
+        ZV=-0.25D0*(ZV1+ZV2)
+      ENDIF
+      GOTO 200
+
+
+C ----------------
+C  NON disponible
+C ----------------
+ 17   GOTO 200
+
+
+C ---------------------------
+C  Arc de CUBIQUE (CUBP,CUBT)
+C ---------------------------
+
+C ::::::::: AJOUT PIFFARD 16/01/86 : POUR CUBIQUES :::::
+C ...... RECUPERATION DES 4 PTS DE BASE SI CUBP .....
+C ......              DES 2 PTS DE BASE + TGTES SI CUBT .....
+ 18   XINI=XCOOR(IBP1-IDIM)
+      YINI=XCOOR(IBP1-IDIM+1)
+      ZINI=0.D0
+      IF (IDIM.GE.3) ZINI=XCOOR(IBP1-IDIM+2)
+      IBP3=(IDIM+1)*IPCEN
+      XINT1=XCOOR(IBP3-IDIM)
+      YINT1=XCOOR(IBP3-IDIM+1)
+      ZINT1=0.D0
+      IF (IDIM.GE.3) ZINT1=XCOOR(IBP3-IDIM+2)
+      IBP4=(IDIM+1)*IPCEN2
+      XINT2=XCOOR(IBP4-IDIM)
+      YINT2=XCOOR(IBP4-IDIM+1)
+      ZINT2=0.D0
+      IF (IDIM.GE.3) ZINT2=XCOOR(IBP4-IDIM+2)
+      XFIN=XCOOR(IBP2-IDIM)
+      YFIN=XCOOR(IBP2-IDIM+1)
+      ZFIN=0.D0
+      IF (IDIM.GE.3) ZFIN=XCOOR(IBP2-IDIM+2)
+C  Calcul de la distance entre les 2 ou 4 pts pour determiner
+C  le nombre de segments a creer si il n'est pas donne
+      ZDIS=0.D0
+      IF (ILIG.EQ.9) THEN
+        XDIS=XFIN-XINT2-XINT1-XINI
+        YDIS=YFIN-YINT2-YINT1-YINI
+        IF (IDIM.GE.3) ZDIS=ZFIN-ZINT2-ZINT1-ZINI
+      ELSE
+        XDIS=XFIN-XINI
+        YDIS=YFIN-YINI
+        IF (IDIM.GE.3) ZDIS=ZFIN-ZINI
+      ENDIF
+      DIS=SQRT(XDIS*XDIS+YDIS*YDIS+ZDIS*ZDIS)
+      IF (DIS.EQ.0) CALL ERREUR(21)
+      IF (IERR.NE.0) RETURN
+      DLONG=DIS
+      DEN1=DEN1/DIS
+      DEN2=DEN2/DIS
+      GOTO 200
+
+
+C -----------------------
+C  Arc de CERCLE (CERC3)
+C -----------------------
+
+C  Ajout PIFFARD : JANV 86 POUR CERCLE PASSANT PAR 3 PTS
+C  Remanie par VERPEAUX on se branche sur le cercle normal
+ 19   IBPC=(IDIM+1)*IPCEN
+      XOM1=XCOOR(IBP1-IDIM)
+      YOM1=XCOOR(IBP1-IDIM+1)
+      ZOM1=0.D0
+      IF (IDIM.GE.3) ZOM1=XCOOR(IBP1-IDIM+2)
+      XOM2=XCOOR(IBPC-IDIM)
+      YOM2=XCOOR(IBPC-IDIM+1)
+      ZOM2=0.D0
+      IF (IDIM.GE.3) ZOM2=XCOOR(IBPC-IDIM+2)
+      XOM3=XCOOR(IBP2-IDIM)
+      YOM3=XCOOR(IBP2-IDIM+1)
+      ZOM3=0.D0
+      IF (IDIM.GE.3) ZOM3=XCOOR(IBP2-IDIM+2)
+      XM1=XOM2-XOM1
+      YM1=YOM2-YOM1
+      ZM1=ZOM2-ZOM1
+      SNOR=SQRT(XM1*XM1+YM1*YM1+ZM1*ZM1)
+      XM1=XM1/SNOR
+      YM1=YM1/SNOR
+      ZM1=ZM1/SNOR
+      XM2=XOM3-XOM2
+      YM2=YOM3-YOM2
+      ZM2=ZOM3-ZOM2
+      SNOR=SQRT(XM2*XM2+YM2*YM2+ZM2*ZM2)
+      XM2=XM2/SNOR
+      YM2=YM2/SNOR
+      ZM2=ZM2/SNOR
+      XVECT=YM1*ZM2-YM2*ZM1
+      YVECT=ZM1*XM2-ZM2*XM1
+      ZVECT=XM1*YM2-XM2*YM1
+      VECT=SQRT(XVECT*XVECT+YVECT*YVECT+ZVECT*ZVECT)
+      XVECT=XVECT/VECT
+      YVECT=YVECT/VECT
+      ZVECT=ZVECT/VECT
+      XV1=YM1*ZVECT-YVECT*ZM1
+      YV1=ZM1*XVECT-ZVECT*XM1
+      ZV1=XM1*YVECT-XVECT*YM1
+      XM3=XOM3-XOM1
+      YM3=YOM3-YOM1
+      ZM3=ZOM3-ZOM1
+      RO=(XM2*XM3+YM2*YM3+ZM2*ZM3)/(XM2*XV1+YM2*YV1+ZM2*ZV1)
+      XCEN=0.5D0*(XOM1+XOM2+RO*XV1)
+      YCEN=0.5D0*(YOM1+YOM2+RO*YV1)
+      ZCEN=0.5D0*(ZOM1+ZOM2+RO*ZV1)
+      IF (IIMPI.EQ.1) WRITE(IOIMP,6032) XCEN,YCEN,ZCEN
+ 6032 FORMAT(2X,'CENTRE DU CERCLE =',3G13.5)
+      RAY=SQRT((XOM1-XCEN)**2+(YOM1-YCEN)**2+(ZOM1-ZCEN)**2)
+      IF (IIMPI.EQ.1) WRITE(IOIMP,6033) RAY
+ 6033 FORMAT(2X,'RAYON DU CERCLE =',G13.5)
+      XV1=XCOOR(IBP1-IDIM)-XCEN
+      XV2=XCOOR(IBP2-IDIM)-XCEN
+      YV1=XCOOR(IBP1-IDIM+1)-YCEN
+      YV2=XCOOR(IBP2-IDIM+1)-YCEN
+      ZV1=0.D0
+      ZV2=0.D0
+      IF (IDIM.GE.3) THEN
+        ZV1=XCOOR(IBP1-IDIM+2)-ZCEN
+        ZV2=XCOOR(IBP2-IDIM+2)-ZCEN
+      ENDIF
+      SCAL=XV1*XV2+YV1*YV2+ZV1*ZV2
+      XVE=YV1*ZV2-YV2*ZV1
+      YVE=XV2*ZV1-XV1*ZV2
+      ZVE=XV1*YV2-XV2*YV1
+      VE=XVE*XVECT+YVE*YVECT+ZVE*ZVECT
+      ANG=ATAN2(VE,SCAL)
+      IF (ANG.LT.0.D0) ANG=ANG+(2.D0*XPI)
+      IF (IIMPI.EQ.1) WRITE(IOIMP,9143) ANG
+      SINA=SIN(ANG)
+      DLONG=ANG*RAY
+      DEN1=DEN1/DLONG
+      DEN2=DEN2/DLONG
+      XV3=YVECT*ZV1-YV1*ZVECT
+      YV3=XV1*ZVECT-XVECT*ZV1
+      ZV3=XVECT*YV1-XV1*YVECT
+      ILIG=3
+      GOTO 200
+
+
+C -------------------------------------------------------------
+C  Arc de CERCLE defini par 1 point + axe + ANGle (CERC 'ROTA')
+C -------------------------------------------------------------
+
+ 20   CONTINUE
+c     Connus : ANG , points : IPOIN1 (IBP1), IPCEN et IPOIN2(IBP2)
+c     Reste a calculer : points : vrai CENtre, V1, V3, DLONG
+c     PC = 1 POINT DE L'AXE
+      IF(IDIM.LE.2) IPCEN=IPOIN2
+      IBPC=(IDIM+1)*IPCEN
+      XC=XCOOR(IBPC-IDIM)
+      YC=XCOOR(IBPC-IDIM+1)
+      ZC=0.D0
+      IF (IDIM.GE.3) ZC=XCOOR(IBPC-IDIM+2)
+C     CALCUL DE L'AXE DE ROTATION
+      IF (IDIM.LE.2) THEN
+        XVECT=0.D0
+        YVECT=0.D0
+        ZVECT=1.D0
+      ELSE
+        XVECT=XCOOR(IBP2-IDIM)-XC
+        YVECT=XCOOR(IBP2-IDIM+1)-YC
+        ZVECT=XCOOR(IBP2-IDIM+2)-ZC
+        NVECT=SQRT(XVECT**2+YVECT**2+ZVECT**2)
+        IF (NVECT.LE.XPETIT) THEN
+          CALL ERREUR(277)
+          RETURN
+        ENDIF
+        XVECT=XVECT/NVECT
+        YVECT=YVECT/NVECT
+        ZVECT=ZVECT/NVECT
+      ENDIF
+C     CALCUL DU VRAI CENTRE = PROJECTION DE P1 SUR L'AXE
+      XV1=XCOOR(IBP1-IDIM)
+      YV1=XCOOR(IBP1-IDIM+1)
+      ZV1=0.D0
+      IF (IDIM.GE.3) ZV1=XCOOR(IBP1-IDIM+2)
+      XC1=XV1-XC
+      YC1=YV1-YC
+      ZC1=0.D0
+      IF (IDIM.GE.3) ZC1=ZV1-ZC
+      SCAL=XC1*XVECT+YC1*YVECT+ZC1*ZVECT
+      XCEN=XC+SCAL*XVECT
+      YCEN=YC+SCAL*YVECT
+      ZCEN=ZC+SCAL*ZVECT
+C     VECTEUR V1 ET SA NORME (= LE RAYON)
+      XV1=XV1-XCEN
+      YV1=YV1-YCEN
+      ZV1=ZV1-ZCEN
+      RAY=SQRT(XC1**2+YC1**2+ZC1*2)
+c     longueur de la ligne
+      DLONG=ANG*RAY
+      DEN1=DEN1/DLONG
+      DEN2=DEN2/DLONG
+c     V3 = vecteur de base orthogonal a V1 et dans le plan (V1,VVECT)
+      XV3=(YVECT*ZV1-YV1*ZVECT)
+      YV3=(XV1*ZVECT-XVECT*ZV1)
+      ZV3=(XVECT*YV1-XV1*YVECT)
+      GOTO 200
+
+
+C ----------------------------------------------------------------------
+C  DECOUPAGE DE LA LIGNE (BASE SUR L'ABSCISSE CURVILIGNE)
+C ----------------------------------------------------------------------
+
+ 200  CALL DECOUP(INBR,DEN1,DEN2,APROG,NBELEM,DENI,DECA,DLONG)
+      IF (IIMPI.EQ.1) WRITE(IOIMP,1000) NBELEM,APROG
+ 1000 FORMAT (/,' ELEMENT ',I6,' RAISON ',G12.5)
+      IF ((ILIG.EQ.9).AND.(NBELEM.LT.3)) CALL ERREUR(21)
+      IF (IERR.NE.0) RETURN
+
+
+C ----------------------------------------------------------------------
+c  CREATION DU MAILLAGE ET SEGMENT DE TRAVAIL
+C ----------------------------------------------------------------------
+
+      NBSOUS=0
+      NBREF=0
+      SEGINI MELEME
+      ITYPEL=ITYPELT
+      NX=NBELEM-1
+c     cas CERC 'ROTA' : le dernier point n'existe pas, il faut le creer
+      IF(ICLE2.EQ.3) NX=NX+1
+      SEGINI TABPAR
+C  Initialisation segment de travail (arc de CUBIQUE)
+      IF ((ILIG.EQ.9).OR.(ILIG.EQ.10)) THEN
+        NSTRAV=NITER+1
+        SEGINI STRAV
+      ENDIF
+
+C  Creation des elements (objet MAILLAGE MELEME)
+C  Calcul des densites de chacun des points
+      DIN=DEN1
+      IPOO=XCOOR(/1)/(IDIM+1)
+      NUM(1,1)=IPOIN1
+      IF (NX.NE.0) THEN
+        DO i=1,NX
+          DIN=DIN*APROG
+          TABPAR(i)=DIN
+          IPOO=IPOO+1
+          NUM(2,i)=IPOO
+          IF (ITYPEL.EQ.3) THEN
+            IPOO=IPOO+1
+            NUM(3,i)=IPOO
+C           NUM(3,i)=IPOO+1
+          ENDIF
+          IF(i.LT.NBELEM) NUM(1,i+1)=IPOO
+        ENDDO
+      ENDIF
+      DIN=DIN*APROG
+c     dernier segment
+      IF(ICLE2.NE.3) THEN
+        IF (ITYPEL.EQ.3) THEN
+          TABPAR(NBELEM)=DIN
+          IPOO=IPOO+1
+          NUM(2,NBELEM)=IPOO
+        ENDIF
+c       le dernier point est fourni en entree : on l'utilise
+        NUM(ITYPEL,NBELEM)=IPOIN2
+      ENDIF
+
+
+C ----------------------------------------------------------------------
+C  CREATION DES POINTS
+C ----------------------------------------------------------------------
+
+C :::::: AJOUT PIFFARD POUR CUBIQUES ::::::
+      IF ((ILIG.EQ.9).OR.(ILIG.EQ.10)) THEN
+        NX=NX+1
+        IDEP=2
+        XPOIN(1)=XINI
+        YPOIN(1)=YINI
+        ZPOIN(1)=ZINI
+        DIST(1)=0.D0
+      ELSE
+        IDEP=1
+      ENDIF
+
+      DPAR=0
+      IADR=XCOOR(/1)/(IDIM+1)
+      IF (NX.EQ.0) GOTO 300
+      NBPTS=IADR+(NX-IDEP+1)*(ITYPEL-1)
+      SEGADJ MCOORD
+
+C---------------------> BOUCLE SUR LES SEGMENTS A CREER
+      DO 301 i=IDEP,NX
+
+         DIN=TABPAR(i)
+         DPAR=DPAR+DIN
+
+C    --- Creation des POINTS milieux (generation de SEG3) ---
+
+         IF (ITYPEL.EQ.2) GOTO 302
+         DPAR1=DPAR-DIN*0.5D0
+         GOTO (1001,1001,1003,1003,1001,1001,1007,1008,1009,1009,
+     .         1010,1003),ILIG
+
+C      - Segment de DROITE
+ 1001    XCOOR(IADR*(IDIM+1)+1)=XIN+DPAR1*XDIS
+         IF (IDIM.GE.2) THEN
+           XCOOR(IADR*(IDIM+1)+2)=YIN+DPAR1*YDIS
+           IF (IDIM.GE.3) XCOOR(IADR*(IDIM+1)+3)=ZIN+DPAR1*ZDIS
+         ENDIF
+         GOTO 1020
+
+C      - Arc de CERCLE
+ 1003    PARA=ANG*DPAR1
+         COSA=COS(PARA)
+         SINA=SIN(PARA)
+         IF (ILIG.EQ.12) THEN
+           PAR2=ANG*DIN/2.D0
+           XDD=2.D0-COS(PAR2)-(TAN(PAR2)/RAY/(2.D0*RAY/SIN(PAR2)-1.D0))
+         ELSE
+           XDD=1.D0
+         ENDIF
+         XCOOR(IADR*(IDIM+1)+1)=XCEN+(COSA*XV1+SINA*XV3)*XDD
+         XCOOR(IADR*(IDIM+1)+2)=YCEN+(COSA*YV1+SINA*YV3)*XDD
+         IF (IDIM.GE.3) THEN
+           XCOOR(IADR*(IDIM+1)+3)=ZCEN+(COSA*ZV1+SINA*ZV3)*XDD
+         ENDIF
+         GOTO 1020
+
+C      - Arc de PARABOLE
+ 1007    PARA=2*(DPAR1-0.5D0)
+         XCOOR(IADR*(IDIM+1)+1)=XIN+PARA*XDIS+(1-PARA**2)*XV
+         XCOOR(IADR*(IDIM+1)+2)=YIN+PARA*YDIS+(1-PARA**2)*YV
+         IF (IDIM.GE.3) XCOOR(IADR*(IDIM+1)+3)=ZIN+PARA*ZDIS+
+     .                       (1-PARA*PARA)*ZV
+         GOTO 1020
+
+C      - NON disponible
+ 1008    GOTO 1020
+
+C      - Arc de CUBIQUE (CUBT et CUBP)
+ 1009    CALL ERREUR(16)
+         RETURN
+
+C      - Erreur anormale car ILG=11 --> ILIG=3
+ 1010    CALL ERREUR(5)
+         RETURN
+
+C      - Densite du point milieu cree
+ 1020    XCOOR((IADR+1)*(IDIM+1))=DENI+DECA*DPAR1
+         IADR=IADR+1
+
+C    --- Creation des points finaux de chaque SEG2 ou SEG3 ---
+
+C :::::: AJOUT PIFFARD POUR CUBIQUES (GENERATION DE SEG2 UNIQUEMENT) :::
+ 302     GOTO (1101,1101,1103,1103,1101,1101,1107,1108,1109,1109,
+     .         1110,1103),ILIG
+
+C      - Segment de DROITE
+ 1101    XCOOR(IADR*(IDIM+1)+1)=XIN+DPAR*XDIS
+         IF (IDIM.GE.2) THEN
+           XCOOR(IADR*(IDIM+1)+2)=YIN+DPAR*YDIS
+           IF (IDIM.GE.3) XCOOR(IADR*(IDIM+1)+3)=ZIN+DPAR*ZDIS
+         ENDIF
+         GOTO 1120
+
+C      - Arc de CERCLE
+ 1103    PARA=ANG*DPAR
+         COSA=COS(PARA)
+         SINA=SIN(PARA)
+         XCOOR(IADR*(IDIM+1)+1)=XCEN+COSA*XV1+SINA*XV3
+         XCOOR(IADR*(IDIM+1)+2)=YCEN+COSA*YV1+SINA*YV3
+         IF (IDIM.GE.3) XCOOR(IADR*(IDIM+1)+3)=ZCEN+COSA*ZV1+SINA*ZV3
+         GOTO 1120
+
+C      - Arc de PARABOLE
+ 1107    PARA=2*(DPAR-0.5D0)
+         XCOOR(IADR*(IDIM+1)+1)=XIN+PARA*XDIS+(1-PARA*PARA)*XV
+         XCOOR(IADR*(IDIM+1)+2)=YIN+PARA*YDIS+(1-PARA*PARA)*YV
+         IF (IDIM.GE.3) XCOOR(IADR*(IDIM+1)+3)=ZIN+PARA*ZDIS+
+     .     (1-PARA*PARA)*ZV
+         GOTO 1120
+ 1108    GOTO 1120
+
+C      - Arc de CUBIQUE
+C ::::: AJOUT PIFFARD : CUBIQUES . 16/01/86 ::::::
+ 1109    UP=(i-1.D0)/NX
+         U(1,i)=UP
+         F1=2*UP**3-3*UP**2+1
+         F2=-2*UP**3+3*UP**2
+         F3=UP**3-2*UP**2+UP
+         F4=UP**3-UP**2
+         IF (ILIG.EQ.9) THEN
+C ...... CUBIQUES PASSANT PAR 4 POINTS .......
+           DO J=1,4
+             TU(J)=+CU(J,1)*XINI+CU(J,2)*XINT1+CU(J,3)*XINT2+CU(J,4)
+     .              *XFIN
+           ENDDO
+           XPOIN(i)=F1*TU(1)+F2*TU(2)+F3*TU(3)+F4*TU(4)
+           DO J=1,4
+             TU(J)=+CU(J,1)*YINI+CU(J,2)*YINT1+CU(J,3)*YINT2+CU(J,4)
+     .             *YFIN
+           ENDDO
+           YPOIN(i)=F1*TU(1)+F2*TU(2)+F3*TU(3)+F4*TU(4)
+           IF (IDIM.GE.3) THEN
+             DO J=1,4
+               TU(J)=+CU(J,1)*ZINI+CU(J,2)*ZINT1+CU(J,3)*ZINT2+CU(J,4)
+     .               *ZFIN
+             ENDDO
+             ZPOIN(i)=F1*TU(1)+F2*TU(2)+F3*TU(3)+F4*TU(4)
+           ENDIF
+         ELSE
+C ...... CUBIQUES PASSANT PAR 2 POINTS + TGTES .......
+            XPOIN(i)=F1*XINI+F2*XFIN+F3*XINT1+F4*XINT2
+            YPOIN(i)=F1*YINI+F2*YFIN+F3*YINT1+F4*YINT2
+            IF (IDIM.GE.2) ZPOIN(i)=F1*ZINI+F2*ZFIN+F3*ZINT1+F4*ZINT2
+         ENDIF
+C ... SI IUNIF = 0 PAS DE CORRECTION SUR LES PARAM DE LA CUBIQUE ....
+         IF (IUNIF.EQ.1) THEN
+           DIST(I)=DIST(I-1)+SQRT((XPOIN(I)-XPOIN(I-1))**2
+     .           +(YPOIN(I)-YPOIN(I-1))**2+(ZPOIN(I)-ZPOIN(I-1))**2)
+            IF (IIMPI.EQ.1) WRITE(IOIMP,6012) DIST(I)
+ 6012       FORMAT(2X,'DISTANCE CUMULEE ENTRE PTS =',G13.5)
+            DLONGT(1)=DIST(I)
+            GOTO 301
+         ELSE
+            XCOOR(IADR*(IDIM+1)+1)=XPOIN(I)
+            XCOOR(IADR*(IDIM+1)+2)=YPOIN(I)
+            IF(IDIM.GT.2) XCOOR(IADR*(IDIM+1)+3)=ZPOIN(I)
+         ENDIF
+         GOTO 1120
+
+C      - Erreur anormale car ILIG=11 --> ILIG=3
+ 1110    CALL ERREUR(5)
+         RETURN
+
+C      - Densite du point cree
+ 1120    XCOOR((IADR+1)*(IDIM+1))=DENI+DECA*DPAR
+         IADR=IADR+1
+
+ 301  CONTINUE
+C---------------------> FIN DE LA BOUCLE SUR LES SEGMENTS A CREER
+      NBPTS=IADR
+      SEGADJ MCOORD
+
+
+ 300  DIN=TABPAR(NBELEM)
+      DPAR=DPAR+DIN
+
+C --- Rajout du point milieu du dernier SEG3 ---
+C     (non effectue dans la boucle)
+      IF (ITYPEL.EQ.3.AND.ICLE2.NE.3) THEN
+        NBPTS=IADR+1
+        SEGADJ MCOORD
+        DPAR1=DPAR-DIN*0.5D0
+        GOTO (1201,1201,1203,1203,1201,1201,1207,1208,
+     .        1201,1201,1201,1203),ILIG
+ 1201   XCOOR(IADR*(IDIM+1)+1)=XIN+DPAR1*XDIS
+        IF (IDIM.GE.2) XCOOR(IADR*(IDIM+1)+2)=YIN+DPAR1*YDIS
+        IF (IDIM.GE.3) XCOOR(IADR*(IDIM+1)+3)=ZIN+DPAR1*ZDIS
+        GOTO 1220
+ 1203   PARA=ANG*DPAR1
+        COSA=COS(PARA)
+        SINA=SIN(PARA)
+        IF (ILIG.EQ.12) THEN
+           PAR2=ANG*DIN/2.D0
+           XDD=2.D0-COS(PAR2)-(TAN(PAR2)/RAY/(2.D0*RAY/SIN(PAR2)-1.D0))
+        ELSE
+           XDD=1.D0
+        ENDIF
+        XCOOR(IADR*(IDIM+1)+1)=XCEN+(XV1*COSA+XV3*SINA)*XDD
+        XCOOR(IADR*(IDIM+1)+2)=YCEN+(YV1*COSA+YV3*SINA)*XDD
+        IF (IDIM.GE.3) THEN
+           XCOOR(IADR*(IDIM+1)+3)=ZCEN+(ZV1*COSA+ZV3*SINA)*XDD
+        ENDIF
+        GOTO 1220
+ 1207   PARA=2*(DPAR1-0.5D0)
+        XCOOR(IADR*(IDIM+1)+1)=XIN+PARA*XDIS+(1-PARA*PARA)*XV
+        XCOOR(IADR*(IDIM+1)+2)=YIN+PARA*YDIS+(1-PARA*PARA)*YV
+        IF (IDIM.GE.3)
+     .     XCOOR(IADR*(IDIM+1)+3)=ZIN+PARA*ZDIS+(1-PARA*PARA)*ZV
+        GOTO 1220
+ 1208   GOTO 1220
+ 1220   XCOOR((IADR+1)*(IDIM+1))=DENI+DECA*DPAR1
+        IADR=IADR+1
+      ENDIF
+
+C  Cas particulier de l'arc de CUBIQUE (CUBP) avec option UNIF
+C :::::::::::::::: AJOUT PIFFARD POUR CUBIQUE PAR 4 POINTS ::::::::::::
+C .... SI CUBIQUE ET SI IUNIF = 1 CORRECTION POUR PTS UNIFORMES.
+      IF ((ILIG.EQ.9).AND.(IUNIF.EQ.1)) THEN
+C      .... ON RECALCULE LES POINTS AVEC LA CORRECTION SUR LES PARAM U .
+C        ..  ON FAIT 5 ITERATIONS MAXI (ON PEUT SORTIR AVT PAR DMOY)
+         DLONGT(1)=DLONGT(1)+SQRT((XFIN-XPOIN(NX))**2
+     &        +(YFIN-YPOIN(NX))**2
+     &        +(ZFIN-ZPOIN(NX))**2)
+         DMOY(1)=DLONGT(1)/NX
+         IF (IIMPI.EQ.1) WRITE(IOIMP,6003) DMOY(1)
+ 6003    FORMAT(2X,'DISTANCE MOYENNE =',G13.5)
+         DO KT=1,NITER
+            IF (IIMPI.EQ.1) WRITE(IOIMP,6000) KT,NITER
+ 6000       FORMAT(2X,'ITERATION',I2,' SUR ',I2,' DEMANDEES')
+            DO I=IDEP,NX
+               U(KT+1,I)=U(KT,I)*(I-1.D0)/NX*DLONGT(KT)/DIST(I)
+               UP=U(KT+1,I)
+               F1=2*UP**3-3*UP**2+1
+               F2=-2*UP**3+3*UP**2
+               F3=UP**3-2*UP**2+UP
+               F4=UP**3-UP**2
+               DO J=1,4
+                  TU(J)=+CU(J,1)*XINI+CU(J,2)*XINT1
+     &                 +CU(J,3)*XINT2+CU(J,4)*XFIN
+               ENDDO
+               XPOIN(I)=F1*TU(1)+F2*TU(2)+F3*TU(3)+F4*TU(4)
+               DO J=1,4
+                  TU(J)=+CU(J,1)*YINI+CU(J,2)*YINT1
+     &                 +CU(J,3)*YINT2+CU(J,4)*YFIN
+               ENDDO
+               YPOIN(I)=F1*TU(1)+F2*TU(2)+F3*TU(3)+F4*TU(4)
+               ZPOIN(I)=0.D0
+               IF (IDIM.GE.3) THEN
+                 DO J=1,4
+                    TU(J)=+CU(J,1)*ZINI+CU(J,2)*ZINT1
+     &                   +CU(J,3)*ZINT2+CU(J,4)*ZFIN
+                 ENDDO
+                 ZPOIN(I)=F1*TU(1)+F2*TU(2)+F3*TU(3)+F4*TU(4)
+               ENDIF
+               DIST2(I)=SQRT((XPOIN(I)-XPOIN(I-1))**2
+     &            +(YPOIN(I)-YPOIN(I-1))**2+(ZPOIN(I)-ZPOIN(I-1))**2)
+               IF (IIMPI.EQ.1) WRITE(IOIMP,6001) DIST2(I)
+ 6001          FORMAT(2X,'DISTANCE ENTRE 2 PTS =',G13.5)
+               DIST(I)=DIST(I-1)+DIST2(I)
+               DLONGT(KT+1)=DLONGT(KT+1)+DIST2(I)
+            ENDDO
+            DLONGT(KT+1)=DLONGT(KT+1)+SQRT((XFIN-XPOIN(NX))**2
+     &        +(YFIN-YPOIN(NX))**2+(ZFIN-ZPOIN(NX))**2)
+            IF (IIMPI.EQ.1) WRITE(IOIMP,6002) DLONGT(KT+1)
+ 6002       FORMAT(2X,'DISTANCE TOTALE ENTRE PTS =',G13.5)
+            DMOY(KT)=DLONGT(KT+1)/NX
+            IF (IIMPI.EQ.1) WRITE(IOIMP,6003) DMOY(KT)
+C6003    FORMAT(2X,'DISTANCE MOYENNE =',G13.5)
+            CRIT=0.05D0*DMOY(KT)
+            ICHANG=0
+            DO IL=IDEP,NX
+               IF (ABS(DIST2(IL)-DMOY(KT)).GT.CRIT) ICHANG=ICHANG+1
+            ENDDO
+            IF (ICHANG.EQ.0) GOTO 307
+         ENDDO
+C .... J'AI FINI LA CORRECTION SI :
+C   ..       - JE SUIS ARRIVE AU BOUT DES ITERATIONS
+C    .       - J'AI TROUVE LA BONNE REPARTITION
+C  ---- STOCKAGE DES POINTS DS LA BASE GIBI -----
+ 307     DPAR=0.D0
+         NBPTS=IADR+NX-IDEP+1
+         SEGADJ MCOORD
+         DO i=IDEP,NX
+           DPAR=DPAR+TABPAR(i)
+           XCOOR(IADR*(IDIM+1)+1)=XPOIN(i)
+           XCOOR(IADR*(IDIM+1)+2)=YPOIN(i)
+           IF (IDIM.GE.3) XCOOR(IADR*(IDIM+1)+3)=ZPOIN(i)
+           XCOOR((IADR+1)*(IDIM+1))=DENI+DECA+DPAR
+           IADR=IADR+1
+         ENDDO
+      ENDIF
+
+
+C ----------------------------------------------------------------------
+C     UN PEU DE MENAGE !
+C ----------------------------------------------------------------------
+
+      SEGSUP TABPAR
+      IF ((ILIG.EQ.9).OR.(ILIG.EQ.10)) SEGSUP STRAV
+
+      IPT2=MELEME
+      DO i=1,NUM(/2)
+        ICOLOR(i)=IDCOUL
+      ENDDO
+
+c     EVENTUELLE FUSION AVEC LIGNES INITIALES ET FINALES
+      IF (ITP1.NE.0) THEN
+        ltelq=.false.
+        CALL FUSE(IPT1,MELEME,IPT2,ltelq)
+        SEGDES IPT1,MELEME
+      ENDIF
+      MELEME=IPT2
+      IF (ITP2.NE.0) THEN
+         ltelq=.false.
+        CALL FUSE(MELEME,IP2,IPT2,ltelq)
+        SEGDES IPT6,MELEME
+      ENDIF
+
+c     ECRITURE
+      MELEME=IPT2
+      SEGDES MELEME
+      IF (IERR.NE.0) SEGSUP MELEME
+      CALL ECROBJ('MAILLAGE',MELEME)
+
+      RETURN
+      END
+
+
+

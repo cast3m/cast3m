@@ -1,0 +1,440 @@
+C IPGRIL    SOURCE    PV        18/11/19    21:15:10     9995
+C-----------------------------------------------------------------------
+C NOM         : IPGRIL
+C DESCRIPTION : Interpolation dans un NUAGE represantant une grille
+C               de valeurs
+C LANGAGE     : ESOPE
+C AUTEUR      : Francois DI PAOLA
+C-----------------------------------------------------------------------
+C APPELE PAR       : IPLNU1
+C APPELE           : IPMULI
+C-----------------------------------------------------------------------
+C ENTREES            : INUA (Objet de type NUAGE)
+C SORTIES            :
+C Lit un CHPOINT ou un MCHAML dans la pile puis ecrit un objet du meme
+C type en retour
+C-----------------------------------------------------------------------
+C VERSION    : v1, 02/10/2015, version initiale
+C HISTORIQUE : v1, 02/10/2015, creation
+C HISTORIQUE :
+C HISTORIQUE :
+C-----------------------------------------------------------------------
+C Priere de PRENDRE LE TEMPS de completer les commentaires
+C en cas de modification de ce sous-programme afin de faciliter
+C la maintenance !
+C-----------------------------------------------------------------------
+C REMARQUES : - L'interpolation est exacte, c'est-a-dire que l'on
+C               retrouve les valeurs de la grille si l'on interpole en
+C               un noeud de la grille
+C             - La grille peut contenir autant de dimensions que
+C               souhaitees
+C             - Pour le moment, seule l'interpolation multi-lineaire est
+C               disponible
+C             - Une interpolation par splines cubiques est possible sur
+C               la meme base (a faire plus tard ...)
+C-----------------------------------------------------------------------
+C
+      SUBROUTINE IPGRIL(INUA)
+C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+-INC CCNOYAU
+-INC CCOPTIO
+-INC SMNUAGE
+-INC SMCHPOI
+-INC SMCHAML
+-INC SMLREEL
+-INC SMLENTI
+-INC SMLMOTS
+-INC CCASSIS
+      CHARACTER*8  MOT1,MOT2
+      LOGICAL      BTHRD
+
+      SEGMENT SPARAL
+        INTEGER NNN,ML1,ML2,MPV1,MPV2,MCH1,MEL2,
+     &          N1EL1,N1PEL1
+        INTEGER IXX(NBTHR)
+      ENDSEGMENT
+
+      SEGMENT SXX
+        REAL*8 XX(NDIM)
+      ENDSEGMENT
+
+C
+C     Introduction d'un COMMON pour la parallelisation
+      COMMON/IPLMUC/IPARAL
+
+      EXTERNAL IPMULi
+
+C
+C     Pour la paralelisation de l'interpolation
+C
+      BTHRD = .FALSE.
+      IPARAL= 0
+C
+C
+C     Depouillement du nuage pour connaitre le nombre de dimensions de
+C     la grille
+      MNUAG1=INUA
+      SEGACT,MNUAG1
+      NNU=MNUAG1.NUAPOI(/1)
+      NDIM=NNU-1
+      IF (NDIM.LT.1) THEN
+        INTERR(1)=MNUAG1
+        INTERR(2)=2
+        INTERR(3)=1
+        CALL ERREUR(628)
+        RETURN
+      ENDIF
+C
+C     Initialisation d'une liste de mots pour stocker les noms des
+C     dimensions de la grille
+      JGN=4
+      JGM=NNU
+      SEGINI,MLMOT1
+C
+C     Iniilisation d'une liste d'entiers pour stocker les pointeurs vers
+C     les LISTREEL definissant la grille de valeur de la fonction F
+      JG=NNU
+      SEGINI,MLENT1
+C
+C     Parcours du NUAGE pour verifications
+      NVAL=1
+      DO I=1,NNU
+C       Nom de la composante I
+        MOT1=MNUAG1.NUANOM(I)
+C       Et rangement du mot dans la liste de mots adhoc
+        MLMOT1.MOTS(I)=MOT1
+C       Les composantes doivent abriter 1 seul objet de type LISTREEL
+        MOT2=MNUAG1.NUATYP(I)
+        IF (MOT2.NE.'LISTREEL') THEN
+          CALL ERREUR(941)
+          RETURN
+        ENDIF
+        NUAVI1=MNUAG1.NUAPOI(I)
+        SEGACT,NUAVI1
+        NPO=NUAVI1.NUAINT(/1)
+        IF (NPO.NE.1) THEN
+          CALL ERREUR(941)
+          RETURN
+        ENDIF
+        MLREE1=NUAVI1.NUAINT(1)
+        SEGDES,NUAVI1
+C       Verification de la taille de la derniere liste
+        SEGACT,MLREE1
+        IF (I.EQ.NNU) THEN
+          NTEST=MLREE1.PROG(/1)
+          IF (NTEST.NE.NVAL) THEN
+            CALL ERREUR(21)
+            RETURN
+          ENDIF
+        ELSE
+          NVAL=NVAL*(MLREE1.PROG(/1))
+        ENDIF
+C       Et rangement du pointeur dans la liste d'entiers adhoc
+        MLENT1.LECT(I)=MLREE1
+      ENDDO
+      SEGDES,MNUAG1
+C
+C     Acquisition d'un CHPOINT ou d'un MCHAML en entree (MCHPO1/MCHEL1)
+      ICH=1
+      CALL LIROBJ('CHPOINT',MCHPO1,0,IRETOU)
+      IF (IRETOU.EQ.1) THEN
+        SEGACT,MCHPO1
+      ELSE
+        CALL LIROBJ('MCHAML',MCHEL1,0,IRETOU)
+        IF (IRETOU.EQ.1) THEN
+          ICH=2
+          SEGACT,MCHEL1
+        ELSE
+          CALL ERREUR(686)
+          RETURN
+        ENDIF
+      ENDIF
+C
+C     ----------------
+C     CAS D'UN CHPOINT
+C     ----------------
+      IF (ICH.EQ.1) THEN
+C       Initialisation du champ de sortie (MCHPO2) sur la base de
+C       celui d'entree, il possede les memes sous champs
+        SEGINI,MCHPO2=MCHPO1
+        MCHPO2.MOCHDE='CHPOINT interpole'
+C       Boucle sur les sous champs (MSOUP1) du CHPOINT d'entree
+        NBSOUS=MCHPO1.IPCHP(/1)
+        DO I=1,NBSOUS
+          MSOUP1=MCHPO1.IPCHP(I)
+          SEGACT,MSOUP1
+          NCOMP1=MSOUP1.NOCOMP(/2)
+C         Verification que le CHPOINT contienne bien NDIM composantes
+          IF (NCOMP1.NE.NDIM) THEN
+            MOTERR(1:8)='CHPOINT '
+            CALL ERREUR(980)
+            RETURN
+          ENDIF
+C         Liste de correpondance entre les composantes du CHPOINT et les
+C         noms des dimensions de la grille
+C         MLENT2.LECT(i) = numero de la composante de MSOUP1
+C                          correspondante a la dimension i de la grille
+          JG=NCOMP1
+          SEGINI,MLENT2
+          DO J=1,NCOMP1
+            MOT1=MSOUP1.NOCOMP(J)
+            JVAL1=0
+            DO K=1,NDIM
+              MOT2=MLMOT1.MOTS(K)
+              IF (MOT1.EQ.MOT2) THEN
+                JVAL1=K
+                GOTO 1
+              ENDIF
+            ENDDO
+C           Cas ou une composante du CHPOINT ne se retrouve pas dans les
+C           noms des dimensions de la grille
+ 1          IF (JVAL1.EQ.0) THEN
+              CALL ERREUR(665)
+              RETURN
+            ENDIF
+            MLENT2.LECT(JVAL1)=J
+          ENDDO
+          MPOVA1=MSOUP1.IPOVAL
+          SEGACT,MPOVA1
+C         Initialisation des sous champs de sortie (MSOUP2)
+C         - ils sont definits sur les meme noeuds
+C         - ils ne possedent qu'une seule composante
+          NC=1
+          SEGINI,MSOUP2
+          MSOUP2.NOCOMP(1)=MLMOT1.MOTS(NDIM+1)
+          MSOUP2.IGEOC=MSOUP1.IGEOC
+C         On le range aussitot dans le CHPOINT global
+          MCHPO2.IPCHP(I)=MSOUP2
+C         Initialisation du tableau de valeurs (MPOVA2) du sous champ de
+C         sortie
+          N =MPOVA1.VPOCHA(/1)
+          NC=1
+          SEGINI,MPOVA2
+C         Preparation pour le calcul en parallele
+
+C         Regalge fait sur PC40 pour determiner le nombre de NOEUDS optimum
+C         par thread
+          IOPTIM = 100
+          N1 = N / IOPTIM
+
+          ITH = 0
+          IF (NBESC .NE. 0 ) ith=oothrd
+
+
+          IF ((N1.LE.1) .OR. (NBTHRS .EQ. 1) .OR. (ITH .GT. 0)) THEN
+            NBTHR = 1
+            BTHRD = .FALSE.
+          ELSE
+            BTHRD = .TRUE.
+            NBTHR = MIN(N1, NBTHRS)
+            CALL THREADII
+          ENDIF
+
+          SEGINI,SPARAL
+          DO ITH=1,NBTHR
+            SEGINI,SXX
+            SPARAL.IXX(ITH) = SXX
+          ENDDO
+
+          SPARAL.NNN    = N
+          SPARAL.ML1    = MLENT1
+          SPARAL.ML2    = MLENT2
+          SPARAL.MPV1   = MPOVA1
+          SPARAL.MPV2   = MPOVA2
+          SPARAL.MCH1   = 0
+          SPARAL.MEL2   = 0
+          SPARAL.N1EL1  = 0
+          SPARAL.N1PEL1 = 0
+
+C         Lancement des Threads
+          IF (BTHRD) THEN
+            IPARAL = SPARAL
+            DO ITH=2,NBTHR
+              CALL THREADID(ITH,IPMULi)
+            ENDDO
+            CALL IPMULi(1)
+
+            DO ITH=2,NBTHR
+              CALL THREADIF(ITH)
+            ENDDO
+
+            CALL THREADIS
+          ELSE
+            CALL IPMUL0(1,SPARAL)
+          ENDIF
+          MSOUP2.IPOVAL=MPOVA2
+          SEGDES,MSOUP1,MSOUP2,MPOVA1,MPOVA2
+          DO ITH=1,NBTHR
+            SXX = SPARAL.IXX(ITH)
+            SEGSUP,SXX
+          ENDDO
+          SEGSUP,MLENT2,SPARAL
+        ENDDO
+        SEGDES,MCHPO1,MCHPO2
+        SEGSUP,MLMOT1,MLENT1
+C       Ecriture du CHPOINT de sortie dans la pile
+        CALL ECROBJ('CHPOINT ',MCHPO2)
+C
+C     ---------------
+C     CAS D'UN MCHAML
+C     ---------------
+      ELSEIF(ICH.EQ.2) THEN
+C       Initialisation du champ de sortie (MCHEL2) sur la base de
+C       celui d'entree, il possede les memes sous zones
+        SEGINI,MCHEL2=MCHEL1
+        MCHEL2.TITCHE='MCHAML interpole'
+C       Boucle sur les sous zones (MCHAM1) du MCHAML d'entree
+        NBSOUS=MCHEL1.ICHAML(/1)
+        DO I=1,NBSOUS
+          MCHAM1=MCHEL1.ICHAML(I)
+          SEGACT,MCHAM1
+C         Initialisation des sous zones de sortie (MCHAM2)
+C           - elles ne possedent qu'une seule composante de type
+C             flottant
+          N2=1
+          SEGINI,MCHAM2
+          MCHAM2.NOMCHE(1)=MLMOT1.MOTS(NDIM+1)
+          MCHAM2.TYPCHE(1)='REAL*8'
+C         On le range aussitot dans le MCHAML global
+          MCHEL2.ICHAML(I)=MCHAM2
+C         Verification que le MCHAML de cettre sous zone contienne bien
+C         NDIM composantes
+          NCOMP1=MCHAM1.NOMCHE(/2)
+          IF (NCOMP1.NE.NDIM) THEN
+            MOTERR(1:8)='MCHAML  '
+            CALL ERREUR(980)
+            RETURN
+          ENDIF
+C         Activation des MELVA1 pour parallelisme
+          DO J=1,NDIM
+            MELVA1=MCHAM1.IELVAL(J)
+            SEGACT,MELVA1
+          ENDDO
+C         Liste de correpondance entre les composantes du MCHAML et les
+C         noms des dimensions de la grille
+C         MLENT2.LECT(i) = numero de la composante de MCHAM1
+C                          correspondante a la dimension i de la grille
+          JG=NCOMP1
+          SEGINI,MLENT2
+          N1PTEL=0
+          N1EL=0
+          N2PTEL=0
+          N2EL=0
+          DO J=1,NCOMP1
+            MOT1=MCHAM1.NOMCHE(J)
+            JVAL1=0
+            DO K=1,NDIM
+              MOT2=MLMOT1.MOTS(K)
+              IF (MOT1.EQ.MOT2) THEN
+                JVAL1=K
+                GOTO 2
+              ENDIF
+            ENDDO
+C           Cas ou une composante du MCHAML ne se retrouve pas dans les
+C           noms des dimensions de la grille
+ 2          IF (JVAL1.EQ.0) THEN
+              CALL ERREUR(665)
+              RETURN
+            ENDIF
+            MLENT2.LECT(JVAL1)=J
+C           Verification que le champ contient des flottants,
+            IF (MCHAM1.TYPCHE(J).NE.'REAL*8') THEN
+              MOTERR(1:16)  = MCHAM1.TYPCHE(J)
+              MOTERR(17:20) = MOT1(1:4)
+              MOTERR(21:29) = 'argument'
+              CALL ERREUR(552)
+              RETURN
+            ENDIF
+C           Recherche des tailles MAX des MELVAL de chaque composante de
+C           cette sous zone (pour preparer le champ de sortie)
+            MELVA1=MCHAM1.IELVAL(J)
+            SEGACT,MELVA1
+            N1PTEL=MAX(N1PTEL,MELVA1.VELCHE(/1))
+            N1EL  =MAX(N1EL  ,MELVA1.VELCHE(/2))
+          ENDDO
+C         Initialisation du tableau de valeurs (MELVA2) du sous champ
+C         de sortie
+          SEGINI,MELVA2
+C         Preparation pour le calcul en parallele
+C         Regalge fait sur PC40 pour determiner le nombre de NOEUDS optimum
+C         par thread
+          IOPTIM = 100
+          N1 = N1EL / IOPTIM
+
+          ITH = 0
+          IF (NBESC .NE. 0 ) ith=oothrd
+C         CB215821 : DESACTIVE LA PARALLELISATION PTHREAD LORSQUE ON EST
+C                    DEJA DANS LES ASSISTANTS
+          IF ((N1.LE.1) .OR. (NBTHRS .EQ. 1) .OR. (ITH .GT. 0)) THEN
+            NBTHR = 1
+            BTHRD = .FALSE.
+          ELSE
+            BTHRD = .TRUE.
+            NBTHR = MIN(N1, NBTHRS)
+            CALL THREADII
+          ENDIF
+
+          SEGINI,SPARAL
+          DO ITH=1,NBTHR
+            SEGINI,SXX
+            SPARAL.IXX(ITH) = SXX
+          ENDDO
+
+          SPARAL.NNN    = 0
+          SPARAL.ML1    = MLENT1
+          SPARAL.ML2    = MLENT2
+          SPARAL.MPV1   = 0
+          SPARAL.MPV2   = 0
+          SPARAL.MCH1   = MCHAM1
+          SPARAL.MEL2   = MELVA2
+          SPARAL.N1EL1  = N1EL
+          SPARAL.N1PEL1 = N1PTEL
+
+C         Lancement des Threads
+          IF ((nbthr.gt.1) .AND. BTHRD) THEN
+            IPARAL = SPARAL
+            DO ITH=2,NBTHR
+              CALL THREADID(ITH,IPMULi)
+            ENDDO
+            CALL IPMULi(1)
+
+            DO ITH=2,NBTHR
+              CALL THREADIF(ITH)
+            ENDDO
+
+            CALL THREADIS
+          ELSE
+            CALL IPMUL0(1,SPARAL)
+          ENDIF
+          MCHAM2.IELVAL(1)=MELVA2
+          SEGDES,MCHAM1,MCHAM2,MELVA2
+C         Desactivation des MELVA1 pour parallelisme
+          DO J=1,NDIM
+            MELVA1=MCHAM1.IELVAL(J)
+            SEGACT,MELVA1
+          ENDDO
+
+          DO ITH=1,NBTHR
+            SXX = SPARAL.IXX(ITH)
+            SEGSUP,SXX
+          ENDDO
+          SEGSUP,MLENT2,SPARAL
+        ENDDO
+        SEGDES,MCHEL1,MCHEL2
+C       Ecriture du MCHAML de sortie dans la pile
+        CALL ECROBJ('MCHAML ',MCHEL2)
+      ENDIF
+
+      RETURN
+      END
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,417 @@
+* fichier :  equ_chaleur2D.dgibi
+************************************************************************
+* Section : Thermique Statique
+************************************************************************
+************************************************************************
+* NOM         : equ_chaleur2D.dgibi
+* ___
+*
+* DESCRIPTION : Solution stationnaire de l'équation de la chaleur  (2D)
+* ___________
+*
+*               GEOMETRIE : Un carré ! (il sera translaté et tourné)
+*               ----------
+*
+*               y
+*                 ^   y=1
+*                 |------------
+*                 |           |
+*                 |           |
+*                 |           |
+*                 |x = 0      |x=1
+*                 |           |
+*                 |           |
+*                O-----------------------------> x
+*                     y=0
+*
+*
+*               EQUATIONS :
+*               ----------
+*
+*               - Equations :
+*
+*                  mu Laplacien(T) = 0 avec mu = 1 ici
+*
+*               - Conditions aux limites :
+*
+*                  conditions de Dirichlet sur tout le bord :
+*                  on prend la restriction de la solution exacte au bord
+*
+*               - Solution exacte :
+*
+*                  T(x,y)= alpha x + beta y + gamma xy + delta
+*
+*                  pour une discrétisation avec de éléments linéaires,
+*                  on prend gamma = 0 (car les triangles linéaires
+*                  disponibles ne discrétisent pas de façon exacte le
+*                  terme bilinéaire en xy).
+*
+* DISCRETISATION : On teste tous les types d'éléments continus disponibles
+* ______________   aujourd'hui (99/03/04) (voir la notice NAVI) :
+*                  * 'QUAF' (température au sommet) ;
+*                  * 'MACR' (température au sommet) ;
+*                  * 'LINE' (température au sommet).
+*                  On devrait également tester les discrétisations
+*                  discontinus (linéaires ou Ctes par élément). Ceci
+*                  n'est pas fait.
+*
+*       Le maillage est construit avec l'opérateur SURF, il est perturbé
+*       par un bruit blanc gaussien. Il est ensuite translaté d'un
+*       vecteur arbitraire et tourné d'un angle arbitraire.
+*
+* Opérateurs utilisés : LAPN (option EF implicite)
+*
+*
+* RESOLUTION :     - Tous les types de solveurs (voir la notice KRES):
+* ___________        * Directs (Crout)
+*                    * Itératifs (Gradient Conjugué, BiCGSTAB, GMRES(50))
+*                  - Pour les solveurs itératifs, tous les types de
+*                    préconditionneurs :
+*                    * sans ;
+*                    * Jacobi (diagonal) ;
+*                    * D-ILU (pour mat. symétrique) ;
+*                    * ILU(0) (Choleski incomplet) ;
+*                    * MILU(0) (Choleski incomplet relaxé).
+*                    5 : préconditionnement ILUT (dual truncation)
+*                    6 : préconditionnement ILUT2 (une variante du
+*                       précédent qui remplit mieux la mémoire et
+*                       fonctionne mieux quelquefois)
+*
+*
+* TESTS EFFECTUES : La solution du problème discrétisé doit être la
+* _______________   même que la solution exacte aux erreurs de
+*                   troncature près et à la précision sur le résidu prés
+*                   dans le cas des solveurs itératifs.
+*                   On impose donc des valeurs faibles pour l'écart en
+*                   norme L2 entre solution exacte et calculée :
+*                   * 1.D-14 pour le solveur direct ;
+*                   * 1.D-12 pour les solveurs itératifs.
+*
+* LANGAGE     : GIBIANE-CASTEM 2000
+* AUTEUR      : Stéphane GOUNAND (CEA/DRN/DMT/SEMT/TTMF)
+*               mél : gounand@semt2.smts.cea.fr
+************************************************************************
+* VERSION    : v1, 09/02/99, version initiale
+* HISTORIQUE : v1, 09/02/99, création
+* HISTORIQUE : 22/03/00, gounand
+*   Ajout du test des préconditionneurs ILUT
+* HISTORIQUE :
+************************************************************************
+* Prière de PRENDRE LE TEMPS de compléter les commentaires
+* en cas de modification de ce sous-programme afin de faciliter
+* la maintenance !
+************************************************************************
+interact= FAUX ;
+complet = FAUX ;
+graph   = FAUX ;
+*
+'OPTION' 'DIME' 2 'ELEM' QUA4 'MODE' 'PLAN' ;
+'OPTION' 'ISOV' 'SULI' ;
+'OPTION' 'ECHO' 0 ;
+nbisov = 15 ;
+'SI' ('NON' interact) ;
+  'OPTION' 'TRAC' 'PS' ;
+  'OPTION' 'ISOV' 'LIGNE' ;
+'FINSI' ;
+*
+** Erreur Linfini entre deux Champoints.
+*
+DEBPROC CALCERR vitp1*'CHPOINT' vit*'CHPOINT' ;
+  err = MAXI (vitp1 - vit) 'ABS' ;
+FINPROC err ;
+*
+** Erreur Pseudo L2 entre deux Champoints.
+*
+DEBPROC CALCERR2 vitp1*'CHPOINT' vit*'CHPOINT' ;
+  er0 = 'KOPS' vitp1 '-' vit ;
+  er2 = 'KOPS' er0 '*' er0 ;
+  err = 0.D0 ;
+  suppv  = 'EXTRAIRE' er2 'MAIL' ;
+  compv  = 'EXTRAIRE' er2 'COMP' ;
+  nbcomp = 'DIME' compv ;
+  nptd   = 'NBNO' suppv ;
+  'REPETER' numcomp nbcomp ;
+  lacomp = 'EXTRAIRE' compv &numcomp ;
+    'REPETER' numpo nptd ;
+      lepoi = suppv 'POIN' &numpo ;
+      err = err '+' ('EXTRAIRE' er2 lacomp lepoi) ;
+    'FIN' numpo ;
+  'FIN' numcomp ;
+  err = err '/' nptd ;
+  err = err ** 0.5D0 ;
+FINPROC err ;
+*
+* Procédure paramétrée (solveur, type de discrétisation)
+* renvoyant l'erreur en norme L2 sur la température.
+* On calcule une solution exacte de l'équation de Laplace
+* (équations de la chaleur) ;
+*
+'DEBPROC' CALCUL ktypi*'ENTIER' kprec*'ENTIER' typdis*'MOT' ;
+ttypi = 'TABLE' ;
+ttypi . 1 = 'CHAINE' 'Crout' ;
+ttypi . 2 = 'CHAINE' 'Gradient Conjugué' ;
+ttypi . 3 = 'CHAINE' 'BiCGSTAB' ;
+ttypi . 5 = 'CHAINE' 'GMRES(50)' ;
+tprec = 'TABLE' ;
+tprec . 0 = 'sans' ;
+tprec . 1 = 'diag' ;
+tprec . 2 = 'D-ILU' ;
+tprec . 3 = 'ILU(0)' ;
+tprec . 4 = 'MILU(0)' ;
+tprec . 5 = 'ILUT(2)' ;
+tprec . 6 = 'ILUT2(2)' ;
+*
+* titre global pour les dessins
+*
+titglob = 'CHAINE' ' typdis=' typdis ' typinv=' (ttypi . ktypi)
+' prec=' (tprec . kprec) ;
+*
+* Paramètres physiques
+*
+mu = 1. ;
+* Conditions aux limites
+alpha = (** 2. 0.5) ;
+beta  = (** 3. 0.5) ;
+'SI' ('EGA' typdis 'QUAF') ;
+  gamma = (** 5. 0.5)  ;
+'SINON' ;
+  gamma = 0. ;
+'FINSI' ;
+delta = (** 1.5 0.5) ;
+*
+*  Géométrie
+*
+pA = 0.   0. ;
+pB = 1.   0. ;
+pC = 1.   1. ;
+pD = 0.   1. ;
+*
+* Paramètres de la discrétisation de base
+*
+'SI' complet ;
+  nAB = 10 ;
+  nBC = 13 ;
+  nCD = 15 ;
+  nDA = 17 ;
+'SINON' ;
+  nAB = 4 ;
+  nBC = 5 ;
+  nCD = 6 ;
+  nDA = 7 ;
+'FINSI' ;
+*
+* Rotation et translation aditionnelle + bruit blanc
+* + raffinement
+*
+vtran = ((** 2 0.5) (* -1 (** 3 0.5))) ;
+orig  = (0.D0 0.D0) ;
+arot  = (** 360. 0.5) ;
+*arot  = 0.D0 ;
+*arot = 90.0D0 ;
+lesdens = 'PROG' (1. '/' nAB) (1. '/' nCD) (1. '/' nBC) (1. '/' nDA) ;
+ampbruit = (0.1 * ('MINIMUM' lesdens)) ;
+*
+* Géométrie discrétisée
+*
+bas    = 'DROIT' nAB pA pB ;
+droite = 'DROIT' nBC pB pC ;
+haut   = 'DROIT' nCD pC pD ;
+gauche = 'DROIT' nDA pD pA ;
+pourtour = bas 'ET' droite 'ET' haut 'ET' gauche ;
+mt = 'SURFACE' pourtour 'PLAN' ;
+'TASSER' mt ;
+mt = 'ORIENTER' mt ;
+*
+* On rajoute le bruit
+*
+pmt = 'CHANGER' mt 'POI1' ;
+pcnt= 'CHANGER' pourtour 'POI1' ;
+inmt= 'DIFF' pmt pcnt;
+brbl1 = 'BRUIT' 'BLAN' 'GAUS' 0.D0 ampbruit inmt ;
+brbl2 = 'BRUIT' 'BLAN' 'GAUS' 0.D0 ampbruit inmt ;
+brbl = 'ET' ('NOMC' 'UX' brbl1) ('NOMC' 'UY' brbl2) ;
+mt = 'PLUS' mt brbl;
+*
+* Eventuellement, on trace le résultat
+*
+'SI' graph ;
+   titgeo = 'CHAINE' 'mt ' 'NBPO=' ('NBNO' mt)
+                      ' NBELEM=' ('NBEL' mt) titglob ;
+   'TRACER' mt 'NOEUD' 'TITRE' titgeo ;
+'FINSI' ;
+*
+* Modèle
+*
+_mt     = 'CHANGER' mt 'QUAF' ;
+_bas    = 'CHANGER' bas    'QUAF' ;
+_droite = 'CHANGER' droite 'QUAF' ;
+_haut   = 'CHANGER' haut   'QUAF' ;
+_gauche = 'CHANGER' gauche 'QUAF' ;
+'ELIMINATION' 1.D-6 (_gauche 'ET' _haut 'ET' _droite 'ET' _bas
+                     'ET' _mt) ;
+$mt = 'MODELISER' _mt 'NAVIER_STOKES' typdis ;
+*
+* Solution exacte bilinéaire
+*
+xx yy = 'COORDONNEE' ('DOMA' $mt 'SOMMET') ;
+solex = 'KOPS' ('KOPS' xx '*' alpha) '+' ('KOPS' yy '*' beta) ;
+solex = 'KOPS' solex '+' ('KOPS' ('KOPS' xx '*' yy) '*' gamma) ;
+solex = 'KOPS' solex '+' delta ;
+solex = 'KCHT' $mt 'SCAL' 'SOMMET' solex ;
+*
+* On tourne et on translate
+*
+_tmt solex = 'TOURNER' _mt solex arot orig ;
+_tmt solex = 'PLUS'    _tmt solex vtran ;
+$tmt = 'MODELISER' _tmt 'NAVIER_STOKES' typdis ;
+'ELIMINATION' 1.D-6 ('ET' ('DOMA' $tmt 'SOMMET')
+                          ('EXTRAIRE' solex 'MAIL')) ;
+solex = 'KCHT' $tmt 'SCAL' 'SOMMET' solex ;
+mtmt = 'DOMA' $tmt 'MAILLAGE' ;
+cmtmt = 'CONTOUR' mtmt ;
+*
+* Mise en place du calcul numérique
+*
+* équation de Laplace
+*
+rv = 'EQEX' $tmt 'ITMA' 1
+'OPTI' 'EF' 'IMPL'
+'ZONE' $tmt 'OPER' 'LAPN' alpha 'INCO' 'TN' 'TN' ;
+*
+* conditions aux limites
+*
+csolex = 'REDU' solex cmtmt ;
+rv = 'EQEX' rv
+ 'CLIM' 'TN' 'TIMP' cmtmt csolex ;
+*                      ________________
+*
+*                       INITIALISATION
+*                      ________________
+*
+rv . 'INCO' = 'TABLE' 'INCO' ;
+rv . 'INCO' . 'TN' = 'KCHT' $tmt 'SCAL' 'SOMMET' 0. ;
+*
+rv . 'NITER' = 1 ;
+rv . 'METHINV' . 'TYPINV'   = ktypi ;
+rv . 'METHINV' . 'PRECOND'  = kprec ;
+rv . 'METHINV' . 'ILUTLFIL' = 2.D0 ;
+rv . 'METHINV' . 'ILUTDTOL' = 0.D0 ;
+rv . 'METHINV' . 'IMPINV'   = 2 ;
+rv . 'METHINV' . 'NITMAX'   = 1000 ;
+rv . 'METHINV' . 'GMRESTRT' = 50 ;
+rv . 'METHINV' . 'RESID'    = 1.D-13 ;
+*                         __________
+*
+*                           CALCUL
+*                         __________
+*
+EXEC rv ;
+*
+* Résultats
+*
+'SI' graph ;
+*
+* solutions exactes
+*
+  tn = solex ;
+  titt = 'CHAINE' 'Température exacte' titglob ;
+  'TRACER' tn mtmt cmtmt nbisov 'TITRE' titt ;
+*
+* graphe de convergence de la méthode itérative
+*
+  'SI' ('NEG' ktypi 1) ;
+    conver = (rv . 'METHINV' . 'CONVINV') ;
+    dimcon = 'DIME' conver ;
+    labs = 'PROG' 1.D0 'PAS' 1.D0 dimcon ;
+    lord = ('LOG' conver) '/' ('LOG' 10.D0) ;
+    evtot = 'EVOL' 'MANU' 'ITER' labs 'RESID' lord ;
+    titev = 'CHAINE' 'Historique de convergence' titglob ;
+    'DESSIN' evtot 'TITR' titev 'LEGE' ;
+  'FINSI' ;
+
+*
+* solutions calculées
+*
+  tn = rv . 'INCO' . 'TN' ;
+  titt = 'CHAINE' 'Température calculée' titglob ;
+  'TRACER' tn mtmt cmtmt nbisov 'TITRE' titt ;
+'FINSI' ;
+*
+* Calcul des erreurs par rapport à la solution analytique
+*
+tn = rv . 'INCO' . 'TN' ;
+errlit = CALCERR  tn solex ;
+errl2t = CALCERR2 tn solex ;
+'MESSAGE' '-------------------------------------------------' ;
+'MESSAGE' ('CHAINE' 'Erreur en norme LINF' titglob ' : ' errlit) ;
+'MESSAGE' ('CHAINE' 'Erreur en norme L2  ' titglob ' : ' errl2t) ;
+'MESSAGE' '-------------------------------------------------' ;
+'FINPROC' errl2t ;
+* Fin de la procédure de calcul                             *
+*___________________________________________________________*
+*
+*-----------------------------------------------------------
+* Paramètres du calcul
+*
+* Types d'inversion dans ltypi :
+*   1 = Crout (direct) ; 2 = CG ; 3 = BiCGSTAB ; 5 = GMRES
+* Types de préconditionnement  dans lprec :
+*   0 = sans ; 1 = diag ; 2 = D-ILU ; 3 = ILU(0) ; 4 = MILU(0)
+*   5 = ILUT(2) ; 6 = ILUT2(2)
+* ldiscr : type d'éléments à tester.
+'SI' complet ;
+  ldiscr = 'MOTS' 'QUAF' ;
+  ltypi  = 'LECT' 1 2 3 5 ;
+  lprec  = 'LECT' 3 ;
+'SINON' ;
+  ldiscr = 'MOTS' 'QUAF' 'MACR' 'LINE' ;
+  ltypi  = 'LECT' 1 2 3 5 ;
+  lprec  = 'LECT' 0 'PAS' 1 6 ;
+'FINSI' ;
+*
+*-----------------------------------------------------------*
+* Boucles sur les différents paramètres du calcul           *
+ok = VRAI ;
+*
+*  Boucle sur les discrétisations
+*
+'REPETER' idiscr ('DIME' ldiscr) ;
+  discr = 'EXTRAIRE' ldiscr &idiscr ;
+*
+*  Boucle sur les méthodes de résolution
+*
+  'REPETER' itypi ('DIME' ltypi) ;
+    typi = 'EXTRAIRE' ltypi &itypi ;
+    'SI' ('EGA' typi 1) ;
+      errl2t = CALCUL typi 0 discr ;
+      ok = ('ET' ok (errl2t '<' 1.D-14)) ;
+    'SINON' ;
+      'REPETER' iprec ('DIME' lprec) ;
+        prec = 'EXTRAIRE' lprec &iprec ;
+        errl2t = CALCUL typi prec discr ;
+        ok = ('ET' ok (errl2t '<' 1.D-12)) ;
+      'FIN' iprec ;
+    'FINSI' ;
+    'SI' ('ET' ('NON' complet) ('NON' ok)) ;
+      'MESSAGE' 'On a dépassé les marges d_erreur :' ;
+      'MESSAGE' ' * 1.D-14  pour une méthode directe' ;
+      'MESSAGE' ' * 1.D-12  pour une méthode itérative' ;
+      'ERREUR' 5 ;
+    'FINSI' ;
+  'FIN' itypi ;
+'FIN' idiscr ;
+
+'SI' interact ;
+   'OPTION' 'DONN' 5 ;
+'FINSI' ;
+'MESSAGE' 'Tout s_est bien passé' ;
+'FIN' ;
+
+
+
+
+
+
+
+
+

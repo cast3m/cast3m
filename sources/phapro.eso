@@ -1,0 +1,525 @@
+C PHAPRO    SOURCE    FANDEUR   14/03/12    21:15:06     7991
+
+      SUBROUTINE PHAPRO
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*
+*  Calcule la nouvelle proportion de phase
+* en entree
+*           : son chamelem de materiau associé
+*           : un champ de temperature proposée avec les mult de
+*             lagrange
+*  en sortie MCHAML de proportion de phase mis a jour
+*
+-INC CCOPTIO
+-INC CCREEL
+
+-INC SMMODEL
+-INC SMCHAML
+      POINTEUR mchelp.mchelm, mchelq.mchelm
+      POINTEUR melvap.melval, melvaq.melval
+-INC SMCHPOI
+-INC SMELEME
+-INC SMCOORD
+
+      segment icpr(npt)
+      segment,mtemp
+        integer icon(imax),ipos(ino),ivoi(nvoi)
+        real*8 qrest(ino),qtot(ino)
+      endsegment
+      segment iqmoye
+        real*8 qmoy(nbel)
+      endsegment
+      segment ipo2(ino)
+
+      segment,mcorr
+        integer imelem(npartp),imchap(npartp),imoyep(npartp),
+     &          imchaq(npartq)
+      endsegment
+
+C*      write(ioimp,*) 'Entree dans Phapro'
+      xpre   = xpetit
+      umxpre = 1.d0 - xpre
+
+* Lecture du mchaml de proportions de phase
+      call lirobj('MCHAML',mchel1,1,iretou)
+      if (ierr.ne.0) return
+* Lecture du mchaml de chaleur latente
+      call lirobj('MCHAML',mchelq,1,iretou)
+      if (ierr.ne.0) return
+* Lecture du chpoint des reactions
+      call lirobj('CHPOINT',mchpoi,1,iretou)
+      if (ierr.ne.0) return
+
+* Verification des supports des MCHAMLS (aux noeuds !)
+      ipmodl = 0
+      call quesup(ipmodl,mchel1,0,0,isupp,iret)
+      if (isupp.gt.1) return
+      call quesup(ipmodl,mchelq,0,0,isupq,iret)
+      if (isupq.gt.1) return
+
+* Creation du mchaml de proportions de phase resultat par recopie du
+* champ donne en entree
+      call copie8(mchel1,mchelp)
+
+* On regarde d'abord le chpoint des reactions :
+      segact,mchpoi
+      ipachp = mchpoi.ipchp(/1)
+* S'il est vide, il n'y a rien a faire.
+      if (ipachp.eq.0) then
+C*        write(ioimp,*) 'chpoint vide, rien a faire.'
+        call ecrobj('MCHAML',mchelp)
+        goto 9900
+* Petite verification : une seule partition pour le chpoint des reactions
+      else if (ipachp.gt.1) then
+        call erreur(180)
+        goto 9900
+      endif
+      msoupo = mchpoi.ipchp(1)
+      segact,msoupo
+* Recherche de la composante obligatoire 'Q' des reactions
+      melchp = igeoc
+      mvpchp = ipoval
+      icochp = 0
+      do 100 ic = 1, nocomp(/2)
+        if (nocomp(ic).eq.'Q   ') then
+          if (icochp.ne.0) then
+            icochp = -1
+          else
+            icochp = ic
+          endif
+        endif
+ 100  continue
+      segdes,msoupo
+      if (icochp.le.0) then
+        if (icochp.lt.0)
+     &     write(ioimp,*) 'ERREUR : composante Q en double !'
+        call erreur(21)
+        goto 9900
+      endif
+* NB : par la suite, on ne travaillera plus que sur melchp et la
+*      icochp-eme composante de mvpchp !
+
+C Informations de correspondance entre mchelp et mchelq :
+      segact,mchelp,mchelq
+      npartp = mchelp.imache(/1)
+      npartq = mchelq.imache(/1)
+
+      segini,mcorr
+      do 101 ima = 1, npartp
+        meleme = mchelp.imache(ima)
+        do ico = 1, npartq
+          if (meleme.eq.mchelq.imache(ico)) then
+            imelem(ima) = ico
+            goto 101
+          endif
+        enddo
+        call erreur(103)
+        goto 9900
+ 101  continue
+
+      do 102 ima = 1, npartp
+        mchaml = mchelp.ichaml(ima)
+        segact,mchaml
+        do ico = 1, nomche(/2)
+          if (nomche(ico).eq.'PPHA') then
+            if (typche(ico).ne.'REAL*8') then
+              moterr(1:16) = typche(ico)
+              moterr(17:20) = 'PPHA'
+              moterr(21:36) = mchelp.titche
+              call erreur(552)
+              goto 9990
+            endif
+            imchap(ima) = ico
+            goto 102
+          endif
+        enddo
+        moterr(1:4) = 'PPHA'
+        call erreur(236)
+        goto 9990
+ 102  continue
+
+      do 103 ima = 1, npartq
+        mchaml = mchelq.ichaml(ima)
+        segact,mchaml
+        do ico = 1, nomche(/2)
+          if (nomche(ico).eq.'Q   ') then
+            if (typche(ico).ne.'REAL*8') then
+              moterr(1:16) = typche(ico)
+              moterr(17:20) = 'Q   '
+              moterr(21:36) = mchelq.titche
+              call erreur(552)
+              goto 9990
+            endif
+            imchaq(ima) = ico
+            goto 103
+          endif
+        enddo
+        moterr(1:4) = 'Q   '
+        call erreur(236)
+        goto 9990
+ 103  continue
+
+* Tableau des connexions a partir du mchaml de chaleur latente Q
+* icpr : icpr(i) donne le nombre d'elements du mchaml auxquels le noeud
+*        num. i (= 0 si le noeud n'est pas dans le mchaml)
+      npt = xcoor(/1) / (idim+1)
+      segini,icpr
+      ngrand = 0
+      do 110 ima = 1, npartq
+        meleme = mchelq.imache(ima)
+        segact,meleme
+        nbnn = meleme.num(/1)
+        nbel = meleme.num(/2)
+        ngrand = max(ngrand,nbel)
+        do 111 iel = 1, nbel
+          do 111 inn = 1, nbnn
+            ia = meleme.num(inn,iel)
+            icpr(ia) = icpr(ia)+1
+ 111    continue
+c*        segdes,meleme
+ 110  continue
+      ngrand = ngrand+1
+* ino  : nombre total de noeuds (differents) concernes par le mchaml + 1
+* imax : somme des icpr(i) pour i = 1 a npt
+* nvoi : nombre max d'elements auquel appartient un noeud + 1
+      ino  = 1
+      imax = 0
+      nvoi = 0
+      do 112 inn = 1, npt
+        ia = icpr(inn)
+        if (ia.ne.0) then
+          ino = ino + 1
+          imax = imax + ia
+          nvoi = max(ia,nvoi)
+        endif
+ 112  continue
+      nvoi = nvoi+1
+* ipos :
+* icpr :
+      segini,mtemp
+      ia = 1
+      do 113 inn = 1, npt
+        if (icpr(inn).ne.0) then
+          ja = ia
+          ia = ia + 1
+          mtemp.ipos(ia) = mtemp.ipos(ja) + icpr(inn)
+          icpr(inn) = ja
+        endif
+ 113  continue
+*
+      segini,ipo2
+      do 114 ima = 1, npartq
+        meleme = mchelq.imache(ima)
+        nbnn = meleme.num(/1)
+        nbel = meleme.num(/2)
+        nplu = ngrand*(ima-1)
+        do 114 iel = 1, nbel
+          do 114 inn = 1, nbnn
+            ia = meleme.num(inn,iel)
+            ib = icpr(ia)
+            ipo2(ib) = ipo2(ib) + 1
+            id = ipos(ib) + ipo2(ib)
+            icon(id) = iel + nplu
+  114 continue
+      segsup,ipo2
+
+      do 115 ima = 1, npartp
+        inomp  = mcorr.imchap(ima)
+        meleme = mchelp.imache(ima)
+        mchaml = mchelp.ichaml(ima)
+c*        segact,meleme,mchaml <- Deja actives
+        melvap = mchaml.ielval(inomp)
+        ico    = mcorr.imelem(ima)
+        inomq  = mcorr.imchaq(ico)
+C**     meleme = mchelq.imache(ico) = mchelp.imache(ima)
+        mchaml = mchelq.ichaml(ico)
+c*        segact,meleme,mchaml <- Deja actives
+        melvaq = mchaml.ielval(inomq)
+        nbnn = meleme.num(/1)
+        nbel = meleme.num(/2)
+        segact,melvap*MOD,melvaq
+        n1ptel = melvap.velche(/1)
+        n1el   = melvap.velche(/2)
+        n2ptel = 0
+        n2el   = 0
+C* Champ de phase est constant :
+        if (n1ptel .lt. melvaq.velche(/1)) then
+          n1ptel = melvaq.velche(/1)
+          n1el   = nbel
+          segadj,melvap
+c*          write(ioimp,*) 'Segadj complet'
+          r_z = melvap.velche(1,1)
+          if (r_z.ne.0.D0) then
+            do iel = 1, nbel
+              do inn = 1, n1ptel
+                melvap.velche(inn,iel) = r_z
+              enddo
+            enddo
+          endif
+C* Champ de phase est constant par element :
+        else if (n1el .lt. melvaq.velche(/2)) then
+c*        n1el   = melvaq.velche(/2)
+          n1el   = nbel
+          segadj,melvap
+c*          write(ioimp,*) 'Segadj element'
+          do inn = 1, n1ptel
+            r_z = melvap.velche(inn,1)
+            if (r_z.ne.0.D0) then
+              do iel = 2, n1el
+                melvap.velche(inn,iel) = r_z
+              enddo
+            endif
+          enddo
+        endif
+        segini,iqmoye
+        mcorr.imoyep(ima) = iqmoye
+ 115  continue
+
+      meleme = melchp
+      mpoval = mvpchp
+      segact,meleme,mpoval
+
+* fabrication de la proportion de phase deja mangee par element
+      DO 1000 ifois = 1, 2
+
+C*        write(ioimp,*) 'IFOIS =',ifois
+        if (ifois.eq.2) then
+          do i = 1, ino
+            qrest(i) = 0.D0
+            qtot(i)  = 0.D0
+          enddo
+        endif
+
+        do 570 ima = 1, npartp
+
+          inomp  = mcorr.imchap(ima)
+          mchaml = mchelp.ichaml(ima)
+          melvap = mchaml.ielval(inomp)
+          imelp1 = melvap.velche(/1)
+          imelp2 = melvap.velche(/2)
+
+          ico    = mcorr.imelem(ima)
+          inomq  = mcorr.imchaq(ico)
+          mchaml = mchelq.ichaml(ico)
+          melvaq = mchaml.ielval(inomq)
+          imelq1 = melvaq.velche(/1)
+          imelq2 = melvaq.velche(/2)
+
+          iqmoye = mcorr.imoyep(ima)
+
+          meleme = mchelp.imache(ima)
+          nbnn = meleme.num(/1)
+          nbel = meleme.num(/2)
+
+          do 575 iel = 1, nbel
+            jmelp2 = min(iel,imelp2)
+            jmelq2 = min(iel,imelq2)
+            qs = 0.d0
+            do 574 inn = 1, nbnn
+              is = ABS(icpr(meleme.num(inn,iel)))
+              jmelp1 = min(inn,imelp1)
+              jmelq1 = min(inn,imelq1)
+              r_z  = melvap.velche(jmelp1,jmelp2)
+              r_z1 = melvaq.velche(jmelq1,jmelq2)
+              qs = qs + r_z
+              qtot(is)  = qtot(is) + r_z1
+              qrest(is) = qrest(is)+ r_z1*(1.d0-r_z)
+  574       continue
+            qmoy(iel) = qs/nbnn
+  575     continue
+  570   continue
+
+* boucle sur les noeuds concernés on y passe deux fois, la premiere
+* pour traiter les noeuds qui basculent completement
+        meleme = melchp
+        mpoval = mvpchp
+
+        nbechp = meleme.num(/2)
+
+        do 600 iel = 1, nbechp
+          ia = meleme.num(1,iel)
+          ib = icpr(ia)
+          if (ib.LE.0) goto 600
+* on commence par comparer qreac avec qlat pour voir si tout est mangé
+          qreac = vpocha(iel,icochp)
+          ic    = ipos(ib)+1
+          id    = ipos(ib+1)
+          if (ifois.eq.2) go to 620
+            qres = qrest(ib)
+            if (qreac.lt.0.D0) then
+              if (-qreac.lt.qres*umxpre) goto 600
+              xval = 1.d0
+            else
+              qto = qtot(ib)
+              if (qreac.lt.(qto-qres)*umxpre) goto 600
+              xval = 0.d0
+            endif
+* tous les elements sont manges : icpr(ia) => -icpr(ia) (<0)
+            icpr(ia) = -ABS(ib)
+            do 610 ie = ic, id
+              il = icon(ie)
+              ilv = mod(il,ngrand)
+              ieme = (il-ilv) / ngrand + 1
+              inomp  = mcorr.imchap(ieme)
+              mchaml = mchelp.ichaml(ieme)
+              melvap = mchaml.ielval(inomp)
+              ipt1   = mchelp.imache(ieme)
+              nbnn   = ipt1.num(/1)
+              do inn = 1, nbnn
+                if (ipt1.num(inn,ilv).eq.ia) then
+                  jmelp1 = min(inn,melvap.velche(/1))
+                  jmelp2 = min(ilv,melvap.velche(/2))
+                  melvap.velche(jmelp1,jmelp2) = xval
+                  goto 610
+                endif
+              enddo
+  610       continue
+            goto 600
+  620     continue
+* il va falloir en tartiner sur certains elements
+* on prend d'abord l'élement dont la plus gande proportion est dans le
+* sens qui nous interesse
+          i_z = id-ic+1
+          do ivo = 1, i_z
+            ivoi(ivo) = 0
+          enddo
+ 630      continue
+            iiem = -1
+            ieg  = 0
+            qma  = -1.5D0
+            qmi  = +1.5D0
+* ifon=1 quand on fond sinon on solidifie
+            if (qreac.lt.0.D0) then
+              ifon = 1
+              qreac = -qreac
+            else
+              ifon = 0
+            endif
+            do 502 ie = ic,id
+              if (ivoi(ie-ic+1).eq.1) goto 502
+              il  = icon(ie)
+              ilv = mod(il,ngrand)
+              ieme = (il - ilv)/ngrand + 1
+              iqmoye = mcorr.imoyep(ieme)
+              if (ifon.eq.1) then
+                if (qmoy(ilv).lt.umxpre. and. qmoy(ilv).GT.qma) then
+                  iiem = ieme
+                  iilv = ilv
+                  ieg  = ie
+                  qma  = qmoy(ilv)
+                endif
+              else
+                if (qmoy(ilv).ge.xpre .and. qmoy(ilv).lt.qmi) then
+                  iiem = ieme
+                  iilv = ilv
+                  ieg  = ie
+                  qmi  = qmoy(ilv)
+                endif
+              endif
+  502       continue
+            if (iiem.eq.-1) goto 600
+*
+            ivoi(ieg-ic+1) = 1
+*    mise a jour du point en question dans l'element trouvé
+            inomp  = mcorr.imchap(iiem)
+            mchaml = mchelp.ichaml(iiem)
+            melvap = mchaml.ielval(inomp)
+            imelp1 = melvap.velche(/1)
+            jmelp2 = min(iilv,melvap.velche(/2))
+            ico    = mcorr.imelem(iiem)
+            inomq  = mcorr.imchaq(ico)
+            mchaml = mchelq.ichaml(ico)
+            melvaq = mchaml.ielval(inomq)
+            imelq1 = melvaq.velche(/1)
+            jmelq2 = min(iilv,melvaq.velche(/2))
+
+            ipt1  = mchelp.imache(iiem)
+            nbnn = ipt1.num(/1)
+C*            iqmoye = mcorr.imoyep(iiem)
+            do 505 inn = 1, nbnn
+              ir = ipt1.num(inn,iilv)
+              if (ir.ne.ia) goto 505
+              jmelp1 = min(inn,imelp1)
+              jmelq1 = min(inn,imelq1)
+              r_p = melvap.velche(jmelp1,jmelp2)
+              r_q = melvaq.velche(jmelq1,jmelq2)
+              if (ifon.eq.1) then
+                qmax = r_q * (1.d0 - r_p)
+                if (qmax.le.qreac) then
+                  melvap.velche(jmelp1,jmelp2) = 1.d0
+                  if ((qreac-qmax)/r_q.le.xpre) goto 600
+                  qreac = qmax - qreac
+                  goto 630
+                else
+                  xpro = qreac / r_q
+                  melvap.velche(jmelp1,jmelp2) = r_p + xpro
+                endif
+              else
+                qmin = r_q * r_p
+                if (qmin.le.qreac) then
+                  melvap.velche(jmelp1,jmelp2) = 0.d0
+                  if (ABS((qmin-qreac)/r_q).le.xpre) goto 600
+                  qreac = qreac - qmin
+                  goto 630
+                else
+                  xpro = qreac / r_q
+                  melvap.velche(jmelp1,jmelp2) = r_p - xpro
+                endif
+              endif
+              goto 600
+  505       continue
+  600   continue
+
+ 1000 CONTINUE
+
+*  travail terminé il faut desactiver
+      meleme = melchp
+      mpoval = mvpchp
+      segdes,meleme,mpoval
+
+* desactivation mchelm,mchel1
+      do 961 ima = 1, npartp
+        inomp  = mcorr.imchap(ima)
+        meleme = mchelp.imache(ima)
+        mchaml = mchelp.ichaml(ima)
+        melvap = mchaml.ielval(inomp)
+* test de validité des valeurs 0.d0 <= val <= 1.d0
+        nbptp = melvap.velche(/1)
+        nbelp = melvap.velche(/2)
+        do 976 iel = 1, nbelp
+          do 976 inn = 1, nbptp
+            r_z  = melvap.velche(inn,iel)
+            if (r_z .LT. 0.D0) then
+              melvap.velche(inn,iel) = 0.d0
+            else if (r_z .GT. 1.D0) then
+              melvap.velche(inn,iel) = 1.d0
+            endif
+  976   continue
+        segdes,melvap,mchaml,meleme
+  961 continue
+
+      call ecrobj('MCHAML',mchelp)
+
+      do 963 ima = 1, npartq
+c*      meleme = mchelq.imache(ima)
+c*      segdes,meleme
+        mchaml = mchelq.ichaml(ima)
+        do ico = 1, mchaml.ielval(/1)
+          melval = mchaml.ielval(ico)
+          segdes,melval
+        enddo
+        segdes,mchaml
+  963 continue
+
+ 9990 continue
+      segdes,mchelp,mchelq
+      segsup,icpr,mcorr,mtemp
+ 9900 continue
+      segdes,mchpoi
+
+      return
+      end
+
+

@@ -1,0 +1,1114 @@
+C COPMSP    SOURCE    CHAT      05/01/12    22:20:44     5004
+       SUBROUTINE COPMSP(NSP,JPL,JLL,WVEC_L,WVEC_R,NVECT,TVECT,
+     &                   mpyn,lrecp,lrecv,nlcg,nlcd)
+C************************************************************************
+C
+C PROJET            :  CASTEM 2000
+C
+C NOM               :  COPMSP ('convection for multispecies')
+C
+C DESCRIPTION       :  Voir CLI252 (appele par CLI252)
+C
+C LANGAGE           :  FORTRAN 77 + ESOPE 2000 (avec estensions CISI)
+C
+C AUTEUR            :  S. KUDRIAKOV, DM2S/SFME/LTMF
+C
+C************************************************************************
+C
+c----------------------------------------------------------------------
+c GENERAL DESCRIPTION:
+c   This subroutine provides the jacobians which are the derivatives
+c   of the numerical flux function defined at the cell interface
+c   with respect to the conservative variables of the left and right
+c   cells (relative to the cell interface).
+c
+c EQUATIONS: 2D Euler equations of gas dynamics - MULTISPECIES GAS
+c
+c
+c REFERENCE: JCP, 129, 364-382 (1996)
+c            " A Sequel to AUSM: AUSM+ ".
+c----------------------------------------------------------------------
+c INPUT:
+c
+c      alpha   -- parameter of the AUSM+ scheme in the Pressure function;
+c                 ( -3/4 <= alpha <= 3/16 ) (imposed as a parameter)
+c
+c      beta    -- parameter of the AUSM+ scheme in the Mach function;
+c                 ( -1/16 <= beta <= 1/2 )  (imposed as a parameter)
+c
+c      nsp     -- number of species (total);
+c
+c      wvec_l  -- vector of the primitive variables
+c                 (rho,u_x,u_y,p) at the left cell;
+c
+c      wvec_r  -- vector of the primitive variables
+c                 (rho,u_x,u_y,p) at the right cell;
+c
+c      nvect   -- normal vector to the interface (2 components in 2D);
+c
+c      tvect   -- tangential vector to the interface;
+c
+c      mpyn    -- pointer to the vectors of the primitive variables
+c                 (Y_1,Y_2,...Y_(nsp-1)) at the left and the right cells;
+c
+c      lrecp   -- pointer to the vector of specific heats at constant pressure
+c                 (size of the vector is equal to number of species (nsp));
+c
+c      lrecv   -- pointer to the vector of specific heats at constant volume
+c                 (size of the vector is equal to number of species (nsp));
+c
+c      nlcg    -- "local" number corresponding to the left cell;
+c
+c      nlcd    -- "local" number corresponding to the right cell;
+c----------------------------------------------------------------------
+c
+c OUTPUT:
+c
+c      jll     -- jakobian matrix (3+nsp) by (3+nsp) -
+c                 derivatives of the numerical
+c                 flux function with respect to the conservative variables
+c                 from the left cell;
+c
+c      jpl     -- jakobian matrix (3+nsp) by (3+nsp) -
+c                 derivatives of the numerical
+c                 flux function with respect to the primitive variables
+c                 from the left cell.
+c----------------------------------------------------------------------
+      IMPLICIT INTEGER(I-N)
+       integer nsp,jll,jpl,lrecp,lrecv,nlcg,nlcd
+       real*8 wvec_l(4),wvec_r(4)
+       real*8 nvect(2),tvect(2)
+       real*8 alpha,beta
+       real*8 gal,gar,gm1l,gm1r,temph
+       real*8 n_x,n_y,t_x,t_y
+       real*8 un_l, un_r, ut_l, ut_r
+       real*8 ml,mr,Mplus,Mmin,mmid
+       real*8 mpl_m, mmin_m,am
+       real*8 rold_l,uold_l,vold_l,pold_l,eold_l
+       real*8 rold_r,uold_r,vold_r,pold_r,eold_r
+       real*8 Pplus,Pmin,pmid
+       real*8 hr_l,hr_r,det,top,bot
+       real*8 br1,br2,br3,br4,temp_l,temp_r,brac_l,brac_r
+       real*8 aleft, arigh
+       real*8 damr_l,damr_r,damu_l,damu_r
+       real*8 damv_l,damv_r,damp_l,damp_r
+       real*8 damg_l,damg_r
+       real*8 dmlr_l,dmlr_r,dmlu_l,dmlu_r
+       real*8 dmlv_l,dmlv_r,dmlp_l,dmlp_r
+       real*8 dmrr_l,dmrr_r,dmru_l,dmru_r
+       real*8 dmrv_l,dmrv_r,dmrp_l,dmrp_r
+       real*8 dMpr_l,dMpr_r,dMpu_l,dMpu_r
+       real*8 dMpv_l,dMpv_r,dMpp_l,dMpp_r
+       real*8 dMmr_l,dMmr_r,dMmu_l,dMmu_r
+       real*8 dMmv_l,dMmv_r,dMmp_l,dMmp_r
+       real*8 dmir_l,dmir_r,dmiu_l,dmiu_r
+       real*8 dmiv_l,dmiv_r,dmip_l,dmip_r
+       real*8 d3mr_l,d3mr_r,d3mu_l,d3mu_r
+       real*8 d3mv_l,d3mv_r,d3mp_l,d3mp_r
+       real*8 d2mr_l,d2mr_r,d2mu_l,d2mu_r
+       real*8 d2mv_l,d2mv_r,d2mp_l,d2mp_r
+       real*8 dPpr_l,dPpr_r,dPpu_l,dPpu_r
+       real*8 dPpv_l,dPpv_r,dPpp_l,dPpp_r
+       real*8 dPmr_l,dPmr_r,dPmu_l,dPmu_r
+       real*8 dPmv_l,dPmv_r,dPmp_l,dPmp_r
+       real*8 dpir_l,dpir_r,dpiu_l,dpiu_r
+       real*8 dpiv_l,dpiv_r,dpip_l,dpip_r
+       integer i,j,k
+       parameter(alpha = 0.1875D0, beta = 0.125D0)
+C------------------------------------------------------------
+-INC SMCHPOI
+       POINTEUR MPYN.MPOVAL
+C-------------------------------------------------------------
+-INC SMLREEL
+       POINTEUR MLRECP.MLREEL, MLRECV.MLREEL
+C-------------------------------------------------------------
+C******* Les fractionines massiques **************************
+C-------------------------------------------------------------
+       SEGMENT FRAMAS
+         REAL*8 YET(NSP)
+      ENDSEGMENT
+      POINTEUR YL.FRAMAS, YR.FRAMAS
+C-------------------------------------------------------
+C**********  Les CP's and CV's   ***********************
+C-------------------------------------------------------
+      SEGMENT GCONST
+         REAL*8 GC(NSP)
+      ENDSEGMENT
+      POINTEUR CP.GCONST, CV.GCONST
+C-------------------------------------------------------------
+C********  Segments for the elementary matrixes  *************
+C-------------------------------------------------------------
+       SEGMENT JACEL
+         REAL*8 JAC(3+NSP,3+NSP)
+       ENDSEGMENT
+       POINTEUR JTL.JACEL, JL.JACEL, JR.JACEL,
+     &          WL.JACEL
+c----------------------------------------
+       SEGINI JTL
+       SEGINI JL
+       SEGINI JR
+       SEGINI WL
+C-------------------------------------------------------------
+C**********  Segments for the vectors  ***********************
+C-------------------------------------------------------------
+       SEGMENT VECEL
+         REAL*8 VV(NSP)
+       ENDSEGMENT
+       POINTEUR DMLY_L.VECEL, DMLY_R.VECEL,
+     &          dmry_l.vecel, dmry_r.vecel,
+     &          dMpy_l.vecel, dMpy_r.vecel,
+     &          dMmy_l.vecel, dMmy_r.vecel,
+     &          dmiy_l.vecel, dmiy_r.vecel,
+     &          d3my_l.vecel, d3my_r.vecel,
+     &          d2my_l.vecel, d2my_r.vecel,
+     &          dPpy_l.vecel, dPpy_r.vecel,
+     &          dPmy_l.vecel, dPmy_r.vecel,
+     &          dpiy_l.vecel, dpiy_r.vecel,
+     &          dgdyl.vecel, dgdyr.vecel
+C----------------------------------------------
+       SEGINI DMLY_L, DMLY_R,
+     &          dmry_l, dmry_r,
+     &          dMpy_l, dMpy_r,
+     &          dMmy_l, dMmy_r,
+     &          dmiy_l, dmiy_r,
+     &          d3my_l, d3my_r,
+     &          d2my_l, d2my_r,
+     &          dPpy_l, dPpy_r,
+     &          dPmy_l, dPmy_r,
+     &          dpiy_l, dpiy_r,
+     &          dgdyl, dgdyr
+C-------------------------------------------------------------
+C**********  Segments for the flux-vector  *******************
+C-------------------------------------------------------------
+       SEGMENT FUNEL
+         REAL*8 FU(3+NSP)
+       ENDSEGMENT
+       POINTEUR f.funel
+C-------------------------
+       SEGINI f
+C------------------------------------------------------------
+       SEGINI YL, YR
+       SEGACT MPYN
+       DO 100 I=1,(NSP-1)
+           YL.YET(I)=MPYN.VPOCHA(NLCG,I)
+           YR.YET(I)=MPYN.VPOCHA(NLCD,I)
+ 100   CONTINUE
+C----------------------------------------
+       SEGINI CP, CV
+       MLRECP = LRECP
+       MLRECV = LRECV
+       SEGACT MLRECP, MLRECV
+       DO 101 I=1,(NSP-1)
+           CP.GC(I)=MLRECP.PROG(I)
+           CV.GC(I)=MLRECV.PROG(I)
+ 101   CONTINUE
+       CP.GC(NSP)=MLRECP.PROG(NSP)
+       CV.GC(NSP)=MLRECV.PROG(NSP)
+c-------------------------------------------------------------
+c  Computing GAMMA at the left cell and its derivatives
+c  with respect to the primitive variables Y_i
+c-------------------------------------------------------------
+       top=0.0D0
+       bot=0.0D0
+       do 40 i=1,(nsp-1)
+        top=top+yl.yet(i)*(cp.gc(i)-cp.gc(nsp))
+        bot=bot+yl.yet(i)*(cv.gc(i)-cv.gc(nsp))
+ 40    continue
+       top=cp.gc(nsp)+top
+       bot=cv.gc(nsp)+bot
+       gal=top/bot
+       gm1l=gal-1.0d0
+c-------------------------------------------------------------
+       do 41 i=1,(nsp-1)
+        dgdyl.vv(i)=(cp.gc(i)-cp.gc(nsp)-
+     &    gal*(cv.gc(i)-cv.gc(nsp)))/bot
+ 41    continue
+c-------------------------------------------------------------
+c  Computing GAMMA at the right cell and its derivatives
+c  with respect to the primitive variables Y_i
+c-------------------------------------------------------------
+       top=0.0D0
+       bot=0.0D0
+       do 42 i=1,(nsp-1)
+        top=top+yr.yet(i)*(cp.gc(i)-cp.gc(nsp))
+        bot=bot+yr.yet(i)*(cv.gc(i)-cv.gc(nsp))
+ 42    continue
+       top=cp.gc(nsp)+top
+       bot=cv.gc(nsp)+bot
+       gar=top/bot
+       gm1r=gar-1.0d0
+c-------------------------------------------------------------
+       do 43 i=1,(nsp-1)
+        dgdyr.vv(i)=(cp.gc(i)-cp.gc(nsp)-
+     &     gar*(cv.gc(i)-cv.gc(nsp)))/bot
+ 43    continue
+c-------------------------------------------------------------
+       n_x=nvect(1)
+       n_y=nvect(2)
+       t_x=tvect(1)
+       t_y=tvect(2)
+c----------------------------
+c----------------------------
+       rold_l=wvec_l(1)
+       uold_l=wvec_l(2)
+       vold_l=wvec_l(3)
+       pold_l=wvec_l(4)
+c-----------------------
+       rold_r=wvec_r(1)
+       uold_r=wvec_r(2)
+       vold_r=wvec_r(3)
+       pold_r=wvec_r(4)
+c------------------------------------------------------------------
+c Computation of the specific total energy on the left and right.
+c------------------------------------------------------------------
+       eold_l=(uold_l*uold_l+vold_l*vold_l)/2.0d0
+       eold_l=eold_l+pold_l/(gm1l*rold_l)
+       eold_r=(uold_r*uold_r+vold_r*vold_r)/2.0d0
+       eold_r=eold_r+pold_r/(gm1r*rold_r)
+c-------------------------------------------------------------------
+c Computation of the speed of sound and its derivatives;
+c numerical speed of sound at the interface is taken as an average
+c of the speeds of sounds of the neighbouring cells
+c-------------------------------------------------------------------
+       aleft=sqrt(gal*pold_l/rold_l)
+       arigh=sqrt(gar*pold_r/rold_r)
+       am=0.5d0*(aleft+arigh)
+c-------------------------------------------------------------------
+         damr_r=-arigh/(4.0d0*rold_r)
+         damu_r=0.0d0
+         damv_r=0.0d0
+         damp_r=gar/(4.0d0*arigh*rold_r)
+         damg_r=arigh/(4.0d0*gar)
+c-----------------------
+         damr_l=-aleft/(4.0d0*rold_l)
+         damu_l=0.0d0
+         damv_l=0.0d0
+         damp_l=gal/(4.0d0*aleft*rold_l)
+         damg_l=aleft/(4.0d0*gal)
+c-------------------------------------------------------------------
+c Computing numerical Mach number and its derivatives,
+c see p.370, under (A1).
+c-------------------------------------------------------------------
+       un_l=uold_l*n_x+vold_l*n_y
+       un_r=uold_r*n_x+vold_r*n_y
+       ut_l=uold_l*t_x+vold_l*t_y
+       ut_r=uold_r*t_x+vold_r*t_y
+c-------------------------------------------------------------------
+       ml=un_l/am
+       mr=un_r/am
+c-------------------------------------------------------------------
+c  Mplus and Mmin are calligraphic lettes M+ and M- from the paper,
+c  see (19a) and (19b), p.367.
+c-------------------------------------------------------------------
+       if(abs(ml) .ge. 1.0d0) then
+         Mplus=(ml+abs(ml))/2.0d0
+       else
+         Mplus=(ml+1.0d0)*(ml+1.0d0)/4.0d0
+         Mplus=Mplus+beta*(ml*ml-1.0d0)*(ml*ml-1.0d0)
+       endif
+c-------------------------------------------------------------------
+       if(abs(mr) .ge. 1.0d0) then
+         Mmin=(mr-abs(mr))/2.0d0
+       else
+         Mmin=-(mr-1.0d0)*(mr-1.0d0)/4.0d0
+         Mmin=Mmin-beta*(mr*mr-1.0d0)*(mr*mr-1.0d0)
+       endif
+c-------------------------------------------------------------------
+c Derivatives of ml and mr with respect to both sets of primitive
+c variables: left  and right.
+c-------------------------------------------------------------------
+       temp_l=-un_l/(am*am)
+       temp_r=-un_r/(am*am)
+c--------
+       dmlr_l=temp_l*damr_l
+       dmlr_r=temp_l*damr_r
+       dmrr_l=temp_r*damr_l
+       dmrr_r=temp_r*damr_r
+c--------
+       dmlu_l=n_x/am+temp_l*damu_l
+       dmlu_r=temp_l*damu_r
+       dmru_l=temp_r*damu_l
+       dmru_r=n_x/am+temp_r*damu_r
+c--------
+       dmlv_l=n_y/am+temp_l*damv_l
+       dmlv_r=temp_l*damv_r
+       dmrv_l=temp_r*damv_l
+       dmrv_r=n_y/am+temp_r*damv_r
+c--------
+       dmlp_l=temp_l*damp_l
+       dmlp_r=temp_l*damp_r
+       dmrp_l=temp_r*damp_l
+       dmrp_r=temp_r*damp_r
+c--------
+       do 44 i=1,(nsp-1)
+         dmly_l.vv(i)=temp_l*damg_l*dgdyl.vv(i)
+         dmly_r.vv(i)=temp_l*damg_r*dgdyr.vv(i)
+         dmry_l.vv(i)=temp_r*damg_l*dgdyl.vv(i)
+         dmry_r.vv(i)=temp_r*damg_r*dgdyr.vv(i)
+ 44    continue
+c-----------------------------------------------------------
+c mmid is m_{1/2} (notation as in the paper, see (13),p.366)
+c-----------------------------------------------------------
+       mmid=Mplus+Mmin
+c-----------------------------------------------------------
+c Computing the derivatives of M+ and M-
+c-----------------------------------------------------------
+       if(ml .ge. 1.0d0) then
+         dMpr_l=dmlr_l
+         dMpu_l=dmlu_l
+         dMpv_l=dmlv_l
+         dMpp_l=dmlp_l
+         do 45 i=1,(nsp-1)
+           dMpy_l.vv(i)=dmly_l.vv(i)
+ 45      continue
+c--------------------
+         dMpr_r=dmlr_r
+         dMpu_r=dmlu_r
+         dMpv_r=dmlv_r
+         dMpp_r=dmlp_r
+         do 46 i=1,(nsp-1)
+           dMpy_r.vv(i)=dmly_r.vv(i)
+ 46      continue
+       else
+        if((ml .gt. -1.0d0) .and. (ml .lt. 1.0d0)) then
+         temph=(ml+1.0d0)/2.0d0
+         dMpr_l=(temph+4.0d0*beta*ml*(ml*ml-1.0d0))*dmlr_l
+         dMpu_l=(temph+4.0d0*beta*ml*(ml*ml-1.0d0))*dmlu_l
+         dMpv_l=(temph+4.0d0*beta*ml*(ml*ml-1.0d0))*dmlv_l
+         dMpp_l=(temph+4.0d0*beta*ml*(ml*ml-1.0d0))*dmlp_l
+         do 47 i=1,(nsp-1)
+         dMpy_l.vv(i)=(temph+4.0d0*beta*ml*
+     &      (ml*ml-1.0d0))*dmly_l.vv(i)
+ 47      continue
+c--------------------
+           dMpr_r=(temph+4.0d0*beta*ml*(ml*ml-1.0d0))*dmlr_r
+           dMpu_r=(temph+4.0d0*beta*ml*(ml*ml-1.0d0))*dmlu_r
+           dMpv_r=(temph+4.0d0*beta*ml*(ml*ml-1.0d0))*dmlv_r
+           dMpp_r=(temph+4.0d0*beta*ml*(ml*ml-1.0d0))*dmlp_r
+           do 48 i=1,(nsp-1)
+             dMpy_r.vv(i)=(temph+4.0d0*beta*ml*
+     &         (ml*ml-1.0d0))*dmly_r.vv(i)
+ 48        continue
+         else
+           dMpr_l=0.0d0
+           dMpu_l=0.0d0
+           dMpv_l=0.0d0
+           dMpp_l=0.0d0
+           do 49 i=1,(nsp-1)
+             dMpy_l.vv(i)=0.0d0
+ 49        continue
+c---------------------
+           dMpr_r=0.0d0
+           dMpu_r=0.0d0
+           dMpv_r=0.0d0
+           dMpp_r=0.0d0
+           do 50 i=1,(nsp-1)
+             dMpy_r.vv(i)=0.0d0
+ 50        continue
+         endif
+       endif
+c-----------------------------------------------------------
+       if(mr .ge. 1.0d0) then
+         dMmr_l=0.0d0
+         dMmu_l=0.0d0
+         dMmv_l=0.0d0
+         dMmp_l=0.0d0
+         do 51 i=1,(nsp-1)
+           dMmy_l.vv(i)=0.0d0
+ 51      continue
+c---------------------
+         dMmr_r=0.0d0
+         dMmu_r=0.0d0
+         dMmv_r=0.0d0
+         dMmp_r=0.0d0
+         do 52 i=1,(nsp-1)
+           dMmy_r.vv(i)=0.0d0
+ 52      continue
+       else
+         if((mr .gt. -1.0d0) .and. (mr .lt. 1.0d0)) then
+           temph=(-mr+1.0d0)/2.0d0
+           dMmr_l=(temph-4.0d0*beta*mr*(mr*mr-1.0d0))*dmrr_l
+           dMmu_l=(temph-4.0d0*beta*mr*(mr*mr-1.0d0))*dmru_l
+           dMmv_l=(temph-4.0d0*beta*mr*(mr*mr-1.0d0))*dmrv_l
+           dMmp_l=(temph-4.0d0*beta*mr*(mr*mr-1.0d0))*dmrp_l
+           do 53 i=1,(nsp-1)
+             dMmy_l.vv(i)=(temph-4.0d0*beta*mr*
+     &        (mr*mr-1.0d0))*dmry_l.vv(i)
+ 53        continue
+c--------------------
+           dMmr_r=(temph-4.0d0*beta*mr*(mr*mr-1.0d0))*dmrr_r
+           dMmu_r=(temph-4.0d0*beta*mr*(mr*mr-1.0d0))*dmru_r
+           dMmv_r=(temph-4.0d0*beta*mr*(mr*mr-1.0d0))*dmrv_r
+           dMmp_r=(temph-4.0d0*beta*mr*(mr*mr-1.0d0))*dmrp_r
+           do 54 i=1,(nsp-1)
+             dMmy_r.vv(i)=(temph-4.0d0*beta*mr*
+     &          (mr*mr-1.0d0))*dmry_r.vv(i)
+ 54        continue
+         else
+           dMmr_l=dmrr_l
+           dMmu_l=dmru_l
+           dMmv_l=dmrv_l
+           dMmp_l=dmrp_l
+           do 55 i=1,(nsp-1)
+             dMmy_l.vv(i)=dmry_l.vv(i)
+ 55        continue
+c--------------------
+           dMmr_r=dmrr_r
+           dMmu_r=dmru_r
+           dMmv_r=dmrv_r
+           dMmp_r=dmrp_r
+           do 56 i=1,(nsp-1)
+             dMmy_r.vv(i)=dmry_r.vv(i)
+ 56        continue
+         endif
+       endif
+c-----------------------------------------------------------------
+c computing the derivatives of m_{1/2} (notation as in the paper)
+c-----------------------------------------------------------------
+       dmir_l=dMpr_l+dMmr_l
+       dmir_r=dMpr_r+dMmr_r
+c-------------
+       dmiu_l=dMpu_l+dMmu_l
+       dmiu_r=dMpu_r+dMmu_r
+c-------------
+       dmiv_l=dMpv_l+dMmv_l
+       dmiv_r=dMpv_r+dMmv_r
+c-------------
+       dmip_l=dMpp_l+dMmp_l
+       dmip_r=dMpp_r+dMmp_r
+c-------------
+       do 57 i=1,(nsp-1)
+         dmiy_l.vv(i)=dMpy_l.vv(i)+dMmy_l.vv(i)
+         dmiy_r.vv(i)=dMpy_r.vv(i)+dMmy_r.vv(i)
+ 57    continue
+c----------------------------------------------------------------
+c computing the main convective variables and their derivatives
+c mpl_m is m^{+}_{1/2} (paper's notation) and
+c mmin_m  is m^{-}_{1/2} (paper's notation), see (A2) on p.370.
+c----------------------------------------------------------------
+       if(mmid .ge. 0.0d0) then
+         mpl_m = mmid
+         d2mr_l=dmir_l
+         d2mu_l=dmiu_l
+         d2mv_l=dmiv_l
+         d2mp_l=dmip_l
+         do 58 i=1,(nsp-1)
+           d2my_l.vv(i)=dmiy_l.vv(i)
+ 58      continue
+c------------
+         d2mr_r=dmir_r
+         d2mu_r=dmiu_r
+         d2mv_r=dmiv_r
+         d2mp_r=dmip_r
+         do 59 i=1,(nsp-1)
+           d2my_r.vv(i)=dmiy_r.vv(i)
+ 59      continue
+c------------
+       else
+         mpl_m = 0.0d0
+         d2mr_l=0.0d0
+         d2mu_l=0.0d0
+         d2mv_l=0.0d0
+         d2mp_l=0.0d0
+         do 60 i=1,(nsp-1)
+           d2my_l.vv(i)=0.0d0
+ 60      continue
+c------------
+         d2mr_r=0.0d0
+         d2mu_r=0.0d0
+         d2mv_r=0.0d0
+         d2mp_r=0.0d0
+         do 61 i=1,(nsp-1)
+           d2my_r.vv(i)=0.0d0
+ 61      continue
+       endif
+c---------------------------------------------
+       if(mmid .le. 0.0d0) then
+         mmin_m = mmid
+         d3mr_l=dmir_l
+         d3mu_l=dmiu_l
+         d3mv_l=dmiv_l
+         d3mp_l=dmip_l
+         do 62 i=1,(nsp-1)
+           d3my_l.vv(i)=dmiy_l.vv(i)
+ 62      continue
+c------------
+         d3mr_r=dmir_r
+         d3mu_r=dmiu_r
+         d3mv_r=dmiv_r
+         d3mp_r=dmip_r
+         do 63 i=1,(nsp-1)
+           d3my_r.vv(i)=dmiy_r.vv(i)
+ 63      continue
+c------------
+       else
+         mmin_m = 0.0d0
+         d3mr_l=0.0d0
+         d3mu_l=0.0d0
+         d3mv_l=0.0d0
+         d3mp_l=0.0d0
+         do 64 i=1,(nsp-1)
+           d3my_l.vv(i)=0.0d0
+ 64      continue
+c------------
+         d3mr_r=0.0d0
+         d3mu_r=0.0d0
+         d3mv_r=0.0d0
+         d3mp_r=0.0d0
+         do 65 i=1,(nsp-1)
+           d3my_r.vv(i)=0.0d0
+ 65      continue
+       endif
+c---------------------------------------------------------------
+c Computing the calligraphic P+ and P- with their derivatives,
+c see (21a) & (21b) on p.368.
+c---------------------------------------------------------------
+       if(ml .ge. 1.0d0) then
+         Pplus = 1.0d0
+       else
+         if((ml .gt. -1.0d0) .and. (ml .lt. 1.0d0)) then
+           Pplus=(ml+1.0d0)*(ml+1.0d0)*(2.0d0-ml)/4.0d0
+           Pplus=Pplus+alpha*ml*(ml*ml-1.0d0)*(ml*ml-1.0d0)
+         else
+           Pplus = 0.0d0
+         endif
+       endif
+c---------------------------------------------------------------
+       if(mr .ge. 1.0d0) then
+         Pmin = 0.0d0
+       else
+         if((mr .gt. -1.0d0) .and. (mr .lt. 1.0d0)) then
+           Pmin=(mr-1.0d0)*(mr-1.0d0)*(2.0d0+mr)/4.0d0
+           Pmin=Pmin-alpha*mr*(mr*mr-1.0d0)*(mr*mr-1.0d0)
+         else
+           Pmin = 1.0d0
+         endif
+       endif
+c---------------------------------------------------------------
+       brac_l=(ml+1.0d0)*(2.0d0-ml)/2.0d0-(ml+1.0d0)*(ml+1.0d0)/4.0d0
+       brac_l=brac_l+alpha*(ml*ml-1.0d0)*(ml*ml-1.0d0)
+       brac_l=brac_l+4.0d0*alpha*ml*ml*(ml*ml-1.0d0)
+c--------------
+       brac_r=(mr-1.0d0)*(2.0d0+mr)/2.0d0+(mr-1.0d0)*(mr-1.0d0)/4.0d0
+       brac_r=brac_r-alpha*(mr*mr-1.0d0)*(mr*mr-1.0d0)
+       brac_r=brac_r-4.0d0*alpha*mr*mr*(mr*mr-1.0d0)
+c---------------------------------------------------------------
+       if((ml .gt. -1.0d0) .and. (ml .lt. 1.0d0)) then
+         dPpr_l=brac_l*dmlr_l
+         dPpr_r=brac_l*dmlr_r
+c------------
+         dPpu_l=brac_l*dmlu_l
+         dPpu_r=brac_l*dmlu_r
+c------------
+         dPpv_l=brac_l*dmlv_l
+         dPpv_r=brac_l*dmlv_r
+c------------
+         dPpp_l=brac_l*dmlp_l
+         dPpp_r=brac_l*dmlp_r
+c------------
+         do 66 i=1,(nsp-1)
+           dPpy_l.vv(i)=brac_l*dmly_l.vv(i)
+           dPpy_r.vv(i)=brac_l*dmly_r.vv(i)
+ 66      continue
+c------------
+       else
+         dPpr_l=0.0d0
+         dPpr_r=0.0d0
+c-----------
+         dPpu_l=0.0d0
+         dPpu_r=0.0d0
+c-----------
+         dPpv_l=0.0d0
+         dPpv_r=0.0d0
+c-----------
+         dPpp_l=0.0d0
+         dPpp_r=0.0d0
+c-----------
+         do 67 i=1,(nsp-1)
+           dPpy_l.vv(i)=0.0d0
+           dPpy_r.vv(i)=0.0d0
+ 67      continue
+c-----------
+       endif
+c---------------------------------------------------------------
+       if((mr .gt. -1.0d0) .and. (mr .lt. 1.0d0)) then
+         dPmr_l=brac_r*dmrr_l
+         dPmr_r=brac_r*dmrr_r
+c------------
+         dPmu_l=brac_r*dmru_l
+         dPmu_r=brac_r*dmru_r
+c------------
+         dPmv_l=brac_r*dmrv_l
+         dPmv_r=brac_r*dmrv_r
+c------------
+         dPmp_l=brac_r*dmrp_l
+         dPmp_r=brac_r*dmrp_r
+c------------
+         do 68 i=1,(nsp-1)
+           dPmy_l.vv(i)=brac_r*dmry_l.vv(i)
+           dPmy_r.vv(i)=brac_r*dmry_r.vv(i)
+ 68      continue
+c------------
+       else
+         dPmr_l=0.0d0
+         dPmr_r=0.0d0
+c-----------
+         dPmu_l=0.0d0
+         dPmu_r=0.0d0
+c-----------
+         dPmv_l=0.0d0
+         dPmv_r=0.0d0
+c-----------
+         dPmp_l=0.0d0
+         dPmp_r=0.0d0
+c-----------
+         do 69 i=1,(nsp-1)
+           dPmy_l.vv(i)=0.0d0
+           dPmy_r.vv(i)=0.0d0
+ 69      continue
+c-----------
+       endif
+c-------------------------------------------------------------------
+c computing pmid -- p_{1/2} and its derivatives, see (20b), p.367.
+c-------------------------------------------------------------------
+       pmid=Pplus*pold_l + Pmin*pold_r
+       dpir_l=dPpr_l*pold_l+dPmr_l*pold_r
+       dpiu_l=dPpu_l*pold_l+dPmu_l*pold_r
+       dpiv_l=dPpv_l*pold_l+dPmv_l*pold_r
+       dpip_l=dPpp_l*pold_l+Pplus+dPmp_l*pold_r
+       do 70 i=1,(nsp-1)
+         dpiy_l.vv(i)=dPpy_l.vv(i)*pold_l+dPmy_l.vv(i)*pold_r
+ 70    continue
+c----------------------------
+       dpir_r=dPpr_r*pold_l+dPmr_r*pold_r
+       dpiu_r=dPpu_r*pold_l+dPmu_r*pold_r
+       dpiv_r=dPpv_r*pold_l+dPmv_r*pold_r
+       dpip_r=dPpp_r*pold_l+Pmin+dPmp_r*pold_r
+       do 71 i=1,(nsp-1)
+         dpiy_r.vv(i)=dPpy_r.vv(i)*pold_l+dPmy_r.vv(i)*pold_r
+ 71    continue
+c---------------------------------------------------------------------
+c computing JACOBIAN as a derivative of the numerical flux function
+c with respect to the primitive variables.
+c Notation: jl(i,j) --- is the derivative of the i-component of the
+c           flux function with respect to the j-component of the
+c           vector of primitive variables of the left state.
+c           jr(i,j) --- is the derivative of the i-component of the
+c           flux function with respect to the j-component of the
+c           vector of primitive variables of the right state.
+c---------------------------------------------------------------------
+       f.fu(1)=am*(mpl_m*rold_l+mmin_m*rold_r)
+c---------------------------------------------------------------------
+       jl.jac(1,1)=damr_l*f.fu(1)/am+am*(d2mr_l*rold_l+mpl_m)
+       jl.jac(1,1)=jl.jac(1,1)+am*d3mr_l*rold_r
+       jl.jac(1,2)=damu_l*f.fu(1)/am+am*(d2mu_l*rold_l+d3mu_l*rold_r)
+       jl.jac(1,3)=damv_l*f.fu(1)/am+am*(d2mv_l*rold_l+d3mv_l*rold_r)
+       jl.jac(1,4)=damp_l*f.fu(1)/am+am*(d2mp_l*rold_l+d3mp_l*rold_r)
+       do 72 i=1,(nsp-1)
+        jl.jac(1,4+i)=damg_l*dgdyl.vv(i)*f.fu(1)/am+
+     &     am*(d2my_l.vv(i)*rold_l+d3my_l.vv(i)*rold_r)
+ 72    continue
+c------------------------------------
+       jr.jac(1,1)=damr_r*f.fu(1)/am+am*(d2mr_r*rold_l+mmin_m)
+       jr.jac(1,1)=jr.jac(1,1)+am*d3mr_r*rold_r
+       jr.jac(1,2)=damu_r*f.fu(1)/am+am*(d2mu_r*rold_l+d3mu_r*rold_r)
+       jr.jac(1,3)=damv_r*f.fu(1)/am+am*(d2mv_r*rold_l+d3mv_r*rold_r)
+       jr.jac(1,4)=damp_r*f.fu(1)/am+am*(d2mp_r*rold_l+d3mp_r*rold_r)
+       do 73 i=1,(nsp-1)
+        jr.jac(1,4+i)=damg_r*dgdyr.vv(i)*f.fu(1)/am+
+     &     am*(d2my_r.vv(i)*rold_l+d3my_r.vv(i)*rold_r)
+ 73    continue
+c------------------------------------
+c------------------------------------
+       br1=mpl_m*rold_l*un_l+mmin_m*rold_r*un_r
+       br2=mpl_m*rold_l*ut_l+mmin_m*rold_r*ut_r
+       f.fu(2)=n_x*(am*br1+pmid)+am*t_x*br2
+c------------------
+       det=n_x*t_y-n_y*t_x
+c---------------------------------------------------------
+       br3=d2mr_l*rold_l*un_l+mpl_m*un_l+d3mr_l*rold_r*un_r
+       br4=d2mr_l*rold_l*ut_l+mpl_m*ut_l+d3mr_l*rold_r*ut_r
+       jl.jac(2,1)=n_x*(damr_l*br1+am*br3+dpir_l)
+       jl.jac(2,1)=jl.jac(2,1)+t_x*damr_l*br2+am*t_x*br4
+c-------------------
+       br3=d2mu_l*rold_l*un_l+mpl_m*rold_l*t_y/det
+       br3=br3+d3mu_l*rold_r*un_r
+       br4=d2mu_l*rold_l*ut_l+mpl_m*rold_l*(-n_y)/det
+       br4=br4+d3mu_l*rold_r*ut_r
+       jl.jac(2,2)=n_x*(damu_l*br1+am*br3+dpiu_l)
+       jl.jac(2,2)=jl.jac(2,2)+t_x*damu_l*br2+am*t_x*br4
+c-------------------
+       br3=d2mv_l*rold_l*un_l+mpl_m*rold_l*(-t_x)/det
+       br3=br3+d3mv_l*rold_r*un_r
+       br4=d2mv_l*rold_l*ut_l+mpl_m*rold_l*n_x/det
+       br4=br4+d3mv_l*rold_r*ut_r
+       jl.jac(2,3)=n_x*(damv_l*br1+am*br3+dpiv_l)
+       jl.jac(2,3)=jl.jac(2,3)+t_x*damv_l*br2+am*t_x*br4
+c-------------------
+       br3=d2mp_l*rold_l*un_l+d3mp_l*rold_r*un_r
+       br4=d2mp_l*rold_l*ut_l+d3mp_l*rold_r*ut_r
+       jl.jac(2,4)=n_x*(damp_l*br1+am*br3+dpip_l)
+       jl.jac(2,4)=jl.jac(2,4)+t_x*damp_l*br2+am*t_x*br4
+c-------------------
+       do 74 i=1,(nsp-1)
+         br3=d2my_l.vv(i)*rold_l*un_l+d3my_l.vv(i)*rold_r*un_r
+         br4=d2my_l.vv(i)*rold_l*ut_l+d3my_l.vv(i)*rold_r*ut_r
+         jl.jac(2,4+i)=n_x*(damg_l*dgdyl.vv(i)*br1+
+     &       am*br3+dpiy_l.vv(i))
+         jl.jac(2,4+i)=jl.jac(2,4+i)+
+     &       t_x*damg_l*dgdyl.vv(i)*br2+am*t_x*br4
+ 74    continue
+c-------------------------------------------------------------
+       br3=d2mr_r*rold_l*un_l+mmin_m*un_r+d3mr_r*rold_r*un_r
+       br4=d2mr_r*rold_l*ut_l+mmin_m*ut_r+d3mr_r*rold_r*ut_r
+       jr.jac(2,1)=n_x*(damr_r*br1+am*br3+dpir_r)
+       jr.jac(2,1)=jr.jac(2,1)+t_x*damr_r*br2+am*t_x*br4
+c-------------------
+       br3=d2mu_r*rold_l*un_l+mmin_m*rold_r*t_y/det
+       br3=br3+d3mu_r*rold_r*un_r
+       br4=d2mu_r*rold_l*ut_l+mmin_m*rold_r*(-n_y/det)
+       br4=br4+d3mu_r*rold_r*ut_r
+       jr.jac(2,2)=n_x*(damu_r*br1+am*br3+dpiu_r)
+       jr.jac(2,2)=jr.jac(2,2)+t_x*damu_r*br2+am*t_x*br4
+c-------------------
+       br3=d2mv_r*rold_l*un_l+mmin_m*rold_r*(-t_x/det)
+       br3=br3+d3mv_r*rold_r*un_r
+       br4=d2mv_r*rold_l*ut_l+mmin_m*rold_r*n_x/det
+       br4=br4+d3mv_r*rold_r*ut_r
+       jr.jac(2,3)=n_x*(damv_r*br1+am*br3+dpiv_r)
+       jr.jac(2,3)=jr.jac(2,3)+t_x*damv_r*br2+am*t_x*br4
+c-------------------
+       br3=d2mp_r*rold_l*un_l+d3mp_r*rold_r*un_r
+       br4=d2mp_r*rold_l*ut_l+d3mp_r*rold_r*ut_r
+       jr.jac(2,4)=n_x*(damp_r*br1+am*br3+dpip_r)
+       jr.jac(2,4)=jr.jac(2,4)+t_x*damp_r*br2+am*t_x*br4
+c-------------------
+       do 75 i=1,(nsp-1)
+         br3=d2my_r.vv(i)*rold_l*un_l+d3my_r.vv(i)*rold_r*un_r
+         br4=d2my_r.vv(i)*rold_l*ut_l+d3my_r.vv(i)*rold_r*ut_r
+         jr.jac(2,4+i)=n_x*(damg_r*dgdyr.vv(i)*br1+
+     &       am*br3+dpiy_r.vv(i))
+         jr.jac(2,4+i)=jr.jac(2,4+i)+
+     &      t_x*damg_r*dgdyr.vv(i)*br2+am*t_x*br4
+ 75    continue
+c-------------------------------------------------------------
+c-------------------------------------------------------------
+       br1=mpl_m*rold_l*un_l+mmin_m*rold_r*un_r
+       br2=mpl_m*rold_l*ut_l+mmin_m*rold_r*ut_r
+       f.fu(3)=n_y*(am*br1+pmid)+am*t_y*br2
+       br3=d2mr_l*rold_l*un_l+mpl_m*un_l+d3mr_l*rold_r*un_r
+       br4=d2mr_l*rold_l*ut_l+mpl_m*ut_l+d3mr_l*rold_r*ut_r
+       jl.jac(3,1)=n_y*(damr_l*br1+am*br3+dpir_l)
+       jl.jac(3,1)=jl.jac(3,1)+t_y*damr_l*br2+am*t_y*br4
+c-------------------
+       br3=d2mu_l*rold_l*un_l+mpl_m*rold_l*t_y/det
+       br3=br3+d3mu_l*rold_r*un_r
+       br4=d2mu_l*rold_l*ut_l+mpl_m*rold_l*(-n_y/det)
+       br4=br4+d3mu_l*rold_r*ut_r
+       jl.jac(3,2)=n_y*(damu_l*br1+am*br3+dpiu_l)
+       jl.jac(3,2)=jl.jac(3,2)+t_y*damu_l*br2+am*t_y*br4
+c-------------------
+       br3=d2mv_l*rold_l*un_l+mpl_m*rold_l*(-t_x/det)
+       br3=br3+d3mv_l*rold_r*un_r
+       br4=d2mv_l*rold_l*ut_l+mpl_m*rold_l*n_x/det
+       br4=br4+d3mv_l*rold_r*ut_r
+       jl.jac(3,3)=n_y*(damv_l*br1+am*br3+dpiv_l)
+       jl.jac(3,3)=jl.jac(3,3)+t_y*damv_l*br2+am*t_y*br4
+c-------------------
+       br3=d2mp_l*rold_l*un_l+d3mp_l*rold_r*un_r
+       br4=d2mp_l*rold_l*ut_l+d3mp_l*rold_r*ut_r
+       jl.jac(3,4)=n_y*(damp_l*br1+am*br3+dpip_l)
+       jl.jac(3,4)=jl.jac(3,4)+t_y*damp_l*br2+am*t_y*br4
+c-------------------
+       do 76 i=1,(nsp-1)
+         br3=d2my_l.vv(i)*rold_l*un_l+d3my_l.vv(i)*rold_r*un_r
+         br4=d2my_l.vv(i)*rold_l*ut_l+d3my_l.vv(i)*rold_r*ut_r
+         jl.jac(3,4+i)=n_y*(damg_l*dgdyl.vv(i)*br1+
+     &       am*br3+dpiy_l.vv(i))
+         jl.jac(3,4+i)=jl.jac(3,4+i)+
+     &     t_y*damg_l*dgdyl.vv(i)*br2+am*t_y*br4
+ 76    continue
+c-------------------------------------------------------------
+       br3=d2mr_r*rold_l*un_l+mmin_m*un_r+d3mr_r*rold_r*un_r
+       br4=d2mr_r*rold_l*ut_l+mmin_m*ut_r+d3mr_r*rold_r*ut_r
+       jr.jac(3,1)=n_y*(damr_r*br1+am*br3+dpir_r)
+       jr.jac(3,1)=jr.jac(3,1)+t_y*damr_r*br2+am*t_y*br4
+c-------------------
+       br3=d2mu_r*rold_l*un_l+mmin_m*rold_r*t_y/det
+       br3=br3+d3mu_r*rold_r*un_r
+       br4=d2mu_r*rold_l*ut_l+mmin_m*rold_r*(-n_y/det)
+       br4=br4+d3mu_r*rold_r*ut_r
+       jr.jac(3,2)=n_y*(damu_r*br1+am*br3+dpiu_r)
+       jr.jac(3,2)=jr.jac(3,2)+t_y*damu_r*br2+am*t_y*br4
+c-------------------
+       br3=d2mv_r*rold_l*un_l+mmin_m*rold_r*(-t_x/det)
+       br3=br3+d3mv_r*rold_r*un_r
+       br4=d2mv_r*rold_l*ut_l+mmin_m*rold_r*n_x/det
+       br4=br4+d3mv_r*rold_r*ut_r
+       jr.jac(3,3)=n_y*(damv_r*br1+am*br3+dpiv_r)
+       jr.jac(3,3)=jr.jac(3,3)+t_y*damv_r*br2+am*t_y*br4
+c-------------------
+       br3=d2mp_r*rold_l*un_l+d3mp_r*rold_r*un_r
+       br4=d2mp_r*rold_l*ut_l+d3mp_r*rold_r*ut_r
+       jr.jac(3,4)=n_y*(damp_r*br1+am*br3+dpip_r)
+       jr.jac(3,4)=jr.jac(3,4)+t_y*damp_r*br2+am*t_y*br4
+c-------------------
+       do 77 i=1,(nsp-1)
+         br3=d2my_r.vv(i)*rold_l*un_l+d3my_r.vv(i)*rold_r*un_r
+         br4=d2my_r.vv(i)*rold_l*ut_l+d3my_r.vv(i)*rold_r*ut_r
+         jr.jac(3,4+i)=n_y*(damg_r*dgdyr.vv(i)*br1+
+     &       am*br3+dpiy_r.vv(i))
+         jr.jac(3,4+i)=jr.jac(3,4+i)+
+     &      t_y*damg_r*dgdyr.vv(i)*br2+am*t_y*br4
+ 77    continue
+c-------------------------------------------------------------
+c  ---------------------  f4 ----------------------------
+c-------------------------------------------------------------
+       hr_l=rold_l*(uold_l*uold_l+vold_l*vold_l)/2.0d0+gal*pold_l/gm1l
+       hr_r=rold_r*(uold_r*uold_r+vold_r*vold_r)/2.0d0+gar*pold_r/gm1r
+       f.fu(4)=am*(mpl_m*hr_l+mmin_m*hr_r)
+c---------------------
+       br1=d2mr_l*hr_l+mpl_m*(uold_l*uold_l+vold_l*vold_l)/2.0d0
+       br1=br1+d3mr_l*hr_r
+       jl.jac(4,1)=damr_l*f.fu(4)/am+am*br1
+c---------------------
+       br1=d2mu_l*hr_l+mpl_m*uold_l*rold_l
+       br1=br1+d3mu_l*hr_r
+       jl.jac(4,2)=damu_l*f.fu(4)/am+am*br1
+c---------------------
+       br1=d2mv_l*hr_l+mpl_m*vold_l*rold_l
+       br1=br1+d3mv_l*hr_r
+       jl.jac(4,3)=damv_l*f.fu(4)/am+am*br1
+c---------------------
+       br1=d2mp_l*hr_l+mpl_m*gal/gm1l
+       br1=br1+d3mp_l*hr_r
+       jl.jac(4,4)=damp_l*f.fu(4)/am+am*br1
+c---------------------
+       do 78 i=1,(nsp-1)
+         br1=d2my_l.vv(i)*hr_l+mpl_m*(-pold_l)*dgdyl.vv(i)/(gm1l*gm1l)
+         br1=br1+d3my_l.vv(i)*hr_r
+         jl.jac(4,4+i)=damg_l*dgdyl.vv(i)*f.fu(4)/am+am*br1
+ 78    continue
+c----------------------------------------------------------
+c----------------------------------------------------------
+       br1=d2mr_r*hr_l+mmin_m*(uold_r*uold_r+vold_r*vold_r)/2.0d0
+       br1=br1+d3mr_r*hr_r
+       jr.jac(4,1)=damr_r*f.fu(4)/am+am*br1
+c---------------------
+       br1=d2mu_r*hr_l+mmin_m*uold_r*rold_r
+       br1=br1+d3mu_r*hr_r
+       jr.jac(4,2)=damu_r*f.fu(4)/am+am*br1
+c---------------------
+       br1=d2mv_r*hr_l+mmin_m*vold_r*rold_r
+       br1=br1+d3mv_r*hr_r
+       jr.jac(4,3)=damv_r*f.fu(4)/am+am*br1
+c---------------------
+       br1=d2mp_r*hr_l+mmin_m*gar/gm1r
+       br1=br1+d3mp_r*hr_r
+       jr.jac(4,4)=damp_r*f.fu(4)/am+am*br1
+c---------------------
+       do 79 i=1,(nsp-1)
+         br1=d2my_r.vv(i)*hr_l+mmin_m*
+     &     (-pold_r)*dgdyr.vv(i)/(gm1r*gm1r)
+         br1=br1+d3my_r.vv(i)*hr_r
+         jr.jac(4,4+i)=damg_r*dgdyr.vv(i)*f.fu(4)/am+am*br1
+ 79    continue
+c-------------------------------------------------------------
+c ------------------ f5++ ------------------------------------
+c-------------------------------------------------------------
+       do 80 i=1,(nsp-1)
+       f.fu(4+i)=am*(mpl_m*rold_l*yl.yet(i)+mmin_m*rold_r*yr.yet(i))
+c---------------------
+       jl.jac(4+i,1)=damr_l*f.fu(4+i)/am+
+     &       am*(d2mr_l*rold_l*yl.yet(i)+mpl_m*yl.yet(i))
+       jl.jac(4+i,1)=jl.jac(4+i,1)+am*d3mr_l*rold_r*yr.yet(i)
+       jl.jac(4+i,2)=damu_l*f.fu(4+i)/am+am*(d2mu_l*rold_l*yl.yet(i)+
+     &           d3mu_l*rold_r*yr.yet(i))
+       jl.jac(4+i,3)=damv_l*f.fu(4+i)/am+am*(d2mv_l*rold_l*yl.yet(i)+
+     &           d3mv_l*rold_r*yr.yet(i))
+       jl.jac(4+i,4)=damp_l*f.fu(4+i)/am+am*(d2mp_l*rold_l*yl.yet(i)+
+     &           d3mp_l*rold_r*yr.yet(i))
+       do 81 j=5,(4+nsp-1)
+        if((4+i).eq.j) then
+          jl.jac(4+i,j)=damg_l*dgdyl.vv(j-4)*f.fu(4+i)/am+
+     &    am*(d2my_l.vv(j-4)*rold_l*yl.yet(i)+mpl_m*rold_l+
+     &    d3my_l.vv(j-4)*rold_r*yr.yet(i))
+        else
+          jl.jac(4+i,j)=damg_l*dgdyl.vv(j-4)*f.fu(4+i)/am+
+     &    am*(d2my_l.vv(j-4)*rold_l*yl.yet(i)+
+     &    d3my_l.vv(j-4)*rold_r*yr.yet(i))
+        endif
+ 81    continue
+c------------------------------------
+       jr.jac(4+i,1)=damr_r*f.fu(4+i)/am+
+     &       am*(d2mr_r*rold_l*yl.yet(i)+mmin_m*yr.yet(i))
+       jr.jac(4+i,1)=jr.jac(4+i,1)+am*d3mr_r*rold_r*yr.yet(i)
+       jr.jac(4+i,2)=damu_r*f.fu(4+i)/am+am*(d2mu_r*rold_l*yl.yet(i)+
+     &           d3mu_r*rold_r*yr.yet(i))
+       jr.jac(4+i,3)=damv_r*f.fu(4+i)/am+am*(d2mv_r*rold_l*yl.yet(i)+
+     &           d3mv_r*rold_r*yr.yet(i))
+       jr.jac(4+i,4)=damp_r*f.fu(4+i)/am+am*(d2mp_r*rold_l*yl.yet(i)+
+     &           d3mp_r*rold_r*yr.yet(i))
+       do 82 j=1,(nsp-1)
+        if(i.eq.j) then
+          jr.jac(4+i,4+j)=damg_r*dgdyr.vv(j)*f.fu(4+i)/am+
+     &    am*(d2my_r.vv(j)*rold_l*yl.yet(i)+mmin_m*rold_r+
+     &    d3my_r.vv(j)*rold_r*yr.yet(i))
+        else
+          jr.jac(4+i,4+j)=damg_r*dgdyr.vv(j)*f.fu(4+i)/am+
+     &    am*(d2my_r.vv(j)*rold_l*yl.yet(i)+
+     &    d3my_r.vv(j)*rold_r*yr.yet(i))
+        endif
+ 82    continue
+ 80    continue
+C-------------------------------------------------------------
+C This operation is made for the outlet boundary conditions
+C when the pressure at the outlet is given.
+C To find the flux it was assumed that rho_l = rho_r,
+C  velocity_l=velocity_r and yl = yr
+C therefore we hace to modify the jacobian
+C-------------------------------------------------------------
+       DO 105 I=1,(3+NSP)
+          DO 106 J=1,(3+NSP)
+           IF(J .EQ. 4) THEN
+             JL.JAC(I,J) = JL.JAC(I,J)
+           ELSE
+             JL.JAC(I,J)=JL.JAC(I,J)+JR.JAC(I,J)
+           ENDIF
+ 106      CONTINUE
+ 105     CONTINUE
+c-------------------------------------------------------------
+c  matrix wl(i,j) represents the derivative of the i-component
+c  of the vector of primitive variables of the left state with
+c  respect to the j-component of the vector of the conservative
+c  variables of the left state.
+c
+c  Here: (rho, ux, uy, p, Y_1,...,Y_(nsp-1)) -
+c                               vector of primitive variables;
+c  (rho, rho ux, rho uy, rho e, rho Y_1,..., rho Y_(nsp-1)) -
+c                            vector of conservative variables.
+c-------------------------------------------------------------
+       wl.jac(1,1)=1.0d0
+       wl.jac(1,2)=0.0d0
+       wl.jac(1,3)=0.0d0
+       wl.jac(1,4)=0.0d0
+       do 83 i=1,(nsp-1)
+         wl.jac(1,4+i)=0.0d0
+ 83    continue
+c------------------------------
+       wl.jac(2,1)=-uold_l/rold_l
+       wl.jac(2,2)=1.0d0/rold_l
+       wl.jac(2,3)=0.0d0
+       wl.jac(2,4)=0.0d0
+       do 84 i=1,(nsp-1)
+         wl.jac(2,4+i)=0.0d0
+ 84    continue
+c------------------------------
+       wl.jac(3,1)=-vold_l/rold_l
+       wl.jac(3,2)=0.0d0
+       wl.jac(3,3)=1.0d0/rold_l
+       wl.jac(3,4)=0.0d0
+       do 85 i=1,(nsp-1)
+         wl.jac(3,4+i)=0.0d0
+ 85    continue
+c------------------------------
+       br1=0.0d0
+       do 86 i=1,(nsp-1)
+         br1=br1+dgdyl.vv(i)*yl.yet(i)
+ 86    continue
+       br1=br1*pold_l/(rold_l*gm1l)
+       wl.jac(4,1)=gm1l*(uold_l*uold_l+vold_l*vold_l)/2.0d0-br1
+       wl.jac(4,2)=-uold_l*gm1l
+       wl.jac(4,3)=-vold_l*gm1l
+       wl.jac(4,4)=gm1l
+       do 87 i=1,(nsp-1)
+         wl.jac(4,4+i)=dgdyl.vv(i)*pold_l/(rold_l*gm1l)
+ 87    continue
+c------------------------------
+       do 88 i=1,(nsp-1)
+        do 89 j=1,4
+          wl.jac(4+i,j)=0.0d0
+          if(j.eq.1) wl.jac(4+i,j)=-yl.yet(i)/rold_l
+ 89     continue
+c------------
+        do 890 j=5,(4+nsp-1)
+          wl.jac(4+i,j)=0.0d0
+          if(4+i.eq.j)  then
+            wl.jac(4+i,j)=1.0d0/rold_l
+          endif
+ 890    continue
+ 88    continue
+c------------------------------
+c----------------------------------------------
+       do 1 i=1,(3+nsp)
+        do 2 j=1,(3+nsp)
+         jtl.jac(i,j)=0.0d0
+         do 3 k=1,(3+nsp)
+          jtl.jac(i,j)=jtl.jac(i,j)+jl.jac(i,k)*wl.jac(k,j)
+ 3       continue
+ 2      continue
+ 1     continue
+c----------------------------------------------------------------------
+       SEGSUP DMLY_L, DMLY_R,
+     &          dmry_l, dmry_r,
+     &          dMpy_l, dMpy_r,
+     &          dMmy_l, dMmy_r,
+     &          dmiy_l, dmiy_r,
+     &          d3my_l, d3my_r,
+     &          d2my_l, d2my_r,
+     &          dPpy_l, dPpy_r,
+     &          dPmy_l, dPmy_r,
+     &          dpiy_l, dpiy_r,
+     &          dgdyl, dgdyr
+C--------------------------------------------
+       SEGSUP f
+C--------------------------------------------
+       jpl = jl
+       SEGDES JL
+       SEGDES JR
+       SEGSUP WL
+C--------------------------------------------
+       jll=jtl
+       SEGDES JTL
+       SEGDES YL
+       SEGDES YR
+       SEGDES CP
+       SEGDES CV
+       SEGDES MLRECP, MLRECV
+C--------------------------------------------
+       return
+       end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

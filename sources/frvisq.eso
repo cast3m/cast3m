@@ -1,0 +1,562 @@
+C FRVISQ    SOURCE    PV        17/09/29    21:15:12     9578
+
+      SUBROUTINE FRVISQ(IPMODL,JPMAIL,IPCHE1, IPRIG)
+C
+C***********************************************************************
+C                                                                      *
+C  Routine principale appelée par AMOR                                 *
+C                                                                      *
+C  Calcule la matrice d'amortissement associée à la frontière du       *
+C  maillage dans plusieurs cas :                                       *
+C                                                                      *
+C   FORMULATION MECANIQUE                                              *
+C   +++++++++++++++++++++                                              *
+C                                                                      *
+C     * cas des massifs, dont l'enveloppe est constituée de SEG2 ou    *
+C       SEG3 (cas 2D), FAC3, FAC4, FAC6, ou FAC8 (cas 3D)              *
+C                                                                      *
+C   FORMULATION LIQUIDE                                                *
+C   +++++++++++++++++++                                                *
+C                                                                      *
+C     * cas des éléments dont l'enveloppe est constituée d'éléments    *
+C       à 2 (cas 2D), 3 ou 4 noeuds (cas 3D).                          *
+C______________________________________________________________________*
+C                                                                      *
+C  Entrées :                                                           *
+C  --------                                                            *
+C                                                                      *
+C     IPMODL : pointeur sur le modèle, objet MMODEL                    *
+C     JPMAIL : pointeur sur le maillage de la frontière, objet MELEME  *
+C     IPCHE1 : pointeur sur le champ par éléments de caractéristiques  *
+C              matériau, objet MCHAML                                  *
+C  Sorties :                                                           *
+C  --------                                                            *
+C     IPRIG : pointeur sur la matrice d'amortissement construite,      *
+C             objet MRIGID (=0 en cas d'erreur)                        *
+C                                                                      *
+C***********************************************************************
+C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+C
+-INC CCOPTIO
+-INC CCHAMP
+
+-INC SMCOORD
+-INC SMELEME
+-INC SMMODEL
+-INC SMCHAML
+-INC SMRIGID
+-INC SMINTE
+C
+      INTEGER oooval
+
+      SEGMENT INFO
+        INTEGER INFELL(JG)
+      ENDSEGMENT
+C
+      SEGMENT NOTYPE
+        CHARACTER*16 TYPE(NBTYPE)
+      ENDSEGMENT
+C
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS),NSOF(NS)
+        INTEGER IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+C
+      CHARACTER*(NCONCH) CONM
+
+C Support du champ de caracteristiques
+      PARAMETER ( IPLAZ=3 )
+
+      PARAMETER (NINF=3)
+      INTEGER INFOS(NINF)
+C
+      IPRIG = 0
+
+      IF (IFOUR.EQ.-3) THEN
+        CALL ERREUR(21)
+        RETURN
+      ENDIF
+
+c_______________________________________________________________________
+c
+c     activation du modele
+c_______________________________________________________________________
+C
+      MMODEL=IPMODL
+      SEGACT MMODEL
+      NSOUS=KMODEL(/1)
+
+C______________________________________________________________________C
+C                                                                      C
+C  CREATION DE L'OBJET MATRICE DE RIGIDITE                             C
+C______________________________________________________________________C
+C                                                                      C
+      NRIGEL=0
+      SEGINI,MRIGID
+      MTYMAT='RIGIDITE'
+      IFORIG=IFOMOD
+      ICHOLE=0
+      IMGEO1=0
+      IMGEO2=0
+      ISUPEQ=0
+      JRCOND=0
+      JRDEPP=0
+      JRDEPD=0
+
+C______________________________________________________________________C
+C                                                                      C
+C  BOUCLE SUR LES SOUS ZONES                                           C
+C______________________________________________________________________C
+C                                                                      C
+      DO 100 ISOUS = 1, NSOUS
+C
+C  on récupère l'information générale
+C
+        IMODEL = KMODEL(ISOUS)
+        SEGACT,IMODEL
+
+C- Initialisations
+        IENVEL = 0
+        IPOGEO = 0
+
+        IPT1 = IMAMOD
+        CONM = CONMOD
+        MELM = NEFMOD
+C
+C  création du tableau info
+C
+        iret = 1
+        CALL IDENT(IPT1,CONM,IPCHE1,0,INFOS,iret)
+        IF (iret.EQ.0) GOTO 1099
+C
+C  Determination de l'enveloppe du maillage massif du sous-modele
+C
+        CALL ECROBJ('MAILLAGE',IPT1)
+        IF (IDIM.EQ.3) THEN
+          CALL ENVELO
+        ELSE IF (IDIM.EQ.2) THEN
+          CALL PRCONT
+        ELSE
+          CALL ERREUR(5)
+        ENDIF
+        IF (IERR.NE.0) GOTO 1099
+        CALL LIROBJ('MAILLAGE',IENVEL,1,iret)
+        IF (IERR.NE.0) GOTO 1099
+C
+C  Elements de l'enveloppe IENVEL dans le maillage frontiere JPMAIL
+C
+        iret = 0
+        CALL INTERB(IENVEL,JPMAIL,iret,IPOGEO)
+        IF (iret.GT.0) GOTO 1099
+
+        IPT3 = IPOGEO
+        SEGACT,IPT3
+        NBSOU3 = IPT3.LISOUS(/1)
+        IPT2 = IPT3
+C
+C  boucle sur les sous-zones de l'enveloppe
+C
+        DO 110 IB = 1, MAX(1,NBSOU3)
+
+C-- Initialisations :
+          MOFORC = 0
+          MODEPL = 0
+          IPMINT = 0
+          MOMATR = 0
+          MOCARA = 0
+          MOTYPM = 0
+          MOTYPC = 0
+          ISUPM  = 0
+          ISUPC  = 0
+          IDESCR = 0
+
+C-- Informations sur la (sous-zone de) l'enveloppe
+          IF (NBSOU3.NE.0) THEN
+            IPT2 = IPT3.LISOUS(IB)
+            SEGACT,IPT2
+          ENDIF
+          NBNOE2 = IPT2.NUM(/1)
+          NBELE2 = IPT2.NUM(/2)
+          LETYP  = IPT2.ITYPEL
+C-- Petit test sur le type
+          IF (LETYP.EQ.1) THEN
+            CALL ERREUR(16)
+            GOTO 1199
+          ENDIF
+          IPOGEO = IPT2
+C
+C-- On détermine la formulation associée à l'objet géométrique
+C-- elementaire de surface
+          CALL TYPFAC(MELM,NBNOE2,MELE)
+C
+C-- ERREUR : impossible d'utiliser FROABS pour les éléments
+C--          de formulation MELM
+          IF (MELE.EQ.0) THEN
+            MOTERR(1:8) = NOMTP(MELM)
+            CALL ERREUR(193)
+            GOTO 1199
+          ENDIF
+
+C-- Information sur l'élément fini
+          CALL ELQUOI(MELE,0,3,IPINF,IMODEL)
+          IF (IERR.NE.0) GOTO 1199
+C
+          INFO  = IPINF
+          MFR   = INFELL(13)
+          LRE   = INFELL(9)
+          LW    = INFELL(7)
+          NDDL  = INFELL(15)
+c*          IELE  = INFELL(14)
+          IPPORE = 0
+          IPMINT = INFELL(11)
+          SEGSUP,INFO
+
+C-- Recherche des inconnues primales et duales (DEPL-FORC)
+          CALL IDPRIM(IMODEL,MFR,MODEPL,NDEPL,ndum)
+          CALL IDDUAL(IMODEL,MFR,MOFORC,NFORC,ndum)
+
+          IF (NDEPL.EQ.0 .OR. NFORC.EQ.0 .OR. NDEPL.NE.NFORC) THEN
+            CALL ERREUR(5)
+            GOTO 1199
+          ENDIF
+
+C-- Remplissage du segment DESCRipteur
+          NLIGRP = LRE
+          NLIGRD = LRE
+          SEGINI,DESCR
+
+          NCOMP = NDEPL
+          NBNNS = NBNOE2
+          IDDL=1
+          DO 1004 INOEUD=1,NBNNS
+            DO 1005 ICOMP=1,NCOMP
+              NOMID = MODEPL
+              LISINC(IDDL)=LESOBL(ICOMP)
+              NOMID = MOFORC
+              LISDUA(IDDL)=LESOBL(ICOMP)
+              NOELEP(IDDL)=INOEUD
+              NOELED(IDDL)=INOEUD
+              IDDL=IDDL+1
+ 1005       CONTINUE
+ 1004     CONTINUE
+
+          SEGDES,DESCR
+          IDESCR = DESCR
+
+C-- Recuperation des noms de composantes MATERIAU
+          nbrobl = 0
+          nbrfac = 0
+          nomid  = 0
+          notype = 0
+
+C  rho, E, nu pour les massifs
+          IF (MFR.EQ.1) THEN
+            nbrobl = 3
+            SEGINI,nomid
+            lesobl(1) = 'RHO '
+            lesobl(2) = 'YOUN'
+            lesobl(3) = 'NU  '
+
+            nbtype = 1
+            SEGINI,notype
+            type(1) = 'REAL*8'
+C
+C  rho, cson, rhoref, cref, rlcar pour les liquides
+          ELSE IF (MFR.EQ.11.OR.MFR.EQ.41) THEN
+            nbrobl = 5
+            SEGINI,nomid
+            lesobl(1) = 'RHO '
+            lesobl(2) = 'CSON'
+            lesobl(3) = 'RORF'
+            lesobl(4) = 'CREF'
+            lesobl(5) = 'LCAR'
+
+            nbtype = 1
+            SEGINI,notype
+            type(1) = 'REAL*8'
+          ENDIF
+
+          MOMATR = nomid
+          MOTYPM = notype
+          NMATR = nbrobl
+          NMATF = nbrfac
+          NMATT = NMATR+NMATF
+
+C--- Verification du support des composantes recherchées
+          IF (MOMATR.NE.0) THEN
+            CALL QUESUQ(IMODEL,IPCHE1,3,0,MOMATR,IPLAZ,ISUPM,iret)
+            IF (ISUPM.GT.1) GOTO 1199
+          ENDIF
+C
+C-- Recuperation des noms de composantes CARACTERISTIQUES
+          nbrobl = 0
+          nbrfac = 0
+          nomid  = 0
+          notype = 0
+
+C Epaisseur du massif en contraintes planes
+          IF (MFR.EQ.1 .AND. IFOUR.EQ.-2) THEN
+            nbrfac = 1
+            SEGINI,nomid
+            lesfac(1) = 'DIM3'
+            nbtype = 1
+            SEGINI,notype
+            type(1) = 'REAL*8'
+          ENDIF
+
+          MOCARA = nomid
+          MOTYPC = notype
+          NCARA = nbrobl
+          NCARF = nbrfac
+          NCARR = NCARA+NCARF
+
+C--- Verification du support des composantes recherchées
+          IF (MOCARA.NE.0) THEN
+            CALL QUESUQ(IMODEL,IPCHE1,3,0,MOCARA,IPLAZ,ISUPC,iret)
+            IF (ISUPC.GT.1) GOTO 1199
+          ENDIF
+
+C-- Segment d'integration MINTE
+          MINTE = IPMINT
+          SEGACT,MINTE
+          NBPGAU = POIGAU(/1)
+
+C- Partionnement si necessaire de la matrice d'amortissement
+C- determinant ainsi le nombre d'objets elementaires de MRIGID
+          LTRK = oooval(1,4)
+          IF (LTRK.EQ.0) LTRK = oooval(1,1)
+* Ajout a la taille en mots de la matrice des infos du segment
+          LSEG = LRE*LRE*NBELE2 + 16
+          NBLPRT = (LSEG-1)/LTRK + 1
+          NBLMAX = (NBELE2-1)/NBLPRT + 1
+          NBLPRT = (NBELE2-1)/NBLMAX + 1
+c*        write(ioimp,*) ' frvisq : nblprt nblmax = ',nblprt,nblmax,nbele2
+C*OF : Pour l'instant pas de partition pour FRVISQ
+          NBLPRT = 1
+
+C-- Ajout de la matrice d'AMORTISSEMENT a la matrice globale
+          NRIGE0 = IRIGEL(/2)
+          NRIGEL = NRIGE0 + NBLPRT
+          SEGADJ,MRIGID
+
+          descr  = IDESCR
+          meleme = IPOGEO
+          nbnn   = NBNOE2
+          nbelem = NBELE2
+          nbsous = 0
+          nbref  = 0
+
+          DO 120 irige = 1, NBLPRT
+
+C-- Mettre ici la partition du maillage IPOGEO
+            ipmail = meleme
+            ipdesc = descr
+
+C- Initialisation de la matrice de rigidite elementaire (xmatri)
+            NELRIG = nbelem
+            SEGINI,xmatri
+            ipmatr = xmatri
+
+C- Recuperation des valeurs des proprietes materiau et geometriques
+c* Note : les proprietes sont les valeurs au support des EF massifs
+c*        et non celles au niveau de l'enveloppe surfacique !
+c*        Cela ne marche que si les proprietes sont constantes. Dans
+c*        les autres cas, le resultat est... Pour eviter cela, on met
+c*        un test sur la constance du champ !
+            ivamat = 0
+            ivacar = 0
+            IF (MOMATR.NE.0) THEN
+              CALL KOMCHA(IPCHE1,IPT1,CONM,MOMATR,MOTYPM,1,
+c*              CALL KOMCHA(IPCHE1,ipmail,CONM,MOMATR,MOTYPM,1,
+     &                    INFOS,3, ivamat)
+              IF (IERR.NE.0) GOTO 1199
+              mptval = ivamat
+              do i = 1, NMATT
+                if (ival(i).ne.0) then
+                  melval = IVAL(i)
+                  if (velche(/1).ne.1 .and. velche(/2).ne.1) then
+                    write(ioimp,*) 'Champ MATERIAU non constant'
+                    call erreur(21)
+                    goto 1199
+                  endif
+                endif
+              enddo
+              IF (ISUPM.EQ.1) THEN
+                CALL VALCHE(ivamat,NMATT,IPMINT,IPPORE,MOMATR,MELE)
+                IF (IERR.NE.0) THEN
+                  ISUPM = 0
+                  GOTO 1199
+                ENDIF
+              ENDIF
+            ENDIF
+            IF (MOCARA.NE.0) THEN
+              CALL KOMCHA(IPCHE1,IPT1,CONM,MOCARA,MOTYPC,1,
+c*              CALL KOMCHA(IPCHE1,ipmail,CONM,MOCARA,MOTYPC,1,
+     &                    INFOS,3, ivacar)
+              IF (IERR.NE.0) GOTO 1199
+              mptval = ivacar
+              do i = 1, NCARR
+                if (ival(i).ne.0) then
+                  melval = IVAL(i)
+                  if (velche(/1).ne.1 .and. velche(/2).ne.1) then
+                    write(ioimp,*) 'Champ MATERIAU non constant'
+                    call erreur(21)
+                    goto 1199
+                  endif
+                endif
+              enddo
+              IF (ISUPC.EQ.1) THEN
+                CALL VALCHE(ivacar,NCARR,IPMINT,IPPORE,MOCARA,MELE)
+                IF (IERR.NE.0)THEN
+                  ISUPC = 0
+                  GOTO 1199
+                ENDIF
+              ENDIF
+            ENDIF
+
+C  distinction des cas 2D et 3D
+C______________________________________________________________________C
+C                                                                      C
+C            CAS DES ELEMENTS MASSIFS BIDIMENSIONNELS                  C
+C                  FACES ASSOCIEES SEG2 OU SEG3                        C
+C______________________________________________________________________C
+C                                                                      C
+         IF (MELE.EQ.2.OR.MELE.EQ.3) THEN
+C
+            CALL FROA2D(ipmail,ipmatr,IPMINT,ivamat,ivacar,
+     1                  MELE,MFR,LRE,NDDL)
+C
+C______________________________________________________________________C
+C                                                                      C
+C               CAS DES ELEMENTS LIQUIDES 2D OU 3D                     C
+C               FACES ASSOCIEES LSE2, LTR3 OU LQU4                     C
+C______________________________________________________________________C
+C                                                                      C
+C
+         ELSE IF(MELE.EQ.97.OR.MELE.EQ.35.OR.MELE.EQ.36) THEN
+C
+            CALL LFROA(ipmail,ipmatr,IPMINT,ivamat,ivacar,
+     1                  MELE,MFR,LRE,NDDL)
+C
+C______________________________________________________________________C
+C                                                                      C
+C            CAS DES ELEMENTS MASSIFS TRIDIMENSIONNELS                 C
+C             FACES ASSOCIEES FAC3,FAC4,FAC6 OU FAC8                   C
+C______________________________________________________________________C
+C
+         ELSE IF(MELE.EQ.31.OR.MELE.EQ.32.OR.MELE.EQ.33.
+     1                                   OR.MELE.EQ.34)THEN
+C
+            CALL FROA3D(ipmail,ipmatr,IPMINT,ivamat,ivacar,
+     1                  MELE,MFR,LRE,NDDL)
+C
+C  erreur, l'élément n'est pas encore implémenté
+C
+         ELSE
+C
+            MOTERR(1:4)=NOMTP(MELE)
+            MOTERR(5:12)='FRVISQ'
+            CALL ERREUR (86)
+         ENDIF
+C
+         IF (ISUPM.EQ.1 .OR. nblprt.GT.1) THEN
+           CALL DTMVAL(ivamat,3)
+         ELSE
+           CALL DTMVAL(ivamat,1)
+         ENDIF
+         IF (ISUPC.EQ.1 .OR. nblprt.GT.1) THEN
+           CALL DTMVAL(ivacar,3)
+         ELSE
+           CALL DTMVAL(ivacar,1)
+         ENDIF
+
+          xmatri = ipmatr
+          IF (NBLPRT.GT.1) THEN
+            meleme = ipmail
+            SEGDES,meleme
+          ENDIF
+
+C- Sortie prematuree en cas d'erreur
+          IF (IERR.NE.0) GOTO 1199
+
+C- Stockage de la matrice
+          jrige = NRIGE0 + irige
+          COERIG(jrige)   = 1.
+          IRIGEL(1,jrige) = ipmail
+          IRIGEL(2,jrige) = 0
+          IRIGEL(3,jrige) = ipdesc
+          IRIGEL(4,jrige) = ipmatr
+          IRIGEL(5,jrige) = NIFOUR
+          IRIGEL(6,jrige) = 0
+          IRIGEL(7,jrige) = 0
+* matrice non symetrique (forces sur pi seulement
+* qui dependent de p)
+          IF (MFR.EQ.11.OR.MFR.EQ.41) THEN
+            IRIGEL(7,jrige) = 2
+            xmatri.symre=2
+           ENDIF
+          SEGDES,xmatri
+          IRIGEL(8,jrige) = 0
+
+ 120      CONTINUE
+C- Fin de la boucle de partition maillage/rigidite
+
+          SEGDES,MINTE
+ 1199     CONTINUE
+          IF (MOMATR.NE.0) THEN
+            nomid = MOMATR
+            SEGSUP,nomid
+            notype = MOTYPM
+            SEGSUP,notype
+          ENDIF
+          IF (MOCARA.NE.0) THEN
+            nomid = MOCARA
+            SEGSUP,nomid
+            notype = MOTYPC
+            SEGSUP,notype
+          ENDIF
+C
+          IF (NBSOU3.NE.0) SEGDES,IPT2
+
+C- Sortie prematuree en cas d'erreur
+          IF (IERR.NE.0) GOTO 1098
+
+ 110    CONTINUE
+C- Fin de la boucle sur (les sous-zones de) l'enveloppe
+C
+ 1098   CONTINUE
+        SEGDES,IPT3
+ 1099   CONTINUE
+        SEGDES,IMODEL
+C- Sortie prematuree en cas d'erreur
+        IF (IERR.NE.0) GOTO 999
+C
+ 100  CONTINUE
+C- Fin de la boucle sur les modeles elementaires
+C
+      NRIGE0 = IRIGEL(/2)
+      IF (NRIGE0.EQ.0) THEN
+        CALL ERREUR(902)
+      ENDIF
+
+ 999  CONTINUE
+      IF (IERR.EQ.0) THEN
+        IPRIG = MRIGID
+        SEGDES,MRIGID
+      ELSE
+        IPRIG = 0
+        SEGSUP,MRIGID
+      ENDIF
+      SEGDES,MMODEL
+
+      RETURN
+      END
+
+
+
+
+
+

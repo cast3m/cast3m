@@ -1,0 +1,535 @@
+C ALEA1     SOURCE    FD218221  17/01/11    21:15:01     9277
+      SUBROUTINE ALEA1
+     & (MMODEL,IPOSI,LADIM,XDIR1,XDIR2,XDIR3,ZSIG,CLAMD1,CLAMD2,CLAMD3,
+     &  VALMOY,DELZET,OMMAX)
+C
+C=======================================================================
+C
+C  Subroutine ALEA1 : génération d'un CHAMELEM aléatoire
+C
+C  Appellée par ALEA
+C
+C---------------------
+C Variables internes :
+C---------------------
+C
+C  NBEL   : nombre d'éléments
+C  NBPT   : nombre de noeuds par éléments
+C  NBPGAU : nombre de valeurs à stocker par élément
+C
+C  IPTABL : pointeur sur la table domaine, si elle existe
+C
+C--------------------------------------
+C Développements ultérieurs possibles :
+C--------------------------------------
+C
+C Génération aux points de gauss pour la MECA-FLUX (pression et vitesse)
+C
+C=======================================================================
+C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+      REAL*8 ZDIST, VALMOY, OMMAX
+C
+-INC CCOPTIO
+-INC CCREEL
+-INC CCGEOME
+-INC SMELEME
+-INC SMCOORD
+-INC SMCHAML
+-INC SMMODEL
+-INC SMTABLE
+-INC SMINTE
+
+C     Table des coordonnées des points supports
+      SEGMENT TABCOR
+        REAL*8  COR(NBL,3)
+      ENDSEGMENT
+
+C     Table des valeurs en ces points
+      SEGMENT TABVAL
+        REAL*8  VAL(NBL)
+      ENDSEGMENT
+
+C     Table des partitions ok pour la génération
+      SEGMENT TPART
+        LOGICAL  LPART(NBPART)
+      ENDSEGMENT
+
+C     Objet de type 'LISTENTI' utilise par ELQUOI.
+      SEGMENT/INFO/(INFELL(JG)),INFO1.INFO,INFO2.INFO
+
+C     Coordonnées reduites et fonctions de forme pour trouver
+C     les coordonnées réelles des points de gauss
+      SEGMENT WRK2
+        REAL*8 XE(3,NBBB),SHP(6,NBBB)
+      ENDSEGMENT
+
+      DIMENSION    XDIR1(3),XDIR2(3),XDIR3(3)
+      CHARACTER*16 NOMFOR
+      POINTEUR     MELCHP.MELEME, MELENT.MELEME, MELSUP.MELEME
+
+      INTEGER      IPOSI
+C
+C     epsilon servant à différents tests
+      EPS = 1.D-12
+*
+*     ------------------------------------------------------------------
+*     2. On construit les coordonnées des points supports
+*        on initialise le champ résultat en parallèle (CHAMELEM)
+*     ------------------------------------------------------------------
+
+      SEGACT MMODEL
+*     Nombre de partitions :
+      NBPART = KMODEL(/1)
+
+*     En-tête du CHAMELEM
+*     Le nombre de partitions est fixé à zéro pour l'instant, et
+*     il va augmenter à chaque partition invalide du modèle.
+      L1 = 40
+      N1 = 0
+      N3 = 6
+      SEGINI MCHELM
+      TITCHE='   CHAMELEM cree par l operateur ALEA   '
+      IFOCHE = IFOUR
+*
+*     Boucle sur les partitions du modèle.
+*     Le chamelem résultat aura autant de partitions qu'il y a de
+*     sous-maillages supports correspondant.
+*
+      NBL = 1
+      SEGINI TABCOR
+      SEGINI TPART
+
+      NBL = 0
+      DO 4 IPART=1,NBPART
+        IMODEL = KMODEL(IPART)
+        SEGACT IMODEL
+        NOMFOR = FORMOD(1)
+
+*       a priori, cette partition convient
+        LPART(IPART) = .TRUE.
+*
+*       ------------------------------------------------------------------
+*       Vérification de la correspondance modèle - support demandé
+*
+        IF ((IPOSI.EQ.2).OR.(IPOSI.EQ.6)) THEN
+*         On vérifie que le modèle est bien un modèle de méca-flux
+*         (NAVIER-STOKES ou DARCY), qui ,seuls, permettent l'usage de la
+*         table domaine, que l'on récupère au passage.
+*         Sinon, on passe à la partition suivante.
+          IF ((NOMFOR.NE.'NAVIER_STOKES').AND.(NOMFOR.NE.'DARCY')
+     &         .AND.(NOMFOR.NE.'EULER')) THEN
+            LPART(IPART) = .FALSE.
+            GOTO 4
+          ELSE
+            CALL LEKMOD(MMODEL,IPTABL,IRET)
+          ENDIF
+        ENDIF
+
+        IF ((IPOSI.EQ.3).OR.(IPOSI.EQ.4).OR.(IPOSI.EQ.5)) THEN
+*         On vérifie que le modèle est bien un modèle MECANIQUE
+*         sinon, on passe à la partition suivante.
+          IF ((NOMFOR.EQ.'NAVIER_STOKES').OR.(NOMFOR.EQ.'DARCY')
+     &         .AND.(NOMFOR.NE.'EULER')) THEN
+            LPART(IPART) = .FALSE.
+            GOTO 4
+          ENDIF
+        ENDIF
+
+        IF ((IPOSI.EQ.7).OR.(IPOSI.EQ.8)) THEN
+*         On vérifie que le modèle est bien un modèle NAVIER-STOKES
+*         ou EULER sinon, on passe à la partition suivante.
+          IF ((NOMFOR.NE.'NAVIER_STOKES').AND.(NOMFOR.NE.'EULER')) THEN
+            LPART(IPART) = .FALSE.
+            GOTO 4
+          ENDIF
+        ENDIF
+*
+*       N° d'élément fini NELE
+*       nombre d'éléments NBEL
+*       nombre de noeuds par éléments NBPT
+*       nombre de fonctions de forme NBNN (pts de gauss seulement)
+        NELE   = NEFMOD
+
+        MELENT = IMAMOD
+        SEGACT MELENT
+        NBPT = MELENT.NUM(/1)
+        NBEL = MELENT.NUM(/2)
+
+*       ------------------------------------------------------------------
+*       2a. Détermination du support des points de valeur MELSUP s'ils existent,
+*       du nombre de valeurs à stocker par élément NBPGAU,
+*       et des pointeurs sur les segments d'intégration MINTE
+
+        IF (IPOSI.EQ.1) THEN
+*         Noeuds
+
+*         On utilise tous les noeuds du maillage fourni
+*         En particulier, en MECA-FLUX, tous les noeuds des QUAF
+          MELSUP = MELENT
+          SEGACT MELSUP
+          NBPGAU = MELSUP.NUM(/1)
+          SEGDES MELSUP
+          MINTE  = 0
+
+        ELSEIF(IPOSI.EQ.2) THEN
+*         Points centres
+
+*         on les tire du maillage QUAF par la table domaine
+          CALL LEKTAB(IPTABL,'CENTRE',MELSUP)
+          IF (IERR.NE.0) THEN
+*           On ne trouve pas le support qui contient les points
+            CALL ERREUR(248)
+            RETURN
+          ENDIF
+          if(infmod(/1).lt.iposi+2) then
+          CALL ELQUOI(NELE,0,IPOSI,INFO,IMODEL)
+          MINTE=infell(11)
+          SEGSUP INFO
+          else
+          MINTE  = infmod(4)
+          endif
+          NBPGAU = 1
+
+        ELSEIF(IPOSI.EQ.6) THEN
+*         Points faces
+
+*         !!!!!!!!!! La structure de Castem ne permet pas encore de
+*         créer un CHAMELEM appuyé aux faces.
+*         Option noeud indisponible
+          CALL ERREUR(507)
+          RETURN
+
+**         on les tire du maillage QUAF par la table domaine
+*          CALL LEKTAB(IPTABL,'FACE',MELSUP)
+*          IF (IERR.NE.0) THEN
+**           On ne trouve pas le support qui contient les points
+*            CALL ERREUR(248)
+*            RETURN
+*          ENDIF
+*          CALL ELQUOI(NELE,0,IPOSI,INFO,IMODEL)
+*          MINTE  = INFELE(11)
+*          SEGSUP INFO
+*          SEGACT MELSUP
+*          NBPGAU = MELSUP.NUM(/1)
+*          SEGDES MELSUP
+
+        ELSEIF ((IPOSI.EQ.3).OR.(IPOSI.EQ.4).OR.(IPOSI.EQ.5)) THEN
+*         Points de gauss MECANIQUE
+
+*          CALL ELQUOI(NELE,0,IPOSI,INFO,IMODEL)
+          IF(IPOSI.EQ.3) then
+             NBPGAU = INFELE(6)
+             minte=infmod(5)
+          ELSEIF(IPOSI.EQ.4) then
+            NBPGAU = INFELE(3)
+              minte=infmod(6)
+          ELSEIF(IPOSI.EQ.5) then
+            NBPGAU = INFELE(4)
+            MINTE = INFMOD(7)
+          ENDIF
+          NBNN  = INFELE(8)
+*          SEGSUP INFO
+
+        ELSEIF ((IPOSI.EQ.7).OR.(IPOSI.EQ.8)) THEN
+*         !!!!!!! Implémentation possible ci-après pour
+*         les points de gauss du modèle NAVIER-STOKES (VITESSE et PRESSION)
+
+*         Option noeud indisponible (pour l'instant)
+          CALL ERREUR(507)
+          RETURN
+
+        ELSE
+*         Erreur anormale.contactez votre support
+          CALL ERREUR(5)
+        ENDIF
+        SEGDES MELENT
+*
+*       ------------------------------------------------------------------
+*       2b. Contenu par partition du CHAMELEM :
+*
+*       on ajoute une partition au CHAMELEM
+        N1 = N1 + 1
+        SEGADJ MCHELM
+
+*       Le maillage pointé par le CHAMELEM est le maillage du modèle.
+
+        IF (NOMFOR.EQ.'DARCY') THEN
+*         !!!!!!!! les tests des calculs DARCY exigent encore le
+*         maillage de sommets, récupéré par la table domaine, alors
+*         que le modèle pointe sur le maillage de QUAF.
+          CALL LEKMOD(MMODEL,IPTABL,IRET)
+          IF (IERR.NE.0) THEN
+C           Données incompatibles
+            CALL ERREUR(21)
+            RETURN
+          ENDIF
+*         la table domaine existe. Le CHAMELEM va pointer sur le maillage
+*         de sommets. On suppose bien entendu que les partitions du
+*         modèle sont parcourues dans le même ordre que les
+*         sous-maillages du maillage.
+          CALL LEKTAB(IPTABL,'MAILLAGE',IPT1)
+          IF (IERR.NE.0) RETURN
+          SEGACT IPT1
+          IF (IPT1.LISOUS(/1).EQ.0) THEN
+            MELCHM = IPT1
+          ELSE
+            MELCHM = IPT1.LISOUS(IPART)
+          ENDIF
+          SEGDES IPT1
+        ELSE
+*         Le CHAMELEM pointe sur le maillage du modèle
+*         (NAVIER-STOKES ou MECANIQUE).
+          MELCHM = MELENT
+        ENDIF
+
+        CONCHE(N1)   = CONMOD
+        IMACHE(N1)   = MELCHM
+        INFCHE(N1,1) = 0
+        INFCHE(N1,2) = 0
+        INFCHE(N1,3) = NIFOUR
+        INFCHE(N1,4) = MINTE
+        INFCHE(N1,5) = 0
+        INFCHE(N1,6) = IPOSI
+*
+*       ------------------------------------------------------------------
+*       2c. Construction des coordonnées des points supports :
+*           dans le repère réel.
+*
+*       combien de points de valeur à calculer en tout ?
+        L    = NBL
+        NBL  = NBL + (NBEL * NBPGAU)
+        SEGADJ TABCOR
+
+*       Cas où les points existent, et leurs coordonnées sont dans XCOOR.
+        IF ((IPOSI.EQ.1).OR.(IPOSI.EQ.2).OR.(IPOSI.EQ.6)) THEN
+
+*         Ce sont les points sommets, centres ou faces.
+          SEGACT MELSUP
+          DO 9 I=1,NBEL
+            DO 10 J=1,NBPGAU
+              L = L + 1
+              IREF = (IDIM+1) * (MELSUP.NUM(J,I)-1)
+              DO 11 K=1,IDIM
+                COR(L,K) = XCOOR(IREF+K)
+ 11           CONTINUE
+ 10         CONTINUE
+ 9        CONTINUE
+          SEGDES MELSUP
+
+        ELSEIF ((IPOSI.EQ.3).OR.(IPOSI.EQ.4).OR.(IPOSI.EQ.5)) THEN
+
+*         Les points n'existent pas. Ce sont les points de gauss MECANIQUE.
+*         On calcule leurs coordonnées à partir des fonctions de forme
+*         et des coordonnées des points sommets associés.
+          SEGACT MELENT
+          SEGACT MINTE
+          NBBB = NBEL
+          SEGINI WRK2
+
+          DO 5 IEL=1,NBEL
+
+*           Coordonnées XE des points supports des fonctions de forme
+*           de l'élément IEL
+*           Le maillage MELENT contient nécessairement au moins ces points
+            CALL DOXE(XCOOR,IDIM,NBNN,MELENT.NUM,IEL,XE)
+*
+*           Boucle sur les points de gauss
+            DO 1100 IGAU=1,NBPGAU
+*
+              L = L + 1
+
+              XX=0.D0
+              YY=0.D0
+              ZZ=0.D0
+              DO 1101 ISH=1,NBNN
+*               valeur de la fonction de forme n°ISH au point de gauss IGAU
+                CGAUSS = SHPTOT(1,ISH,IGAU)
+*               coordonnée réelle du point support des fonctions de forme
+*               coordonnées réelles du point de gauss
+                XX = XX + XE(1,ISH)*CGAUSS
+                YY = YY + XE(2,ISH)*CGAUSS
+                IF (IDIM.EQ.3) THEN
+                  ZZ = ZZ + XE(3,ISH)*CGAUSS
+                ENDIF
+ 1101         CONTINUE
+
+              COR(L,1) = XX
+              COR(L,2) = YY
+              COR(L,3) = ZZ
+
+ 1100       CONTINUE
+
+ 5        CONTINUE
+          SEGDES MELENT,MINTE,WRK2
+
+        ELSE
+
+*         Erreur anormale.contactez votre support
+          CALL ERREUR(5)
+          RETURN
+        ENDIF
+*
+*       ------------------------------------------------------------------
+*       2d. Transformation des coordonnées dans le repère adimensionné
+*           par la matrice lambda de dimension LADIM.
+*
+        IF (IDIM.EQ.2) THEN
+          IF (LADIM.EQ.1) THEN
+*           2D stat 1D
+            DO 20 L=1,NBL
+              XX = COR(L,1)
+              YY = COR(L,2)
+              COR(L,1) = ((XX * XDIR1(1)) + (YY * XDIR1(2))) / CLAMD1
+ 20         CONTINUE
+          ELSE
+*           2D stat 2D
+            DO 21 L=1,NBL
+              XX = COR(L,1)
+              YY = COR(L,2)
+              COR(L,1) = ((XX * XDIR1(1)) + (YY * XDIR1(2))) / CLAMD1
+              COR(L,2) = ((XX * XDIR2(1)) + (YY * XDIR2(2))) / CLAMD2
+ 21         CONTINUE
+          ENDIF
+        ELSE
+          IF (LADIM.EQ.1) THEN
+*           3D stat 1D
+            DO 22 L=1,NBL
+              XX = COR(L,1)
+              YY = COR(L,2)
+              ZZ = COR(L,3)
+              COR(L,1) = ( (XX * XDIR1(1)) + (YY * XDIR1(2))
+     &                   + (ZZ * XDIR1(3)) ) / CLAMD1
+ 22         CONTINUE
+          ELSEIF (LADIM.EQ.2) THEN
+*           3D stat 2D
+            DO 23 L=1,NBL
+              XX = COR(L,1)
+              YY = COR(L,2)
+              ZZ = COR(L,3)
+              COR(L,1) = ( (XX * XDIR1(1)) + (YY * XDIR1(2))
+     &                   + (ZZ * XDIR1(3)) ) / CLAMD1
+              COR(L,2) = ( (XX * XDIR2(1)) + (YY * XDIR2(2))
+     &                   + (ZZ * XDIR2(3)) ) / CLAMD2
+ 23         CONTINUE
+          ELSE
+*           3D stat 3D
+            DO 24 L=1,NBL
+              XX = COR(L,1)
+              YY = COR(L,2)
+              ZZ = COR(L,3)
+              COR(L,1) = ( (XX * XDIR1(1)) + (YY * XDIR1(2))
+     &                   + (ZZ * XDIR1(3)) ) / CLAMD1
+              COR(L,2) = ( (XX * XDIR2(1)) + (YY * XDIR2(2))
+     &                   + (ZZ * XDIR2(3)) ) / CLAMD2
+              COR(L,3) = ( (XX * XDIR3(1)) + (YY * XDIR3(2))
+     &                   + (ZZ * XDIR3(3)) ) / CLAMD3
+ 24         CONTINUE
+          ENDIF
+        ENDIF
+
+*
+*       ------------------------------------------------------------------
+*       2e. Contenu par composante (1 seule, 'SCAL') du CHAMELEM :
+*
+        N2 = 1
+        SEGINI MCHAML
+        ICHAML(N1) = MCHAML
+        NOMCHE(1)  = 'SCAL    '
+        TYPCHE(1)  = 'REAL*8          '
+        N1PTEL     = NBPGAU
+        N1EL       = NBEL
+        N2PTEL     = 0
+        N2EL       = 0
+        SEGINI MELVAL
+        IELVAL(1)  = MELVAL
+
+        SEGDES IMODEL
+
+ 4    CONTINUE
+      SEGDES MMODEL
+
+      IF (NBL.EQ.0) THEN
+*       on n'a pas trouvé de partition avec le modèle correspondant
+*       aux points de gauss demandés :
+C       Données incompatibles
+        CALL ERREUR(21)
+        RETURN
+      ENDIF
+*
+*     ------------------------------------------------------------------
+*     3. Génération aléatoire :
+*     ------------------------------------------------------------------
+*
+*     Si les points supports appartiennent à différentes mailles en
+*     même temps, il faut savoir que les valeurs en des points
+*     confondus sont égales avec la méthode des bandes tournantes.
+
+      CALL BANTOU(TABCOR,TABVAL,LADIM,ZSIG,VALMOY,DELZET,OMMAX)
+      SEGDES TABCOR
+*
+*     ------------------------------------------------------------------
+*     4. Construction champ résultat :
+*     ------------------------------------------------------------------
+*
+*     BANTOU renvoie le résultat sous la forme d'une table de valeur,
+*     TABVAL active, que l'on doit maintenant convertir en MELVAL,
+*     partition par partition (on parcourt les partitions valides).
+
+      L = 1
+      ICHELM = 0
+      DO 8 IPART=1,NBPART
+        IF (LPART(IPART)) THEN
+          ICHELM = ICHELM + 1
+          MCHAML = ICHAML(ICHELM)
+          MELVAL = IELVAL(1)
+
+          NBEL   = VELCHE(/2)
+          NBPGAU = VELCHE(/1)
+          DO 1 I=1,NBEL
+            DO 19 J=1,NBPGAU
+              VELCHE(J,I) = VAL(L)
+              L = L + 1
+ 19         CONTINUE
+ 1        CONTINUE
+        ENDIF
+ 8    CONTINUE
+
+*     ------------------------------------------------------------------
+*     5. Ecriture et sortie
+*     ------------------------------------------------------------------
+*
+*     Fermeture des segments
+*
+      DO 12 IPART=1,N1
+        MCHAML = ICHAML(IPART)
+        MELVAL = IELVAL(1)
+        SEGDES MELVAL,MCHAML
+ 12   CONTINUE
+      SEGDES MCHELM
+      SEGSUP TABVAL,TPART
+*
+*     Résultat
+*
+      CALL ECROBJ('MCHAML  ',MCHELM)
+
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

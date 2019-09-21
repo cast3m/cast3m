@@ -1,0 +1,630 @@
+C ZECHI2    SOURCE    PV        16/11/17    22:02:45     9180
+      SUBROUTINE ZECHI2(IKAS,IVOL1,MTAB1,MTAB2,MTAB3,MPOVA1,MPOVA2,
+     &                 IKH,IKT,IKP,MELEVF,MLENT1,NOMP,NOMD)
+C-----------------------------------------------------------------------
+C coeff d'échange étant un SCAL ou CHPO CENTRE, le champ exterieur
+C un SCAL, un CHPO CENTRE ou un CHPO SOMMET.
+C-----------------------------------------------------------------------
+C
+C--------------------
+C Paramètres Entrée :
+C--------------------
+C
+C E/  IKAS    : Type de situation à traiter (1=EF, 2 ou 3=VF)
+C E/  IVOL1   : Type d'échange (0=surfacique, 1=volumique)
+C E/  MTAB1   : Pointeur de la table EQEX
+C E/  MTAB2   : Pointeur de la table DOMAINE locale
+C E/  MTAB3   : Pointeur de la table KIZX
+C E/  MPOVA1  : MPOVAL des valeurs du coefficient d'échange
+C E/  MPOVA2  : MPOVAL des valeurs du champ exterieur
+C E/  IKH     : Forme originel du coefficient d'échange
+C               (0=CHPO CENTRE, 1=FLOTTANT)
+C E/  IKT     : Forme originel du champ exterieur
+C               (0=CHPO CENTRE, 1=FLOTTANT, 4=CHPO SOMMET)
+C E/  IKP     : Support de l'inconnue primale
+C               (0=CHPO CENTRE, 4=CHPO SOMMET)
+C E/  MELEVF  : Pointeur vers les points CENTRE du maillage volumique
+C               en correspondance avec les points CENTRE surfacique
+C               (Utilisé en Formulation VF et échange surfacique)
+C E/  MLENT1  : Correspondance de numérotations pour le champ exterieur
+C               MLENT1.LECT(I)=J : point I en Jième position du spg
+C               (Utilisé lorsque le champ exterieur est au SOMMET)
+C E/  NOMP    : Nom de l'inconnue primale
+C E/  NOMD    : Nom de l'inconnue duale
+C
+C------------------
+C Champs calculés :
+C------------------
+C
+C   MTAB3.'MATELM' : Matrice associé à l'opérateur ECHIMP
+C   MTAB1.'SMBR'   : Second membre du système matriciel issu de la
+C                    discrétisation, la contribution de ECHIMP y est
+C                    assemblée.
+C
+C-----------------------------------------------------------------------
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+C
+-INC CCGEOME
+-INC CCOPTIO
+-INC SIZFFB
+-INC SMCHPOI
+-INC SMCHAML
+-INC SMCOORD
+-INC SMELEME
+-INC SMLENTI
+-INC SMMATRIK
+C
+      CHARACTER*8 NOMP,NOMD,NOM0,TYPE,TYPC,TYPS
+      INTEGER SPGP,SPGD
+C
+C- Initialisations
+C
+      MLENT2 = 0
+      MCHPO1 = 0
+      MCHELM = 0
+      NBCOMP = 1
+      IAXI   = 0
+      IF (IFOMOD.EQ.0) IAXI=2
+      SEGACT MPOVA1
+      SEGACT MPOVA2
+C
+C- Récupération des informations géométriques locales
+C
+      CALL LEKTAB(MTAB2,'CENTRE   ',MELEMC)
+      CALL LEKTAB(MTAB2,'SOMMET   ',MELEMS)
+      CALL LEKTAB(MTAB2,'MAILLAGE ',MELEME)
+      CALL KRIPAD(MELEMS,MLENTI)
+C
+C- En echange surfacique et option VF création du spg du second-membre
+C- différent de MELEVF à cause des coins (dans le spg chaque point
+C- n'est présent qu'une fois meme si il est connecté plusieurs fois)
+C
+      IF (IKAS.NE.1 .AND. IVOL1.EQ.0) THEN
+         IPT1  = MELEVF
+         SEGACT  IPT1
+         SEGINI, IPT2=IPT1
+         IOK1  = 1
+         NUMPD = IPT2.NUM(/2)
+         DO 10 I=2,NUMPD
+            ITEST = IPT1.NUM(1,I)
+            DO 5 J=1,IOK1
+               JTEST = IPT2.NUM(1,J)
+               IF (JTEST.EQ.ITEST) GOTO 10
+  5         CONTINUE
+            IOK1 = IOK1 + 1
+            IPT2.NUM(1,IOK1) = ITEST
+ 10      CONTINUE
+         IF (IOK1.NE.NUMPD) THEN
+            NBSOUS = 0
+            NBELEM = IOK1
+            NBREF  = 0
+            NBNN   = 1
+            SEGADJ IPT2
+         ENDIF
+         SEGDES IPT2
+      ENDIF
+C
+C- Maillage de connectivités et supports géométriques des inconnues
+C
+C   SPGP  : Support géométrique local de l'inconnue primale
+C   SPGD  : Idem pour la duale
+C   MLOCP : Connectivité local pour l'inconnue primale
+C   MLOCD : Idem pour la duale
+C
+      IF (IKAS.EQ.1) THEN
+         TYPS = 'SOMMET  '
+         SPGD  = MELEMS
+         IF (IKP.EQ.0) THEN
+            SPGP  = MELEMC
+            MLOCD = MELEME
+            MLOCP = MELEMC
+         ELSE
+            SPGP  = MELEMS
+            MLOCD = MELEME
+            MLOCP = MELEME
+         ENDIF
+      ELSE
+         TYPS = 'CENTRE  '
+         IF (IVOL1.EQ.0) THEN
+            SPGD  = IPT2
+            MLOCD = MELEVF
+         ELSE
+            SPGD  = MELEMC
+            MLOCD = MELEMC
+         ENDIF
+         IF (IKP.EQ.0) THEN
+            SPGP  = MELEMC
+            MLOCP = MELEMC
+         ELSE
+            SPGP  = MELEMS
+            MLOCP = MELEME
+         ENDIF
+         CALL KRIPAD(SPGD,MLENT2)
+      ENDIF
+C
+C- Création du CHPO contenant la contribution au second membre de ECHIMP
+C
+      NAT      = 1
+      NSOUPO   = 1
+      SEGINI MCHPOI
+      MTYPOI   = TYPS
+      JATTRI(1) = 2
+      IFOPOI   = IFOMOD
+      NC       = 1
+      SEGINI MSOUPO
+      IPCHP(1) = MSOUPO
+      SEGDES MCHPOI
+      NOCOMP(1)= NOMD(1:4)
+      IGEOC    = SPGD
+      IPT3     = SPGD
+      SEGACT IPT3
+      N        = IPT3.NUM(/2)
+      SEGDES IPT3
+      SEGINI MPOVAL
+      IPOVAL   = MPOVAL
+      SEGDES MSOUPO
+C
+C-------------------
+C-------------------
+C
+      IF (IKAS.EQ.1) THEN
+C
+C- Matrice EF dans le cas ou l'inconnue primale est au CENTRE
+C- (matrice colonne : h fois diagonale de la matrice MASSE condensée)
+C
+         IF (IKP.EQ.0) THEN
+            CALL LEKTAB(MTAB2,'XXPSOML ',MCHELM)
+            IF (IERR.NE.0) RETURN
+            SEGACT MCHELM
+            NRIGE  = 7
+            NKID   = 9
+            NKMT   = 7
+            NMATRI = 1
+            SEGINI MATRIK
+            IRIGEL(1,1) = MLOCP
+            IRIGEL(2,1) = MLOCD
+            IRIGEL(7,1) = 3
+            NBME   = 1
+            SEGACT MELEME
+            NBSOUS = LISOUS(/1)
+            IF (NBSOUS.EQ.0) NBSOUS=1
+            SEGINI IMATRI
+            IRIGEL(4,1) = IMATRI
+            SEGDES MATRIK
+            KSPGP = SPGP
+            KSPGD = SPGD
+            LISPRI(1) = NOMP(1:4)//'    '
+            LISDUA(1) = NOMD(1:4)//'    '
+            NUTOEL = 0
+            DO 30 L=1,NBSOUS
+               IPT1 = MELEME
+               IF (NBSOUS.NE.1) IPT1=LISOUS(L)
+               SEGACT IPT1
+               NP     = 1
+               MP     = IPT1.NUM(/1)
+               NBEL   = IPT1.NUM(/2)
+               SEGINI IZAFM
+               LIZAFM(L,1) = IZAFM
+               MCHAML = ICHAML(L)
+               SEGACT MCHAML
+               MELVAL = IELVAL(1)
+               SEGACT MELVAL
+               DO 20 K=1,NBEL
+                  NK   = NUTOEL + K
+                  KPOS = 1 + (1-IKH)*(NK-1)
+                  DO 15 I=1,MP
+                     VAL1 = MPOVA1.VPOCHA(KPOS,1)*VELCHE(I,K)
+                     AM(K,1,I) = AM(K,1,I) + VAL1
+C                    write(6,*) 'EF CENTRE AM K I',K,I,AM(K,1,I)
+ 15               CONTINUE
+ 20            CONTINUE
+               SEGDES IZAFM
+               SEGDES IPT1
+               SEGDES MCHAML,MELVAL
+               NUTOEL = NUTOEL + NBEL
+ 30         CONTINUE
+            IF (NBSOUS.NE.1) SEGDES MELEME
+            SEGDES MCHELM
+            SEGDES IMATRI
+C
+C- Matrice EF dans le cas ou l'inconnue primale est au SOMMET
+C- (matrice carrée : h fois matrice MASSE consistante)
+C
+         ELSE
+            NRIGE  = 7
+            NKID   = 9
+            NKMT   = 7
+            NMATRI = 1
+            SEGINI MATRIK
+            IRIGEL(1,1) = MLOCP
+            IRIGEL(2,1) = MLOCD
+            IRIGEL(7,1) = 2
+            NBME   = 1
+            SEGACT MELEME
+            NBSOUS = LISOUS(/1)
+            IF (NBSOUS.EQ.0) NBSOUS=1
+            SEGINI IMATRI
+            IRIGEL(4,1) = IMATRI
+            SEGDES MATRIK
+            KSPGP = SPGP
+            KSPGD = SPGD
+            LISPRI(1) = NOMP(1:4)//'    '
+            LISDUA(1) = NOMD(1:4)//'    '
+            NUTOEL = 0
+            DO 100 L=1,NBSOUS
+               IPT1 = MELEME
+               IF (NBSOUS.NE.1) IPT1=LISOUS(L)
+               SEGACT IPT1
+               NP     = IPT1.NUM(/1)
+               NBEL   = IPT1.NUM(/2)
+               MP     = NP
+               SEGINI IZAFM
+               LIZAFM(L,1) = IZAFM
+               NOM0   = NOMS(IPT1.ITYPEL)//'    '
+               CALL KALPBG(NOM0,'FONFORM ',IZFFM)
+               IF (IZFFM.EQ.0) THEN
+C Echec lors de la lecture des fonctions de forme d'un élément.
+                  CALL ERREUR(662)
+                  RETURN
+               ENDIF
+               SEGACT IZFFM*MOD
+               IZHR = KZHR(1)
+               SEGACT IZHR*MOD
+               NPG = GR(/3)
+               NES = GR(/1)
+               DO 90 K=1,NBEL
+                  NK   = NUTOEL + K
+                  KPOS = 1 + (1-IKH)*(NK-1)
+                  DO 50 I=1,NP
+                     II     = IPT1.NUM(I,K)
+                     DO 40 N=1,IDIM
+                        XYZ(N,I) = XCOOR((II-1)*(IDIM+1)+N)
+ 40                  CONTINUE
+ 50               CONTINUE
+                  CALL CALJBC(FN,GR,PG,XYZ,HR,PGSQ,RPG,NES,IDIM,NP,
+     &                        NPG,IAXI,AIRE)
+                  DO 80 I=1,NP
+                     DO 70 J=1,NP
+                        UU = 0.D0
+                        DO 60 LG=1,NPG
+                           UU = UU + FN(I,LG)*FN(J,LG)*PGSQ(LG)
+ 60                     CONTINUE
+                        AM(K,I,J) = MPOVA1.VPOCHA(KPOS,1) * UU
+C                       write(6,*) 'EF SOMMET AM K I J',K,I,J,AM(K,I,J)
+ 70                  CONTINUE
+ 80               CONTINUE
+ 90            CONTINUE
+               SEGDES IPT1
+               SEGDES IZAFM
+               SEGDES IZFFM*MOD
+               SEGDES IZHR
+               NUTOEL = NUTOEL + NBEL
+100         CONTINUE
+            IF (NBSOUS.NE.1) SEGDES MELEME
+            SEGDES IMATRI
+         ENDIF
+C
+C- Second membre EF, champ exterieur FLOTTANT ou CHPO CENTRE
+C- (matrice MASSE condensée saturé par h*champ exterieur)
+C
+         IF (IKT.EQ.0.OR.IKT.EQ.1) THEN
+            IF (MCHELM.EQ.0) CALL LEKTAB(MTAB2,'XXPSOML ',MCHELM)
+            IF (IERR.NE.0) RETURN
+            SEGACT MCHELM
+            SEGACT MELEME
+            NBSOUS = LISOUS(/1)
+            IF (NBSOUS.EQ.0) NBSOUS=1
+            NUTOEL = 0
+            DO 130 L=1,NBSOUS
+               IPT1 = MELEME
+               IF (NBSOUS.NE.1) IPT1=LISOUS(L)
+               SEGACT IPT1
+               NP     = IPT1.NUM(/1)
+               NBEL   = IPT1.NUM(/2)
+               MCHAML = ICHAML(L)
+               SEGACT MCHAML
+               MELVAL = IELVAL(1)
+               SEGACT MELVAL
+               DO 120 K=1,NBEL
+                  NK   = NUTOEL + K
+                  KPOS = 1 + (1-IKH)*(NK-1)
+                  KTEX = 1 + (1-IKT)*(NK-1)
+                  DO 110 I=1,NP
+                     II   = IPT1.NUM(I,K)
+                     IPOS = LECT(II)
+                     VAL1 = MPOVA1.VPOCHA(KPOS,1)*VELCHE(I,K)
+     &                    * MPOVA2.VPOCHA(KTEX,1)
+                     VPOCHA(IPOS,1) = VPOCHA(IPOS,1) + VAL1
+C                 write(6,*) 'EF CENTRE VPOCHA IPOS',IPOS,VPOCHA(IPOS,1)
+110               CONTINUE
+120            CONTINUE
+               SEGDES IPT1
+               SEGDES MCHAML,MELVAL
+               NUTOEL = NUTOEL + NBEL
+130         CONTINUE
+            IF (NBSOUS.NE.1) SEGDES MELEME
+            SEGDES MCHELM
+C
+C- Second membre EF, champ exterieur CHPO SOMMET
+C- (matrice MASSE consistante saturée par h*champ exterieur)
+C
+         ELSE
+            SEGACT MELEME
+            NBSOUS = LISOUS(/1)
+            IF (NBSOUS.EQ.0) NBSOUS=1
+            NUTOEL = 0
+            DO 200 L=1,NBSOUS
+               IPT1 = MELEME
+               IF (NBSOUS.NE.1) IPT1=LISOUS(L)
+               SEGACT IPT1
+               NP   = IPT1.NUM(/1)
+               NBEL = IPT1.NUM(/2)
+               NOM0 = NOMS(IPT1.ITYPEL)//'    '
+               CALL KALPBG(NOM0,'FONFORM ',IZFFM)
+               IF (IZFFM.EQ.0) THEN
+C Echec lors de la lecture des fonctions de forme d'un élément.
+                  CALL ERREUR(662)
+                  RETURN
+               ENDIF
+               SEGACT IZFFM*MOD
+               IZHR = KZHR(1)
+               SEGACT IZHR*MOD
+               NPG = GR(/3)
+               NES = GR(/1)
+               DO 190 K=1,NBEL
+                  NK   = NUTOEL + K
+                  KPOS = 1 + (1-IKH)*(NK-1)
+                  DO 150 I=1,NP
+                     II     = IPT1.NUM(I,K)
+                     DO 140 N=1,IDIM
+                        XYZ(N,I) = XCOOR((II-1)*(IDIM+1)+N)
+140                  CONTINUE
+150               CONTINUE
+                  CALL CALJBC(FN,GR,PG,XYZ,HR,PGSQ,RPG,NES,IDIM,NP,
+     &                        NPG,IAXI,AIRE)
+                  DO 180 I=1,NP
+                     II   = IPT1.NUM(I,K)
+                     IPOS = LECT(II)
+                     SOM1 = 0.D0
+                     DO 170 J=1,NP
+                        JPOS = MLENT1.LECT(IPT1.NUM(J,K))
+                        UU = 0.D0
+                        DO 160 LG=1,NPG
+                           UU = UU + FN(I,LG)*FN(J,LG)*PGSQ(LG)
+160                     CONTINUE
+                        SOM1 = SOM1 + MPOVA1.VPOCHA(KPOS,1)
+     &                              * MPOVA2.VPOCHA(JPOS,1) * UU
+170                  CONTINUE
+                     VPOCHA(IPOS,1) = VPOCHA(IPOS,1) + SOM1
+C                 write(6,*) 'EF SOMMET VPOCHA IPOS',IPOS,VPOCHA(IPOS,1)
+180               CONTINUE
+190            CONTINUE
+               SEGDES IPT1
+               SEGDES IZFFM*MOD
+               SEGDES IZHR
+               NUTOEL = NUTOEL + NBEL
+200         CONTINUE
+            IF (NBSOUS.NE.1) SEGDES MELEME
+         ENDIF
+C
+C-------------------
+C-------------------
+C
+      ELSE
+C
+C- Matrice VF dans le cas ou l'inconnue primale est au CENTRE
+C- (matrice IDENTITE multipliée par h*VOLUME)
+C
+         IF (IKP.EQ.0) THEN
+            CALL LEKTAB(MTAB2,'XXVOLUM ',MCHPO3)
+            IF (IERR.NE.0) RETURN
+            CALL LICHT(MCHPO3,MPOVA3,TYPC,IGEOM)
+            NRIGE  = 7
+            NKID   = 9
+            NKMT   = 7
+            NMATRI = 1
+            SEGINI MATRIK
+            IRIGEL(1,1) = MLOCP
+            IRIGEL(2,1) = MLOCD
+            IF (MLOCP.EQ.MLOCD) THEN
+               IF (NOMP(1:4).EQ.NOMD(1:4)) THEN
+                  IRIGEL(7,1) = 5
+               ELSE
+                  IRIGEL(7,1) = 2
+               ENDIF
+            ELSE
+               IRIGEL(7,1) = 3
+            ENDIF
+            NBME   = 1
+            NBSOUS = 1
+            SEGINI IMATRI
+            IRIGEL(4,1) = IMATRI
+            SEGDES MATRIK
+            KSPGP = SPGP
+            KSPGD = SPGD
+            LISPRI(1) = NOMP(1:4)//'    '
+            LISDUA(1) = NOMD(1:4)//'    '
+            NBEL = MPOVA3.VPOCHA(/1)
+            NP   = 1
+            MP   = 1
+            SEGINI IZAFM
+            LIZAFM(1,1) = IZAFM
+            SEGDES IMATRI
+            DO 210 NK=1,NBEL
+               KPOS = 1 + (1-IKH)*(NK-1)
+               AM(NK,1,1) = AM(NK,1,1) +
+     &                      MPOVA1.VPOCHA(KPOS,1) * MPOVA3.VPOCHA(NK,1)
+C              write(6,*) 'VF CENTRE AM NK',NK,AM(NK,1,1)
+210         CONTINUE
+C
+C- Matrice VF dans le cas ou l'inconnue primale est au SOMMET
+C- (matrice ligne : h fois diagonale matrice MASSE condensée)
+C
+         ELSE
+            CALL LEKTAB(MTAB2,'XXPSOML ',MCHELM)
+            IF (IERR.NE.0) RETURN
+            SEGACT MCHELM
+            NRIGE  = 7
+            NKID   = 9
+            NKMT   = 7
+            NMATRI = 1
+            SEGINI MATRIK
+            IRIGEL(1,1) = MLOCP
+            IRIGEL(2,1) = MLOCD
+            IRIGEL(7,1) = 3
+            NBME   = 1
+            SEGACT MELEME
+            NBSOUS = LISOUS(/1)
+            IF (NBSOUS.EQ.0) NBSOUS=1
+            SEGINI IMATRI
+            IRIGEL(4,1) = IMATRI
+            SEGDES MATRIK
+            KSPGP = SPGP
+            KSPGD = SPGD
+            LISPRI(1) = NOMP(1:4)//'    '
+            LISDUA(1) = NOMD(1:4)//'    '
+            NUTOEL = 0
+            DO 240 L=1,NBSOUS
+               IPT1 = MELEME
+               IF (NBSOUS.NE.1) IPT1=LISOUS(L)
+               SEGACT IPT1
+               NP     = IPT1.NUM(/1)
+               MP     = 1
+               NBEL   = IPT1.NUM(/2)
+               SEGINI IZAFM
+               LIZAFM(L,1) = IZAFM
+               MCHAML = ICHAML(L)
+               SEGACT MCHAML
+               MELVAL = IELVAL(1)
+               SEGACT MELVAL
+               DO 230 K=1,NBEL
+                  NK   = NUTOEL + K
+                  KPOS = 1 + (1-IKH)*(NK-1)
+                  DO 220 I=1,NP
+                     VAL1 = MPOVA1.VPOCHA(KPOS,1)*VELCHE(I,K)
+                     AM(K,I,1) = AM(K,I,1) + VAL1
+C                    write(6,*) 'VF SOMMET AM K I',K,I,AM(K,I,1)
+220               CONTINUE
+230            CONTINUE
+               SEGDES IPT1
+               SEGDES MCHAML,MELVAL
+               SEGDES IZAFM
+               NUTOEL = NUTOEL + NBEL
+240         CONTINUE
+            IF (NBSOUS.NE.1) SEGDES MELEME
+            SEGDES MCHELM
+            SEGDES IMATRI
+         ENDIF
+C
+C- Second membre VF dans le cas ou le champ exterieur est au CENTRE
+C- (matrice diagonale h*VOLUME saturée par le champ exterieur)
+C
+         IF (IKT.EQ.0.OR.IKT.EQ.1) THEN
+            IF (MCHPO1.EQ.0) CALL LEKTAB(MTAB2,'XXVOLUM ',MCHPO1)
+            IF (IERR.NE.0) RETURN
+            CALL LICHT(MCHPO1,MPOVA3,TYPC,IGEOM)
+            NBEL = MPOVA3.VPOCHA(/1)
+            IPT2   = MLOCD
+            SEGACT IPT2
+            DO 250 NK=1,NBEL
+               IPOS = MLENT2.LECT(IPT2.NUM(1,NK))
+               KPOS = 1 + (1-IKH)*(NK-1)
+               KTEX = 1 + (1-IKT)*(NK-1)
+               VAL1 = MPOVA1.VPOCHA(KPOS,1) * MPOVA2.VPOCHA(KTEX,1)
+     &              * MPOVA3.VPOCHA(NK,1)
+               VPOCHA(IPOS,1) = VPOCHA(IPOS,1) + VAL1
+C              write(6,*) 'VF CENTRE VPOCHA IPOS',IPOS,VPOCHA(IPOS,1)
+250         CONTINUE
+            SEGDES IPT2
+            SEGDES MPOVA3
+C
+C- Second membre VF dans le cas ou l'inconnue primale est au SOMMET
+C- (matrice MASSE condensée saturée par h*champ exterieur)
+C
+         ELSE
+            IF (MCHELM.EQ.0) CALL LEKTAB(MTAB2,'XXPSOML ',MCHELM)
+            IF (IERR.NE.0) RETURN
+            SEGACT MCHELM
+            SEGACT MELEME
+            NBSOUS = LISOUS(/1)
+            IF (NBSOUS.EQ.0) NBSOUS=1
+            NUTOEL = 0
+            IPT2   = MLOCD
+            SEGACT IPT2
+            DO 280 L=1,NBSOUS
+               IPT1 = MELEME
+               IF (NBSOUS.NE.1) IPT1=LISOUS(L)
+               SEGACT IPT1
+               NP     = IPT1.NUM(/1)
+               NBEL   = IPT1.NUM(/2)
+               MCHAML = ICHAML(L)
+               SEGACT MCHAML
+               MELVAL = IELVAL(1)
+               SEGACT MELVAL
+               DO 270 K=1,NBEL
+                  NK   = NUTOEL + K
+                  IPOS = MLENT2.LECT(IPT2.NUM(1,NK))
+                  KPOS = 1 + (1-IKH)*(NK-1)
+                  SOM1 = 0.D0
+                  DO 260 J=1,NP
+                     JPOS = MLENT1.LECT(IPT1.NUM(J,K))
+                     SOM1 = SOM1 + MPOVA2.VPOCHA(JPOS,1)*VELCHE(J,K)
+260               CONTINUE
+                  VAL1 = SOM1 * MPOVA1.VPOCHA(KPOS,1)
+                  VPOCHA(IPOS,1) = VPOCHA(IPOS,1) + VAL1
+C              write(6,*) 'VF SOMMET VPOCHA IPOS',IPOS,VPOCHA(IPOS,1)
+270            CONTINUE
+               SEGDES IPT1
+               SEGDES MCHAML,MELVAL
+               NUTOEL = NUTOEL + NBEL
+280         CONTINUE
+            IF (NBSOUS.NE.1) SEGDES MELEME
+            SEGDES MCHELM
+            SEGDES IPT2
+         ENDIF
+      ENDIF
+C
+C- Désactivation
+C
+      SEGDES MPOVA2
+      SEGDES MPOVA1
+      SEGDES MPOVAL
+      SEGSUP MLENTI
+      IF (MLENT2.NE.0) SEGSUP MLENT2
+C
+C- Ecriture de la matrice et du second-membre
+C
+      CALL ECMO(MTAB3,'MATELM','MATRIK',MATRIK)
+      TYPE = ' '
+      CALL ACMO(MTAB1,'SMBR',TYPE,MCHPO4)
+      IF (TYPE.NE.'CHPOINT ') THEN
+         CALL ECMO(MTAB1,'SMBR','CHPOINT ',MCHPOI)
+      ELSE
+         CALL ECROBJ('CHPOINT ',MCHPO4)
+         CALL ECROBJ('CHPOINT ',MCHPOI)
+         CALL PRFUSE
+         CALL LIROBJ('CHPOINT ',MCHPOI,1,IRET)
+         IF (IERR.NE.0) RETURN
+         CALL ECMO(MTAB1,'SMBR','CHPOINT ',MCHPOI)
+      ENDIF
+C     write(6,*) 'IKAS IVOL IKH IKT IKP',IKAS,IVOL1,IKH,IKT,IKP
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

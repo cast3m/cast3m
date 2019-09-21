@@ -1,0 +1,607 @@
+C INVACA    SOURCE    GG250959  17/09/20    21:15:40     9554
+
+      SUBROUTINE INVACA(IPMODL,IPCHE1,IPCHE2,IPCHE3,IPCHE4,IPCHE5,
+     &                  IMIL,IRET)
+
+*---------------------------------------------------------------------
+*
+*      CALCUL DES 3 INVARIANTS D'UN TENSEUR D'ORDRE 2
+*                 (APPELE PAR INVARI)
+*
+*   ENTREES:
+*   --------
+*
+*     IPMODL   POINTEUR SUR UN MMODEL
+*     IPCHE1   POINTEUR SUR UN CHAMELEM DE CONTRAINTES OU DEFORMATIONS
+*              (TYPE MCHAML)
+*     IPCHE5   POINTEUR SUR UN CHAMELEM DE CARACTERISTIQUES
+*              (TYPE MCHAML)
+*     IMIL     INDICATEUR OU ON CALCULE LES CONTRAINTES POUR
+*              LES COQUES
+*
+*  SORTIES :
+*  ---------
+*
+*     IPCHE2   POINTEUR SUR UN CHAMELEM STRESSES ( I1)
+*     IPCHE3   POINTEUR SUR UN CHAMELEM STRESSES ( I2 )
+*     IPCHE4   POINTEUR SUR UN CHAMELEM STRESSES ( I3 )
+*     IRET     =1  OU  0   SUIVANT SUCCES OU PAS
+*
+*  PASSAGE AUX NOUVEAUX CHAMELEM PAR JM CAMPENON LE 12/90
+*
+*---------------------------------------------------------------------
+*
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCHAMP
+
+-INC SMCHAML
+-INC SMMODEL
+
+      SEGMENT NOTYPE
+        CHARACTER*16 TYPE(NBTYPE)
+      ENDSEGMENT
+*
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS)    ,NSOF(NS)
+        INTEGER      IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+*
+      PARAMETER ( NINF=3 )
+      INTEGER INFOS(NINF)
+      CHARACTER*(NCONCH) CONM
+      LOGICAL lsupno
+*
+      DIMENSION SIG(9)
+
+*------ Fin des déclarations ------------------------------------
+
+      IRET = 0
+      IPCHE2 = 0
+      IPCHE3 = 0
+      IPCHE4 = 0
+*
+* Reduction des MCHAMLs sur le MODELE
+*
+      kerre = 0
+*
+      CALL REDUAF(IPCHE1,IPMODL,ipch,0,ir,kerre)
+      IF (ir.NE.1) CALL ERREUR(kerre)
+      IF (IERR.NE.0) RETURN
+      IPCHE1 = ipch
+*
+      IF (IPCHE5.NE.0) THEN
+        CALL REDUAF(IPCHE5,IPMODL,ipch,0,ir,kerre)
+        IF (ir.NE.1) CALL ERREUR(kerre)
+        IF (IERR.NE.0) RETURN
+        IPCHE5 = ipch
+      ENDIF
+*
+* Verification du type de IPCHE1 !
+*
+      MCHELM = IPCHE1
+      SEGACT,MCHELM
+      IF (TITCHE.EQ.'CONTRAINTES') THEN
+        ICONTR = 1
+        W1 = 2.D0
+        W2 = 1.D0
+        W3 = 2.D0
+      ELSE IF (TITCHE.EQ.'DEFORMATIONS') THEN
+        ICONTR = 0
+        W1 = 0.5D0
+        W2 = 0.25D0
+        W3 = 0.25D0
+      ELSE
+        MOTERR(1:8)='CONTRAIN'
+        MOTERR(9:16)='DEFORMAT'
+        CALL ERREUR(109)
+        GOTO 666
+      ENDIF
+*
+*  Verification du lieu support des mchamls
+*
+      CALL QUESUP(IPMODL,IPCHE1,0,0,iret1,ISUP1)
+      IF (IERR.NE.0) GOTO 666
+*
+      IPCH5O = IPCHE5
+      IF (IPCHE5.NE.0) THEN
+        CALL QUESUP(IPMODL,IPCH5O,ISUP1,0,ISUP5,iret5)
+        IF (ISUP5.GT.1) GOTO 666
+        IF (IERR.NE.0) GOTO 666
+C Le support des caractéristiques est différent de celui de IPCHE1
+        IF (ISUP5.NE.0) THEN
+          CALL CHASUP(IPMODL,IPCH5O,IPCHE5,irecar,ISUP1)
+          IF (irecar.NE.0) GOTO 666
+        ENDIF
+      ENDIF
+*
+*  Activation et verification du modele
+*
+      MMODEL = IPMODL
+      SEGACT,MMODEL
+      NSOUS = KMODEL(/1)
+      KEL22 = 0
+      DO ISOUS = 1, NSOUS
+        IMODEL=KMODEL(ISOUS)
+        SEGACT,IMODEL
+        IF (FORMOD(1).NE.'MECANIQUE' .AND.
+     &      FORMOD(1).NE.'POREUX') THEN
+          MOTERR(1:8) = FORMOD(1)
+          CALL ERREUR(193)
+          GOTO 666
+        ENDIF
+        IF ((NEFMOD.EQ.22).OR.(NEFMOD.EQ.259)) KEL22 = KEL22 + 1
+      ENDDO
+*
+C ... Initialisation des trois nouveaux MCHELM - resultats ...
+      N1 = NSOUS - KEL22
+      L1 = 8
+      N3 = 6
+*
+      SEGINI MCHEL1
+      MCHEL1.IFOCHE=IFOUR
+      MCHEL1.TITCHE='SCALAIRE'
+*
+      SEGINI MCHEL2
+      MCHEL2.IFOCHE=IFOUR
+      MCHEL2.TITCHE='SCALAIRE'
+*
+      SEGINI MCHEL3
+      MCHEL3.IFOCHE=IFOUR
+      MCHEL3.TITCHE='SCALAIRE'
+*
+* Petit segment utile
+      nbtype = 1
+      SEGINI,notype
+      type(1)='REAL*8'
+      MOTYPE = notype
+*
+      ISOUS = 0
+*
+* ... BOUCLE SUR LES SOUS ZONES DU MODELE ...
+*
+      DO 200 JSOUS = 1, NSOUS
+*
+        IMODEL = KMODEL(JSOUS)
+        SEGACT,IMODEL
+*
+        IPMAIL= IMAMOD
+        CONM  = CONMOD
+        MELE  = NEFMOD
+*
+        iOK = 1
+        IF ((MELE.EQ.22).OR.(MELE.EQ.259)) GOTO 210
+*
+        iOK = 0
+*
+C    ... COQUE INTEGREE OU NON ? ...
+        IF (INFMOD(/1).NE.0) THEN
+          NPINT = INFMOD(1)
+          IF (NPINT.NE.0)THEN
+            CALL ERREUR(615)
+            GOTO 210
+          ENDIF
+        ELSE
+          NPINT = 0
+        ENDIF
+*
+*    ... INITIALISATION ...
+*
+        ISOUS = ISOUS + 1
+*
+        IVACAR = 0
+        IVACOM = 0
+        MOCOMP = 0
+        MOCARA = 0
+        lsupno = .false.
+*
+*  ... INFORMATION SUR L'ELEMENT FINI ...
+*
+        MFR   = INFELE(13)
+        MINTE = INFMOD(2+ISUP1)
+        NSTRS = INFELE(16)
+*
+*  ... Verification de compatibilité des MCHAML du point de vue des
+*      tableaux INFCHE et remplissage du tableau INFOS pour KOMCHA ...
+*
+        CALL IDENT(IPMAIL,CONM,IPCHE1,IPCHE5,INFOS,IRTD)
+        IF (IRTD.EQ.0) GOTO 210
+*
+*  ... RECHERCHE DES NOMS de COMPOSANTES de CONTRAINTES/DEFORMATIONS...
+*
+        IF (ICONTR.EQ.1) THEN
+          IF (lnomid(4).NE.0) THEN
+            MOCOMP = lnomid(4)
+          ELSE
+            lsupno = .true.
+            CALL IDCONT(IMODEL,IFOUR,MOCOMP,NCOMP,NFAC)
+          ENDIF
+        ELSE
+          IF (lnomid(5).NE.0) THEN
+            MOCOMP = lnomid(5)
+          ELSE
+            lsupno = .true.
+            CALL IDDEFO(IMODEL,IFOUR,MOCOMP,NCOMP,NFAC)
+          ENDIF
+        ENDIF
+        nomid = MOCOMP
+        SEGACT,nomid
+        NCOMP = lesobl(/2)
+        NFAC  = lesfac(/2)
+*
+*    ... VERIFICATION DE LEUR PRESENCE ...
+*
+        CALL KOMCHA(IPCHE1,IPMAIL,CONM,MOCOMP,MOTYPE,1,INFOS,3,IVACOM)
+        IF (IERR.NE.0) GOTO 220
+*
+*    ... TRAITEMENT DES CHAMPS DE CARACTERISTIQUES ...
+*
+        nbrobl = 0
+        nbrfac = 0
+        nomid  = 0
+*    ... EPAISSEUR DANS LE CAS DES COQUES MINCES ...
+        IF (MFR.EQ.3 .OR. MFR.EQ.9) THEN
+          nbrobl = 1
+          nbrfac = 0
+          SEGINI,nomid
+          lesobl(1) = 'EPAI'
+        ENDIF
+*
+        MOCARA = nomid
+        NCARA = nbrobl
+        NCARF = nbrfac
+        NCARR = NCARA+NCARF
+*
+        IF (MOCARA.NE.0 .AND. NCARA.GE.1)  THEN
+          IF (IPCHE5.NE.0)  THEN
+C          ... On vérifie si elle est présente dans le champ de
+C              caractéristiques qui a été fourni ...
+            CALL KOMCHA(IPCHE5,IPMAIL,CONM,MOCARA,MOTYPE,1,
+     &                                     INFOS,3,IVACAR)
+          ELSE
+C          ... S'il n'y a pas de champ de caractéristiques, on râle ...
+            MOTERR(1:8)='CARACTER'
+            MOTERR(9:12)=NOMTP(MELE)
+            MOTERR(13:20)='INVA'
+            CALL ERREUR(145)
+          ENDIF
+          IF (IERR.NE.0) GOTO 230
+        ENDIF
+*
+C  Creation des MELVAL de la zone élémentaire
+*
+*  ... RECHERCHE DE LA TAILLE DES MELVAL A ALLOUER ...
+*
+        MPTVAL = IVACOM
+        N1PTEL= 0
+        N1EL  = 0
+        DO 110 ICOMP = 1, NCOMP
+          MELVAL = IVAL(ICOMP)
+          N1PTEL = MAX(N1PTEL,VELCHE(/1))
+          N1EL   = MAX(N1EL  ,VELCHE(/2))
+ 110    CONTINUE
+        N2PTEL=0
+        N2EL  =0
+*
+        SEGINI,MELVA1,MELVA2,MELVA3
+*
+*  Création des MCHAML ...
+*
+        N2 = 1
+        SEGINI,MCHAM1
+        SEGINI,MCHAM2
+        SEGINI,MCHAM3
+*
+        MCHAM1.NOMCHE(1)='SCAL'
+        MCHAM1.TYPCHE(1)='REAL*8'
+        MCHAM1.IELVAL(1)=MELVA1
+*
+        MCHAM2.NOMCHE(1)='SCAL'
+        MCHAM2.TYPCHE(1)='REAL*8'
+        MCHAM2.IELVAL(1)=MELVA2
+*
+        MCHAM3.NOMCHE(1)='SCAL'
+        MCHAM3.TYPCHE(1)='REAL*8'
+        MCHAM3.IELVAL(1)=MELVA3
+*
+* Remplissage des attributs de la sous-zone ...
+*
+        MCHEL1.INFCHE(ISOUS,1)=0
+        MCHEL1.INFCHE(ISOUS,2)=0
+        MCHEL1.INFCHE(ISOUS,3)=NIFOUR
+        MCHEL1.INFCHE(ISOUS,4)=MINTE
+        MCHEL1.INFCHE(ISOUS,5)=0
+        MCHEL1.INFCHE(ISOUS,6)=ISUP1
+        MCHEL1.IMACHE(ISOUS)=IPMAIL
+        MCHEL1.CONCHE(ISOUS)=CONMOD
+        MCHEL1.ICHAML(ISOUS)=MCHAM1
+*
+        MCHEL2.INFCHE(ISOUS,1)=0
+        MCHEL2.INFCHE(ISOUS,2)=0
+        MCHEL2.INFCHE(ISOUS,3)=NIFOUR
+        MCHEL2.INFCHE(ISOUS,4)=MINTE
+        MCHEL2.INFCHE(ISOUS,5)=0
+        MCHEL2.INFCHE(ISOUS,6)=ISUP1
+        MCHEL2.IMACHE(ISOUS)=IPMAIL
+        MCHEL2.CONCHE(ISOUS)=CONMOD
+        MCHEL2.ICHAML(ISOUS)=MCHAM2
+*
+        MCHEL3.INFCHE(ISOUS,1)=0
+        MCHEL3.INFCHE(ISOUS,2)=0
+        MCHEL3.INFCHE(ISOUS,3)=NIFOUR
+        MCHEL3.INFCHE(ISOUS,4)=MINTE
+        MCHEL3.INFCHE(ISOUS,5)=0
+        MCHEL3.INFCHE(ISOUS,6)=ISUP1
+        MCHEL3.IMACHE(ISOUS)=IPMAIL
+        MCHEL3.CONCHE(ISOUS)=CONMOD
+        MCHEL3.ICHAML(ISOUS)=MCHAM3
+*
+**********************************************************************
+*                                                                    *
+*               BRANCHEMENT SUIVANT LA FORMULATION                   *
+*                                                                    *
+**********************************************************************
+*            MASSI   COQUE    COQEP          CIST
+        GOTO ( 30, 99, 60, 99, 80, 99, 99, 99,120, 99,
+     &         99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+     &         99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+*             INCO    PORE
+     &         30, 99, 30, 99, 99, 99, 99, 99, 99, 99), MFR
+C       XFEM : idem massif
+        IF (MFR.EQ.63) GOTO 30
+C
+ 99     CONTINUE
+        MOTERR(1:8) = NOMFR(MFR/2+1)
+        CALL ERREUR(193)
+        GOTO 240
+*_______________________________________________________________________
+*
+*    FORMULATION MASSIVE / INCOMPRESSIBLE / POREUX / XFEM
+*_______________________________________________________________________
+*
+   30   CONTINUE
+        DO 31 IB=1,N1EL
+          DO 31 IGAU=1,N1PTEL
+*
+C       ... Recherche des composantes du champ des contraintes ...
+            MPTVAL=IVACOM
+            DO 35 ICOMP=1,NCOMP
+               MELVAL=IVAL(ICOMP)
+               IGMN=MIN(IGAU,VELCHE(/1))
+               IBMN=MIN(IB  ,VELCHE(/2))
+               SIG(ICOMP)=VELCHE(IGMN,IBMN)
+   35       CONTINUE
+
+C       ... Calcul des invariants ...
+
+            XI1=SIG(1)+SIG(2)+SIG(3)
+            IF (IFOUR.LT.1.AND.IFOUR.GT.-3) THEN
+               XI2=SIG(1)*SIG(1)+SIG(2)*SIG(2)+SIG(3)*SIG(3)+
+     .             W1*SIG(4)*SIG(4)
+               XI3=SIG(3)*(SIG(1)*SIG(2)-W2*SIG(4)*SIG(4))
+            ELSE IF (IFOUR.GE.3.AND.IFOUR.LE.15) THEN
+               XI2=SIG(1)*SIG(1)+SIG(2)*SIG(2)+SIG(3)*SIG(3)
+               XI3=SIG(1)*SIG(2)*SIG(3)
+            ELSE
+               XI2=SIG(1)*SIG(1)+SIG(2)*SIG(2)+SIG(3)*SIG(3)+
+     .             W1*(SIG(4)*SIG(4)+SIG(5)*SIG(5)+SIG(6)*SIG(6))
+               XI3=SIG(1)*SIG(2)*SIG(3)-
+     .             W2*(SIG(1)*SIG(6)*SIG(6)+SIG(2)*SIG(5)*SIG(5)+
+     .             SIG(3)*SIG(4)*SIG(4))+W3*SIG(4)*SIG(5)*SIG(6)
+            ENDIF
+
+C       ... et leur stockage ...
+
+            MELVA1.VELCHE(IGAU,IB)=XI1
+            MELVA2.VELCHE(IGAU,IB)=XI2
+            MELVA3.VELCHE(IGAU,IB)=XI3
+
+   31   CONTINUE
+        GOTO 250
+*_______________________________________________________________________
+*
+*    FORMULATION COQUE MINCE
+*_______________________________________________________________________
+*
+   60 CONTINUE
+      DO 61 IB=1,N1EL
+      DO 61 IGAU=1,N1PTEL
+C       ... Recherche des composantes du champ des contraintes généralisées ...
+            MPTVAL=IVACOM
+            DO 62 ICOMP=1,NCOMP
+               MELVAL=IVAL(ICOMP)
+               IGMN=MIN(IGAU,VELCHE(/1))
+               IBMN=MIN(IB  ,VELCHE(/2))
+               SIG(ICOMP)=VELCHE(IGMN,IBMN)
+   62       CONTINUE
+*
+C       ... Recherche de l'épaisseur de la coque ...
+            MPTVAL=IVACAR
+            MELVAL=IVAL(1)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            EPAIST=VELCHE(IGMN,IBMN)
+*
+*       ... CALCUL DES CONTRAINTES ...
+*
+            CALL EFCONT(EPAIST,0.D0,NSTRS,SIG)
+            IF(IFOUR.GT.0) THEN
+               SIG(1)=SIG(1)+SIG(4)*IMIL
+               SIG(2)=SIG(2)+SIG(5)*IMIL
+               SIG(3)=SIG(3)+SIG(6)*IMIL
+            ELSE IF(IFOUR.LE.0) THEN
+               SIG(1)=SIG(1)+SIG(3)*IMIL
+               SIG(2)=SIG(2)+SIG(4)*IMIL
+               SIG(3)=0.D0
+            ENDIF
+*
+C       ... Calcul des invariants ...
+
+            XI1=SIG(1)+SIG(2)
+            XI2=SIG(1)*SIG(1)+SIG(2)*SIG(2)+W1*SIG(3)*SIG(3)
+            XI3=0.D0
+*
+C       ... et leur stockage ...
+            MELVA1.VELCHE(IGAU,IB)=XI1
+            MELVA2.VELCHE(IGAU,IB)=XI2
+            MELVA3.VELCHE(IGAU,IB)=XI3
+*
+   61   CONTINUE
+        GOTO 250
+*_______________________________________________________________________
+*
+*    FORMULATION COQUE EPAISSE
+*_______________________________________________________________________
+*
+   80   CONTINUE
+        DO 81 IB=1,N1EL
+          DO 81 IGAU=1,N1PTEL
+C       ... Recherche des composantes du champ des contraintes ...
+            MPTVAL=IVACOM
+            DO 85 ICOMP=1,NCOMP
+               MELVAL=IVAL(ICOMP)
+               IGMN=MIN(IGAU,VELCHE(/1))
+               IBMN=MIN(IB  ,VELCHE(/2))
+               SIG(ICOMP)=VELCHE(IGMN,IBMN)
+   85       CONTINUE
+*
+C       ... Calcul des invariants ...
+
+            XI1=SIG(1)+SIG(2)
+            XI2=SIG(1)*SIG(1)+SIG(2)*SIG(2)+
+     &          W1*(SIG(3)*SIG(3)+SIG(4)*SIG(4)+SIG(5)*SIG(5))
+            XI3=-W2*(SIG(1)*SIG(5)*SIG(5)+SIG(2)*SIG(4)*SIG(4))
+     &          +W3*SIG(3)*SIG(4)*SIG(5)
+*
+C       ... et leur stockage ...
+
+            MELVA1.VELCHE(IGAU,IB)=XI1
+            MELVA2.VELCHE(IGAU,IB)=XI2
+            MELVA3.VELCHE(IGAU,IB)=XI3
+*
+   81   CONTINUE
+        GOTO 250
+*_______________________________________________________________________
+*
+*    FORMULATION COQUE AVEC CISAILLEMENT
+*_______________________________________________________________________
+*
+  120   CONTINUE
+        DO 121 IB=1,N1EL
+          DO 121 IGAU=1,N1PTEL
+C       ... Recherche des composantes du champ des contraintes ...
+            MPTVAL=IVACOM
+            DO 122 ICOMP=1,NCOMP
+               MELVAL=IVAL(ICOMP)
+               IGMN=MIN(IGAU,VELCHE(/1))
+               IBMN=MIN(IB  ,VELCHE(/2))
+               SIG(ICOMP)=VELCHE(IGMN,IBMN)
+  122       CONTINUE
+*
+C       ... Recherche de l'épaisseur de la coque ...
+            MPTVAL=IVACAR
+            MELVAL=IVAL(1)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            EPAIST=VELCHE(IGMN,IBMN)
+*
+*       ... CALCUL DES CONTRAINTES ...
+*
+            CALL EFCONT(EPAIST,0.D0,NSTRS,SIG)
+            SIG(1)=SIG(1)+SIG(4)*IMIL
+            SIG(2)=SIG(2)+SIG(5)*IMIL
+            SIG(4)=SIG(3)+SIG(6)*IMIL
+            SIG(3)=0.D0
+            SIG(5)=SIG(7)
+            SIG(6)=SIG(8)
+
+C       ... Calcul des invariants ...
+
+            XI1=SIG(1)+SIG(2)+SIG(3)
+            XI2=SIG(1)*SIG(1)+SIG(2)*SIG(2)+SIG(3)*SIG(3)+
+     &          W1*(SIG(4)*SIG(4)+SIG(5)*SIG(5)+SIG(6)*SIG(6))
+            XI3=SIG(1)*SIG(2)*SIG(3)-
+     &          W2*(SIG(1)*SIG(6)*SIG(6)+SIG(2)*SIG(5)*SIG(5)+
+     &          SIG(3)*SIG(4)*SIG(4))+W3*SIG(4)*SIG(5)*SIG(6)
+*
+C       ... et leur stockage ...
+            MELVA1.VELCHE(IGAU,IB)=XI1
+            MELVA2.VELCHE(IGAU,IB)=XI2
+            MELVA3.VELCHE(IGAU,IB)=XI3
+*
+  121 CONTINUE
+        GOTO 250
+*
+**********************************************************************
+*                                                                    *
+*           FIN DU BRANCHEMENT SUIVANT LA FORMULATION                *
+*                                                                    *
+**********************************************************************
+*
+*    ... DESACTIVATION DES SEGMENTS PROPRES A LA GEOMETRIE ISOUS ...
+*
+  250    CONTINUE
+         iOK = 1
+
+  240    CONTINUE
+         SEGDES,MELVA1,MELVA2,MELVA3
+         SEGDES,MCHAM1,MCHAM2,MCHAM3
+*
+ 230    CONTINUE
+        IF (MOCARA.NE.0) THEN
+          nomid = MOCARA
+          SEGSUP,nomid
+        ENDIF
+*
+        CALL DTMVAL(IVACOM,1)
+*
+ 220    CONTINUE
+        nomid = MOCOMP
+        SEGDES,nomid
+        IF (lsupno) SEGSUP,nomid
+*
+ 210    CONTINUE
+        SEGDES,IMODEL
+*
+* ... ERREUR DANS UNE SOUS ZONE : DESACTIVATION ET RETOUR ...
+        IF (iOK.EQ.0) GOTO 990
+*
+  200 CONTINUE
+
+C ... FIN DE LA GRANDE BOUCLE SUR LES ZONES ÉLÉMENTAIRES ...
+
+      IRET = 1
+
+ 990  CONTINUE
+      SEGDES,MMODEL
+
+      IF (IRET.EQ.1) THEN
+        SEGDES,MCHEL1,MCHEL2,MCHEL3
+        IPCHE2 = MCHEL1
+        IPCHE3 = MCHEL2
+        IPCHE4 = MCHEL3
+      ELSE
+        SEGSUP,MCHEL1,MCHEL2,MCHEL3
+        IPCHE2 = 0
+        IPCHE3 = 0
+        IPCHE4 = 0
+      ENDIF
+*
+      SEGSUP,notype
+      IF (IPCH5O.NE.IPCHE5) THEN
+        CALL DTCHAM(IPCHE5)
+        IPCHE5 = IPCH5O
+      ENDIF
+*
+  666 CONTINUE
+      SEGDES,MCHELM
+
+      RETURN
+      END
+
+
+
+

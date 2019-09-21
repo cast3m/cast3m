@@ -1,0 +1,497 @@
+C LMDCHP    SOURCE    CB215821  19/03/18    21:15:30     10161
+C***********************************************************************
+C NOM         : lmdchp.eso
+C DESCRIPTION : Lecture d'un CHPOINT au format .med
+C***********************************************************************
+C HISTORIQUE :  23/10/2017 : RPAREDES : Creation
+C HISTORIQUE :
+C***********************************************************************
+C Prière de PRENDRE LE TEMPS DE COMPLÉTER LES COMMENTAIRES
+C en cas de modification de ce sous-programme afin de faciliter
+C la maintenance !
+C***********************************************************************
+C APPELÉ PAR : opérateur (LIRE 'MED') lirmed.eso
+C***********************************************************************
+C ENTRÉES :
+C             FID     : Id du fichier
+C             MTABLE  : Table avec la geometrie
+C             NBNOIN  : Numérotation de noeuds courant
+C             SLSCHA  : Segment avec l'information des champs
+C             SLSFUS  : Segment avec la liste de champs à créer
+C             IPDT    : Pas de Tps
+C SORTIES : ISOR : Pointeur vers le CHPOINT
+C***********************************************************************
+      SUBROUTINE LMDCHP(FID, MTABLE, NBNOIN, SLSCHA, SLSFUS, IPDT, ISOR)
+      IMPLICIT INTEGER(i-n)
+      IMPLICIT REAL*8(a-h,o-z)
+
+-INC CCMED
+-INC CCOPTIO
+-INC SMELEME
+-INC SMCOORD
+-INC SMLMOTS
+-INC CCGEOME
+-INC SMTABLE
+-INC SMCHPOI
+-INC TMTRAV
+
+C ***** Déclaration
+C Définition des entiers *4
+      INTEGER*4 FID
+      INTEGER*4 numdt
+      INTEGER*4 numit
+      INTEGER*4 etype
+      INTEGER*4 gtype
+      INTEGER*4 stm
+      INTEGER*4 swm
+      INTEGER*4 cs
+      INTEGER*4 cret
+      INTEGER*4 n
+      INTEGER*4 nc
+      INTEGER*4 psize4
+      INTEGER*4 int4a
+      INTEGER*4 nip
+      INTEGER*4 pit
+      INTEGER*4 ind
+
+      INTEGER   psize
+
+C Chaines de Caractere de longueur MED_NAME_SIZE=64
+      CHARACTER*(MED_NAME_SIZE) lname
+      CHARACTER*(MED_NAME_SIZE) fname
+      CHARACTER*(MED_NAME_SIZE) pname
+      CHARACTER*(MED_NAME_SIZE) mname
+      CHARACTER*(MED_NAME_SIZE) VID64
+      PARAMETER(VID64='
+     &               ')
+
+C
+      CHARACTER*4   cha4a, cha4b, cha4F
+      CHARACTER*8   charre, typobj, cha8a
+      CHARACTER*10  cha10
+      CHARACTER*64  nommai, cha64a
+      CHARACTER*16  cha16b
+      LOGICAL       login, logre
+
+      EXTERNAL LONG
+
+C ***** Déclaration des segments
+C----- SEG SLSCHA
+C         ncham  : nombre de champs (CHPOINT ou MCHAML)
+C         LISCHA : liste des noms de champs
+C         LISMAI : liste des noms de maillages
+C         LSCHIN : liste de SEG CHAINF (information)
+C         LSPARA : liste de SEG CHAPAR (parametres)
+      SEGMENT SLSCHA
+        CHARACTER*(MED_NAME_SIZE) LISCHA(ncham), LISMAI(ncham)
+        INTEGER                   LSCHIN(ncham), LSPARA(ncham)
+      ENDSEGMENT
+
+      SEGMENT SLSFUS
+        INTEGER      CHAFUS(nbfus)
+      ENDSEGMENT
+
+      SEGMENT CHAINF
+C         nc     :   nombre de séquences de calcul dans le champ
+C         ncomp  :   nombre de composantes
+C         INUMDT :   liste de numéros de pas de tps
+C         INUMIT :   liste de numéros d'iteration
+C         ISCHPR :   liste de SEG CHAPRO (profil)
+C         XDT    :   liste de pas de tps
+C         CNAME  :   liste de noms des composants
+C         CUNIT  :   liste d'unités des composants
+        INTEGER      INUMDT(nc), INUMIT(nc), ISCHPR(nc)
+        REAL*8       XDT(nc)
+        CHARACTER*(MED_SNAME_SIZE) CNAME(ncomp), CUNIT(ncomp)
+      ENDSEGMENT
+
+C----- SEG CHAPAR
+C         ncpars : nombre de paramètres par champ
+C         CHAPAR : nom du paramètre
+C         CPARVL : valeur du paramètre
+      SEGMENT CHAPAR
+        CHARACTER*(MED_SNAME_SIZE) CPARNM(ncpars)
+        INTEGER                    CPARVL(ncpars)
+      ENDSEGMENT
+
+C----- SEG CHAPRO
+C         nprof  : nombre de profils
+C         CTYPE  : type de champ
+C         CPRONA : nom du profil
+C         CETYPE : entity type
+C         CGTYPE : geometry type
+      SEGMENT CHAPRO
+        CHARACTER*8               CTYPE(nprof)
+        CHARACTER*(MED_NAME_SIZE) CPRONA(nprof)
+        INTEGER    CETYPE(nprof), CGTYPE(nprof)
+      ENDSEGMENT
+
+      SEGMENT MCNAM4
+        CHARACTER*4 CNAME4(ncomp)
+      ENDSEGMENT
+
+      SEGMENT SCHAVL
+        REAL*8 CHAVAL(nbnode, nnin)
+      ENDSEGMENT
+
+      SEGMENT SPROFI
+        INTEGER LPROFI(psize)
+      ENDSEGMENT
+
+      SEGMENT STPROF
+        INTEGER LTPROF(nbfus, ntprof)
+      ENDSEGMENT
+
+      SEGMENT SINT4
+        INTEGER INT4(psize)
+      ENDSEGMENT
+
+C***********************************************************************
+C      Ecriture du CHPOINT
+C***********************************************************************
+
+C-----Initialisation
+      swm    = MED_NO_INTERLACE
+      stm    = MED_COMPACT_STMODE
+      etype  = MED_NODE
+      gtype  = MED_NONE
+      cs     = MED_ALL_CONSTITUENT
+      lname  = VID64
+      nbfus  = SLSFUS.CHAFUS(/1)
+      ijatt  = 1
+      ifopo  = IFOMOD
+
+C-----Information préliminaire
+      ntprof = 0
+      DO ia=1,nbfus
+        icha   = SLSFUS.CHAFUS(ia)
+        CHAINF = SLSCHA.LSCHIN(icha)
+        CHAPRO = CHAINF.ISCHPR(IPDT)
+        nprof  = CHAPRO.CETYPE(/1)
+        ntprof = MAX(ntprof, nprof)
+      ENDDO
+      SEGINI STPROF
+
+      nnin   = 0
+      nnnoe  = 0
+      SEGINI MTRAV
+
+      innin  = 0
+      innnoe = 0
+C-----Définition initiale de MTRAV
+      DO ia=1,nbfus
+        icha   = SLSFUS.CHAFUS(ia)
+        nommai = SLSCHA.LISMAI(icha)
+        CHAINF = SLSCHA.LSCHIN(icha)
+        CHAPAR = SLSCHA.LSPARA(icha)
+        CHAPRO = CHAINF.ISCHPR(IPDT)
+        fname  = SLSCHA.LISCHA(icha)
+        IF (CHAPAR .LE. 0) THEN
+          ncpars = 0
+        ELSE
+          ncpars = CHAPAR.CPARVL(/1)
+        ENDIF
+
+C-----Définition des composantes et de l'harmonique (si existe)
+        ncomp = CHAINF.CNAME(/2)
+        nnin  = nnin + ncomp
+        SEGADJ MTRAV
+        DO ib=1,ncomp
+          cha4a  = CHAINF.CNAME(ib)(1:4)
+          IF (cha4a .EQ. '    ')THEN
+            cha4a='SCAL'
+            CHAINF.CNAME(ib)=cha4a
+          ENDIF
+          CALL PLACE(MTRAV.INCO, innin, iamot, cha4a)
+          IF (iamot .EQ. 0) THEN
+            innin = innin + 1
+            MTRAV.INCO(innin) = cha4a
+
+            IF (ncpars .GT. 0) THEN
+C             Determination du FORMAT automatique
+              IFORMA = INT(LOG10(REAL(ib))) + 1
+              cha4F='(I )'
+              IF    (IFORMA.GE.1 .AND. IFORMA.LT.7)THEN
+                WRITE(cha4F(3:3), '(I1)') IFORMA
+              ELSE
+                CALL ERREUR(1094)
+                RETURN
+              ENDIF
+
+              WRITE(cha8a, cha4F) ib
+              cha16b = 'NOHARM'//cha8a(1:IFORMA)
+
+              CALL PLACE(CHAPAR.CPARNM, ncpars, ibmot, cha16b)
+              IF (ibmot .GT. 0) THEN
+                MTRAV.NHAR(innin) = CHAPAR.CPARVL(ibmot)
+              ENDIF
+            ENDIF
+          ENDIF
+        ENDDO
+
+        IF(innin .NE. nnin)THEN
+          nnin = innin
+          SEGADJ MTRAV
+        ENDIF
+
+C-----Recherche de paramètres
+      IF ((ia .EQ. 1) .AND. (ncpars .GT. 0)) THEN
+        CALL PLACE(CHAPAR.CPARNM, ncpars, ipar, 'JATTRI')
+        IF (ipar.GT.0) THEN
+          ijatt = CHAPAR.CPARVL(ipar)
+        ENDIF
+        CALL PLACE(CHAPAR.CPARNM, ncpars, ipar, 'IFOPOI')
+        IF (ipar.GT.0) THEN
+          ifopo = CHAPAR.CPARVL(ipar)
+        ENDIF
+      ENDIF
+
+C-----Définition de la géométrie
+        nprof = CHAPRO.CETYPE(/1)
+        DO ib=1,nprof
+          pname = CHAPRO.CPRONA(ib)
+          IF (pname .NE. ' ') THEN
+            typobj = ' '
+            CALL ACCTAB(MTABLE,'MOT',ival,xval,pname,login,iobin,
+     &                  typobj,ivalre,xvalre,charre,logre,iobre)
+
+            IF ((iobre .LE. 0) .OR. (typobj .NE. 'MAILLAGE')) THEN
+C-------------Lecture de la taille d'un profil dont on connait le nom
+              CALL mpfpsn(FID, pname, psize4, cret)
+              IF(cret .NE. 0) THEN
+                moterr    ='mpfpsn'
+                interr(1) = cret
+                CALL ERREUR(873)
+                RETURN
+              ENDIF
+              psize=psize4
+
+              IF (psize .EQ. 0) THEN
+                CALL ERREUR(21)
+                RETURN
+              ENDIF
+              STPROF.LTPROF(ia, ib) = psize
+              nnnoe  = nnnoe + psize
+              SEGADJ MTRAV
+
+              SEGINI,SINT4,SPROFI
+              CALL MPFPR4(FID, pname, psize, SPROFI.LPROFI, SINT4.INT4)
+              DO ic=1,psize
+                innnoe = innnoe + 1
+                MTRAV.IGEO(innnoe)=SPROFI.LPROFI(ic) + NBNOIN
+              ENDDO
+              SEGSUP,SINT4,SPROFI
+
+            ELSE
+C-------------On cherche directement dans le maillage
+              MELEME = iobre
+              SEGACT MELEME
+              nbsous = MELEME.LISOUS(/1)
+              ityp   = MELEME.ITYPEL
+
+              IF (nbsous .GT. 0) THEN
+                IPT1 = 0
+                DO ic=1,nbsous
+                  IPT3 = MELEME.LISOUS(ic)
+                  SEGINI,IPT2=IPT3
+                  CALL CHANGE(IPT2, 1)
+                  IF (IPT1 .EQ. 0) THEN
+                    IPT1 = IPT2
+                  ELSE
+                    CALL FUSE(IPT1,IPT2,IPT3,login)
+                    CALL CHANGE(IPT3, 1)
+                    IPT1 = IPT3
+                  ENDIF
+                ENDDO
+                MELEME = IPT1
+              ELSE
+                IF (ityp .NE. 1) THEN
+                  SEGINI,IPT1=MELEME
+                  CALL CHANGE(IPT1, 1)
+                  MELEME = IPT1
+                ENDIF
+              ENDIF
+              SEGACT MELEME
+              nbnode = MELEME.NUM(/2)
+
+              STPROF.LTPROF(ia, ib) = nbnode
+              nnnoe  = nnnoe + nbnode
+              IF (nnnoe .EQ. 0) THEN
+                CALL ERREUR(21)
+                RETURN
+              ENDIF
+              SEGADJ MTRAV
+              DO ic=1,nbnode
+                innnoe = innnoe + 1
+                MTRAV.IGEO(innnoe) = MELEME.NUM(1,ic)
+              ENDDO
+              SEGDES MELEME
+            ENDIF
+
+          ELSE
+            IF (nprof .NE. 1) THEN
+              CALL ERREUR(21)
+              RETURN
+            ENDIF
+            typobj = ' '
+            CALL ACCTAB(MTABLE,'MOT',ival,xval,nommai,login,iobin,
+     &                  typobj,ivalre,xvalre,charre,logre,iobre)
+            IF ((iobre .LE. 0) .OR. (typobj .NE. 'MAILLAGE')) THEN
+              CALL ERREUR(21)
+              RETURN
+            ENDIF
+
+C----------- On cherche tous les points dans un maillage POI1
+            MELEME = iobre
+            SEGACT MELEME
+            nbsous = MELEME.LISOUS(/1)
+            ityp   = MELEME.ITYPEL
+            IF (nbsous .GT. 0) THEN
+              IPT1 = 0
+              DO ic=1,nbsous
+                IPT3 = MELEME.LISOUS(ic)
+                SEGINI,IPT2=IPT3
+                CALL CHANGE(IPT2, 1)
+                IF (IPT1 .EQ. 0) THEN
+                  IPT1 = IPT2
+                ELSE
+                  CALL FUSE(IPT1,IPT2,IPT3,login)
+                  CALL CHANGE(IPT3, 1)
+                  IPT1 = IPT3
+                ENDIF
+              ENDDO
+              MELEME = IPT1
+            ELSE
+              IF (ityp .NE. 1) THEN
+                SEGINI,IPT1=MELEME
+                CALL CHANGE(IPT1, 1)
+                MELEME = IPT1
+              ENDIF
+            ENDIF
+            SEGACT MELEME
+            nbnode = MELEME.NUM(/2)
+
+            STPROF.LTPROF(ia, ib) = nbnode
+            nnnoe  = nnnoe + nbnode
+            IF (nnnoe .EQ. 0) THEN
+              CALL ERREUR(21)
+              RETURN
+            ENDIF
+            SEGADJ MTRAV
+            DO ic=1,nbnode
+              innnoe = innnoe + 1
+              MTRAV.IGEO(innnoe) = MELEME.NUM(1,ic)
+            ENDDO
+            SEGDES MELEME
+          ENDIF
+        ENDDO
+      ENDDO
+
+C-----Définition des valeurs
+      innnoe = 0
+      DO ia=1,nbfus
+        icha   = SLSFUS.CHAFUS(ia)
+        fname  = SLSCHA.LISCHA(icha)
+C        nommai = SLSCHA.LISMAI(icha)
+        CHAINF = SLSCHA.LSCHIN(icha)
+        CHAPRO = CHAINF.ISCHPR(IPDT)
+        nprof  = CHAPRO.CETYPE(/1)
+        numdt  = CHAINF.INUMDT(IPDT)
+        numit  = CHAINF.INUMIT(IPDT)
+        ncomp  = CHAINF.CNAME(/2)
+
+        SEGINI MCNAM4
+        DO ib=1,ncomp
+          MCNAM4.CNAME4(ib) = CHAINF.CNAME(ib)(1:4)
+        ENDDO
+
+        DO ib=1,nprof
+          pname  = CHAPRO.CPRONA(ib)
+          IF (pname .NE. ' ') THEN
+C-----------Lecture du nombre de valeurs à lire dans un champ pour une séquence de calcul, et un type d'entité donnés pour un profil donné
+            pit = ib
+            CALL mfdnvp (fid, fname, numdt, numit, etype, gtype, pit,
+     &                   stm, pname, psize4, lname, nip, n, cret)
+            IF(cret .NE. 0) THEN
+              moterr    = 'mfdnvp'
+              interr(1) = cret
+              CALL ERREUR(873)
+              RETURN
+            ENDIF
+            nbnode = psize4
+            SEGINI,SCHAVL
+
+C-----------Lecture des valeurs d'un champ définies sur des entités d'un maillage pour une séquence de calcul et un profil donnés
+            CALL mfdrpr(fid, fname, numdt, numit, etype, gtype,
+     &                  stm, pname, swm, cs, SCHAVL.CHAVAL, cret)
+            IF(cret .NE. 0) THEN
+              moterr    = 'mfdrpr'
+              interr(1) = cret
+              CALL ERREUR(873)
+              RETURN
+            ENDIF
+
+          ELSE
+C-----------Lecture du nombre de valeurs dans un champ pour une séquence de calcul, et un type d'entité donnés (pas de gestion des profils)
+            CALL mfdnva (fid,fname, numdt, numit, etype, gtype, n, cret)
+            IF(cret .NE. 0) THEN
+              moterr    = 'mfdnva'
+              interr(1) = cret
+              CALL ERREUR(873)
+              RETURN
+            ENDIF
+            nbnode = STPROF.LTPROF(ia, ib)
+            SEGINI SCHAVL
+
+C-----------Lecture des valeurs d'un champ définies sur des entités d'un maillage pour une séquence de calcul donnée (pas de gestion de profil)
+            CALL mfdrvr(fid, fname, numdt, numit, etype, gtype,
+     &            swm, cs, SCHAVL.CHAVAL, cret)
+            IF(cret .NE. 0) THEN
+              moterr    = 'mfdrvr'
+              interr(1) = cret
+              CALL ERREUR(873)
+              RETURN
+            ENDIF
+          ENDIF
+
+C         Ecriture des valeurs dans le MTRAV pour creer le CHPOINT
+          IF(nbnode .GT. MTRAV.IBIN(/2))THEN
+C            NNIN  = MTRAV.IBIN(/1)
+            NNNOE = nbnode
+            SEGADJ,MTRAV
+          ENDIF
+
+          innno2 = innnoe
+          DO ic=1,nnin
+            innnoe = innno2
+            CALL PLACE(MCNAM4.CNAME4, ncomp, iamot, MTRAV.INCO(ic))
+            DO ie=1,nbnode
+              innnoe = innnoe + 1
+              IF (iamot .GT. 0) THEN
+                MTRAV.BB  (ic, innnoe) = SCHAVL.CHAVAL(ie, iamot)
+                MTRAV.IBIN(ic, innnoe) = 1
+              ELSE
+                MTRAV.BB  (ic, innnoe) = 0.D0
+                MTRAV.IBIN(ic, innnoe) = 0
+              ENDIF
+            ENDDO
+          ENDDO
+          SEGSUP SCHAVL
+        ENDDO
+      ENDDO
+
+      CALL CRECHP(MTRAV, MCHPOI)
+      SEGSUP MTRAV,STPROF
+      IF (MCHPOI .LE. 0) THEN
+        CALL ERREUR(21)
+        RETURN
+      ENDIF
+
+      MCHPOI.MOCHDE    ='CHPOINT cree par LIRMED'
+      MCHPOI.JATTRI(1) = ijatt
+      MCHPOI.IFOPOI    = ifopo
+      SEGACT MCHPOI*NOMOD
+      ISOR = MCHPOI
+
+      END
+

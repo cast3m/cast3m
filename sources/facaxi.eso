@@ -1,0 +1,1009 @@
+C FACAXI    SOURCE    CB215821  17/11/30    21:16:07     9639
+      SUBROUTINE FACAXI (MYMOD,INFOEL,NPAX,NGAX,KACHE,INOR,ICHFAC
+     &     ,EXTINC)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+C----------------------------------------------------------------------
+C SP appele par FFORME
+C
+C     Calcul des facteurs de forme en axisymetrique
+C   entée:
+C     MYMOD  : pointeur de l'objet modèle
+C     INFOEL : utile pour les coques ou quadratiques
+C     NPAX   : nombre de points d integration (disc.reguliere)
+C     NGAX   : nombre de points de Gauss
+C     KACHE  : 0 si option convexe, sinon option cache
+C     INOR   : 1 si normalisation, 0 sinon
+C     EXTINC : coefficient d'extinction (si cavite absorbante)
+C   sortie:
+C     ICHFAC : pointeur sur l'objet MCHAML resultat
+C
+C----------------------------------------------------------------------
+C     traitement des coques par dedoublement des elements a partir
+C     de la normale
+C                          ->
+C       A (inverse) = A - e*n  (e=1e-3)
+C     cas des boucles 1 sur k1 et 2 sur k2
+C     mais pas de la boucle 3 obstructeurs
+C
+C     bcl face k1
+C      ** face k1  **
+C            bcl face k2
+C            .. face k2 ..
+C                  bcl 3 obstructeurs
+C            .. si coq: inverse face k2 ..
+C                  les obstructeurs sont les memes que pour k2
+C            fin bcl face k2
+C
+C      ** si coq : inverse face k1 **
+C            bcl face k2
+C            .. face k2 ..
+C                  bcl 3 obstructeurs
+C            .. si coq: inverse face k2 ..
+C                  les obstructeurs sont les memes que pour k2
+C            fin bcl face k2
+C     fin bcl face k1
+C----------------------------------------------------------------------
+C
+      LOGICAL ICOQ
+C
+-INC CCREEL
+-INC SMELEME
+-INC SMMODEL
+-INC CCOPTIO
+-INC SMCOORD
+      POINTEUR MYMOD.MMODEL
+
+C----------------------------------------------------------------------
+      SEGMENT , INFOEL
+      LOGICAL KCOQ(N1),KQUAD(N1)
+      ENDSEGMENT
+C----------------------------------------------------------------------
+C     FACTEURS DE FORME
+C           NNBEL1 = NOMBRE DE LIGNES + 1
+C           NBEL2  = NOMBRE DE COLONNES
+C     LFACT(NNBEL1) POINTE SUR LE TABLEAU DES SURFACES
+C
+      SEGMENT IFACFO
+      INTEGER   LFACT(NNBEL1)
+      ENDSEGMENT
+      SEGMENT LFAC
+      REAL*8    FACT(NBEL2)
+      ENDSEGMENT
+      POINTEUR PSUR.LFAC, PLIG.LFAC
+      POINTEUR PCOL.LFAC
+C----------------------------------------------------------------------
+C     coordonnees des obstructeurs
+      SEGMENT SFOBS
+      REAL*8 OBS(2,NTOBS)
+      ENDSEGMENT
+C----------------------------------------------------------------------
+      SEGMENT STRAV
+      REAL*8 A1(NA,NA),A2(NA,NA),A3(NA,NA),AA2(NA,NA)
+      REAL*8 U1(NA1),U2(NA1),UU2(NA1)
+      ENDSEGMENT
+C----------------------------------------------------------------------
+C
+      EPS = 1D-5
+
+      KIMP = IIMPI
+      NES = IDIM
+
+C... critere de dedoublement des coques
+      ECOQ=1.D-3
+      IF (INFOEL.EQ.0) THEN
+         ICOQ = .FALSE.
+      ELSE
+         ICOQ = .TRUE.
+         SEGACT INFOEL
+      ENDIF
+C...  quadratique
+      NSPA1=1
+      NSPA2=1
+      NSPA3=1
+      NS=2
+
+      RAD = 0
+C
+C     Calcul du nombre de faces NFACE et du rayon RAD
+      SEGACT MYMOD
+      NTYP = MYMOD.KMODEL(/1)
+      NFACE = 0
+      DO 10 ITYP=1,NTYP
+         IMODEL = MYMOD.KMODEL(ITYP)
+         SEGACT IMODEL
+         IPT1 = IMAMOD
+         SEGDES IMODEL
+         SEGACT IPT1
+         NEL = IPT1.NUM(/2)
+         NSGEO  = IPT1.NUM(/1)
+C         Recherche du max sur Ox
+         DO 5 IEL = 1,NEL
+            DO 6 IPT = 1,NSGEO
+               IREF = (IDIM+1)*(IPT1.NUM(IPT,IEL)-1)
+               VALX = XCOOR(IREF+1)
+               IF (VALX.GT.RAD)  RAD = VALX
+ 6          CONTINUE
+ 5       CONTINUE
+         IF (ICOQ.AND.KCOQ(ITYP)) THEN
+            NFACE = NFACE + 2 * NEL
+         ELSE
+            NFACE = NFACE + NEL
+         ENDIF
+
+ 10   CONTINUE
+
+C
+
+      IF (KIMP.GE.3) THEN
+         WRITE( 6,*) ' DIMENSIONNEMENT : RAD =',RAD
+         WRITE( 6,*) ' NOMBRE TOTAL DE FACES ',NFACE
+      ENDIF
+C
+C>>>  INITIALISATION SFOBS et STRAV
+C     -----------------------------
+      IF(KACHE.NE.0) THEN
+         NTOBS = 2*NFACE
+         SEGINI SFOBS
+      ENDIF
+      NA=2
+      NA1=3
+      SEGINI STRAV
+
+C
+C>>>  INITIALISATION OBJET FACFOR
+C     ---------------------------
+C
+      NNBEL1=NFACE+1
+      NBEL2=NFACE
+      SEGINI IFACFO
+      DO 900 LS=1,NNBEL1
+         SEGINI PLIG
+         LFACT(LS)=PLIG
+         SEGACT PLIG*MOD
+ 900  CONTINUE
+      PSUR = LFACT(NNBEL1)
+      SEGACT PSUR*MOD
+
+C     -------------------------------------------------------------
+C>>>  CALCUL
+
+C
+C>>   BOUCLE FACE 1
+C
+
+      NELT1= 0
+      DO 100 ITYP = 1,NTYP
+         IMODEL = MYMOD.KMODEL(ITYP)
+         SEGACT IMODEL
+         IPT1 = IMAMOD
+         SEGDES IMODEL
+         IF(KIMP.GE.4) THEN
+            WRITE (6,*) 'Maillage :',IPT1
+         ENDIF
+
+         NSGEO1 = IPT1.NUM(/1)
+         NSPA1=1
+         IF(ICOQ.AND.KQUAD(ITYP)) NSPA1=2
+         NEL1 = IPT1.NUM(/2)
+         DO 110 I1 = 1,NEL1
+
+            IF (ICOQ.AND.KCOQ(ITYP)) THEN
+               K1 = (2*I1-1) + NELT1
+            ELSE
+               K1 = I1+ NELT1
+            ENDIF
+
+C*** traitement de la face K1 ***************************************
+
+            PLIG=LFACT(K1)
+C
+            DO 111 IS = 1,NSGEO1,NSPA1
+               LS=IS
+               IF(ICOQ.AND.KQUAD(ITYP)) LS=(IS+1)/2
+               IREF = (IDIM+1)*(IPT1.NUM(IS,I1)-1)
+               IF(KIMP.GE.4) THEN
+                  WRITE (6,*) 'Noeud numéro',IPT1.NUM(IS,I1),'ref :'
+     $                 ,IREF
+               ENDIF
+               DO 112 K = 1,NES
+C**          A1(K,IS) = XCOOR(IREF+K)/RAD
+                  A1(K,LS) = XCOOR(IREF+K)/RAD
+ 112           CONTINUE
+ 111        CONTINUE
+            CALL KNORM2(NES,A1,NS,U1,S1)
+            S1=XPI*S1*ABS(A1(1,1)+A1(1,2))
+            PSUR.FACT(K1)=S1
+            ZMIN1=MIN(A1(2,1),A1(2,2))
+            ZMAX1= MAX(A1(2,1),A1(2,2))
+            RMAX1= MAX(A1(1,1),A1(1,2))
+
+
+C>>    BOUCLE FACE 2
+C     -------------------------------------------------------------
+
+            NELT2= 0
+            DO 200 JTYP = 1,NTYP
+               IMODEL = MYMOD.KMODEL(JTYP)
+               SEGACT IMODEL
+               IPT2 = IMAMOD
+               SEGDES IMODEL
+
+               NSGEO2 = IPT2.NUM(/1)
+               NSPA2=1
+               IF(ICOQ.AND.KQUAD(JTYP)) NSPA2=2
+               NEL2 = IPT2.NUM(/2)
+               DO 210 I2 = 1,NEL2
+
+                  IF (ICOQ.AND.KCOQ(JTYP))THEN
+                     K2 = 2*I2-1  + NELT2
+                  ELSE
+                     K2 = I2 + NELT2
+                  ENDIF
+
+C... face K2 .....................................................
+
+                  KVU=1
+                  FF=0.D0
+
+C.. UTILISATION DE LA RECIPROCITE
+C
+                  IF(K1.GT.K2) THEN
+                     S2=PSUR.FACT(K2)
+                     PCOL=LFACT(K2)
+
+                     PLIG.FACT(K2)=(S2/S1)*PCOL.FACT(K1)
+
+                  ELSE
+C.. TEST K1=K2 ET VISIBILITE A PRIORI
+
+C------------------------------------------------------------------
+
+C>> K1=K2 : ELIMINATION DES CAS TRIVIAUX OU F(K1,K2)=0
+C
+                     IF(K1.EQ.K2) THEN
+                        IF(KIMP.GE.4) THEN
+                           WRITE(6,*) ' A1 ',A1(1,1),A1(2,1)
+                           WRITE(6,*) ' A1 ',A1(1,2),A1(2,2)
+                           WRITE(6,*) ' U1 ',U1(1),U1(2)
+                        ENDIF
+                        IF (ABS(U1(1)).LT.EPS) KVU=0
+                        IF (U1(1).GE.EPS) KVU=0
+
+                        IF(KVU.NE.0) THEN
+                           DO 214 K = 1,NES
+                              A2(K,1) = A1(K,1)
+                              A2(K,2) = A1(K,2)
+ 214                       CONTINUE
+                        ENDIF
+
+C>> K1::K2 : ELIMINATION DES CAS DE NON-VISIBLITE
+C            UTILISATION DE LA VISIBILITE A PRIORI DANS LE PLAN R-Z
+C            ON TESTE LA FACE K2 ET SON SYMETRIQUE (-R,Z)
+
+                     ELSE
+                        DO 211 IS = 1,NSGEO2,NSPA2
+                           LS=IS
+                           IF(ICOQ.AND.KQUAD(ITYP)) LS=(IS+1)/2
+                           IREF = (IDIM+1)*(IPT2.NUM(IS,I2)-1)
+                           DO 212 K = 1,NES
+C**        A2(K,IS) = XCOOR(IREF+K)/RAD
+                              A2(K,LS) = XCOOR(IREF+K)/RAD
+ 212                       CONTINUE
+ 211                    CONTINUE
+                        CALL KNORM2(NES,A2,NS,U2,S2)
+                        S2=XPI*S2*ABS(A2(1,1)+A2(1,2))
+
+C.. calcul du symetrique
+                        AA2(1,1)= -A2(1,2)
+                        AA2(2,1)=  A2(2,2)
+                        AA2(1,2)= -A2(1,1)
+                        AA2(2,2)=  A2(2,1)
+                        CALL KNORM2(NES,AA2,NS,UU2,SS2)
+
+C.. visibilite a priori
+                        CALL KPRIOR(NES,NS,NS,A1,A2,U1,U2,IVU)
+                        CALL KPRIOR(NES,NS,NS,A1,AA2,U1,UU2,IVUS)
+
+                        IF(KIMP.GE.4)WRITE(6,*) ' K1 K2 IVU IVUS ',K1,K2
+     $                       ,IVU,IVUS
+                        IF(IVU.EQ.0.AND.IVUS.EQ.0) KVU=0
+
+                     ENDIF
+C   ---------------------------------------------------------------
+C<< FIN TEST K1=K2 ET VISIBIITE A PRIORI
+                     IF(KIMP.GE.4.AND.KVU.NE.0) THEN
+                        WRITE(6,*) ' FACES VISIBLES ',K1,K2
+                     ENDIF
+
+C>> CALCUL
+C... option convexe
+                     IF(KACHE.EQ.0) THEN
+                        IF(KVU.NE.0) THEN
+
+                           CALL KAXC(A1,A2,NPAX,NGAX,FF,KIMP,EXTINC,RAD)
+                           IF(KIMP.GE.4) WRITE(6,*) ' FF CONVEXE ',K1,K2
+     $                          ,FF/S1
+
+                        ENDIF
+C.. option cache
+                     ELSE
+                        IF(KVU.NE.0) THEN
+
+C>> RECHERCHE DES OBSTRUCTEURS POTENTIELS.--------------------------
+
+                           NOBS=0
+
+C>> BOUCLE FACE 3---------------------------------------------------
+                           NELT3= 0
+                           DO 300 KTYP = 1,NTYP
+                              IMODEL = MYMOD.KMODEL(KTYP)
+                              SEGACT IMODEL
+                              IPT3 = IMAMOD
+                              SEGDES IMODEL
+
+                              NSGEO3 = IPT3.NUM(/1)
+                              NSPA3=1
+                              IF(ICOQ.AND.KQUAD(KTYP)) NSPA3=2
+                              NEL3 = IPT3.NUM(/2)
+                              DO 310 I3 = 1,NEL3
+                                 K3 = I3+ NELT3
+
+                                 IF(K3.NE.K1.AND.K3.NE.K2) THEN
+
+                                    DO 311 IS = 1,NSGEO3,NSPA3
+                                       LS=IS
+                                       IF(ICOQ.AND.KQUAD(ITYP)) LS=(IS+1
+     $                                      )/2
+                                       IREF = (IDIM+1)*(IPT3.NUM(IS,I3)
+     $                                      -1)
+                                       DO 312 K = 1,NES
+C**        A3(K,IS) = XCOOR(IREF+K)/RAD
+                                          A3(K,LS) = XCOOR(IREF+K)/RAD
+ 312                                   CONTINUE
+ 311                                CONTINUE
+
+                                    ZMIN2=MIN(A2(2,1),A2(2,2))
+                                    ZMAX2= MAX(A2(2,1),A2(2,2))
+                                    RMAX2= MAX(A2(1,1),A2(1,2))
+                                    ZTMIN=MIN(ZMIN1,ZMIN2)
+                                    ZTMAX= MAX(ZMAX1,ZMAX2)
+                                    RMAX = MAX(RMAX1,RMAX2)
+
+                                    IF( MAX(A3(2,1),A3(2,2)).LE.ZTMIN)
+     $                                   THEN
+                                       KOBS=0
+                                    ELSEIF(MIN(A3(2,1),A3(2,2)).GE
+     $                                      .ZTMAX) THEN
+                                       KOBS=0
+                                    ELSEIF(MIN(A3(1,1),A3(1,2)).GE
+     $                                      .RMAX) THEN
+                                       KOBS=0
+                                    ELSE
+                                       KOBS=1
+                                       OBS(1,2*NOBS+1)=A3(1,1)
+                                       OBS(2,2*NOBS+1)=A3(2,1)
+                                       OBS(1,2*NOBS+2)=A3(1,2)
+                                       OBS(2,2*NOBS+2)=A3(2,2)
+                                       NOBS=NOBS+1
+
+                                    ENDIF
+                                 ENDIF
+
+ 310                          CONTINUE
+C
+                              NELT3=NELT3+NEL3
+C
+ 300                       CONTINUE
+
+C<< FIN RECHERCHE OBSTRUCTEURS--------------------------------------
+
+                           IF(KIMP.GE.4) THEN
+                              WRITE(6,*) ' FACES K1 K2 ',K1,K2,' NOBS '
+     $                             ,NOBS
+                           ENDIF
+
+                           CALL KAXK(A1,A2,OBS,NOBS,NTOBS,NPAX,NGAX,FF
+     $                          ,KIMP,EXTINC,RAD)
+                           IF(KIMP.GE.4) WRITE(6,*) ' FF  ',K1,K2,FF/S1
+
+                        ENDIF
+
+                     ENDIF
+C<< FIN CALCUL
+C   ---------------------------------------------------------------
+
+C       WRITE(6,*) ' K1 K2 PLIG ',K1,K2,PLIG
+                     PLIG.FACT(K2) =  FF/S1
+
+                  ENDIF
+C... fin face K2 ..................................................
+
+
+C... face inverse de K2 (cas des coques) ..........................
+
+                  IF (ICOQ.AND.KCOQ(JTYP)) THEN
+
+                     K2=K2 + 1
+
+                     KVU=1
+                     FF=0.D0
+
+C UTILISATION DE LA RECIPROCITE
+C
+                     IF(K1.GT.K2) THEN
+                        S2=PSUR.FACT(K2)
+                        PCOL=LFACT(K2)
+
+                        PLIG.FACT(K2)=(S2/S1)*PCOL.FACT(K1)
+
+                     ELSE
+
+C>> TEST K1=K2 ET VISIBILITE A PRIORI
+
+C------------------------------------------------------------------
+
+C>> K1=K2 : ELIMINATION DES CAS TRIVIAUX OU F(K1,K2)=0
+C
+                        IF(K1.EQ.K2) THEN
+                           IF(KIMP.GE.4) THEN
+                              WRITE(6,*) ' A1 ',A1(1,1),A1(2,1)
+                              WRITE(6,*) ' A1 ',A1(1,2),A1(2,2)
+                              WRITE(6,*) ' U1 ',U1(1),U1(2)
+                           ENDIF
+                           IF (ABS(U1(1)).LT.EPS) KVU=0
+                           IF (U1(1).GE.EPS) KVU=0
+
+                           IF(KVU.NE.0) THEN
+                              DO 514 K = 1,NES
+                                 A2(K,1) = A1(K,1)
+                                 A2(K,2) = A1(K,2)
+ 514                          CONTINUE
+                           ENDIF
+
+C>> K1::K2 : ELIMINATION DES CAS DE NON-VISIBLITE
+C            UTILISATION DE LA VISIBILITE A PRIORI DANS LE PLAN R-Z
+C            ON TESTE LA FACE K2 ET SON SYMETRIQUE (-R,Z)
+
+
+                        ELSE
+
+                           DO 512 K = 1,NES
+                              U2(K)=-U2(K)
+                              XX1= A2(K,1)
+                              A2(K,1) = A2(K,2) + ECOQ*U2(K)
+                              A2(K,2) = XX1     + ECOQ*U2(K)
+ 512                       CONTINUE
+
+C... calcul du symetrique
+                           AA2(1,1)= -A2(1,2)
+                           AA2(2,1)=  A2(2,2)
+                           AA2(1,2)= -A2(1,1)
+                           AA2(2,2)=  A2(2,1)
+                           CALL KNORM2(NES,AA2,NS,UU2,SS2)
+
+C... visibilité a priori
+                           CALL KPRIOR(NES,NS,NS,A1,A2,U1,U2,IVU)
+                           CALL KPRIOR(NES,NS,NS,A1,AA2,U1,UU2,IVUS)
+
+                           IF(KIMP.GE.4)WRITE(6,*) ' K1 K2 IVU IVUS ',K1
+     $                          ,K2,IVU,IVUS
+                           IF(IVU.EQ.0.AND.IVUS.EQ.0) KVU=0
+
+                        ENDIF
+C   ---------------------------------------------------------------
+C<< FIN TEST K1=K2 ET VISIBIITE A PRIORI
+                        IF(KIMP.GE.4.AND.KVU.NE.0) THEN
+                           WRITE(6,*) ' FACES VISIBLES ',K1,K2
+                        ENDIF
+
+C>> CALCUL --------------------------------------------------------
+C.. option convexe
+                        IF(KACHE.EQ.0) THEN
+                           IF(KVU.NE.0) THEN
+
+                              CALL KAXC(A1,A2,NPAX,NGAX,FF,KIMP,EXTINC
+     $                             ,RAD)
+                              IF(KIMP.GE.4) WRITE(6,*) ' FF CONVEXE ',K1
+     $                             ,K2,FF/S1
+
+                           ENDIF
+C.. option cache
+                        ELSE
+                           IF(KVU.NE.0) THEN
+
+C>> les obstructeurs potentiels sont les memes que pour la face K2
+
+                              IF(KIMP.GE.4) THEN
+                                 WRITE(6,*) ' FACES K1 K2 ',K1,K2
+     $                                ,' NOBS ',NOBS
+                              ENDIF
+
+                              CALL KAXK(A1,A2,OBS,NOBS,NTOBS,NPAX,NGAX
+     $                             ,FF,KIMP,EXTINC,RAD)
+
+
+                              IF(KIMP.GE.4) WRITE(6,*) ' FF  ',K1,K2,FF
+     $                             /S1
+
+                           ENDIF
+
+                        ENDIF
+C<< FIN CALCUL ------------------------------------------------------
+
+C       WRITE(6,*) ' K1 K2 PLIG ',K1,K2,PLIG
+                        PLIG.FACT(K2) =  FF/S1
+
+                     ENDIF
+
+                  ENDIF
+
+C... fin face inverse de K2 (cas des coques) .........................
+
+ 210           CONTINUE
+
+               IF (ICOQ.AND.KCOQ(JTYP)) THEN
+                  NELT2 = NELT2 + 2 * NEL2
+               ELSE
+                  NELT2 = NELT2 + NEL2
+               ENDIF
+
+ 200        CONTINUE
+
+C     ---FIN BOUCLE FACE 2-----------------------------------------
+
+
+
+
+C*** fin traitement de la face K1 ***********************************
+
+C*** traitement de la face inverse de K1*****************************
+            IF (ICOQ.AND.KCOQ(ITYP)) THEN
+
+               K1=K1+1
+               PLIG=LFACT(K1)
+
+               DO 122 K = 1,NES
+                  U1(K) =-U1(K)
+                  XX1=A1(K,1)
+                  A1(K,1) = A1(K,2) + ECOQ * U1(K)
+                  A1(K,2) = XX1     + ECOQ * U1(K)
+ 122           CONTINUE
+
+               PSUR.FACT(K1)=S1
+
+C>>    BOUCLE FACE 2
+C     -------------------------------------------------------------
+
+               NELT2= 0
+               DO 2000 JTYP = 1,NTYP
+                  IMODEL = MYMOD.KMODEL(JTYP)
+                  SEGACT IMODEL
+                  IPT2 = IMAMOD
+                  SEGDES IMODEL
+
+                  NSGEO2 = IPT2.NUM(/1)
+                  NSPA2=1
+                  IF(ICOQ.AND.KQUAD(JTYP)) NSPA2=2
+                  NEL2 = IPT2.NUM(/2)
+                  DO 2100 I2 = 1,NEL2
+
+                     IF (ICOQ.AND.KCOQ(JTYP))THEN
+                        K2 = 2*I2-1  + NELT2
+                     ELSE
+                        K2 = I2 + NELT2
+                     ENDIF
+
+C... face K2 .....................................................
+
+                     KVU=1
+                     FF=0.D0
+
+C.. UTILISATION DE LA RECIPROCITE
+C
+                     IF(K1.GT.K2) THEN
+                        S2=PSUR.FACT(K2)
+                        PCOL=LFACT(K2)
+
+                        PLIG.FACT(K2)=(S2/S1)*PCOL.FACT(K1)
+
+                     ELSE
+C.. TEST K1=K2 ET VISIBILITE A PRIORI
+
+C------------------------------------------------------------------
+
+C>> K1=K2 : ELIMINATION DES CAS TRIVIAUX OU F(K1,K2)=0
+C
+                        IF(K1.EQ.K2) THEN
+                           IF(KIMP.GE.4) THEN
+                              WRITE(6,*) ' A1 ',A1(1,1),A1(2,1)
+                              WRITE(6,*) ' A1 ',A1(1,2),A1(2,2)
+                              WRITE(6,*) ' U1 ',U1(1),U1(2)
+                           ENDIF
+                           IF (ABS(U1(1)).LT.EPS) KVU=0
+                           IF (U1(1).GE.EPS) KVU=0
+
+                           IF(KVU.NE.0) THEN
+                              DO 2140 K = 1,NES
+                                 A2(K,1) = A1(K,1)
+                                 A2(K,2) = A1(K,2)
+ 2140                         CONTINUE
+                           ENDIF
+
+C>> K1::K2 : ELIMINATION DES CAS DE NON-VISIBLITE
+C            UTILISATION DE LA VISIBILITE A PRIORI DANS LE PLAN R-Z
+C            ON TESTE LA FACE K2 ET SON SYMETRIQUE (-R,Z)
+
+                        ELSE
+                           DO 2110 IS = 1,NSGEO2,NSPA2
+                              LS=IS
+                              IF(ICOQ.AND.KQUAD(ITYP)) LS=(IS+1)/2
+                              IREF = (IDIM+1)*(IPT2.NUM(IS,I2)-1)
+                              DO 2120 K = 1,NES
+C**        A2(K,IS) = XCOOR(IREF+K)/RAD
+                                 A2(K,LS) = XCOOR(IREF+K)/RAD
+ 2120                         CONTINUE
+ 2110                      CONTINUE
+                           CALL KNORM2(NES,A2,NS,U2,S2)
+                           S2=XPI*S2*ABS(A2(1,1)+A2(1,2))
+
+C.. calcul du symetrique
+                           AA2(1,1)= -A2(1,2)
+                           AA2(2,1)=  A2(2,2)
+                           AA2(1,2)= -A2(1,1)
+                           AA2(2,2)=  A2(2,1)
+                           CALL KNORM2(NES,AA2,NS,UU2,SS2)
+
+C.. visibilite a priori
+                           CALL KPRIOR(NES,NS,NS,A1,A2,U1,U2,IVU)
+                           CALL KPRIOR(NES,NS,NS,A1,AA2,U1,UU2,IVUS)
+
+                           IF(KIMP.GE.4)WRITE(6,*) ' K1 K2 IVU IVUS ',K1
+     $                          ,K2,IVU,IVUS
+                           IF(IVU.EQ.0.AND.IVUS.EQ.0) KVU=0
+
+                        ENDIF
+C   ---------------------------------------------------------------
+C<< FIN TEST K1=K2 ET VISIBIITE A PRIORI
+                        IF(KIMP.GE.4.AND.KVU.NE.0) THEN
+                           WRITE(6,*) ' FACES VISIBLES ',K1,K2
+                        ENDIF
+
+C>> CALCUL
+C... option convexe
+                        IF(KACHE.EQ.0) THEN
+                           IF(KVU.NE.0) THEN
+
+                              CALL KAXC(A1,A2,NPAX,NGAX,FF,KIMP,EXTINC
+     $                             ,RAD)
+                              IF(KIMP.GE.4) WRITE(6,*) ' FF CONVEXE ',K1
+     $                             ,K2,FF/S1
+
+                           ENDIF
+C.. option cache
+                        ELSE
+                           IF(KVU.NE.0) THEN
+
+C>> RECHERCHE DES OBSTRUCTEURS POTENTIELS.--------------------------
+
+                              NOBS=0
+
+C>> BOUCLE FACE 3---------------------------------------------------
+                              NELT3= 0
+                              DO 3000 KTYP = 1,NTYP
+                                 IMODEL = MYMOD.KMODEL(KTYP)
+                                 SEGACT IMODEL
+                                 IPT3 = IMAMOD
+                                 SEGDES IMODEL
+
+                                 NSGEO3 = IPT3.NUM(/1)
+                                 NSPA3=1
+                                 IF(ICOQ.AND.KQUAD(KTYP)) NSPA3=2
+                                 NEL3 = IPT3.NUM(/2)
+                                 DO 3100 I3 = 1,NEL3
+                                    K3 = I3+ NELT3
+
+                                    IF(K3.NE.K1.AND.K3.NE.K2) THEN
+
+                                       DO 3110 IS = 1,NSGEO3,NSPA3
+                                          LS=IS
+                                          IF(ICOQ.AND.KQUAD(ITYP)) LS
+     $                                         =(IS+1)/2
+                                          IREF = (IDIM+1)*(IPT3.NUM(IS
+     $                                         ,I3)-1)
+                                          DO 3120 K = 1,NES
+C**        A3(K,IS) = XCOOR(IREF+K)/RAD
+                                             A3(K,LS) = XCOOR(IREF+K)
+     $                                            /RAD
+ 3120                                     CONTINUE
+ 3110                                  CONTINUE
+
+                                       ZMIN2=MIN(A2(2,1),A2(2,2))
+                                       ZMAX2= MAX(A2(2,1),A2(2,2))
+                                       RMAX2= MAX(A2(1,1),A2(1,2))
+                                       ZTMIN=MIN(ZMIN1,ZMIN2)
+                                       ZTMAX= MAX(ZMAX1,ZMAX2)
+                                       RMAX = MAX(RMAX1,RMAX2)
+
+                                       IF( MAX(A3(2,1),A3(2,2)).LE
+     $                                      .ZTMIN) THEN
+                                          KOBS=0
+                                       ELSEIF(MIN(A3(2,1),A3(2,2)).GE
+     $                                         .ZTMAX) THEN
+                                          KOBS=0
+                                       ELSEIF(MIN(A3(1,1),A3(1,2)).GE
+     $                                         .RMAX) THEN
+                                          KOBS=0
+                                       ELSE
+                                          KOBS=1
+                                          OBS(1,2*NOBS+1)=A3(1,1)
+                                          OBS(2,2*NOBS+1)=A3(2,1)
+                                          OBS(1,2*NOBS+2)=A3(1,2)
+                                          OBS(2,2*NOBS+2)=A3(2,2)
+                                          NOBS=NOBS+1
+
+                                       ENDIF
+                                    ENDIF
+
+ 3100                            CONTINUE
+C
+                                 NELT3=NELT3+NEL3
+C
+ 3000                         CONTINUE
+
+C<< FIN RECHERCHE OBSTRUCTEURS--------------------------------------
+
+                              IF(KIMP.GE.4) THEN
+                                 WRITE(6,*) ' FACES K1 K2 ',K1,K2
+     $                                ,' NOBS ',NOBS
+                              ENDIF
+
+                              CALL KAXK(A1,A2,OBS,NOBS,NTOBS,NPAX,NGAX
+     $                             ,FF,KIMP,EXTINC,RAD)
+                              IF(KIMP.GE.4) WRITE(6,*) ' FF  ',K1,K2,FF
+     $                             /S1
+
+                           ENDIF
+
+                        ENDIF
+C<< FIN CALCUL
+C   ---------------------------------------------------------------
+
+C       WRITE(6,*) ' K1 K2 PLIG ',K1,K2,PLIG
+                        PLIG.FACT(K2) =  FF/S1
+
+                     ENDIF
+C... fin face K2 ..................................................
+
+
+C... face inverse de K2 (cas des coques) ..........................
+
+                     IF (ICOQ.AND.KCOQ(JTYP)) THEN
+
+                        K2=K2 + 1
+
+                        KVU=1
+                        FF=0.D0
+
+C UTILISATION DE LA RECIPROCITE
+C
+                        IF(K1.GT.K2) THEN
+                           S2=PSUR.FACT(K2)
+                           PCOL=LFACT(K2)
+
+                           PLIG.FACT(K2)=(S2/S1)*PCOL.FACT(K1)
+
+                        ELSE
+C**
+
+C>> TEST K1=K2 ET VISIBILITE A PRIORI
+
+C------------------------------------------------------------------
+
+C>> K1=K2 : ELIMINATION DES CAS TRIVIAUX OU F(K1,K2)=0
+C
+                           IF(K1.EQ.K2) THEN
+                              IF(KIMP.GE.4) THEN
+                                 WRITE(6,*) ' A1 ',A1(1,1),A1(2,1)
+                                 WRITE(6,*) ' A1 ',A1(1,2),A1(2,2)
+                                 WRITE(6,*) ' U1 ',U1(1),U1(2)
+                              ENDIF
+                              IF (ABS(U1(1)).LT.EPS) KVU=0
+                              IF (U1(1).GE.EPS) KVU=0
+
+                              IF(KVU.NE.0) THEN
+                                 DO 5140 K = 1,NES
+                                    A2(K,1) = A1(K,1)
+                                    A2(K,2) = A1(K,2)
+ 5140                            CONTINUE
+                              ENDIF
+
+C>> K1::K2 : ELIMINATION DES CAS DE NON-VISIBLITE
+C            UTILISATION DE LA VISIBILITE A PRIORI DANS LE PLAN R-Z
+C            ON TESTE LA FACE K2 ET SON SYMETRIQUE (-R,Z)
+
+
+                           ELSE
+
+                              DO 5120 K = 1,NES
+                                 U2(K)=-U2(K)
+                                 XX1=A2(K,1)
+                                 A2(K,1) = A2(K,2) + ECOQ*U2(K)
+                                 A2(K,2) = XX1     + ECOQ*U2(K)
+ 5120                         CONTINUE
+
+C... calcul du symetrique
+                              AA2(1,1)= -A2(1,2)
+                              AA2(2,1)=  A2(2,2)
+                              AA2(1,2)= -A2(1,1)
+                              AA2(2,2)=  A2(2,1)
+                              CALL KNORM2(NES,AA2,NS,UU2,SS2)
+
+C... visibilité a priori
+                              CALL KPRIOR(NES,NS,NS,A1,A2,U1,U2,IVU)
+                              CALL KPRIOR(NES,NS,NS,A1,AA2,U1,UU2,IVUS)
+
+                              IF(KIMP.GE.4)WRITE(6,*) ' K1 K2 IVU IVUS '
+     $                             ,K1,K2,IVU,IVUS
+                              IF(IVU.EQ.0.AND.IVUS.EQ.0) KVU=0
+
+                           ENDIF
+C   ---------------------------------------------------------------
+C<< FIN TEST K1=K2 ET VISIBIITE A PRIORI
+                           IF(KIMP.GE.4.AND.KVU.NE.0) THEN
+                              WRITE(6,*) ' FACES VISIBLES ',K1,K2
+                           ENDIF
+
+C>> CALCUL --------------------------------------------------------
+C.. option convexe
+                           IF(KACHE.EQ.0) THEN
+                              IF(KVU.NE.0) THEN
+
+                                 CALL KAXC(A1,A2,NPAX,NGAX,FF,KIMP
+     $                                ,EXTINC,RAD)
+                                 IF(KIMP.GE.4) WRITE(6,*) ' FF CONVEXE '
+     $                                ,K1,K2,FF/S1
+
+                              ENDIF
+C.. option cache
+                           ELSE
+                              IF(KVU.NE.0) THEN
+
+C>> les obstructeurs potentiels sont les memes que pour la face K2
+
+                                 IF(KIMP.GE.4) THEN
+                                    WRITE(6,*) ' FACES K1 K2 ',K1,K2
+     $                                   ,' NOBS ',NOBS
+                                 ENDIF
+
+                                 CALL KAXK(A1,A2,OBS,NOBS,NTOBS,NPAX
+     $                                ,NGAX,FF,KIMP,EXTINC,RAD)
+
+                                 IF(KIMP.GE.4) WRITE(6,*) ' FF  ',K1,K2
+     $                                ,FF/S1
+
+                              ENDIF
+
+                           ENDIF
+C<< FIN CALCUL ------------------------------------------------------
+
+C       WRITE(6,*) ' K1 K2 PLIG ',K1,K2,PLIG
+                           PLIG.FACT(K2) =  FF/S1
+
+                        ENDIF
+
+                     ENDIF
+
+C... fin face inverse de K2 (cas des coques) .........................
+
+ 2100             CONTINUE
+
+                  IF (ICOQ.AND.KCOQ(JTYP)) THEN
+                     NELT2 = NELT2 + 2 * NEL2
+                  ELSE
+                     NELT2 = NELT2 + NEL2
+                  ENDIF
+
+ 2000          CONTINUE
+
+C     ---FIN BOUCLE FACE 2-----------------------------------------
+
+            ENDIF
+C*** fin traitement de la face inverse de K1*************************
+
+ 110     CONTINUE
+
+
+         IF (ICOQ.AND.KCOQ(ITYP)) THEN
+            NELT1 = NELT1 + 2 * NEL1
+         ELSE
+            NELT1 = NELT1 + NEL1
+         ENDIF
+
+ 100  CONTINUE
+
+C     ---FIN BOUCLE FACE 1-----------------------------------------
+C
+
+
+
+C     Désactivation des maillages élémentaires
+      DO 920 ITYP = 1,NTYP
+         IMODEL = MYMOD.KMODEL(ITYP)
+         SEGACT IMODEL
+         IPT1 = IMAMOD
+         SEGDES IPT1
+         SEGDES IMODEL
+ 920  CONTINUE
+      SEGDES MYMOD
+
+C>> SURFACES DIMENSIONNEES
+
+      DO 910 LS=1,NFACE
+         PSUR.FACT(LS)=PSUR.FACT(LS)*RAD*RAD
+ 910  CONTINUE
+C
+      IF(KACHE.NE.0) SEGSUP SFOBS
+C
+
+C>>>  NORMALISATION,CACUL DES BILANS ET IMPRESSION
+C     --------------------------------------------
+
+      IF(EXTINC.GT.1D-3) THEN
+         INOR=0
+      ENDIF
+
+      CALL KFN(IFACFO,INOR,KIMP)
+
+C     Traduction puis suppression de IFACFO
+
+      IF (KIMP.GE.3) THEN
+         CALL PRFACF(IFACFO)
+      ENDIF
+
+      LTITR=1
+      CALL FFMCHA(MYMOD,INFOEL,IFACFO,ICHFAC,LTITR)
+
+      SEGACT IFACFO
+      DO 930 NNEL = 1,LFACT(/1)
+         LFAC = LFACT(NNEL)
+         SEGSUP LFAC
+ 930  CONTINUE
+      SEGSUP IFACFO
+
+      SEGSUP STRAV
+
+      RETURN
+      END
+C///////////
+C mettre apres KPRIOR
+*       WRITE (6,*) 'K1 =',K1,' et K2 =',K2
+*       WRITE (6,*) 'NES =',NES,'NS =',NS
+*       WRITE (6,*) 'A1(*,1) :',(A1(K,1),K=1,IDIM)
+*       WRITE (6,*) 'A1(*,2) :',(A1(K,2),K=1,IDIM)
+*       WRITE (6,*) 'U1      :',(U1(K),K=1,IDIM+1)
+*       WRITE (6,*) 'A2(*,1) :',(A2(K,1),K=1,IDIM)
+*       WRITE (6,*) 'A2(*,2) :',(A2(K,2),K=1,IDIM)
+*       WRITE (6,*) 'U2      :',(U2(K),K=1,IDIM+1)
+*       WRITE (6,*) 'IVU =',IVU
+*       WRITE (6,*) 'AA2(*,1) :',(AA2(K,1),K=1,IDIM)
+*       WRITE (6,*) 'AA2(*,2) :',(AA2(K,2),K=1,IDIM)
+*       WRITE (6,*) 'UU2      :',(UU2(K),K=1,IDIM+1)
+*       WRITE (6,*) 'IVUS =',IVUS
+C///////////
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

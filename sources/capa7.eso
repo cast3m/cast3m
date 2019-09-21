@@ -1,0 +1,214 @@
+C CAPA7     SOURCE    FANDEUR   13/01/16    21:15:02     7666
+
+C=======================================================================
+C=                             C A P A 7                               =
+C=                             ---------                               =
+C=                                                                     =
+C=  Fonction :                                                         =
+C=  ----------                                                         =
+C=  Creation d'un champ par element (MCHAML) contenant les valeurs de  =
+C=  la capacite calorifique equivalente en cas de changement de phase  =
+C=                                                                     =
+C=  Parametres :  (E)=Entree  (S)=Sortie                               =
+C=  ------------                                                       =
+C=   ITAPHA   (E)  Table                                               =
+C=   IPOGEO   (E)  Maillage ELEMENTAIRE (MELEME)               (ACTIF) =
+C=   ICOQ     (E)  Non nul si element COQUE, =0 sinon                  =
+C=   IPINTE   (E)  Segment SMINTE de l'element fini            (ACTIF) =
+C=   ICHPHA   (S)  MCHAML de capacite due au changement de phase       =
+C=======================================================================
+
+      SUBROUTINE CAPA7 (ITAPHA,IPOGEO,ICOQ,IPINTE, ICHPHA)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+
+-INC SMCHAML
+-INC SMCHPOI
+-INC SMCOORD
+-INC SMELEME
+-INC SMINTE
+
+      SEGMENT MTRI
+        INTEGER NPAKET(NX)
+        REAL*8  TEMPER(NX,2)
+        INTEGER IPCHPT(2)
+      ENDSEGMENT
+
+      LOGICAL L0
+
+      PARAMETER ( Epsi = 1.D-5,
+     &            XZero = 0.D0, XUn = 1.D0, X1s2 = 0.5D0 ,
+     &            X1s3 = 0.333333333333333333333333333333333333D0 )
+
+      CHARACTER*4 LNOCO(3)
+      DATA LNOCO / 'TSUP','TINF','T   ' /
+
+      ICHPHA = 0
+
+C ===
+C  1 - Recuperation/Verification sur les donnees du changement de phase
+C ===
+C CLAT     Chaleur latente du changement de phase         (FLOTTANT)
+C TPHA1    Temperature 1 du changement de phase           (FLOTTANT)
+C TPHA2    Temperature 2 du changement de phase           (FLOTTANT)
+C IPCHP1   Champ de temperatures au pas                   (CHPOINT)
+C IPCHP2   Champ de temperatures au pas N + 1             (CHPOINT)
+      I0  = 0
+      X0  = XZero
+      IP0 = 0
+      L0  = .FALSE.
+      CALL ACCTAB(ITAPHA,'MOT     ',I0,X0  ,'CHALEUR LATENTE',L0,IP0,
+     &                   'FLOTTANT',I0,CLAT,' '              ,L0,IP0)
+      CALL ACCTAB(ITAPHA,'MOT     ',I0,X0   ,'TPHASE 1',L0,IP0,
+     &                   'FLOTTANT',I0,TPHA1,' '       ,L0,IP0)
+      CALL ACCTAB(ITAPHA,'MOT     ',I0,X0   ,'TPHASE 2',L0,IP0,
+     &                   'FLOTTANT',I0,TPHA2,' '       ,L0,IP0)
+      CALL ACCTAB(ITAPHA,'MOT     ',I0,X0,'CHAMP THERMIQUE 1',L0,IP0,
+     &                   'CHPOINT ',I0,X0,' '                ,L0,IPCHP1)
+      CALL ACCTAB(ITAPHA,'MOT     ',I0,X0,'CHAMP THERMIQUE 2',L0,IP0,
+     &                   'CHPOINT ',I0,X0,' '                ,L0,IPCHP2)
+      IF (IERR.NE.0) RETURN
+      TF1 = MIN(TPHA1,TPHA2)
+      TF2 = MAX(TPHA1,TPHA2)
+      DTF21 = TF2 - TF1
+      IF (DTF21.LT.Epsi) THEN
+        CALL ERREUR(511)
+        RETURN
+      ENDIF
+      DHDTF = SIGN(XUn,(TPHA2-TPHA1)) * CLAT / DTF21
+C ===
+C  2 - Informations sur le maillage considere (IPOGEO)
+C ===
+      IPT1 = IPOGEO
+c*      SEGACT,IPT1
+      NBNN1  = IPT1.NUM(/1)
+      NBELE1 = IPT1.NUM(/2)
+C ===
+C  3 - Informations sur le support d'integration (MINTE)
+C ===
+      MINTE = IPINTE
+c*      SEGACT,MINTE
+      NBPGAU = POIGAU(/1)
+C ===
+C  4 - Initialisation et remplissage du segment de travail MTRI
+C ===
+      NX = XCOOR(/1)/(IDIM+1)
+      SEGINI,MTRI
+C- NPAKET(Noeud) = 1 si Noeud est dans le maillage IPOGEO
+      DO iElt = 1, NBELE1
+        DO iNoe = 1, NBNN1
+          MTRI.NPAKET(IPT1.NUM(iNoe,iElt)) = 1
+        ENDDO
+      ENDDO
+      MTRI.IPCHPT(1) = IPCHP1
+      MTRI.IPCHPT(2) = IPCHP2
+C- Recherche de la temperature nodale en debut et fin de pas
+C- pour chaque noeud du maillage IPOGEO.
+C- Dans le cas des elements COQUEs, la temperature nodale est la
+C- moyenne des temperatures T, TSUP et TINF.
+C- Si le noeud du maillage IPOGEO n'est pas dans le support des
+C- champs de temperatures, sa temperature est arbitrairement nulle.
+      DO icht = 1, 2
+        MCHPOI = MTRI.IPCHPT(icht)
+        SEGACT,MCHPOI
+        NSOUPO = IPCHP(/1)
+        DO iSoupo = 1, NSOUPO
+          MSOUPO = IPCHP(iSoupo)
+          SEGACT,MSOUPO
+          CALL PLACE(NOCOMP,NOCOMP(/1),indT,LNOCO(3))
+          IF (indT.EQ.0) GOTO 10
+C- Verification sur les composantes du CHPOINT pour les coques
+          IF (ICOQ.NE.0) THEN
+            CALL PLACE(NOCOMP,NOCOMP(/1),indTI,LNOCO(2))
+            CALL PLACE(NOCOMP,NOCOMP(/1),indTS,LNOCO(1))
+            IF (indTI.EQ.0 .OR. indTS.EQ.0) THEN
+              MOTERR(1:4) = LNOCO(1)
+              IF (indTI.EQ.0) MOTERR(1:4) = LNOCO(2)
+              CALL ERREUR(181)
+              GOTO 999
+            ENDIF
+          ENDIF
+          MELEME = IGEOC
+          SEGACT,MELEME
+          MPOVAL = IPOVAL
+          SEGACT,MPOVAL
+          DO iElt = 1, NUM(/2)
+            j = NUM(1,iElt)
+            IF (MTRI.NPAKET(j).NE.0) THEN
+              MTRI.TEMPER(j,icht) = VPOCHA(iElt,indT)
+              IF (ICOQ.NE.0) THEN
+                MTRI.TEMPER(j,icht) = X1s3 *
+     &            (  MTRI.TEMPER(j,icht) + VPOCHA(iELT,indTI)
+     &             + VPOCHA(iELT,indTS) )
+              ENDIF
+            ENDIF
+          ENDDO
+          SEGDES,MPOVAL
+          SEGDES,MELEME
+ 10       CONTINUE
+          SEGDES,MSOUPO
+        ENDDO
+        SEGDES,MCHPOI
+      ENDDO
+
+C ===
+C  5 - Determination du MCHAML de capacite calorifique du changement
+C      de phase (terme de chaleur latente)
+C ===
+      N2 = 1
+      SEGINI,MCHAML
+      NOMCHE(1) = 'C   '
+      TYPCHE(1) = 'REAL*8'
+      N1PTEL = NBPGAU
+      N1EL   = NBELE1
+      N2PTEL = 0
+      N2EL   = 0
+      SEGINI,MELVAL
+      IELVAL(1) = MELVAL
+C- Remplissage du segment MELVAL pour chaque point de Gauss (iGau) de
+C- chacun des elements (iElt) du maillage
+      DO iElt = 1, NBELE1
+        DO iGau = 1, NBPGAU
+C- Calcul des temperatures T1 et T2 au point de Gauss (iGau)
+          T1 = XZero
+          T2 = XZero
+          DO iNoe = 1, NBNN1
+            j = IPT1.NUM(iNoe,iElt)
+            T1 = T1 + MTRI.TEMPER(j,1)*SHPTOT(1,iNoe,iGau)
+            T2 = T2 + MTRI.TEMPER(j,2)*SHPTOT(1,iNoe,iGau)
+          ENDDO
+C- Calcul du terme de capactite calorifique du au changement de phase
+C- (s'il y a lieu)
+          IF (.NOT.(((T1.LE.TF1).AND.(T2.LE.TF1)).OR.
+     &              ((T1.GE.TF2).AND.(T2.GE.TF2)))) THEN
+            IF (T1.NE.T2) THEN
+              DT21 = T2 - T1
+              DTEFF = X1s2 * (DTF21+DT21-ABS(TF2-T2)-ABS(T1-TF1))
+              VELCHE(iGau,iElt) = DHDTF * DTEFF / ABS(DT21)
+            ELSE
+              VELCHE(iGau,iElt) = DHDTF
+            ENDIF
+c*        ELSE
+c*          VELCHE(iGau,iElt) = XZero
+          ENDIF
+        ENDDO
+      ENDDO
+      SEGDES,MELVAL,MCHAML
+      ICHPHA = MCHAML
+
+C ===
+C  6 - MENAGE : Desactivation des segments utilises et crees
+C ===
+ 999  CONTINUE
+      SEGSUP,MTRI
+c*      SEGDES,IPT1
+c*      SEGDES,MINTE
+
+      RETURN
+      END
+
+
+

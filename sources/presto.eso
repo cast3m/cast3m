@@ -1,0 +1,696 @@
+C PRESTO    SOURCE    CHAT      05/01/13    02:25:58     5004
+      SUBROUTINE PRESTO(DEPST,NSTRS,MFR1,IB,IGAU,
+     1     DSIGT,NCOMAT,SIG0,VAR0,XMAT,XCAR,NVARI,ICARA,
+     2     SIGF,VARF,DEFP,TETA1,TETA2,KERRE,DT0)
+*
+*_________________________________________________________________
+*
+*
+*    ENTREES :
+*    ---------
+*
+* DEPST = INCREMENT DE DEFORMATIONS TOTALES
+* NSTRS = NBRE DE COMPOSANTES DES DEFORMATIONS
+* NCOMAT= NBRE DE CARACTERISTIQUES MECANIQUES DU MATERIAU
+* MFR1  = NUMERO DE LA FORMULATION
+* IB    = NUMERO DE L ELEMENT COURANT
+* IGAU  = NUMERO DU POINT COURANT
+* NVARI = NBRE DE VARIABLES INTERNES
+* SIG0(NSTRS) = CONTRAINTES AU DEBUT DU PAS D'INTEGRATION
+* VAR0(NVARI) = VARIABLES INTERNES AU DEBUT DU PAS DE TEMPS
+* XMAT(NCOMAT) = CARACTERISTIQUES MECANIQUES DU MATERIAU
+* ICARA = NBRE DE CARACTERISTIQUES GEOMETRIQUES DES ELEMENTS FINIS
+* XCARA(ICARA) = CARACTERISTIQUES GEOMETRIQUES DES ELEMENTS FINIS
+* TETA1 = TEMPERATURE AU DEBUT DU PAS DE TEMPS
+* TETA2 = TEMPERATURE A LA FIN DU PAS DE TEMPS
+* DT0   = PAS DE TEMPS DU CALCUL
+*
+*    SORTIE :
+*    --------
+*
+* SIGF(NSTRS) = CONTRAINTES FINALES
+* VARF(NVARI) = VARIALES INTERNES A LA FIN DU PAS D'INTEGRATION
+* DEFP(NSTRS) = INCREMENT DE DEFORMATION PLASTIQUE A LA FIN
+*               DU PAS D'INTEGRATION
+* ============================================================
+*       ICI IL FAUT PROGRAMMER EN FORTRAN PUR
+*=============================================================
+*
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*
+-INC CCREEL
+-INC CCOPTIO
+      DIMENSION SIG0(*),DEPST(*),VAR0(*),XMAT(*),XCAR(*),SIGF(*),
+     &     VARF(*),DEFP(*),DSIGT(*)
+      DIMENSION RSIG0(6),RDEPS(6),RSIGF(6),RDEFP(6),RDIGT(6)
+      DIMENSION DEVT(6),ELT(6),SIGT(6),ST(6),DEFT(6)
+      DIMENSION DIJ(6),CIJ(6),CIJ2(6)
+*
+*  Adaptation de l'option de calcul vers le 3D massif de SIG0 a RSIG0
+*====================================================================
+*
+      IF (MFR1 .EQ. 1 .OR. MFR1 .EQ. 31)  THEN
+*
+*---> 1 formulation massive
+*---> 2 formulation quasi incompressible
+*---> MASSIF 3D
+*
+         IF (NSTRS .EQ. 6) THEN
+            DO 110 I=1,NSTRS
+               RSIG0(I)=SIG0(I)
+               VARF(I+1)=VAR0(I+1)+DEPST(I)
+               RDEPS(I)=DEPST(I)
+ 110        CONTINUE
+         ELSE IF (NSTRS.EQ.4.AND.((IFOUR.EQ.0)
+     &           .OR.(IFOUR.EQ.-1).OR.(IFOUR.EQ.-2))) THEN
+*
+*---> Calcul en mode deformations planes ou axisymetrique
+*     ou en contraintes planes
+*
+            DO 115 I=1,NSTRS
+               RSIG0(I)=SIG0(I)
+               VARF(I+1)=VAR0(I+1)+DEPST(I)
+               RDEPS(I)=DEPST(I)
+ 115        CONTINUE
+            RSIG0(5)=0.D0
+            RSIG0(6)=0.D0
+            VARF(6)=VAR0(6)
+            VARF(7)=VAR0(7)
+            RDEPS(5)=0.D0
+            RDEPS(6)=0.D0
+         ENDIF
+      ELSE
+         KERRE = 99
+         GOTO 98
+      ENDIF
+*
+*   Passage des deformations de cisaillement exprimées
+*   en GAMA aux déformations de cisaillement exprimées
+*   en déformations
+*
+      DO 116 I=1,6
+         A=1.D0
+         IF (I.GT.3) A=2.D0
+         RDEPS(I)=RDEPS(I)/A
+         VAR0(I+1)=VAR0(I+1)/A
+         VARF(I+1)=VARF(I+1)/A
+         VAR0(I+8)=VAR0(I+8)/A
+         VARF(I+8)=VARF(I+8)/A
+ 116  CONTINUE
+*
+*   Données du materiau
+*===========================================================
+*
+*
+      YOUNG=XMAT(1)
+      XNU=XMAT(2)
+      G00=YOUNG/(2.D0*(1.D0+XNU))
+      IF (IFOUR.EQ.-2) THEN
+         RHO0=XMAT(21)
+      ELSE
+         RHO0=XMAT(20)
+      ENDIF
+      TAU0=XMAT(5)
+      P0=XMAT(6)
+      S0=XMAT(7)
+      SINF0=XMAT(8)
+      XK00=XMAT(9)
+      G0=XMAT(10)
+      Y0=XMAT(11)
+      YINF0=XMAT(12)
+      Y1=XMAT(13)
+      Y2=XMAT(14)
+      BETA0=XMAT(15)
+      Gp1=XMAT(16)
+      Gt1=XMAT(17)
+      XMU0=XMAT(18)
+      TM0=XMAT(19)
+*
+*  Calculs préliminaires
+*===================================
+*
+*---> Nombre d'iterations internes maximales
+*
+      NMAX=200
+      iter00=0
+*
+*---> Trace de l'incrément de déformation totale
+*
+      IF (IFOUR.EQ.-2) THEN
+         VARF(4)=VAR0(11)-(XNU/(1.D0-XNU)
+     .        *(VARF(2)-VAR0(9)+VARF(3)-VAR0(10)))
+         RDEPS(3)=VARF(4)-VAR0(4)
+      ENDIF
+ 96   treps1=RDEPS(1)+RDEPS(2)+RDEPS(3)
+*
+*---> Vitesse de deformation equivalente
+*
+*      DT0=5.D-7
+      DEPS2=RDEPS(1)*RDEPS(1)+RDEPS(2)*RDEPS(2)+RDEPS(3)*RDEPS(3)
+      DEPS2=DEPS2-RDEPS(1)*RDEPS(2)-RDEPS(2)*RDEPS(3)
+      DEPS2=DEPS2-RDEPS(3)*RDEPS(1)
+      DEPS3=RDEPS(4)*RDEPS(4)+RDEPS(5)*RDEPS(5)+RDEPS(6)*RDEPS(6)
+      DEPS2=DEPS2+3.D0*DEPS3
+      DEPS0=(DEPS2**(0.5D0))*2.D0/3.D0
+      DEPS0=DEPS0+(treps1/3.D0)
+      IF (ABS(DT0).LT.1.D-15) THEN
+         DEPS=0.D0
+      ELSE
+         DEPS=DEPS0/DT0
+      END IF
+*
+*---> Trace de la déformation totale
+*
+      treps0=VARF(2)+VARF(3)+VARF(4)
+*
+*---> Calcul de la compression a la fin du pas de temps
+*
+      RHO1=RHO0/(1.D0+treps0)
+      ETAnew=RHO1/RHO0
+*
+*---> Temperature de fusion a la fin (TM2)
+*     du pas de temps
+*
+      TM2=TM0*EXP(2.D0*XMU0*(1.D0-(1.D0/ETAnew)))
+      TM2=TM2/(ETAnew**(2.D0/3.D0))
+*
+*---> On divise le coefficient variable avec la température
+*     par la température de fusion
+*
+      XK0=XK00/TM2
+*
+*  Calculs des grandeurs élastiques test
+*====================================================
+*
+*---> Déformations
+*      -élastiques totales test ELT
+*      -trace des déformations élastiques totales TRELT
+*      -déviatoires élastiques test DEVT
+*      -incrément de déformation plastique DEFT
+*      -déformation plastique équivalente test EPSPT
+*
+      DO 100 I=1,6
+         ELT(I)=VARF(I+1)-VAR0(8+I)
+ 100  CONTINUE
+      TRELT=ELT(1)+ELT(2)+ELT(3)
+      DO 200 I=1,6
+         A=0.D0
+         IF (I.LE.3) A=1.D0
+         DEVT(I)=ELT(I)-(1.D0*TRELT*A/3.D0)
+         DEFT(I)=0.D0
+ 200  CONTINUE
+      EPSPT=VAR0(1)
+*
+*---> Coefficient proportionnel entre le module de
+*     cisaillement et le module de pression hydrostatique
+*
+      E1=2.D0*(1.D0+XNU)/(3.D0*(1.D0-(2.D0*XNU)))
+*
+*---> Données matériaux Gtest et XKtest
+*
+      pente1=E1*Gp1*TRELT/(ETAnew**(1.D0/3.D0))
+      Gtest=(G00+Gt1)/(1.D0+pente1)
+      XKtest=E1*Gtest
+*
+*---> Si on dépasse la température de fusion,
+*     le solide devient liquide
+*        -les caractéritiques matériaux sont constantes
+*        -G=0, donc le déviateur élastique est nul
+*        -la limite d'élasticité est constante et nulle donc:
+*        -la trace de la déformation plastique est nulle
+*
+      IF (TETA2.GT.TM2) THEN
+         Gtest=0.D0
+         DEVT(1)=0.D0
+         DEVT(2)=0.D0
+         DEVT(3)=0.D0
+         DEVT(4)=0.D0
+         DEVT(5)=0.D0
+         DEVT(6)=0.D0
+         TREPT=RDEPS(1)+RDEPS(2)+RDEPS(3)
+         TRELT=TREPT
+         DEFT(1)=RDEPS(1)-(1.D0*TREPT/3.D0)
+         DEFT(2)=RDEPS(2)-(1.D0*TREPT/3.D0)
+         DEFT(3)=RDEPS(3)-(1.D0*TREPT/3.D0)
+         DEFT(4)=RDEPS(4)
+         DEFT(5)=RDEPS(5)
+         DEFT(6)=RDEPS(6)
+         XKtest=VAR0(8)
+         DEPS0=PROCON(DEFT,DEFT,6)
+         DEPS0=(2.D0*DEPS0/3.D0)**.5D0
+         EPSPT=EPSPT+DEPS0
+      ENDIF
+*
+*---> Contraintes test
+*
+      Ptest=-1.D0*XKtest*TRELT
+      DO 300 I=1,6
+         ST(I)=2.D0*Gtest*DEVT(I)
+         A=0.D0
+         IF (I.LE.3) A=1.D0
+         SIGT(I)=ST(I)-(Ptest*A)
+ 300  CONTINUE
+*
+*---> Contrainte équivalente test STEST
+*
+      STEST2=(SIGT(1)*SIGT(1))+(SIGT(2)*SIGT(2))
+      STEST2=STEST2+(SIGT(3)*SIGT(3))
+      STEST2=STEST2-(SIGT(1)*SIGT(2))-(SIGT(2)*SIGT(3))
+      STEST2=STEST2-(SIGT(3)*SIGT(1))
+      STEST3=(SIGT(4)*SIGT(4))+(SIGT(5)*SIGT(5))
+      STEST3=STEST3+(SIGT(6)*SIGT(6))
+      STEST2=STEST2+(3.D0*STEST3)
+      IF (STEST2.LT.0.D0) STEST2=0.D0
+      STEST=STEST2**(0.5D0)
+*
+*---> Calcul de la pulsation de Debye: W0 et de DTETA0
+*
+      W0=(Gtest/RHO1)**(.5D0)
+*
+      DTETA0=(1.D0/6.D0)*((4.D0/XPI)**(.5D0))*W0
+*
+*---> Calcul de la contrainte de saturation YSAT0
+*
+      IF (ABS(DT0).LT.1.D-15) THEN
+         YS1=SINF0
+      ELSE
+         FONC0=XK0*LOG(G0*DTETA0/DEPS)
+         ERF0=ERGAUS(FONC0)
+         YS1=S0-((S0-SINF0)*ERF0)
+      ENDIF
+      YS2=S0*((DEPS/(G0*DTETA0))**BETA0)
+      YSAT0=MAX(YS1,YS2)
+*
+*---> Calcul de la limite élastique YLIM0
+*
+      IF (ABS(DT0).LT.1.D-15) THEN
+         YLIM1=YINF0
+      ELSE
+         FONC0=XK0*LOG(G0*DTETA0/DEPS)
+         ERF0=ERGAUS(FONC0)
+         YLIM1=Y0-((Y0-YINF0)*ERF0)
+      ENDIF
+      YLIM2=Y1*((DEPS/(G0*DTETA0))**Y2)
+      YLIM0=MAX(YLIM1,MIN(YLIM2,YS2))
+*
+*---> Limite d'élasticité test : CAS CUBIQUE CENTRE C.C.
+*
+      DYSL0=ABS(YSAT0-YLIM0)
+      DYSL1=ABS(S0-YLIM0)
+      IF (P0.EQ.0.D0) THEN
+*
+         IF (DYSL0.LT.1.D-15) THEN
+            Yel0=YSAT0
+         ELSE
+            Yel0=-1.D0*TAU0*EPSPT
+            Yel0=EXP(Yel0/(YSAT0-YLIM0))
+            Yel0=YSAT0-((YSAT0-YLIM0)*Yel0)
+         ENDIF
+         Ytest=Yel0*Gtest
+         IF (Ytest.LE.0.D0) Ytest=0.D0
+*
+      ELSE
+*
+*---> Limite d'élasticité test : AUTRES CAS
+*
+         IF (DYSL0.LT.1.D-15) THEN
+            Yel0=YLIM0
+         ELSE IF (DYSL1.LT.1.D-15) THEN
+            Yel0=YLIM0
+         ELSE
+            Yel1=-1.D0*TAU0*EPSPT*P0
+            denom0=P0*(YSAT0-YLIM0)/(S0-YLIM0)
+            denom1=EXP(denom0)-1.D0
+            denom1=denom1*(S0-YLIM0)
+            Yel1=EXP(Yel1/denom1)
+            denom2=1.D0-(EXP(-1.D0*denom0))
+            Yel0=LOG(1.D0-(denom2*Yel1))
+            coeff0=(S0-YLIM0)/P0
+            Yel0=YSAT0+(coeff0*Yel0)
+         ENDIF
+         Ytest=Yel0*Gtest
+         IF (Ytest.LE.0.D0) Ytest=0.D0
+*
+      ENDIF
+*
+*---> Fonction de charge test PHIT
+*
+      PHIT=STEST-Ytest
+      IF (TETA2.GT.TM2) PHIT=0.D0
+*
+*
+*  Vérification du critère de plasticité
+*=========================================================
+*
+*---> Erreur admise
+*
+      ERR0=1.D-7*ABS(PHIT)
+*
+*---> Critère de plasticité
+*
+      PHI0=PHIT
+      iter0=0
+*
+*
+ 97   IF (PHI0.LE.ERR0) THEN
+*
+*  On est élastique
+*=========================================================
+*
+*--------------------------------------------------------------
+*     Cas particulier des contraintes planes
+*--------------------------------------------------------------
+*
+         IF (IFOUR.EQ.-2) THEN
+*
+*---> On vérifie qu'on est en contraintes planes
+*
+            iter00=iter00+1
+            SIG3=ABS(SIGT(3))
+            IF (SIG3.GT.1.D-2) THEN
+               ELT(3)=-1.D0*XNU*(ELT(1)+ELT(2))/(1.D0-XNU)
+               VARF(4)=VAR0(11)+ELT(3)+DEFT(3)
+               RDEPS(3)=VARF(4)-VAR0(4)
+               IF (iter00.LE.NMAX) THEN
+                  GOTO 96
+               ELSE
+                  KERRE=460
+                  GOTO 98
+               ENDIF
+            ENDIF
+         ENDIF
+*
+*-----------------------------------------------------
+*    Fin du cas particulier des contraintes planes
+*-----------------------------------------------------
+*
+         DO 400 I=1,6
+            RSIGF(I)=SIGT(I)
+            RDEFP(I)=DEFT(I)
+            RDIGT(I)=RSIGF(I)-RSIG0(I)
+            VARF(I+8)=DEFT(I)+VAR0(I+8)
+ 400     CONTINUE
+         VARF(1)=EPSPT
+         VARF(8)=XKtest
+         DEPST(3)=VARF(4)-VAR0(4)
+*
+*
+      ELSE
+*
+*  On plastifie
+*=========================================================
+*
+*---> Coefficient donnant la trace de l'incrément de
+*     déformation plastique
+*
+         tr0=Yel0*Gp1/(ETAnew**(1.D0/3.D0))
+*
+*---> Coefficient donnant la variation de pression due
+*     à l'incrément de déformation plastique
+*
+         coeff1=E1*Gp1*TRELT/(ETAnew**(1.D0/3.D0))
+         coeff1=XKtest*tr0/(1.D0+coeff1)
+*
+*---> Module d'écrouissage H = - d PHI / d EPSeq
+*
+         IF (P0.EQ.0.D0) THEN
+            IF (DYSL0.LT.1.D-15) THEN
+               H0=0.D0
+            ELSE
+               H0=TAU0*EXP(-1.D0*TAU0*EPSPT/(YSAT0-YLIM0))
+               H0=H0*Gtest
+            ENDIF
+         ELSE
+            IF ((DYSL0.LT.1.D-15).OR.(DYSL1.LT.1.D-15)) THEN
+               H0=0.D0
+            ELSE
+               H0=coeff0*denom2*P0*TAU0
+               fac0=denom2*EXP(-1.D0*P0*TAU0*EPSPT/denom1)
+               H0=H0/(denom1*(1.D0-fac0))
+               H0=H0*Gtest
+            ENDIF
+         ENDIF
+*
+*---> Matrice de la direction d'écoulement DIJ = d PHI / d SIG
+*
+         DO 500 I=1,6
+            A=0.D0
+            IF (I.LE.3) A=1.D0
+            DIJ(I)=3.D0*ST(I)/(STEST*2.D0)
+            DIJ(I)=DIJ(I)+(A*tr0/3.D0)
+ 500     CONTINUE
+*
+*---> Matrice de la variation de contrainte due à l'incrément de
+*     déformation plastique CIJ = - ( Hooke . d PHI / d SIG)
+*
+         DO 600 I=1,6
+            A=0.D0
+            IF (I.LE.3) A=1.D0
+            CIJ(I)=3.D0*Gtest*ST(I)/STEST
+            CIJ(I)=CIJ(I)-(2.D0*Gp1*coeff1*DEVT(I)/(ETAnew**(1.D0/3.D0))
+     $           )
+            CIJ(I)=CIJ(I)+(coeff1*A)
+            CIJ2(I)=3.D0*Gp1*coeff1*ST(I)/((ETAnew**(1.D0/3.D0))*STEST)
+ 600     CONTINUE
+*
+*---> Calcul du produit DIJ : CIJ
+*
+         PROD0=PROCON(DIJ,CIJ,6)
+*
+*---> Calcul de DIJ : CIJ2
+*
+         PROD1=PROCON(DIJ,CIJ2,6)
+         PROD11=ABS(PROD1)
+*
+*---> Calcul de l'incrément du paramètre plastique
+*     On résoud une équation du second degré
+*     Si le terme (PROD0+H0) est positif, dlam0 est
+*  clairement défini par la solution positive de l'équation
+*     Sinon, on prend la solution qui est de meme signe que
+*  PHIT (une solution est nécessairement
+*  de signe opposé a PHIT). Si aucune solution ne convient
+*  on prend celle qui a le plus petit module afin d'éviter de
+*  diverger.
+*
+         delta0=(PROD0+H0)*(PROD0+H0)
+         delta0=delta0+(4.D0*PHIT*PROD1)
+         IF ((delta0.LT.0.D0).OR.(PROD11.LT.1.D-15)) THEN
+            dlam0=PHIT/(PROD0+H0)
+         ELSE
+            IF ((PROD0+H0).GE.0.D0) THEN
+               dlam0=(delta0**(.5D0))/(2.D0*PROD1)
+               dlam0=dlam0-((PROD0+H0)/(2.D0*PROD1))
+            ELSE
+               dlam0=(delta0**(.5D0))/(2.D0*PROD1)
+               dlam0=dlam0-((PROD0+H0)/(2.D0*PROD1))
+               IF ((dlam0*PHIT).LE.0.D0) THEN
+                  dlam1=-1.D0*(delta0**(.5D0))/(2.D0*PROD1)
+                  dlam1=dlam1-((PROD0+H0)/(2.D0*PROD1))
+                  IF (ABS(dlam1).LT.ABS(dlam0)) dlam0=dlam1
+               ENDIF
+            ENDIF
+         ENDIF
+*
+*
+*  Mise à jour des grandeurs après écoulement plastique
+*============================================================
+*
+*---> Déformation plastique équivalente
+*
+         EPSPT=EPSPT+dlam0
+*
+*---> Pression mise à jour
+*
+         Ptest=Ptest+(coeff1*dlam0)
+*
+*---> Contraintes
+*
+         DO 800 I=1,6
+            A=0.D0
+            IF (I.LE.3) A=1.D0
+            SIGT(I)=SIGT(I)-(CIJ(I)*dlam0)-(CIJ2(I)*dlam0*dlam0)
+*         SIGT(I)=SIGT(I)-(CIJ(I)*dlam0)
+            ST(I)=SIGT(I)+(Ptest*A)
+ 800     CONTINUE
+*
+*---> Contrainte équivalente mise à jour STEST
+*
+         STEST2=(SIGT(1)*SIGT(1))+(SIGT(2)*SIGT(2))
+         STEST2=STEST2+(SIGT(3)*SIGT(3))
+         STEST2=STEST2-(SIGT(1)*SIGT(2))-(SIGT(2)*SIGT(3))
+         STEST2=STEST2-(SIGT(3)*SIGT(1))
+         STEST3=(SIGT(4)*SIGT(4))+(SIGT(5)*SIGT(5))
+         STEST3=STEST3+(SIGT(6)*SIGT(6))
+         STEST2=STEST2+(3.D0*STEST3)
+         IF (STEST2.LE.0.D0) STEST2=0.D0
+         STEST=STEST2**(0.5D0)
+*
+*---> Calcul des données matériaux mises à jour
+*
+         Gtest=G00+(Gp1*Ptest/(ETAnew**(1.D0/3.D0)))+Gt1
+         XKtest=E1*Gtest
+*
+*
+*  Mise à jour des déformations après écoulement plastique
+*============================================================
+*
+*---> Trace des déformations élastiques mises à jour
+*
+         TRELT=-1.D0*Ptest/XKtest
+*
+*---> Déviateur des déformations élastiques
+*
+         DO 900 I=1,6
+            A=0.D0
+            IF (I.LE.3) A=1.D0
+            DEVT(I)=ST(I)/(2.D0*Gtest)
+            IF (IFOUR.EQ.-2) ELT(I)=DEVT(I)+(A*TRELT/3.D0)
+ 900     CONTINUE
+*
+*---> Incrément de déformation plastique au cours du pas
+*
+         DO 700 I=1,6
+            A=0.D0
+            IF (I.LE.3) A=1.D0
+            DEFT(I)=VARF(I+1)-VAR0(I+8)
+            DEFT(I)=DEFT(I)-DEVT(I)-(1.D0*TRELT*A/3.D0)
+ 700     CONTINUE
+*
+*---> Mise à jour de la pulsation de Debye: W0 et de DTETA0
+*
+         W0=(Gtest/RHO1)**(.5D0)
+*
+         DTETA0=(1.D0/6.D0)*((4.D0/XPI)**(.5D0))*W0
+*
+*---> Mise à jour de la contrainte de saturation YSAT0
+*
+         IF (ABS(DT0).LT.1.D-15) THEN
+            YS1=SINF0
+         ELSE
+            ERF0=ERGAUS(FONC0)
+            YS1=S0-((S0-SINF0)*ERF0)
+         ENDIF
+         YS2=S0*((DEPS/(G0*DTETA0))**BETA0)
+         YSAT0=MAX(YS1,YS2)
+*
+*---> Mise à jour de la limite élastique YLIM0
+*
+         IF (ABS(DT0).LT.1.D-15) THEN
+            YLIM1=YINF0
+         ELSE
+            FONC0=XK0*LOG(G0*DTETA0/DEPS)
+            ERF0=ERGAUS(FONC0)
+            YLIM1=Y0-((Y0-YINF0)*ERF0)
+         ENDIF
+         YLIM2=Y1*((DEPS/(G0*DTETA0))**Y2)
+         YLIM0=MAX(YLIM1,MIN(YLIM2,YS2))
+*
+*---> limite d'élasticité mise à jour
+*
+         DYSL0=ABS(YSAT0-YLIM0)
+         DYSL1=ABS(S0-YLIM0)
+         IF (P0.EQ.0.D0) THEN
+            IF (DYSL0.LT.1.D-15) THEN
+               Yel0=YSAT0
+            ELSE
+               Yel0=-1.D0*TAU0*EPSPT
+               Yel0=EXP(Yel0/(YSAT0-YLIM0))
+               Yel0=YSAT0-((YSAT0-YLIM0)*Yel0)
+            ENDIF
+            Ytest=Yel0*Gtest
+            IF (Ytest.LE.0.D0) Ytest=0.D0
+         ELSE
+            IF (DYSL0.LT.1.D-15) THEN
+               Yel0=YLIM0
+            ELSE IF (DYSL1.LT.1.D-15) THEN
+               Yel0=YLIM0
+            ELSE
+               Yel1=-1.D0*TAU0*EPSPT*P0
+               denom0=P0*(YSAT0-YLIM0)/(S0-YLIM0)
+               denom1=EXP(denom0)-1.D0
+               denom1=denom1*(S0-YLIM0)
+               Yel1=EXP(Yel1/denom1)
+               denom2=1.D0-(EXP(-1.D0*denom0))
+               Yel0=LOG(1.D0-(denom2*Yel1))
+               coeff0=(S0-YLIM0)/P0
+               Yel0=YSAT0+(coeff0*Yel0)
+            ENDIF
+            Ytest=Yel0*Gtest
+         ENDIF
+*
+*---> Nouvelle fonction de charge
+*
+         PHIT=STEST-Ytest
+         PHI0=ABS(PHIT)
+*
+*---> Test de convergence ou itération suivante
+*
+         iter0=iter0+1
+*
+         IF (iter0.LT.NMAX) THEN
+            GOTO 97
+         ELSE
+            KERRE=460
+            GOTO 98
+         ENDIF
+*
+      ENDIF
+*
+*   Passage des deformations de cisaillement exprimées
+*   en déformations aux déformations de cisaillement exprimées
+*   en GAMA
+*
+      DO 117 I=1,6
+         A=1.D0
+         IF (I.GT.3) A=2.D0
+         RDEFP(I)=RDEFP(I)*A
+         VAR0(I+1)=VAR0(I+1)*A
+         VARF(I+1)=VARF(I+1)*A
+         VAR0(I+8)=VAR0(I+8)*A
+         VARF(I+8)=VARF(I+8)*A
+ 117  CONTINUE
+*
+*  Passage a l'option de calcul pour les contraintes
+*=========================================================
+*
+      IF (MFR1 .EQ. 1 .OR. MFR1 .EQ. 31)  THEN
+         IF (NSTRS .EQ. 6) THEN
+*
+*---> MASSIF 3D
+*
+            DO 170 I=1,NSTRS
+               SIGF(I)=RSIGF(I)
+               DEFP(I)=RDEFP(I)
+               DSIGT(I)=RDIGT(I)
+ 170        CONTINUE
+         ELSE IF ( NSTRS .EQ. 4 ) THEN
+*
+*---> Calcul axisymétrique ou contraintes planes
+*
+            DO 180 I=1,NSTRS
+               SIGF(I)=RSIGF(I)
+               DEFP(I)=RDEFP(I)
+               DSIGT(I)=RDIGT(I)
+ 180        CONTINUE
+         ENDIF
+      ENDIF
+*
+*
+ 98   CONTINUE
+      RETURN
+*
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+

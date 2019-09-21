@@ -1,0 +1,752 @@
+$$$$ PASAPAS
+* PASAPAS   PROCEDUR  MB234859  18/11/21    21:15:08     10007
+
+'DEBP' PASAPAS  PRECED*'TABLE';
+'SAUT' 1 'LIGNE';
+'MESS'
+'------------------ DEBUT DE LA PROCEDURE PASAPAS --------------------';
+************************************************************************
+*                                                                      *
+*                                                                      *
+*** PRECED      objet de type TABLE                                    *
+*               C'est une table donnant , les arguments d'entrees, les *
+*               options, puis les  resultats des pas precedents        *
+*                                                                      *
+* Etat initial au debut du pas de temps decrit par le MCHELM WTAB.ETAT1*
+* champs de materiaux :                                                *
+*     WTAB.'MAT_REF' materiau etat a la temperature de REFERENCE       *
+*     WTAB.'MAT0'    materiau etat debut de calcul                     *
+*     WTAB.'MAT1'    materiau fin du pas de temps                      *
+*                                                                      *
+************************************************************************
+
+****************   I PARTIE   ******************************************
+
+*---------- attribution des valeurs par defaut et verifs elementaires
+PAS_DEFA PRECED ;
+*--------  initialisation du pas precedent si besoin et creation des tables de sorties.
+PAS_INIT PRECED ;
+
+WTAB  = PRECED.'WTABLE'      ;
+conti = PRECED.'CONTINUATION';
+estim = PRECED.'ESTIMATION'  ;
+*
+WTAB.'GE0_DEB'=WTAB.'FOR0';
+'SI'( WTAB.'GRANDS_DEPLACEMENTS' 'OU'  WTAB.'FEFP_FORMULATION');
+  'SI' ( 'EXIS' conti 'DEPLACEMENTS');
+    WTAB.'GE0_DEB'= 'FORME' conti . 'DEPLACEMENTS';
+  'FINSI';
+'FINSI';
+'FORM' WTAB.'FOR0';
+
+*--------- quel est le delta-temps du dernier pas calcule ? ---------
+'SI' ('EGA' WTAB.'DT' ('MOT' 'INCONNU'));
+   DELTAN = 0.D0 ;
+   WTAB.'DT' = DELTAN ;
+'SINON';
+   DELTAN= WTAB.'DT';
+'FINSI';
+
+*------------Appel a une procedure utilisateur PERSO1
+ 'SI' WTAB.'PROCEDURE_PERSO1';
+    PRECED.'PERSO1_APPEL' = 1 ;
+    PERSO1 PRECED ;
+   'SI' ('EXIS' PRECED 'ARRET') ;
+      WTAB.'ARRET' = PRECED.'ARRET' ;
+   'FINSI' ;
+ 'FINSI';
+
+* ------------Appel a une procedure utilisateur REEV_MEC
+ 'SI' WTAB.'PROCEDURE_REEV_MEC' ;
+    REEV_MEC PRECED 0 ;
+ 'FINSI' ;
+
+* ------------Appel a une procedure utilisateur REEV_THE
+ 'SI' WTAB.'PROCEDURE_REEV_THE' ;
+    REEV_THE PRECED 0 ;
+ 'FINSI' ;
+
+*---------   initialisation ETAT ET MATERIAUX apres les procedures UTILISATEUR
+ETAT1 = PAS_ETAT PRECED WTAB.'TEMPS0'       ;
+
+'SI' ('EGA' WTAB.'ETAT0' ('MOT' 'INCONNU')) ;
+   WTAB.'ETAT0'   = ETAT1                   ;
+   WTAB.'ETAT1'   = ETAT1                   ;
+   WTAB.'MAT0'    = PAS_MATE PRECED ETAT1   ;
+   WTAB.'MAT1'    = WTAB.'MAT0'             ;
+'SINO'                                      ;
+   WTAB.'ETAT1'   = ETAT1                   ;
+   WTAB.'MAT1'    = PAS_MATE PRECED ETAT1   ;
+'FINS'                                      ;
+
+'SI' WTAB.'FOR_MECA' ;
+  'SI' (WTAB.'CHAR_THE' 'OU'  WTAB.'FOR_THER' ) ;
+     WTAB.'ETHER2' WTAB.'MSRTHER2' = PAS_EPTH PRECED WTAB.'MO_TOT' WTAB.'MAT1' WTAB.'TET1' ;
+  'FINS' ;
+'FINS' ;
+
+**************************   II PARTIE  *************************
+******************************************************************
+******************* boucle sur les pas de temps  *****************
+******************************************************************
+
+* ------------quelques initialisations de l'algorithme
+PASFINAL = 0 ;
+IPAS     = 0 ;
+ICHG     = 0 ;
+IAUTO    = 1 ;
+IREREDU  = VRAI;
+TEMP0    = WTAB.'TEMPS0';
+ISAUV    = VRAI;
+DTV      =('EXTR' WTAB.'TEMPS_CALCULES' 1) - TEMP0 ;
+'SI' ( DTV '<' 1.e-15 );
+  'SI' WTAB.'FREQUENTIEL' ;
+     DTV = 1.e-14 ;
+  'SINON' ;
+     DTV =('EXTR' WTAB.'TEMPS_CALCULES' 2) - TEMP0 ;
+  'FINSI';
+'FINSI';
+WTAB.'ARRET'   = FAUX;
+WTAB.'AUTODEUX'= FAUX;
+WTAB.'CONV'    = VRAI;
+DT_AVANT       = DTV ;
+WTAB.'NOMBRE_ITERATIONS'=12;
+
+* Attention Bizarre : RFROT est initialise ici et utilise dans UNPAS ????
+RFROT=0;
+
+*---------- debut boucle sur pas de temps
+'REPETER' BEXTERN  ;
+
+*---recherche du temps a calculer TI
+    NPAS='DIME' WTAB.'TEMPS_CALCULES';
+    ICHG=ICHG + 1;  WTAB.'ICHG'= ICHG;
+    'SI' ( ICHG '>' NPAS) ; 'QUITTER' BEXTERN; 'FINSI';
+    TI = 'EXTRAIRE'  WTAB.'TEMPS_CALCULES' ICHG ;
+    TIV=TI;
+    'SI' (WTAB.'FREQUENTIEL') ;
+       'SI'  (TI '<' TEMP0 ) ;  'ITERER'  BEXTERN ; 'FINSI' ;
+    'SINON' ;
+    'SI'  ((TI '<' TEMP0 ) 'OU' (TI 'EGA' PRECED.'TEMPS'. 0));
+        'ITERER'  BEXTERN ;
+    'FINSI'; 'FINSI';
+
+*---ajustement du pas en fonction du nombre d iteration du pas precedent
+    PASFINAL=PASFINAL+1;
+    'SI' WTAB.'PAS_AJUSTE';
+       DTV=DT_AVANT;
+       'SI' WTAB.'CONV';
+           'SI' (WTAB.'NOMBRE_ITERATIONS' > 20);
+               DTV=DTV'/' (2. ** 0.5);
+           'FINSI';
+           'SI' (WTAB.'NOMBRE_ITERATIONS' <  7);
+              'SI' IREREDU;
+                  DTV=DTV '*' (2. ** 0.5);
+              'FINSI';
+           'FINSI';
+           DT_AVANT= DTV;
+           IREREDU=VRAI;
+       'SINON';
+           DTV=0.0000000001D0* DT_AVANT;
+           DT_AVANT= DT_AVANT /2.;
+           IREREDU=FAUX;
+       'FINSI';
+       TTI = DTV* 1.0000000001 + TEMP0;
+       'SI' ( TTI '<EG' TIV );
+          TI=TTI;
+          PASFINAL=0;
+       'FINSI';
+    'FINSI';
+     estim.'TEMPS'=TI;
+    'SI' (PASFINAL '>EG' 1.5) ; DT_AVANT= TI-TEMP0; 'FINSI';
+    WTAB.'T_FINAL'= TI;
+    WTAB.'DT_INIT' = TI-TEMP0;
+    'SI'((WTAB.'CONSOLIDATION' 'OU' WTAB.'DYNAMIQUE')
+         'ET' (WTAB.'DT_INIT' 'EGA' 0.));
+           'ITERER' BEXTERN;
+    'FINSI';
+    WTAB.'DT'= WTAB.'DT_INIT';
+
+*---compteur IPAS des pas de temps calcules
+    IPAS = IPAS + 1;
+    WTAB.'PAS'=IPAS;
+
+*---on se place dans la configuration deformee
+   'SI'( WTAB.'GRANDS_DEPLACEMENTS' 'OU'  WTAB.'FEFP_FORMULATION');
+      'SI' (WTAB.'RECALCUL');
+        'SI' ('EGA'  ( 'TYPE' WTAB.'GE0_DEB')  'CONFIGUR');
+          'FORM'  WTAB.'GE0_DEB';
+        'FINSI';
+      'FINSI';
+    'FINSI';
+
+*+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+*++++++++++++++++++ BOUCLE interne de bouclage mec_ther ++++++++++++++
+*+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+     I_BOTH = 0 ;
+     'REPETER' BO_BOTH WTAB.'BOU_METH' ;
+        I_BOTH = I_BOTH + 1 ;
+*
+*  re-initialisation de WTAB.'CHARGEMENT' en tete de boucle mec-ther
+*
+       'SI' WTAB.'CONVERGENCE_MEC_THE' ;
+          WTAB.'CHARGEMENT' = WTAB . 'CHARGEMENT_I' ;
+       'FINSI';
+
+*######CALCUL D'UN PAS SI IL Y A DE LA THERMIQUE ####################
+       'SI' (WTAB.'FOR_THER' 'OU' WTAB.'FOR_DIFF') ;
+         'SI' WTAB.'FOR_MECA' ;
+*---------- en cas de convergence mecanique thermique
+           'SI' (I_BOTH > 1) ;
+*----------   reprise de la configuration meca de la derniere estimation
+*             du pas present si coherence mecanique/thermique
+             'SI' ('EXIS' estim 'FOR' );
+                WTAB .'RECARI'  = VRAI ;
+                WTAB .'RECADET' = VRAI ;
+                WTAB.'REA_GEOM' = VRAI ;
+               'FORM' estim.'FOR'      ;
+             'FINSI';
+           'FINSI' ;
+         'FINSI' ;
+
+         'SI' (TI 'NEG' TEMP0);
+           'SI' ('NON' ('EXISTE' PRECED 'PAS_MAX'));
+             WTAB.'TEM_CALC' = 'PROG' TI;
+           'SINON';
+             'SI' ((TEMP0 + PRECED.'PAS_MAX') '>EG' TI);
+                WTAB.'TEM_CALC' = 'PROG' TI;
+             'SINON';
+                WTAB.'TEM_CALC' = 'PROG' TEMP0
+                                   'PAS'  PRECED.'PAS_MAX'  TI;
+                WTAB.'TEM_CALC' = 'ENLE'  WTAB.'TEM_CALC' 1;
+             'FINSI';
+           'FINSI';
+*----- Appel a la procedure thermique (lineaire ou nonlineaire) ----
+           'SI' ('NON' WTAB.'COUPLAGE'); 'MENAGE'; 'FINSI';
+           'SI' ('EGA' WTAB.'PROCEDURE_THERMIQUE' 'NONLINEAIRE');
+              CHTER = TRANSNON PRECED;
+           'FINSI';
+           'SI' ('EGA' WTAB.'PROCEDURE_THERMIQUE' 'LINEAIRE');
+             CHTER = TRANSLIN PRECED;
+           'FINSI';
+           'SI' ('EGA' WTAB.'PROCEDURE_THERMIQUE' 'DUPONT');
+              WTAB.'NOUV_PAS' = ('EXTR' WTAB.'TEM_CALC' 1) - TEMP0;
+              CHTER = DUPONT2 PRECED;
+           'FINSI';
+
+*           Verification d'une erreur en sortie
+           'SI' CHTER.'ERREUR';
+              'ERREUR' ' ';
+           'FINSI';
+
+*          Modele Metallurgique (T.L. en juin 2018)
+           'SI' WTAB.'FOR_METALLU' ;
+              estim.'PROPORTIONS_PHASES' = CHTER.'PROPORTIONS_PHASES' ;
+           'FINSI';
+
+           'SI' WTAB.'FOR_THER' ;
+             WTAB.'TET2'=CHTER.'INITIAL(2)' ;
+             WTAB.'CLIT'=CHTER.'CLIT' ;
+             'SI' ('EGA' WTAB.'PROCEDURE_THERMIQUE' 'NONLINEAIRE') ;
+               'SI' ('NEG' WTAB.'RIBLO_T' 'INCONNU');
+                  WTAB.'RIBLO_T'       = CHTER.'RIBLO_T'       ;
+                  WTAB.'LISEA_T'       = CHTER.'LISEA_T'       ;
+               'FINSI' ;
+             'SI' WTAB.'PHASE';
+                  WTAB.'PROPPHAS'    = CHTER.'PROPPHAS'    ;
+               'FINSI' ;
+             'FINSI' ;
+             'SI' WTAB.'RAYO' ;
+                WTAB.'RAYONNEMENT' = CHTER.'RAYONNEMENT' ;
+             'FINSI' ;
+               'FINSI' ;
+           'SI' WTAB.'FOR_DIFF' ;
+             WTAB.'CO2'=CHTER.'CO2';
+             WTAB.'CLID'=CHTER.'CLID' ;
+             'FINSI' ;
+           'FINS';
+
+         'SI' WTAB.'FOR_THER' ;
+            estim.'TEMPERATURES' = WTAB.'TET2' ;
+            estim.'REACTIONS_THERMIQUES'='REAC' WTAB.'CLIT' WTAB.'TET2';
+           'SI' WTAB.'PHASE';
+              estim.'PROPORTIONS_PHASE'= WTAB.'PROPPHAS';
+           'FINSI' ;
+         'FINSI';
+
+         'SI' WTAB.'FOR_DIFF' ;
+            estim.'CONCENTRATIONS' = WTAB.'CO2' ;
+            estim.'REACTIONS_DIFFUSIONS' ='REAC' WTAB.'CLID' WTAB.'CO2';
+         'FINSI' ;
+*** Reevaluation des donnees du calcul dependant de la temperature
+         'SI' WTAB.'PROCEDURE_REEV_THE' ;
+            REEV_THE PRECED  1 ;
+         'FINSI' ;
+
+*-----convergence mecanique thermique : reprise configuration  ------
+*---------- du pas precedent pour refaire la mecanique  -------------
+         'SI'( WTAB.'GRANDS_DEPLACEMENTS' 'OU' WTAB.'FEFP_FORMULATION');
+           'FORM' WTAB.'GE0_DEB';
+         'FINSI' ;
+       'FINSI' ;
+*################## fin du calcul d'un pas thermique #################
+
+
+*#######################################################################
+*#################### CALCUL D'UN PAS SI MECANIQUE #####################
+*#######################################################################
+      'SI' WTAB.'FOR_MECA' ;
+         'SAUT' 1 'LIGN';
+         'MESSAGE' ' Numero du pas : ' IPAS '  Indice d evolution : ' ICHG ' -> temps :' TI;
+
+*--------------------- calcul de la temperature ---------------------
+* CB215821 : On met la thermique dans le Chargement pour 'TIRER' le chargement
+*            au bon instant dans UNPAS pour la MECANIQUE
+*            Il faudra faire de meme avec la MECANIQUE si la THERMIQUE en depend
+*        'SI' WTAB.'FOR_THER';
+*           THTA1='TABLE';
+*           THTA2='TABLE';
+*           THTA1.0=TEMP0;
+*           THTA1.1=TI;
+*           THTA2.0= conti.'TEMPERATURES' 'ENLE' 'LX' ;
+*           THTA2.1= estim.'TEMPERATURES' 'ENLE' 'LX' ;
+*           CHTH='CHAR' 'T' THTA1 THTA2;
+*           CHASANST= WTAB.'CHARGEMENT' 'ENLE' 'T';
+*           WTAB.'CHARGEMENT'= CHASANST 'ET' CHTH;
+*        'FINSI';
+        'SI' WTAB.'CHAR_THE';
+            WTAB.'TET2' ='TIRE' WTAB.'CHARGEMENT' 'T   ' TI;
+        'FINSI';
+
+*------- Caracteristiques initiales en cas de grands deplacements -----
+        'SI' WTAB.'ITCAR';
+          'SI'  ('EGA' WTAB.'CARA'  'INCONNU');
+             WTAB.'CARA' = WTAB.'MAT0';
+          'FINSI';
+        'FINSI';
+
+************************************************************************
+****************    APPEL A UNPAS       ********************************
+************************************************************************
+        'MENA' ;
+         TT = UNPAS  PRECED;
+
+*---------- Mise a jour du MODELE du PAS precedent ---------------
+         WTAB.'MO_TOT_PREC' = TT.'MO_TOT_PREC' ;
+
+*---------- retour a la configuration initiale -------------------
+        'SI' (WTAB.'GRANDS_DEPLACEMENTS' 'OU' WTAB.'FEFP_FORMULATION');
+          'FORM'  WTAB.'FOR0';
+        'FINSI';
+
+*------- test si on a converge
+         WTAB.'CONV' = TT.'CONV';
+        'SI' ('NON' TT.'CONV' 'ET' ('NON' WTAB.'CONVERGENCE_FORCEE'));
+*          en dynamique et en poreux on garde le PRECED.FREA1 du dernier pas
+*          converge (dans le cas ou on voudrait continuer le calcul)
+*          'SI' WTAB.'DYNAMIQUE' ; WTAB.'FREA1' = F1 ; 'FINSI';
+*          'SI' WTAB.'CONSOLIDATION' ;WTAB.'FREA1' = FF1 ; 'FINSI';
+            'ERREUR' 997 ;
+        'FINSI';
+
+*       Remplissage de la table ESTIMATION : champs en fin de pas
+         DEP0= conti.'DEPLACEMENTS';
+*         DEP = ENLEVER DEP0 'LX';
+         estim.'DEPLACEMENTS'= TT.'ZU1' ;
+*        'DETRUIRE' DEP;
+         estim.'DEFORMATIONS'= TT.'DEFF';
+         estim.'CONTRAINTES' = TT.'SIGF'  ;
+         estim.'DFGRAD'      = TT.'DFGRAD';
+        'SI' WTAB.'IPLAVI' ;
+           estim.'VARIABLES_INTERNES'        = TT.'VARF';
+           estim.'DEFORMATIONS_INELASTIQUES' = TT.'DFPF';
+        'FINSI' ;
+        'SI' WTAB.'GRANDS_DEPLACEMENTS' ;
+           estim.'FOR' = TT.'FOR' ;
+        'FINSI' ;
+        'SI'  WTAB . 'DYNAMIQUE' ;
+           estim.'VITESSES'      = TT.'VITI' ;
+           estim.'ACCELERATIONS' = TT.'ACCEI' ;
+        'FINSI';
+*       'SI'  WTAB .'ITCAR';
+*          estim.'CARA_ACTU' = TT.'CARA' ;
+*       'FINSI';
+***      Reevaluation des donnees du calcul dependant de la mecanique
+        'SI' WTAB.'PROCEDURE_REEV_MEC' ;
+           REEV_MEC PRECED 1;
+        'FINSI' ;
+      'FINSI';
+*#######################################################################
+*################### FIN DU CALCUL D'UN PAS MECANIQUE ##################
+*#######################################################################
+
+
+
+***
+*** Test de la convergence mecanique thermique
+***
+    'SI' WTAB.'CONVERGENCE_MEC_THE' ;
+*      je cherche la convergence thermo-mecanique : je dois au moins
+*      calculer deux fois mon probleme
+      'SI' (I_BOTH > 1) ;
+*       Test sur toutes les composantes (notamment, si DIFFUSION)
+        CHT1     = WTAB . 'THER_COURANT' ;
+        DUABS2   = 'ABS' (WTAB.'THER_COURANTP' - CHT1) ;
+        CRICOH1  = 0. ;
+        NBINCO1  = 'DIME' WTAB . 'PRIM_TOT' ;
+        'REPE' BINCO1 NBINCO1 ;
+          LINCOI1  = 'MOTS' ('EXTR' WTAB.'PRIM_TOT' &BINCO1) ;
+          MDUABSI1 = 'MAXI' DUABS2 'AVEC' LINCOI1 ;
+          NORMI1   = 'MAXI' 'ABS' CHT1 'AVEC' LINCOI1 ;
+          'SI' (NORMI1 '<EG' (1.E-14 * MDUABSI1)) ;
+            NORMI1   = 1. ;
+          'FINS' ;
+          CRICOHI1 = MDUABSI1 / NORMI1 ;
+          'SI' (CRICOHI1 '>' CRICOH1) ;
+            CRICOH1  = CRICOHI1 ;
+         'FINS' ;
+        'FIN' BINCO1 ;
+
+        WTAB.'CONV_THMEC' = CRICOH1 '<' (WTAB . 'CRITERE_COHERENCE') ;
+*       Fin de boucle Si ne converge Pas
+        'SI'('NON' WTAB.'CONV_THMEC') ;
+          'SI' (I_BOTH >EG WTAB.'BOU_METH');
+            'MESS' 'PAS DE COHERENCE TROUVEE MECANIQUE THERMIQUE' ;
+            'ERREUR' 999;
+          'FINSI' ;
+        'FINSI' ;
+      'SINON' ;
+*       je suis sur la premiere boucle de convergence thermomecanique
+        WTAB.'CONV_THMEC' = FAUX ;
+      'FINSI' ;
+*     THER_COURANTPrecedent dans WTAB pour test CONVERGENCE_MEC_THE
+       WTAB . 'THER_COURANTP' = WTAB . 'THER_COURANT' ;
+    'SINON' ;
+*     ici je ne cherche pas la convergence thermomecanique
+      WTAB.'CONV_THMEC' = VRAI ;
+    'FINSI' ;
+
+    'SI' (WTAB.'CONV_THMEC') ;
+       'QUITTER' BO_BOTH ;
+    'FINSI' ;
+
+    'SI' ('NEG' ('TYPE'  WTAB.'GE0_DEB') 'MOT') ;
+      FORME WTAB.'GE0_DEB';
+    'FINSI' ;
+
+  'FIN' BO_BOTH ;
+
+*+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+*++++++++++++++++ fin de boucle interne de convergence mec_ther ++++++++
+*+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+*----- Preparation du pas suivant : Thermique et Diffusion
+      'SI' WTAB.'FOR_THER';
+         WTAB.'TET2' = estim.'TEMPERATURES' ;
+         WTAB.'TET1'=WTAB.'TET2';
+        'SI' ('EGA' WTAB.'PROCEDURE_THERMIQUE' 'DUPONT');
+           WTAB.'TET0'              = WTAB.'TET1'              ;
+           WTAB.'VIEUXPAS'          = WTAB.'NOUV_PAS'          ;
+           WTAB.'RELAXATION_DUPONT' = CHTER.'RELAXATION_DUPONT';
+          'SI' ('EXIS' CHTER  'INITIAL(1)') ;
+             WTAB.'TET1' = CHTER.'INITIAL(1)';
+          'FINSI' ;
+        'FINSI';
+      'FINSI' ;
+
+      'SI' WTAB.'FOR_DIFF';
+        WTAB.'CO1' = WTAB.'CO2'             ;
+        WTAB.'CO2' = estim.'CONCENTRATIONS' ;
+      'FINSI' ;
+
+*----- Preparation du pas suivant : Mecanique
+      'SI' WTAB.'FOR_MECA' ;
+         'SI' ('EXISTE' TT 'SECOND_MEMBRE');
+           WTAB . 'SECOND_MEMBRE' = TT . 'SECOND_MEMBRE' ;
+         'FINSI' ;
+         'SI' ('EXISTE' TT 'SUCCES');
+           WTAB . 'SUCCES' = TT . 'SUCCES' ;
+         'FINSI' ;
+         'SI' ('EXISTE' TT 'AUTOCOEF');
+           WTAB . 'AUTOCOEF' = TT . 'AUTOCOEF' ;
+         'FINSI' ;
+         'SI' ('EXISTE' TT 'AUTOREDU');
+           WTAB . 'AUTOREDU' = TT . 'AUTOREDU' ;
+         'FINSI' ;
+         'SI' ('EXISTE' TT 'AUTORED1');
+           WTAB . 'AUTORED1' = TT . 'AUTORED1' ;
+         'FINSI' ;
+         'SI' ('EXISTE' TT 'RIBLO_M');
+           WTAB . 'RIBLO_M' = TT . 'RIBLO_M' ;
+           WTAB . 'LISEA_M' = TT . 'LISEA_M' ;
+         'FINSI' ;
+         'SI' ('EXISTE' TT 'INCREMENT');
+           WTAB . 'INCREMENT' = TT . 'INCREMENT' ;
+         'FINSI' ;
+         'SI' ('EXISTE' TT 'INITEMPS');
+           WTAB . 'INITEMPS' = TT . 'INITEMPS' ;
+         'FINSI' ;
+         'SI' ('EXISTE' TT 'DT');
+           WTAB . 'DT' = TT . 'DT' ;
+         'FINSI' ;
+         'SI' ('EXISTE' TT 'NBPLAS');
+           WTAB . 'NBPLAS' = TT . 'NBPLAS' ;
+         'FINSI' ;
+         'SI' ('EXISTE' TT 'NOMBRE_ITERATIONS');
+           WTAB . 'NOMBRE_ITERATIONS' = TT . 'NOMBRE_ITERATIONS' ;
+         'FINSI' ;
+         'SI' ('EXISTE' TT 'FFROT');
+           WTAB . 'FFROT' = TT . 'FFROT' ;
+         'FINSI' ;
+         'SI' ('EXISTE' TT 'RESIDU');
+           WTAB . 'RESIDU' = TT . 'RESIDU' ;
+         'FINSI' ;
+         'SI' ('EXISTE' TT 'FNONL');
+           WTAB . 'FNONL' = TT . 'FNONL' ;
+         'FINSI' ;
+         'SI' ('EXISTE' TT 'DTPREC');
+           WTAB . 'DTPREC' = TT . 'DTPREC' ;
+         'FINSI' ;
+*  SP : Modification de WTAB.'TET2' suite a appel a UNPAS
+*  CB : SI (IPILOT) ==> TET2 est TIRE entre TEMPS0 et TI
+         'SI' ('EXISTE' TT 'TET2');
+           WTAB . 'TET2' = TT . 'TET2' ;
+         'FINSI' ;
+         'SI' ('EXISTE' TT 'XDENO');
+           WTAB . 'XDENO'  = TT . 'XDENO'  ;
+         'FINSI' ;
+         'SI' ('EXISTE' TT 'XDENOM');
+           WTAB . 'XDENOM' = TT . 'XDENOM' ;
+         'FINSI' ;
+         'SI' ('EXISTE' TT 'LASTKTAN');
+           WTAB . 'LASTKTAN' = TT . 'LASTKTAN' ;
+         'FINSI' ;
+         'SI' ('EXISTE' TT 'DFGRAD');
+           WTAB . 'DFGRAD'=  TT .'DFGRAD';
+         'FINSI' ;
+         'SI' ('EXIS' TT 'ETHER2');
+            WTAB.'ETHER1'= TT.'ETHER2';
+            WTAB.'ETHER2'= TT.'ETHER2';
+         'FINSI';
+         'SI' ('EXIS' TT 'MSRTHER2');
+            WTAB.'MSRTHER1'= TT.'MSRTHER2';
+            WTAB.'MSRTHER2'= TT.'MSRTHER2';
+         'FINSI';
+         'SI' ('EXIS' TT 'DEFOR2');
+            WTAB.'DEFOR1'= TT.'DEFOR2';
+            WTAB.'DEFOR2'= TT.'DEFOR2';
+         'FINSI';
+         'SI'('EXIS' TT 'ETAT2');
+            WTAB.'ETAT1'= TT.'ETAT2';
+         'FINSI';
+
+* fin des reactualisations.
+*--------------------------- deplacement ------------------------------
+         TT.'DEPTOT' = estim.'DEPLACEMENTS' ;
+*-------------------- forces de reaction ------------------------------
+         TT.'REAC'= 'REAC' TT.'DEPTOT' WTAB.'CLIM';
+         estim.'REACTIONS' = TT.'REAC' ;
+*------------------ deformation d'origine thermique ------------------
+         'SI' WTAB.'CHAR_THE';
+            WTAB.'ETHER2' = TT.'ETHER2';
+            'SI' WTAB.'POR1' ;
+                WTAB.'MSRTHER2' = TT.'MSRTHER2';
+            'FINSI';
+         'FINSI';
+*------- en dynamique : vitesse, forces de reactions, operateur -------
+
+         'SI' WTAB . 'DYNAMIQUE' ;
+            'SI' WTAB . 'LIAISON_PERSISTANTE' ;
+* corection des vitesses pour avoir des vitesses relatives nulles
+* aux points qui sont en contact
+                TT.'VITI' =  TT.'VITI' +  TT.'VAUX' ;
+            'SINON' ;
+* forces d'acceleration et d'amortissement a la fin du pas    *
+             WTAB.'FREA1'  = TT.'FOPL' - TT.'REAC';
+*     en cas d'appuis unilateraux avec choc elastique essai de corriger
+*     les vitesses fournies par le schema
+
+            TT.'VITI'= VITEUNIL TT.'ZRAIDV' WTAB.'MASSE' TT.'VITI'
+         tt.'DEPT'   DEP0 WTAB.'DT'  WTAB.'SECOND_MEMBRE' WTAB;
+           'SI' ( 'EXIS' WTAB 'RATE_VITEUNIL');
+           'ERREUR' 'Probleme dans viteunil' ; 'FINSI';
+            'FINSI' ;
+            'SI' ( 'NEG' WTAB.'REAPREC' 'INCONNU');
+             'SI' ('EGA' ('TYPE' (EXTR TT.'REAC' 'MAIL')) 'MAILLAGE');
+               reacdif='REDU' WTAB.'REAPREC' (EXTR TT.'REAC' 'MAIL');
+               TT.'REAC'=  TT.'REAC' - REACDIF;
+             'FINSI' ;
+              WTAB.'REAPREC'=TT.'REAC';
+            'SINON';
+               WTAB . 'REAPREC'= TT.'REAC';
+            'FINSI';
+            estim.'VITESSES'  = TT.'VITI' ;
+            estim.'REACTIONS' = TT.'REAC' ;
+         'FINSI';
+
+*---------- en consolidation : operateur ------------------------------
+         'SI' WTAB . 'CONSOLIDATION' ;
+             WTAB.'OPERATEUR'  = ROP;
+         'FINSI';
+
+*-------------------------- configuration -----------------------------
+
+         'SI'   WTAB.'GRANDS_DEPLACEMENTS' ;
+            WTAB.'RECALCUL'= VRAI     ;
+            WTAB.'GE0_DEB' = TT.'FOR' ;
+           'SI' WTAB.'ITCAR' ;
+              WTAB.'CARA' = TT.'CARA' ;
+           'FINSI' ;
+         'FINSI';
+         'FORM' WTAB.'FOR0';
+
+***********************************************************************
+         'SI' ('ET' (WTAB.'FEFP_FORMULATION')
+                (WTAB.'UPDATE_LAGRANGIAN')) ;
+* tc            'SI' ( 'NEG' WTAB.'FOR'  'INCONNU'); DETR GEOM1; 'FINSI';
+            WTAB.'GE0_DEB' = TT.'FOR' ; WTAB.'RECALCUL'=VRAI;
+         'FINSI';
+************************************************************************
+
+*--------------------- destruction de l operateur ----------------------
+
+         'SI' (WTAB . 'RECADET') ;
+*           'DETR' RH 'ELEM';
+            'OUBLIER'   ROP;
+         'FINSI';
+
+*----------------------------- temps initial --------------------------
+              DT2 =( TI - TEMP0)/10000.;
+         'SI' (WTAB . 'AUTOMATIQUE' 'OU' ('NON' WTAB.CONV));
+            TEMP0 = ( TI - TEMP0) *  WTAB.'AUTOCOEF' + TEMP0;
+           'MESS' ' Temps effectivement calcule et non converge : ' TEMP0;
+            WTAB.'TEMPS0' = TEMP0;
+         'SINON';
+              TEMP0=TI;
+              WTAB.'TEMPS0' = TEMP0;
+         'FINSI';
+
+*----------------- Appel a une procedure personnelle -------------------
+
+         'SI' (WTAB.'PROCEDURE_PERSO1');
+            PRECED.'PERSO1_APPEL' = 2 ;
+            PERSO1 PRECED;
+            'SI' ('EXIS' PRECED 'ARRET') ;
+              WTAB . 'ARRET' = PRECED . 'ARRET' ;
+            'FINSI' ;
+            TEMP0 =  WTAB.'TEMPS0' ;
+         'FINSI';
+*----------------- On redefinit WTAB.'CHARGEMENT_I' ------------------
+         'SI'   WTAB.'CONVERGENCE_MEC_THE' ;
+            WTAB.'CHARGEMENT_I' = WTAB.'CHARGEMENT' ;
+         'FINSI';
+      'FINSI';
+
+*++++++++++++++++++ fin preparation pas suivant mecanique +++++
+*##################  Sauvegarde ###############################
+      'SI' ('NON' WTAB.'FOR_MECA') ;
+         DT2 =( TI - TEMP0)/10000.;
+         TEMP0=TI;
+         WTAB.'TEMPS0' = TEMP0;
+         TT = 'TABLE' ;
+      'FINSI';
+* pour ne pas sauvegarder la matrice de raideur si on doit la recalculer
+'SI' ('EXIS' WTAB 'RRRR')        ;
+  'SI'  WTAB.'RECARI'            ;
+     WTAB ='ENLE' WTAB 'RRRR'    ;
+     PRECED.'WTABLE'= WTAB       ;
+    'SI' ('EXIS' estim 'FOR')    ;
+       estim ='ENLE' estim 'FOR' ;
+       PRECED.'ESTIMATION'=estim ;
+    'FINSI';
+  'FINSI';
+'FINSI';
+
+*-- remplissage de la table de continuation et des tables de resultats
+*-- s'il faut garder les resultats, sauvegarde incrementale et
+*-- fantomisation si economique
+    ISAUV = PAS_RESU TEMP0 iauto PRECED ;
+
+*******************************************
+*****   cas du pilotage automatique *******
+*******************************************
+
+'SI' WTAB . 'AUTOMATIQUE'; IAUTO=IAUTO+1;
+  'SI' ((WTAB . 'AUTOCOEF'   'EGA'  0.9999999D0) 'OU'
+        (TEMP0 '>EG' TI)) ;
+        TEMP0=TI;
+      'MESS' ' Objectif atteint ';
+      'MESS' ' ';
+      WTAB.'AUTODEUX' = FAUX ;
+      WTAB.AUTORED1 = 0 ;
+      WTAB.AUTOREDU = 1. ;
+      IAUTO=1;
+  'SINON';
+      'MESS' ' Objectif non atteint: On recommence';
+      'MESS' '  ';
+      'SI' ( IAUTO >EG WTAB.'AUTOPAS');
+       'ERREUR' 1000;
+*       'MESS' 'Pilotage non converge  apres ' IAUTO ' pas.';
+      'FINSI';
+      WTAB.'AUTODEUX'=VRAI;ICHG=ICHG - 1;
+  'FINSI';
+'FINSI';
+*
+'SI'(WTAB.'CHAR_THE' 'OU' WTAB.'FOR_THER');
+       WTAB.'TET1'=WTAB.'TET2';
+      'SI' WTAB.'FOR_MECA';
+         WTAB.'ETHER1'=WTAB.'ETHER2';
+      'FINSI';
+      'SI' WTAB.'POR1';
+         WTAB.'MSRTHER1'=WTAB.'MSRTHER2';
+      'FINSI';
+'FINSI' ;
+'SI' WTAB.'CHAR_DEFI' ; WTAB.'DEFOR1'=WTAB.'DEFOR2';'FINSI';
+'SI' WTAB.'FOR_DIFF'  ; WTAB.'CO1'   =WTAB.'CO2'   ;'FINSI' ;
+************************************************************************
+******  cas de la convergence forcee
+************************************************************************
+'SI' WTAB.'PAS_AJUSTE';
+ 'SI' ((TI < TIV) 'OU' ('NON' WTAB.'CONV')); ICHG=ICHG-1;'FINSI';
+'FINSI';
+'SI'  WTAB.'ARRET';
+   'QUITTER' BEXTERN;
+'FINSI';
+************************************************************************
+*************** FIN DE LA BOUCLE SUR LES PAS DE TEMPS ******************
+************************************************************************
+'FIN'  BEXTERN;
+************************************************************************
+
+ 'SI' ('NEG' WTAB.'AMORTISSEMENT' 'INCONNU');
+     WTAB.'AMORTISSEMENT' = TOTO ;
+ 'FINSI';
+
+ 'SI' ('NEG' ('TYPE'  WTAB.'GE0_DEB') 'MOT') ;
+   'OUBL' WTAB 'GE0_DEB' ;
+ 'FINSI' ;
+
+* on tue WTAB.'MAT1' s'il existe car il peut etre tres gourmand en place
+ WTAB.'MAT1' = 'MOT' 'INCONNU';
+
+ 'MESS' ' ';
+ 'MESS'
+'------------------- FIN DE LA PROCEDURE PASAPAS ---------------------';
+'SAUT' 1 'LIGNE';
+*
+************************************************************************
+*
+'SI' ('EXIS' WTAB 'RRRR') ;
+* pour forcer le calcul de la rigidite si on  rappele  pasapas
+   WTAB1= 'ENLEVER' WTAB 'RRRR';
+    PRECED .'WTABLE'= WTAB1;
+'FINSI';
+
+* Typage de la table en sortie de PASAPAS ;
+PRECED.'SOUSTYPE' = 'MOT' 'PASAPAS' ;
+
+'FINPROC' PRECED ;
+$$$$
+
+
+

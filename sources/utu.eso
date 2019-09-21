@@ -1,0 +1,540 @@
+C UTU       SOURCE    JC220346  16/04/25    21:15:24     8915
+      SUBROUTINE UTU(LCH1,DFLO,IRIG)
+************************************************************************
+* NOM         : UTU
+************************************************************************
+* DESCRIPTION : Realise le produit U*tU ou U est une matrice dont les
+*               colonnes sont donnees par un objet LISTCHPO
+*
+*               - Les multiplicateurs de Lagrange sont ignores
+*               - Les harmoniques de Fourier differentes ne sont pas
+*                 croisees (matrice bloc-diagonale)
+*
+*               Les composantes du LISTCHPO doivent avoir ete definies
+*               dans la liste NOMDD (primales) de l'include CCHAMP pour
+*               savoir comment nommer les inconnues duales de la matrice
+*            ***********************************************************
+*
+*                                             +-----------+
+*                                             | CHPOINT#1 |
+*                                             +-----------+
+*                              tU[L;N] ---->  | CHPOINT#2 |
+*                                             +-----------+
+*                                             |    ...    |
+*                        U[N;L]               +-----------+
+*                           |                 | CHPOINT#L |
+*                           |                 +-----------+
+*                           V
+*                         +---+---+---+---+   +-----------+
+*                         | C | C |   | C |   |           |
+*                         | H | H | . | H |   |    UTU    |
+*                         | P | P | . | P |   |           |
+*                         | # | # | . | # |   |   [N;N]   |
+*                         | 1 | 2 |   | L |   |           |
+*                         +---+---+---+---+   +-----------+
+*
+*
+*                   avec :  L = nombre de champs
+*                           N = nombre d'inconnues
+*                               (triplet noeud/composante/harmonique)
+*
+************************************************************************
+* APPELE PAR : pod.eso
+************************************************************************
+* ENTREES :: LCH1 = POINTEUR VERS UN OBJET LISTCHPO
+*            DFLO = COEFFICIENT MULTIPLICATEUR
+* SORTIES :: IRIG = POINTEUR VERS UN OBJET RIGIDITE
+************************************************************************
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+-INC CCOPTIO
+-INC SMCOORD
+-INC SMCHPOI
+-INC SMLCHPO
+-INC SMELEME
+-INC SMRIGID
+-INC CCHAMP
+*
+*     ICPR(I) EST LE NUMERO LOCAL (DANS LE SUPPORT GEOMETRIQUE DU
+*     LISTCHPO LCH1) DU I-EME NOEUD GLOBAL (DANS LA TABLE XCOORD)
+      SEGMENT/TICPR/(ICPR(NOMAX))
+
+*     ICOM(I) EST LE NUMERO LOCAL (DANS LE LISTCHPO LCH1) DE LA I-EME
+*     COMPOSANTE GLOBALE (DANS LA LISTE NOMDD)
+      SEGMENT/TICOM/(ICOM(LNOMDD))
+*
+*     NUMHAR(I) EST LE NUMERO D'HARMONIQUE ASSOCIE A LA I-EME RIGIDITE
+*               ELEMENTAIRE DE LA MATRICE DE SORTIE IRIG2
+*     IMAHAR(I) EST LE POINTEUR VERS LE SEGMENT TIMAH ASSOCIE A LA I-EME
+*               RIGIDITE ELEMENTAIRE DE LA MATRICE DE SORTIE IRIG2
+*     ICOHAR(I) EST LE POINTEUR VERS LE SEGMENT TICOH ASSOCIE A LA I-EME
+*               RIGIDITE ELEMENTAIRE DE LA MATRICE DE SORTIE IRIG2
+      SEGMENT,NUMHAR(0)
+      SEGMENT,IMAHAR(0)
+      SEGMENT,ICOHAR(0)
+*     IMAHA(I) EST LE NUMERO GLOBAL (DANS LA TABLE XCOORD) DU I-EME
+*     NOEUD LOCAL (DANS UNE MATRICE ELEM. DE IRIG2)
+      SEGMENT/TIMAH/(IMAHA(0))
+*     ICOHA(I) EST LE NUMERO GLOBAL (DANS LES LISTES NOMDD/NOMDU) DE LA
+*     I-EME COMPOSANTE LOCALE (DANS UNE MATRICE ELEMENTAIRE DE IRIG2)
+      SEGMENT/TICOH/(ICOHA(0))
+*
+*     IPSO(I,J) EST LE SOUPO DU J-EME CHPOINT QUI CORRESPOND AU I-EME
+*               SOUPO DU PREMIER CHPOINT (IPSO=0 SI LE SOUPO EST ASSOCIE
+*               AUX MULT. DE LAGRANGE)
+*     L'INCONNUE I (COMP+HARM) DU SOUPO J DU PREMIER CHPOINT EST EN
+*               POSITION IINC(I,J,K) DANS LE SOUPO CORRESPONDANT DU
+*               K-EME CHPOINT
+      SEGMENT TRAV1
+         INTEGER IPSO(NBSOU,NBCHP)
+         INTEGER IINC(NXMAX,NBSOU,NBCHP)
+      ENDSEGMENT
+*
+*     VPO(I,J,K,L) EST LA VALEUR DU K-EME CHPOINT PRISE POUR LE I-EME
+*                  NOEUD LOCAL, LA J-EME COMPOSANTE LOCALE ET LE L-EME
+*                  NUMERO D'HARMONIQUE LOCAL
+      SEGMENT TRAV2
+         REAL*8 VPO(NBPOI,NBCOM,NBCHP,NBHAR)
+      ENDSEGMENT
+*
+      CHARACTER*4 CHA4
+*
+*
+*
+*     +---------------------------------------------------------------+
+*     |                                                               |
+*     |            T R A V A I L   P R E L I M I N A I R E            |
+*     |                                                               |
+*     +---------------------------------------------------------------+
+*
+      MLCHPO=LCH1
+      SEGACT,MLCHPO
+*
+*
+*     ===================================
+*     NOMBRE DE CHPOINTS DANS LE LISTCHPO
+*     ===================================
+*
+      NBCHP=ICHPOI(/1)
+      IF (NBCHP.EQ.0) THEN
+         MOTERR(1:8)='LISTCHPO'
+         INTERR(1)=LCH1
+         CALL ERREUR(356)
+         RETURN
+      ENDIF
+*
+*
+*     ============================================================
+*     CONSTRUCTION DE LA LISTE DES INCONNUES ASSOCIEES AU LISTCHPO
+*       => REMPLISSAGE DE TICPR, THARM, TICOH ET TIMAH
+*     ============================================================
+*
+      MCHPO1=ICHPOI(1)
+      SEGACT,MCHPO1
+*
+      NS1=MCHPO1.IPCHP(/1)
+      IF (NS1.EQ.0) THEN
+         MOTERR(1:8)='CHPOINT'
+         CALL ERREUR(1027)
+         RETURN
+      ENDIF
+*
+      SEGINI,NUMHAR,IMAHAR,ICOHAR
+      NBHAR=0
+*
+      NOMAX=XCOOR(/1)/(IDIM+1)
+      SEGINI,TICPR
+      NBPOI=0
+*
+      SEGINI,TICOM
+      NBCOM=0
+*
+      NXMAX=3
+      NBCOM=0
+      NBSOU=NS1
+      SEGINI,TRAV1
+*
+*
+*     **************************************
+*     BOUCLE 1 SUR LES SOUPOS DU 1ER CHPOINT
+*     **************************************
+      DO 10 IS1=1,NS1
+         MSOUP1=MCHPO1.IPCHP(IS1)
+         SEGACT,MSOUP1
+*
+*        ON IGNORE LES MULTIPLICATEURS DE LAGRANGE
+         NX1=MSOUP1.NOCOMP(/2)
+         CHA4=MSOUP1.NOCOMP(1)
+         IF (CHA4.EQ.'LX'.OR.CHA4.EQ.'FLX') THEN
+            SEGDES,MSOUP1
+            GOTO 10
+         ENDIF
+*
+         IF (NX1.GT.NXMAX) THEN
+            NXMAX=NX1
+            SEGADJ,TRAV1
+         ENDIF
+*
+*        ON VERIFIE QUE LE MAILLAGE N'EST PAS VIDE
+         IGEO1=MSOUP1.IGEOC
+         IF (IGEO1.LE.0) THEN
+            MOTERR(1:8)='CHPOINT'
+            CALL ERREUR(1027)
+            RETURN
+         ENDIF
+         IPT1=IGEO1
+         SEGACT,IPT1
+         NNO1=IPT1.NUM(/2)
+         IF (NNO1.EQ.0) THEN
+            SEGDES,MSOUP1,IPT1
+            GOTO 10
+         ENDIF
+*
+*        ON VERIFIE QUE LE CHPOINT EST CORRECTEMENT PARTITIONNE
+*        (UN NOEUD NE PEUT PAS APPARTENIR A PLUSIEURS ZONES)
+         DO I1=1,NNO1
+            K1=IPT1.NUM(1,I1)
+            IF (ICPR(K1).NE.0) THEN
+               CALL ERREUR(920)
+               RETURN
+            ENDIF
+            NBPOI=NBPOI+1
+            ICPR(K1)=NBPOI
+         ENDDO
+*
+*        IDENTIFICATION DES HARMONIQUES DE FOURIER DISTINCTES
+         DO 11 IX1=1,NX1
+            IHA1=MSOUP1.NOHARM(IX1)
+*
+*           A-T-ON DEJA VU CETTE HARMONIQUE DANS CE SOUPO ?
+            DO IX2=1,IX1-1
+               IF (IHA1.EQ.MSOUP1.NOHARM(IX2)) GOTO 11
+            ENDDO
+*
+*           L'A-T-ON DEJA VUE TOUT COURT ?
+            DO K=1,NBHAR
+               IF (IHA1.EQ.NUMHAR(K)) THEN
+*                 => ON RECUPERE SES SEGMENTS TIMAH ET TICOH
+                  TIMAH=IMAHAR(K)
+                  TICOH=ICOHAR(K)
+                  GOTO 12
+               ENDIF
+            ENDDO
+*           => ON CREE DE NOUVEAUX SEGMENTS TIMAH ET TICOH
+            NBHAR=NBHAR+1
+            NUMHAR(**)=IHA1
+            SEGINI,TIMAH,TICOH
+            IMAHAR(**)=TIMAH
+            ICOHAR(**)=TICOH
+
+*           => ON REMPLIT LE SEGMENT TIMAH
+  12        CONTINUE
+            DO 13 IN1=1,NNO1
+               K1=IPT1.NUM(1,IN1)
+               DO IN2=1,IMAHA(/1)
+                  IF (K1.EQ.IMAHA(IN2)) GOTO 13
+               ENDDO
+               IMAHA(**)=K1
+  13        CONTINUE
+
+  11     CONTINUE
+         SEGDES,IPT1
+*
+*        VERIFICATION DES NOMS DES COMPOSANTES (ELLES DOIVENT ETRE
+*        REFERENCEES DANS LA LISTE NOMDD DES INCONNUES PRIMALES)
+         DO 14 IX1=1,NX1
+            CHA4=MSOUP1.NOCOMP(IX1)
+*
+            IINC(IX1,IS1,1)=IX1
+*
+*           SELECTION DU SEGMENT TICOH ASSOCIE A L'HARMONIQUE DE IX1
+            IHA1=MSOUP1.NOHARM(IX1)
+            DO IHA2=1,NBHAR
+               IF (IHA1.EQ.NUMHAR(IHA2)) GOTO 15
+            ENDDO
+  15        CONTINUE
+            TICOH=ICOHAR(IHA2)
+
+*           RECHERCHE DU NOM DE COMPOSANTE DANS NOMDD
+            DO IC1=1,LNOMDD
+               IF (CHA4.EQ.NOMDD(IC1)) THEN
+*                 => ON REMPLIT LE SEGMENT TICOM
+                  IF (ICOM(IC1).EQ.0) THEN
+                     NBCOM=NBCOM+1
+                     ICOM(IC1)=NBCOM
+                  ENDIF
+*                 => ON REMPLIT LE SEGMENT TICOH
+                  DO IC3=1,ICOHA(/1)
+                     IF (IC1.EQ.ICOHA(IC3)) GOTO 14
+                  ENDDO
+                  ICOHA(**)=IC1
+                  GOTO 14
+               ENDIF
+            ENDDO
+
+*           ERREUR : COMPOSANTE PRIMALE NON REFERENCEE DANS CCHAMP
+            MOTERR(1:4)=CHA4
+            CALL ERREUR(108)
+            RETURN
+  14     CONTINUE
+*
+*        POINTEUR DIRECT VERS LE SEGMENT MPOVAL
+         IPSO(IS1,1)=MSOUP1
+*
+*        ********************************
+*        BOUCLE 2 SUR LES AUTRES CHPOINTS
+*        ********************************
+         DO 16 ICH=2,NBCHP
+            MCHPO2=ICHPOI(ICH)
+            SEGACT,MCHPO2
+            NS2=MCHPO2.IPCHP(/1)
+*
+*           **********************************************
+*           ON VA CHERCHER LE SOUPO CORRESPONDANT A MSOUP1
+*           => BOUCLE 3 SUR LES SOUPOS DE MCHPO2
+*           **********************************************
+            DO 17 IS2=1,NS2
+               MSOUP2=MCHPO2.IPCHP(IS2)
+               SEGACT,MSOUP1,MSOUP2
+*
+*              MEME MAILLAGE ?
+               IGEO2=MSOUP2.IGEOC
+               IF (IGEO1.NE.IGEO2) THEN
+                  SEGDES,MSOUP2
+                  GOTO 17
+               ENDIF
+*
+*              MEME NOMBRE DE COMPOSANTES ?
+               NX2=MSOUP2.NOCOMP(/2)
+               CHA4=MSOUP1.NOCOMP(1)
+               IF (CHA4.EQ.'LX'.OR.CHA4.EQ.'FLX'.OR.NX1.NE.NX2) THEN
+                  SEGDES,MSOUP2
+                  GOTO 17
+               ENDIF
+               IF (NX2.GT.NXMAX) THEN
+                  NXMAX=NX2
+                  SEGADJ,TRAV1
+               ENDIF
+*
+*              MEMES LISTES DE COMPOSANTES ?
+*              => ON FAIT LA CORRESPONDANCE ENTRE LES COMPOSANTES DES
+*                 2 SOUPOS
+               DO 18 IX1=1,NX1
+                  CHA4=MSOUP1.NOCOMP(IX1)
+                  DO 19 IX2=1,NX2
+                     IF (CHA4.NE.MSOUP2.NOCOMP(IX2)) GOTO 19
+                     IF (MSOUP1.NOHARM(IX1).EQ.MSOUP2.NOHARM(IX2)) THEN
+                        IINC(IX1,IS1,ICH)=IX2
+                        GOTO 18
+                     ENDIF
+  19              CONTINUE
+                  GOTO 99
+  18           CONTINUE
+*
+*              POINTEUR DIRECT VERS LE SEGMENT MPOVAL
+               IPSO(IS1,ICH)=MSOUP2
+*
+*              (CHPOINT SUIVANT)
+               SEGDES,MCHPO2
+*               SEGDES,MSOUP2
+               GOTO 16
+*
+  17        CONTINUE
+*
+*           MESSAGE D'ERREUR
+*           ****************
+  99        CONTINUE
+            WRITE(MOTERR(1:16),FMT='(2I8)') MCHPO1,MCHPO2
+            CALL ERREUR(135)
+            RETURN
+*
+  16     CONTINUE
+*         SEGDES,MSOUP1
+*
+  10  CONTINUE
+      SEGDES,MCHPO1,MLCHPO
+*
+*
+*
+*     ========================================================
+*     STOCKAGE DES VALEURS DU LISTCHPO DANS UN TABLEAU ORDONNE
+*     D'APRES LE CONTENU DES OBJETS CHPOINT => REMPLISSAGE DE
+*     TRAV2
+*     ========================================================
+*
+      SEGINI,TRAV2
+      DO ICH=1,NBCHP
+         DO 20 ISOU=1,NS1
+            ISO1=IPSO(ISOU,ICH)
+            IF (ISO1.EQ.0) GOTO 20
+            MSOUPO=ISO1
+*            SEGACT,MSOUPO
+            MELEME=IGEOC
+            MPOVAL=IPOVAL
+            SEGACT,MELEME,MPOVAL
+            NNO=VPOCHA(/1)
+            NIX=VPOCHA(/2)
+            DO IX=1,NIX
+               IX1=IINC(IX,ISOU,ICH)
+*              IC1 = NUMERO LOCAL DE LA COMPOSANTE
+               CHA4=NOCOMP(IX1)
+               DO ICO=1,LNOMDD
+                  IF (CHA4.EQ.NOMDD(ICO)) GOTO 21
+               ENDDO
+  21           IC1=ICOM(ICO)
+*              IH1 = NUMERO LOCAL DE L'HARMONIQUE
+               NUH=NOHARM(IX1)
+               DO IH1=1,NBHAR
+                  IF (NUH.EQ.NUMHAR(IH1)) GOTO 22
+               ENDDO
+  22           DO INO=1,NNO
+*                 IN1 = NUMERO LOCAL DU NOEUD
+                  IN1=ICPR(NUM(1,INO))
+*
+                  VPO(IN1,IC1,ICH,IH1)=VPOCHA(INO,IX1)
+               ENDDO
+            ENDDO
+            SEGDES,MELEME,MPOVAL,MSOUPO
+  20     CONTINUE
+      ENDDO
+      SEGSUP,TRAV1,TICOM,TICPR
+
+
+*     +---------------------------------------------------------------+
+*     |                                                               |
+*     |          C R E A T I O N   D E   L A   M A T R I C E          |
+*     |                                                               |
+*     +---------------------------------------------------------------+
+*
+*
+*     =================
+*     CHAPEAU DU MRIGID
+*     =================
+*
+*     ON VA CREER AUTANT DE SOUS-MATRICES QU'IL Y A D'HARMONIQUES
+*     DE FOURIER DISTINCTES
+      NRIGEL=NBHAR
+      SEGINI,MRIGID
+      IRIG=MRIGID
+      MTYMAT='RIGIDITE'
+      COERIG(1)=DFLO
+      ICHOLE=0
+      IMGEO1=0
+      IMGEO2=0
+      IFORIG=IFOMOD
+      ISUPEQ=0
+      JRCOND=0
+      JRDEPP=0
+      JRDEPD=0
+      JRELIM=0
+      JRGARD=0
+      JRTOT=0
+      IMLAG=0
+      IPROFO=0
+      IVECRI=0
+*
+*     BOUCLE 1 SUR LES SOUS-MATRICES
+*     ******************************
+      DO IRI=1,NBHAR
+*
+         NOHAR=NUMHAR(IRI)
+*
+*        =========================
+*        CREATION DU SUPER-ELEMENT
+*        =========================
+*
+         TIMAH=IMAHAR(IRI)
+         NBSOUS=0
+         NBELEM=1
+         NBNN=IMAHA(/1)
+         NBREF=0
+         SEGINI,MELEME
+         ITYPEL=28
+         DO K=1,NBNN
+            NUM(K,1)=IMAHA(K)
+         ENDDO
+         SEGDES,MELEME
+         SEGSUP,TIMAH
+*
+*
+*        =========================
+*        DESCRIPTEUR DE LA MATRICE
+*        =========================
+*
+         TICOH=ICOHAR(IRI)
+         NBCO=ICOHA(/1)
+         NLIGRP=NBCO*NBNN
+         NLIGRD=NBCO*NBNN
+         SEGINI,DESCR
+         IX=0
+         DO ICO=1,NBCO
+            IC1=ICOHA(ICO)
+            DO INO=1,NBNN
+               IX=IX+1
+               LISINC(IX)=NOMDD(IC1)
+               LISDUA(IX)=NOMDU(IC1)
+               NOELEP(IX)=INO
+               NOELED(IX)=INO
+            ENDDO
+         ENDDO
+         SEGDES,DESCR
+         SEGSUP,TICOH
+*
+*
+*        ======================
+*        REMPLISSAGE DU CONTENU
+*        ======================
+*
+         NELRIG=1
+         SEGINI,XMATRI
+*
+         NBINC=NBCOM*NBPOI
+         DO ICH=1,NBCHP
+            DO IX1=1,NBINC
+               IC1=((IX1-1)/NBPOI)+1
+               IN1=MOD(IX1-1,NBPOI)+1
+*
+*              REMPLISSAGE DE LA DIAGONALE
+               VA1=VPO(IN1,IC1,ICH,IRI)
+               RE(IX1,IX1,1)=RE(IX1,IX1,1)+VA1*VA1
+
+*              REMPLISSAGE DU TRIANGLE SUPERIEUR
+               DO IX2=IX1+1,NBINC
+                  IC2=((IX2-1)/NBPOI)+1
+                  IN2=MOD(IX2-1,NBPOI)+1
+                  VA2=VPO(IN2,IC2,ICH,IRI)
+                  RE(IX1,IX2,1)=RE(IX1,IX2,1)+VA1*VA2
+               ENDDO
+*
+            ENDDO
+         ENDDO
+*
+*        REMPLISSAGE DU TRIANGLE INFERIEUR
+         DO IX1=1,NBINC
+            DO IX2=IX1+1,NBINC
+               RE(IX2,IX1,1)=RE(IX1,IX2,1)
+            ENDDO
+         ENDDO
+*
+*
+         IRIGEL(1,IRI)=MELEME
+         IRIGEL(2,IRI)=0
+         IRIGEL(3,IRI)=DESCR
+         IRIGEL(4,IRI)=XMATRI
+         IRIGEL(5,IRI)=NOHAR
+         IRIGEL(6,IRI)=0
+         IRIGEL(7,IRI)=0
+*
+         SEGDES,XMATRI
+      ENDDO
+*
+      SEGDES,MRIGID
+      SEGSUP,TRAV2,NUMHAR,IMAHAR,ICOHAR
+*
+*
+      RETURN
+*
+      END
+*
+*
+

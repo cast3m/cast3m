@@ -1,0 +1,2911 @@
+C VARINU    SOURCE    PV        18/11/19    21:15:24     9995
+
+      SUBROUTINE VARINU(IPOI1,IPOI2,IPMODL,IRET,MICHE,JEMIL,CHARP)
+
+*____________________________________________________________________
+*
+*  OBJET :  Variation d'un champ/élément ayant une ou des composante(s)
+*  °°°°°°°  de type EVOLUTION ou NUAGE (FLOTTANT-EVOLUTION
+*           ou FLOTTANT-FLOTTANT-EVOLUTION) en fonction
+*           d'un champ/point ou d'un champ/élément.Ce champ peut
+*           avoir plusieurs composantes si necessaire. Dans ce cas il
+*           est possible d'instancier un champ/element dont les
+*           composantes dependent de parametres differents en
+*           chaque point.
+*
+*  ENTREES :
+*  °°°°°°°°°
+*
+*     IPOI1   Pointeur sur un MCHAML
+*     IPOI2   Pointeur sur un CHPOINT ou MCHAML
+*     IPMODL  Pointeur sur un MMODEL
+*     JEMIL   1 A 5 selon le support choisi
+*     MICHE   = 1 IPOI2 est un objet de type CHPOINT
+*             = 0 IPOI2 est un objet de type MCHAML
+*     CHARP   Chaine definissant le sous type (facultatif)
+*
+*
+*  SORTIE :
+*  °°°°°°°°
+*
+*     IRET   Pointeur sur le MCHAML resultat
+*            =0 si operation impossible
+*
+*_____________________________________________________________________
+*
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*
+-INC SMCHAML
+-INC SMCHPOI
+-INC SMMODEL
+-INC CCOPTIO
+-INC SMEVOLL
+-INC SMLREEL
+-INC SMLENTI
+-INC SMELEME
+-INC SMINTE
+-INC SMCOORD
+-INC SMNUAGE
+-INC DECHE
+-INC SMLMOTS
+-INC SMTABLE
+-INC CCNOYAU
+-INC CCASSIS
+
+      EXTERNAL long
+*
+      CHARACTER*(*) CHARP
+      CHARACTER*16  CHA1,TYPV,CMNAME
+      CHARACTER*72  SOUTYP
+      CHARACTER*73  LMEFCT
+      CHARACTER*512 MOTEMP,LMELIB,lacomm
+      CHARACTER*8  TYP3,NOMTMP,MOT1,MOT2
+      CHARACTER*8  NOMCO,NOM2,NOM3,NOM4,NOM5,NOMTT
+      CHARACTER*4  NOMCO4,NOMSIM
+      LOGICAL COQ,KNUAG,KREAL,KFLOT,lsupma,dstati,drev21,drev22
+      LOGICAL BTHRD,dnua1
+      INTEGER IPTAMO
+C
+C  Creation des segments
+      SEGMENT SWORK
+         REAL*8 VAL1(NBPGA1),VAL2(NBPGAU),VALN(NBN1)
+         REAL*8 SHP(6,NBN1) ,XE(3,NBN1)
+      ENDSEGMENT
+      SEGMENT IAMOI
+         REAL*8 VEL1(MG1,N1EL2),VEL2(MG2,MXNBE)
+      ENDSEGMENT
+      SEGMENT IAMO2
+         REAL*8  FLO1(NFLO),FLO2(NFLO,NFLO)
+         INTEGER IFLO2(NFLO)
+      ENDSEGMENT
+      SEGMENT WRKEXT
+         CHARACTER*4 NOMPAR(NPARA)
+         INTEGER     IVAPAR(NPARA)
+         REAL*8      VALPAR(NPARA)
+      ENDSEGMENT
+      SEGMENT WRKRES
+         CHARACTER*4 NOMVAL(N2)
+         INTEGER     IVALIS(N2)
+         REAL*8      XVAL(N2)
+      ENDSEGMENT
+      SEGMENT INFO
+          integer INFELL(IU)
+      ENDSEGMENT
+
+C     PARALLELISATION PTHREAD
+      SEGMENT SPARAL
+        INTEGER NNN,ML1,ML2,MPV1,MPV2,MCH1,MEL2,
+     &          N1ELP,N1PELP
+        INTEGER IXX(NBTHR)
+      ENDSEGMENT
+
+      SEGMENT SXX
+        REAL*8 XX(NDIM)
+      ENDSEGMENT
+C
+C     Introduction d'un COMMON pour la parallelisation
+      COMMON/IPLMUC/IPARAL
+      EXTERNAL IPMULi
+
+      DATA NOMTT/'T       '/
+      DATA NOMSIM/'SIMU'/
+      iptamo = 0
+      KREAL = .TRUE.
+C
+      JEMIL1 = JEMIL
+      dstati = .false.
+C
+C     Pour la paralelisation de l'interpolation
+C
+      IPARAL= 0
+      BTHRD = .FALSE.
+      MCHAM2= 0
+      IPOIN1= 0
+C
+      INUBF4 = 0
+C
+C  CONVERSION DU CHPOINT OU MCHAML EN MCHAML AU SUPORT DEMANDE
+      IF (MICHE.EQ.1) THEN
+        CALL CHAME1(0,IPMODL,IPOI2,' ',IPOI3,JEMIL1)
+        IF (IERR.NE.0) RETURN
+      ELSE
+*
+*   AM 14/6/07
+*   ON PASSE UN INDICATEUR DE SUPPORT NEGATIF A CHASUP
+*   POUR EVITER DES PROBLEMES DE CHANGEMENT DE SUPPORT
+*   DE VARIABLES INTERNES NON SCALAIRES, DANS CHASUP
+*
+        JEMIL2 = - JEMIL1
+        CALL CHASUP(IPMODL,IPOI2,IPOI3,IRT2,JEMIL2)
+        IF (IRT2.NE.0) THEN
+          CALL ERREUR(IRT2)
+          RETURN
+        ENDIF
+      ENDIF
+C
+C  ACTIVATION DU MODELE
+      MMODEL=IPMODL
+C      SEGACT MMODEL
+      NSOUS1=KMODEL(/1)
+C
+C  ACTIVATION DES MCHELM
+      MCHEL1=IPOI1
+C      SEGACT MCHEL1
+      NSOUS=MCHEL1.ICHAML(/1)
+      IF (NSOUS.GT.NSOUS1) THEN
+        CALL ERREUR(553)
+        SEGDES MMODEL,MCHEL1
+        RETURN
+      ENDIF
+      NINF=MCHEL1.INFCHE(/2)
+C
+C  Creation du MCHAML
+      N1=NSOUS
+      N3=6
+      IF (CHARP.EQ.' ') THEN
+        L1=MCHEL1.TITCHE(/1)
+        SOUTYP=MCHEL1.TITCHE
+      ELSE
+        L1=LEN(CHARP)
+        SOUTYP=CHARP
+      ENDIF
+      SEGINI MCHELM
+      IRET=MCHELM
+      IFOCHE=IFOUR
+      TITCHE=SOUTYP
+C
+C  Boucle sur les sous zone du MCHAML
+      DO 10 ISOUS=1,NSOUS
+C
+        JEMIL1 = JEMIL
+C
+C  VALEURS INITIALES
+        MCHEL2=0
+        IYOUN=0
+        IMACHE(ISOUS)=MCHEL1.IMACHE(ISOUS)
+        CONCHE(ISOUS)=MCHEL1.CONCHE(ISOUS)
+        DO 20 IP=1,NINF
+          INFCHE(ISOUS,IP)=MCHEL1.INFCHE(ISOUS,IP)
+  20    CONTINUE
+C
+C  Mise en concordance des pointeurs de maillage
+C
+        MELEME=IMACHE(ISOUS)
+C*      DO 30 IO=1,kmodel(/1)
+        DO 30 IO=1, NSOUS1
+          IMODEL=KMODEL(IO)
+C          SEGACT IMODEL
+          if (cmatee.eq.'STATIQUE') dstati = .true.
+          IF (IMAMOD.EQ.MELEME.AND.CONMOD.EQ.CONCHE(ISOUS)) GOTO 40
+C          SEGDES IMODEL
+  30    CONTINUE
+        CALL ERREUR(472)
+        GOTO 9930
+  40    CONTINUE
+C*      SEGACT MELEME  <-- Redondant avec ligne 231
+        IMELE=NEFMOD
+C
+C Le modèle est-il appuye sur des elements coques.
+C       MF1 = 3 ---> coque
+C       MF1 = 5 ---> coque epaisse
+C       MF1 = 9 ---> coque avec cisaillement transverse
+C
+        MF1 = NUMMFR(NEFMOD)
+        COQ = (MF1 .EQ. 3).OR.(MF1 .EQ. 5).OR.(MF1 .EQ. 9)
+
+C   Pour un modele thermique, le support/segment d'integration est specifique
+C idem pour la DIFFUSION en attendant un retour a equivalence a la MECANIQUE !!
+        IF ( JEMIL1 .NE. 1 ) THEN
+          NFORQ = FORMOD(/2)
+          ither = 0
+          idiff = 0
+          imeta = 0
+          CALL PLACE(FORMOD,NFORQ,ither,'THERMIQUE')
+          CALL PLACE(FORMOD,NFORQ,idiff,'DIFFUSION')
+          CALL PLACE(FORMOD,NFORQ,imeta,'METALLURGIE')
+          IF (ither.NE.0 .OR. idiff.NE.0 .OR. imeta.NE.0) JEMIL1 = 6
+        ENDIF
+C
+        IPTR3=0
+        IF (NINF.LT.4.OR.MCHEL1.INFCHE(ISOUS,4).EQ.0) THEN
+          IF (JEMIL1 .EQ. 6) THEN
+            CALL TSHAPE(IMELE,'NOEUD',MINTE1)
+            IF (IERR.NE.0) GOTO 9930
+C#MC 08/04/98
+          ELSE
+            IF (INFMOD(/1).lt.3) then
+              CALL ELQUOI(IMELE,0,1,IPTR3,IMODEL)
+              IF (IERR.NE.0) GOTO 9930
+              info=IPTR3
+              MINTE1=info.INFELL(11)
+              segsup,info
+            ELSE
+              MINTE1=INFMOD(3)
+            ENDIF
+          ENDIF
+C La sous-zone est aux noeuds :
+        ELSE
+          MINTE1=MCHEL1.INFCHE(ISOUS,4)
+        ENDIF
+        SEGACT,MINTE1
+C
+C  Information sur l'element fini
+        IF (JEMIL1 .EQ. 6) THEN
+          CALL TSHAPE(IMELE,'GAUSS',MINTE)
+          IF (IERR.NE.0) GOTO 9920
+          MELGEO = NUMGEO(IMELE)
+        ELSE
+          IF(INFMOD(/1).lt.2+JEMIL1) then
+           CALL ELQUOI(IMELE,0,JEMIL1,IPTR2,IMODEL)
+           IF (IERR.NE.0) GOTO 9920
+           info=IPTR2
+           MINTE =info.INFELL(11)
+           MELGEO=info.INFELL(14)
+           segsup,info
+          ELSE
+           MINTE =INFMOD(2+JEMIL1)
+           MELGEO=INFELE(14)
+          ENDIF
+        ENDIF
+        SEGACT MINTE
+        INFCHE(ISOUS,4)=MINTE
+        IF (JEMIL1.EQ.1) INFCHE(ISOUS,4)=0
+        INFCHE(ISOUS,6)=JEMIL1
+C
+C  On recupere le nombre de points support NBPGA1 pour
+C  pour l'ancien chamelem NBPGAU pour le nouveau mchaml
+        NBPGA1 = MINTE1.SHPTOT(/3)
+        NBPGAU = SHPTOT(/3)
+C
+C  On recupere le nombre d'elements
+        SEGACT MELEME
+        NBN1=NUM(/1)
+        NEL0=NUM(/2)
+        SEGINI SWORK
+C
+C  CREATION DU MCHAML
+        MCHAM1=MCHEL1.ICHAML(ISOUS)
+C        SEGACT MCHAM1
+        N2=MCHAM1.NOMCHE(/2)
+        SEGINI MCHAML
+        ICHAML(ISOUS)=MCHAML
+
+        NMATQ =MATMOD(/2)
+        iuser = 0
+        CALL PLACE(MATMOD,NMATQ,iuser,'UTILISATEUR')
+        CMNAME='                '
+        IF (iuser.GT.0) THEN
+          IF (iuser.LT.NMATQ) CMNAME = MATMOD(iuser+1)
+        ENDIF
+*
+        KNUAG = .FALSE.
+        IF (TITCHE.EQ.'CARACTERISTIQUES') THEN
+          DO 60 IC1=1,N2
+            IF (MCHAM1.NOMCHE(IC1).EQ.'YOUN    ') IYOUN=IC1
+            CHA1=MCHAM1.TYPCHE(IC1)
+            IF (CHA1(9:16).EQ.'NUAGE   ') KNUAG = .TRUE.
+  60      CONTINUE
+          IF (KNUAG) THEN
+            SEGINI WRK53
+            wrk53.MFR = MF1
+            wrk53.NFOR = NFORQ
+            wrk53.NMAT = NMATQ
+            wrk53.CMATE  = CMATEE
+            wrk53.MATE   = IMATEE
+            wrk53.INPLAS = INATUU
+           if(lnomid(6).ne.0) then
+              nomid=lnomid(6)
+C              segact nomid
+              ipnomc=nomid
+              nbrobl=lesobl(/2)
+              nbrfac=lesfac(/2)
+              lsupma=.false.
+            else
+              lsupma=.true.
+              CALL IDMATR(MF1,IMODEL,IPNOMC,NBROBL,NBRFAC)
+            endif
+            IQMOD=IMODEL
+            IWRK53=WRK53
+            NMATT=NBROBL+NBRFAC
+            CALL COTYPE(IQMOD,13,MOTYPE,IWRK53,NBROBL,NBRFAC)
+            NOTYPE=MOTYPE
+            SEGACT NOTYPE
+            NBTYPE=TYPE(/2)
+            KREAL = .TRUE.
+            DO 65 ITYPE=1,NBTYPE
+              TYPV=TYPE(ITYPE)
+              IF (TYPV(1:6).NE.'REAL*8') KREAL = .FALSE.
+  65        CONTINUE
+            SEGDES NOTYPE
+            SEGSUP WRK53
+          ENDIF
+        ENDIF
+C
+        SEGINI WRK53
+        SEGINI WRKRES
+        JESIMU = 0
+C
+C'''''''''''''''''''''''''''''''''''''
+C      BOUCLE SUR LES COMPOSANTES
+C
+C'''''''''''''''''''''''''''''''''''''
+        DO 70 ICOMP=1,N2
+          IAMOI=0
+C
+C  traitement des composantes de type FLOTTANT ou MCHAML
+C
+          CHA1=MCHAM1.TYPCHE(ICOMP)
+          NOMCHE(ICOMP)=MCHAM1.NOMCHE(ICOMP)
+          NOMCO = MCHAM1.NOMCHE(ICOMP)
+          NOMVAL(ICOMP) = MCHAM1.NOMCHE(ICOMP)(1:4)
+          MELVA1=MCHAM1.IELVAL(ICOMP)
+          SEGACT MELVA1
+C
+C---------------------------------------------------------
+C               Composante de type reel
+C---------------------------------------------------------
+C
+          IF (CHA1(1:8).EQ.'REAL*8  ') THEN
+            TYPCHE(ICOMP)='REAL*8'
+            N1PTE1=MELVA1.VELCHE(/1)
+            IF (N1PTE1.EQ.1) THEN
+              N1PTEL=1
+            ELSE
+              N1PTEL=NBPGAU
+            ENDIF
+            N1EL  =MELVA1.VELCHE(/2)
+            N2PTEL=0
+            N2EL  =0
+C
+C  test de compatibilite des nombres d'elements
+C
+            IF (N1EL.NE.NEL0.AND.N1EL.NE.1.AND.NEL0.NE.1) THEN
+              MOTERR(1:8)='VARINU  '
+              CALL ERREUR(146)
+              GOTO 9910
+            ENDIF
+            N1PAUX=N1PTE1
+C
+C  Pour les COQ4, le nb de pt de GAUSS vaut 5, mais on
+C  ne prend que les 4 premiers (le 5ieme sert uniquement
+C  au cisaillement)
+            IF (IMELE.EQ.49.AND.N1PAUX.EQ.5) N1PAUX=4
+            SEGINI MELVAL
+            IELVAL(ICOMP)=MELVAL
+C
+C  Traitement immediat si champ constant
+            IF (N1PTE1.EQ.1) THEN
+              DO 80 IEL=1,N1EL
+                VELCHE(1,IEL)=MELVA1.VELCHE(1,IEL)
+  80          CONTINUE
+            ELSE
+              DO 90 IEL=1,NEL0
+                DO 100 IGAU=1,N1PTE1
+                  VAL1(IGAU)=MELVA1.VELCHE(IGAU,IEL)
+ 100            CONTINUE
+C
+C  LE CHAMELEM N'EST PAS AUX NOEUDS
+                IF (MINTE1.NE.0) THEN
+C  Meme support
+                  IF (MINTE.EQ.MINTE1) THEN
+                    DO 110 IGAU=1,N1PTE1
+                      VELCHE(IGAU,IEL)=VAL1(IGAU)
+ 110                CONTINUE
+                    GOTO 90
+C  Support different
+                  ELSE
+                    CALL DOXE(XCOOR,IDIM,NBN1,NUM,IEL,XE)
+                    CALL QUEDIM(MELGEO,KERRE1)
+                    CALL CH1CH2(IMELE,MINTE,MINTE1,N1PTEL,N1PAUX,NBN1,
+     &                          SWORK,IPOIN1,KERRE1)
+                    IF (KERRE1.NE.0) THEN
+                      CALL ERREUR(KERRE1)
+                      GOTO 9900
+                    ENDIF
+                    DO 120 IGAU=1,N1PTEL
+                      VELCHE(IGAU,IEL)=VAL2(IGAU)
+ 120                CONTINUE
+                  ENDIF
+                ELSE
+                  DO 130 IGAU=1,N1PTEL
+                    VALG=0.D0
+                    DO 140 INO=1,NBN1
+                      VALG=VALG+SHPTOT(1,INO,IGAU)*VAL1(INO)
+ 140                CONTINUE
+                    VELCHE(IGAU,IEL)=VALG
+ 130              CONTINUE
+                ENDIF
+  90          CONTINUE
+            ENDIF
+**          SEGDES MELVAL,MELVA1
+C
+C---------------------------------------------------------
+C               Composante de type evolution
+C---------------------------------------------------------
+C
+          ELSE IF (CHA1(9:16).EQ.'EVOLUTIO') THEN
+            N1PTE3=MELVA1.IELCHE(/1)
+            N1EL3 =MELVA1.IELCHE(/2)
+            IF (N1EL3.NE.NEL0.AND.N1EL3.NE.1.AND.NEL0.NE.1) THEN
+              MOTERR(1:8)='VARINU  '
+              CALL ERREUR(146)
+              GOTO 9910
+            ENDIF
+C
+C  S'il s'agit d'une courbe de traction d'un matériau
+C  constant, on garde l'objet EVOLUTIO sans rien changer.
+C
+            NOMTMP=NOMCHE(ICOMP)
+            IF (TITCHE.EQ.'CARACTERISTIQUES'.AND.
+     &          N1PTE3.EQ.1.AND.N1EL3.EQ.1) THEN
+             IF (NOMTMP.EQ.'TRAC    '.OR.NOMTMP.EQ.'EVOL    '.OR.
+     &           NOMTMP.EQ.'COMP    '.OR.NOMTMP.EQ.'FLXY    '.OR.
+     &           NOMTMP.EQ.'FLXZ    '.OR.NOMTMP.EQ.'CISY    '.OR.
+     &           NOMTMP.EQ.'CISZ    '.OR.NOMTMP.EQ.'JDA     '.OR.
+     &           NOMTMP.EQ.'EM0     '.OR.NOMTMP.EQ.'EM1     '.OR.
+     &           NOMTMP.EQ.'EM2     '.OR.NOMTMP.EQ.'EM3     '.OR.
+     &           NOMTMP.EQ.'EM4     '.OR.NOMTMP.EQ.'EM5     '.OR.
+     &           NOMTMP.EQ.'EM6     '.OR.NOMTMP.EQ.'EM7     '.OR.
+     &           NOMTMP.EQ.'EM8     '.OR.NOMTMP.EQ.'SFFS    '.OR.
+     &           NOMTMP.EQ.'EFFS    '.OR.NOMTMP.EQ.'SJCB    '.OR.
+     &           NOMTMP.EQ.'SJTB    '.OR.NOMTMP.EQ.'SJSB    ') THEN
+              TYPCHE(ICOMP)='POINTEUREVOLUTIO'
+              N1PTEL=0
+              N1EL  =0
+              N2PTEL=1
+              N2EL  =1
+              SEGINI MELVAL
+              IELVAL(ICOMP)=MELVAL
+              IELCHE(N2PTEL,N2EL)=MELVA1.IELCHE(1,1)
+**            SEGDES MELVAL,MELVA1
+              GOTO 70
+             ENDIF
+            ENDIF
+C
+C  S'il s'agit d'autres composantes que la courbe de
+C  traction d'un matériau constant on fait l'interpolation
+C  selon la loi de variation
+C
+            TYPCHE(ICOMP)='REAL*8'
+            MCHEL2=IPOI3
+            SEGACT MCHEL2
+            IF (MCHEL2.ICHAML(/1).LT.NSOUS) THEN
+              CALL ERREUR(553)
+              SEGDES MCHEL2
+              GOTO 9910
+            ENDIF
+            IF (IMAMOD.NE.MCHEL2.IMACHE(ISOUS).OR.
+     &          CONMOD.NE.MCHEL2.CONCHE(ISOUS)) THEN
+              do is = 1,mchel2.imache(/1)
+                if (imamod.eq.mchel2.imache(is).and.
+     &               conmod.eq.mchel2.conche(is)) then
+                   icham2 = mchel2.ichaml(is)
+                   goto 149
+                endif
+               enddo
+               CALL ERREUR(472)
+              SEGDES MCHEL2
+              GOTO 9910
+            ELSE
+              ICHAM2=MCHEL2.ICHAML(ISOUS)
+            ENDIF
+C
+ 149        CONTINUE
+            iptamo = 0
+            if (inatuu.eq.164.and.NOMTMP.eq.'MOCO') then
+             N=1
+             segini mevol1,mevol2
+             segini,melva2=melva1
+             segini,melva3=melva1
+             drev21 = .false.
+             drev22 = .true.
+             do iel = 1,melva2.ielche(/2)
+               do ipg = 1,melva2.ielche(/1)
+                IEVOL = MELVA2.IELCHE(ipg,iel)
+                MEVOLL = IEVOL
+                SEGACT MEVOLL
+                KEVOLL = IEVOLL(1)
+                mevol1.ievoll(1) = ievoll(1)
+                melva2.ielche(ipg,iel) = mevol1
+               if (ievoll(/1).gt.1) then
+                mevol2.ievoll(1) = ievoll(2)
+                melva3.ielche(ipg,iel) = mevol2
+                drev21 = .true.
+               else
+                drev22 = .false.
+               endif
+               enddo
+             enddo
+             CALL VARIN2(ICHAM2,melva2,COQ,MELEME,SWORK,NOMCO,IMELE,
+     &                  MELGEO,MINTE,MINTE1,MELVAL,KERRE1)
+C               iptrai = melval
+               nomche(icomp) = 'RAID'
+             if (drev21.and.drev22) then
+             CALL VARIN2(ICHAM2,melva3,COQ,MELEME,SWORK,NOMCO,IMELE,
+     &                  MELGEO,MINTE,MINTE1,MELVAL,KERRE1)
+               iptamo = melval
+             endif
+c             if (.not.drev22) write(6,*) 'AMOR problématique',kerre1
+c               melval = iptrai
+
+            else
+             CALL VARIN2(ICHAM2,MELVA1,COQ,MELEME,SWORK,NOMCO,IMELE,
+     &                  MELGEO,MINTE,MINTE1,MELVAL,KERRE1)
+            endif
+C
+            IF (KERRE1.NE.0) THEN
+              IF (KERRE1.EQ.146) MOTERR(1:8)='VARINU  '
+              SEGDES MCHEL2
+              CALL ERREUR(KERRE1)
+              GOTO 9910
+            ENDIF
+            IELVAL(ICOMP)=MELVAL
+**          SEGDES MELVA1
+            SEGDES MCHEL2
+C
+C---------------------------------------------------------
+C               Composante de type nuage
+C---------------------------------------------------------
+C
+          ELSE IF (CHA1(9:16).EQ.'NUAGE   ') THEN
+            INUBF4 = MELVA1.IELCHE(1,1)
+            MNUAG1 = INUBF4
+            SEGACT MNUAG1
+            NVAR = MNUAG1.NUANOM(/2)
+            IF (NVAR.LE.1) THEN
+              SEGDES MCHEL2,MCHAM2,MNUAG1
+              INTERR(1)=MNUAG1
+              INTERR(2)=2
+              INTERR(3)=2
+              CALL ERREUR(628)
+              GOTO 9910
+            ENDIF
+C     Depouillement du nuage pour connaitre le nombre de dimensions de
+C     la grille
+      NNU=MNUAG1.NUAPOI(/1)
+      NDIM=NNU-1
+      IF (NDIM.LT.1) THEN
+        INTERR(1)=MNUAG1
+        INTERR(2)=2
+        INTERR(3)=1
+        CALL ERREUR(628)
+        RETURN
+      ENDIF
+C
+C     Initialisation d'une liste de mots pour stocker les noms des
+C     dimensions de la grille
+      JGN=4
+      JGM=NNU
+      SEGINI,MLMOT1
+C
+C     Parcours du NUAGE pour verifications noms
+      dnua1 = .false.
+      knuch2 = 0
+      DO I=1,NNU
+C       Nom de la composante I
+        MOT1=MNUAG1.NUANOM(I)
+C       Et rangement du mot dans la liste de mots adhoc
+        MLMOT1.MOTS(I)=MOT1
+        if (mot1.eq.NOMCHE(ICOMP)) dnua1 = .true.
+      ENDDO
+* recherche adéquation nuage / paramètres
+      IF (DNUA1) THEN
+            MCHEL2=IPOI3
+            SEGACT MCHEL2
+            IF (MCHEL2.ICHAML(/1).LT.NSOUS) THEN
+              CALL ERREUR(553)
+              SEGDES MCHEL2
+              GOTO 9910
+            ENDIF
+            IF (IMAMOD.NE.MCHEL2.IMACHE(ISOUS).OR.
+     &          CONMOD.NE.MCHEL2.CONCHE(ISOUS)) THEN
+              do is = 1,mchel2.imache(/1)
+                if (imamod.eq.mchel2.imache(is).and.
+     &               conmod.eq.mchel2.conche(is)) then
+                   icham2 = mchel2.ichaml(is)
+                   goto 259
+                endif
+               enddo
+               CALL ERREUR(472)
+              SEGDES MCHEL2
+              GOTO 9910
+            ELSE
+              ICHAM2=MCHEL2.ICHAML(ISOUS)
+            ENDIF
+C
+ 259        CONTINUE
+C
+            MCHAM2 = ICHAM2
+            SEGACT MCHAM2
+            NCO1 = MCHAM2.IELVAL(/1)
+            INO1 = 0
+            INO3 = 0
+            do ii = 1,nnu
+              knuch3 = 0
+              DO INO = 1,NCO1
+                NOM2 = MCHAM2.NOMCHE(INO)
+       if (nom2.eq.mlmot1.mots(ii).and.
+     &mcham2.typche(ino)(1:8).eq.'REAL*8  ')   knuch3 = knuch3 + 1
+              ENDDO
+          if (knuch3.eq.1) knuch2 = knuch2 + 1
+            enddo
+
+
+      ELSE
+* recopie
+              TYPCHE(ICOMP)='POINTEURNUAGE   '
+              N1PTEL=0
+              N1EL  =0
+              N2PTEL=1
+              N2EL  =1
+              SEGINI MELVAL
+              IELVAL(ICOMP)=MELVAL
+              IELCHE(N2PTEL,N2EL)=MELVA1.IELCHE(1,1)
+**            SEGDES MELVAL,MELVA1
+              SEGSUP MLMOT1
+              GOTO 70
+
+      ENDIF
+
+C interpolation grille reprend fonctionnalité de IPOL / z = f(x,y)
+           if(knuch2.ge.2) then
+            TYPCHE(ICOMP)='REAL*8'
+            N2EL  = MELVA1.IELCHE(/2)
+            N2PTEL = MELVA1.IELCHE(/1)
+C
+C  test de compatibilite des nombres d'elements
+C
+            IF (N2EL.NE.1.OR.N2PTEL.NE.1) THEN
+              MOTERR(1:8)='VARINU  '
+              CALL ERREUR(146)
+              GOTO 9910
+            ENDIF
+C
+
+            MCHAM2 = ICHAM2
+            SEGACT MCHAM2
+            NCO1 = MCHAM2.IELVAL(/1)
+            INUBF4  = MELVA1.IELCHE(1,1)
+            MNUAG1 = INUBF4
+            SEGACT MNUAG1
+            NVAR = MNUAG1.NUANOM(/2)
+            IF (NVAR.LE.1) THEN
+              SEGDES MCHEL2,MCHAM2,MNUAG1
+              INTERR(1)=MNUAG1
+              INTERR(2)=2
+              INTERR(3)=2
+              CALL ERREUR(628)
+              GOTO 9910
+            ENDIF
+C
+            INO1 = 0
+            INO3 = 0
+            DO INO = 1,NCO1
+                NOM2 = MCHAM2.NOMCHE(INO)
+              do i = 1,nnu
+                if (nom2.eq.mlmot1.mots(i)) then
+                  if (ino1.eq.0) ino1 = ino
+                  if (ino1.ne.0) ino3 = ino
+                endif
+              enddo
+            ENDDO
+            IF (INO1.NE.0.AND.INO3.NE.0) THEN
+                MELVA3=MCHAM2.IELVAL(INO1)
+                MELVA4=MCHAM2.IELVAL(INO3)
+                SEGACT MELVA3,MELVA4
+C
+            ELSE
+             SEGDES MCHEL2,MCHAM2,MNUAG1
+             CALL ERREUR(665)
+             GOTO 9910
+            ENDIF
+C
+C     Depouillement du nuage pour connaitre le nombre de dimensions de
+C     la grille
+      NNU=MNUAG1.NUAPOI(/1)
+      NDIM=NNU-1
+      IF (NDIM.LT.1) THEN
+        INTERR(1)=MNUAG1
+        INTERR(2)=2
+        INTERR(3)=1
+        CALL ERREUR(628)
+        RETURN
+      ENDIF
+C
+C     Initialisation d'une liste de mots pour stocker les noms des
+C     dimensions de la grille
+      JGN=4
+      JGM=NNU
+*      SEGINI,MLMOT1
+C
+C     Iniilisation d'une liste d'entiers pour stocker les pointeurs vers
+C     les LISTREEL definissant la grille de valeur de la fonction F
+      JG=NNU
+      SEGINI,MLENT1
+C
+C     Parcours du NUAGE pour verifications
+      NVAL=1
+      DO I=1,NNU
+C       Nom de la composante I
+        MOT1=MNUAG1.NUANOM(I)
+C       Et rangement du mot dans la liste de mots adhoc
+*        MLMOT1.MOTS(I)=MOT1
+C       Les composantes doivent abriter 1 seul objet de type LISTREEL
+        MOT2=MNUAG1.NUATYP(I)
+        IF (MOT2.NE.'LISTREEL') THEN
+          CALL ERREUR(941)
+          RETURN
+        ENDIF
+        NUAVI1=MNUAG1.NUAPOI(I)
+        SEGACT,NUAVI1
+        NPO=NUAVI1.NUAINT(/1)
+        IF (NPO.NE.1) THEN
+          CALL ERREUR(941)
+          RETURN
+        ENDIF
+        MLREE1=NUAVI1.NUAINT(1)
+        SEGDES,NUAVI1
+C       Verification de la taille de la derniere liste
+        SEGACT,MLREE1
+        IF (I.EQ.NNU) THEN
+          NTEST=MLREE1.PROG(/1)
+          IF (NTEST.NE.NVAL) THEN
+            CALL ERREUR(21)
+            RETURN
+          ENDIF
+        ELSE
+          NVAL=NVAL*(MLREE1.PROG(/1))
+        ENDIF
+C       Et rangement du pointeur dans la liste d'entiers adhoc
+        MLENT1.LECT(I)=MLREE1
+      ENDDO
+      SEGDES,MNUAG1
+
+C         Liste de correspondance entre les composantes du MCHAML et les
+C         noms des dimensions de la grille
+C         MLENT2.LECT(i) = numero de la composante de MCHAM1
+C                          correspondante a la dimension i de la grille
+          JG=NNU
+          SEGINI,MLENT2
+          N1PTEL=0
+          N1EL=0
+          N2PTEL=0
+          N2EL=0
+          DO K=1,NDIM
+            MOT2=MLMOT1.MOTS(K)
+            JVAL1=0
+            DO J=1,MCHAM2.IELVAL(/1)
+              MOT1=MCHAM2.NOMCHE(J)
+              IF (MOT1.EQ.MOT2) THEN
+                JVAL1=K
+                GOTO 2
+              ENDIF
+            ENDDO
+C           Cas ou une composante du MCHAML ne se retrouve pas dans les
+C           noms des dimensions de la grille
+ 2          IF (JVAL1.EQ.0) THEN
+              CALL ERREUR(665)
+              RETURN
+            ENDIF
+            MLENT2.LECT(JVAL1)=J
+C           Verification que le champ contient des flottants,
+            IF (MCHAM2.TYPCHE(J).NE.'REAL*8') THEN
+              MOTERR(1:16)  = MCHAM2.TYPCHE(J)
+              MOTERR(17:20) = MOT1
+              MOTERR(21:29) = 'argument'
+              CALL ERREUR(552)
+              RETURN
+            ENDIF
+C           Recherche des tailles MAX des MELVAL de chaque composante de
+C           cette sous zone (pour preparer le champ de sortie)
+            MELVA1=MCHAM2.IELVAL(J)
+            SEGACT,MELVA1
+            N1PTEL=MAX(N1PTEL,MELVA1.VELCHE(/1))
+            N1EL=MAX(N1EL,MELVA1.VELCHE(/2))
+          ENDDO
+C         Initialisation du tableau de valeurs (MELVA2) du sous champ
+C         de sortie
+          SEGINI,MELVA2
+
+C         Preparation pour le calcul en parallele
+C         Regalge fait sur PC40 pour determiner le nombre de NOEUDS optimum
+C         par thread
+          IOPTIM = 100
+          N1 = N1EL / IOPTIM
+
+          ITH = 0
+          IF (NBESC .NE. 0) ITH=oothrd
+C         CB215821 : DESACTIVE LA PARALLELISATION PTHREAD LORSQUE ON EST
+C                    DEJA DANS LES ASSISTANTS
+          IF ((N1.LE.1) .OR. (NBTHRS .EQ. 1) .OR. (ITH .GT. 0)) THEN
+            NBTHR = 1
+            BTHRD = .FALSE.
+          ELSE
+            BTHRD = .TRUE.
+            NBTHR = MIN(N1, NBTHRS)
+            CALL THREADII
+          ENDIF
+
+          SEGINI,SPARAL
+          DO ITH=1,NBTHR
+            SEGINI,SXX
+            SPARAL.IXX(ITH) = SXX
+          ENDDO
+
+          SPARAL.NNN    = 0
+          SPARAL.ML1    = MLENT1
+          SPARAL.ML2    = MLENT2
+          SPARAL.MPV1   = 0
+          SPARAL.MPV2   = 0
+          SPARAL.MCH1   = MCHAM1
+          SPARAL.MEL2   = MELVA2
+          SPARAL.N1ELP  = N1EL
+          SPARAL.N1PELP = N1PTEL
+
+C         Lancement des Threads
+          IF (BTHRD) THEN
+            IPARAL=SPARAL
+            DO ITH=2,NBTHR
+              CALL THREADID(ITH,IPMULI)
+            ENDDO
+            CALL IPMULI(1)
+
+            DO ITH=2,NBTHR
+              CALL THREADIF(ITH)
+            ENDDO
+
+            CALL THREADIS
+          ELSE
+            CALL IPMULI(1)
+          ENDIF
+C         On le range  dans le MCHAML global
+          IELVAL(ICOMP)=MELVA2
+**        SEGDES MELVA3,MELVA4,MELVA2
+          SEGSUP MLMOT1,MLENT1,MLENT2
+
+          DO ITH=1,NBTHR
+            SXX = SPARAL.IXX(ITH)
+            SEGSUP,SXX
+          ENDDO
+          SEGSUP,SPARAL
+*
+             GOTO 70
+           endif
+
+* autres cas
+            TYPCHE(ICOMP)='POINTEUREVOLUTIO'
+            MCHEL2=IPOI3
+            SEGACT MCHEL2
+            NSOUS2=MCHEL2.ICHAML(/1)
+            IF (NSOUS2.GT.NSOUS1.OR.NSOUS2.LT.NSOUS) THEN
+              CALL ERREUR(553)
+              SEGDES MCHEL2
+              GOTO 9910
+            ENDIF
+C  Mise en concordance des pointeurs de maillage
+            DO 150 IP=1,NSOUS
+              IF (MCHEL2.IMACHE(IP).EQ.MELEME.AND.
+     &            MCHEL2.CONCHE(IP).EQ.CONCHE(ISOUS)) GOTO 160
+ 150        CONTINUE
+            CALL ERREUR(472)
+            SEGDES MCHEL2
+            GOTO 9930
+ 160        CONTINUE
+            MCHAM2=MCHEL2.ICHAML(IP)
+            SEGACT MCHAM2
+C
+            NCO1 = MCHAM2.IELVAL(/1)
+            INU  = MELVA1.IELCHE(1,1)
+            MNUAGE = INU
+            SEGACT MNUAGE
+            NVAR = NUANOM(/2)
+            IF (NVAR.LE.1) THEN
+              SEGDES MCHEL2,MCHAM2,MNUAGE
+              INTERR(1)=MNUAGE
+              INTERR(2)=2
+              INTERR(3)=2
+              CALL ERREUR(628)
+              GOTO 9910
+            ENDIF
+C
+            NOM4 = '        '
+            NOM5 = '        '
+            IA1  = 0
+            IA2  = 0
+            IVAR = 0
+            DO 170 INO2=1,NVAR
+              TYP3 = NUATYP(INO2)
+              IF (TYP3.EQ.'FLOTTANT') THEN
+                IF (IVAR.EQ.0) THEN
+                  NOM4 = NUANOM(INO2)
+                  IA1  = INO2
+                ENDIF
+                IF (IVAR.EQ.1) THEN
+                  NOM5 = NUANOM(INO2)
+                  IA2  = INO2
+                ENDIF
+                IVAR = IVAR + 1
+              ENDIF
+ 170        CONTINUE
+            IF (IVAR.LT.1) THEN
+              SEGDES MCHEL2,MCHAM2,MNUAGE
+              INTERR(1)=MNUAGE
+              MOTERR(1:8)='FLOTTANT'
+              CALL ERREUR(629)
+              GOTO 9910
+            ENDIF
+            IF (IVAR.GT.2) THEN
+              SEGDES MCHEL2,MCHAM2,MNUAGE
+              INTERR(1)=MNUAGE
+              INTERR(2)=2
+              CALL ERREUR(938)
+              GOTO 9910
+            ENDIF
+            IF (NOM4.EQ.NOM5) THEN
+              SEGDES MCHEL2,MCHAM2,MNUAGE
+              INTERR(1)=MNUAGE
+              MOTERR(1:8)='FLOTTANT'
+              CALL ERREUR(939)
+              GOTO 9910
+            ENDIF
+C
+            DO 180 IBBON=1,NVAR
+              IF (NUATYP(IBBON).EQ.'EVOLUTIO') GOTO 190
+ 180        CONTINUE
+            SEGDES MCHEL2,MCHAM2,MNUAGE
+            INTERR(1)=MNUAGE
+            MOTERR(1:8)='EVOLUTIO'
+            CALL ERREUR(629)
+            GOTO 9910
+ 190        CONTINUE
+C
+C  Cas des coques dont les caracteristiques dependent de T
+C
+            IF (COQ.AND.
+     &        ((NOM4.EQ.NOMTT).OR.(NOM5.EQ.NOMTT))) THEN
+              INO2 = 0
+              INO1 = 0
+              INO3 = 0
+              DO 200 INO = 1,NCO1
+                NOM2 = MCHAM2.NOMCHE(INO)
+                IF (NOM2.EQ.NOMTT) INO2=INO
+                IF (NOM2.EQ.'TINF    ') INO1=INO
+                IF (NOM2.EQ.'TSUP    ') INO3=INO
+ 200          CONTINUE
+              IF (INO1.NE.0.AND.INO2.NE.0.AND.INO3.NE.0) THEN
+                MELVA3=MCHAM2.IELVAL(INO1)
+                MELVA4=MCHAM2.IELVAL(INO3)
+                SEGACT MELVA3,MELVA4
+C
+                NBP2=MELVA4.VELCHE(/1)
+                NBP1=MELVA3.VELCHE(/1)
+                NEL1=MELVA3.VELCHE(/2)
+                NEL2=MELVA4.VELCHE(/2)
+                N1PTEL=MAX(NBP1,NBP2)
+                N1EL  =MAX(NEL1,NEL2)
+                N2PTEL=0
+                N2EL  =0
+                SEGINI MELVA5
+                DO 210 IGAU=1,N1PTEL
+                  IGMN1=MIN(IGAU,MELVA3.VELCHE(/1))
+                  IGMN2=MIN(IGAU,MELVA4.VELCHE(/1))
+                  DO 220 IB=1,N1EL
+                    IBMN1=MIN(IB  ,MELVA3.VELCHE(/2))
+                    IBMN2=MIN(IB  ,MELVA4.VELCHE(/2))
+                    MELVA5.VELCHE(IGAU,IB)=MELVA3.VELCHE(IGMN1,IBMN1)+
+     &                                     MELVA4.VELCHE(IGMN2,IBMN2)
+ 220              CONTINUE
+ 210            CONTINUE
+C
+**              SEGDES MELVA3,MELVA4
+                MELVA3=MCHAM2.IELVAL(INO2)
+                SEGACT MELVA3
+C
+                N1PTEL = MELVA3.VELCHE(/1)
+                N1EL = MELVA3.VELCHE(/2)
+                N2PTEL = 0
+                N2EL = 0
+                SEGINI MELVA4
+                DO 230 II = 1,N1PTEL
+                  DO 240 III = 1,N1EL
+                    MELVA4.VELCHE(II,III) = 4.D0*MELVA3.VELCHE(II,III)
+ 240              CONTINUE
+ 230            CONTINUE
+**              SEGDES MELVA3
+C
+                NBP2=MELVA4.VELCHE(/1)
+                NBP1=MELVA5.VELCHE(/1)
+                NEL1=MELVA5.VELCHE(/2)
+                NEL2=MELVA4.VELCHE(/2)
+                N1PTEL=MAX(NBP1,NBP2)
+                N1EL  =MAX(NEL1,NEL2)
+                N2PTEL=0
+                N2EL  =0
+                SEGINI MELVA6
+                DO 250 IGAU=1,N1PTEL
+                  IGMN1=MIN(IGAU,MELVA5.VELCHE(/1))
+                  IGMN2=MIN(IGAU,MELVA4.VELCHE(/1))
+                  DO 260 IB=1,N1EL
+                    IBMN1=MIN(IB  ,MELVA5.VELCHE(/2))
+                    IBMN2=MIN(IB  ,MELVA4.VELCHE(/2))
+                    MELVA6.VELCHE(IGAU,IB)=MELVA5.VELCHE(IGMN1,IBMN1)+
+     &                                     MELVA4.VELCHE(IGMN2,IBMN2)
+ 260              CONTINUE
+ 250            CONTINUE
+                SEGSUP MELVA4,MELVA5
+C
+                N1PTEL = MELVA6.VELCHE(/1)
+                N1EL = MELVA6.VELCHE(/2)
+                N2PTEL = 0
+                N2EL = 0
+                IF (NOM4.EQ.NOMTT) THEN
+                  SEGINI MELVA2
+                  DO 270 II = 1,N1PTEL
+                    DO 280 III = 1,N1EL
+                      MELVA2.VELCHE(II,III)=
+     &                  1.D0/6.D0*MELVA6.VELCHE(II,III)
+ 280                CONTINUE
+ 270              CONTINUE
+                  SEGSUP MELVA6
+                  GOTO 290
+                ENDIF
+                IF (NOM5.EQ.NOMTT) THEN
+                  SEGINI MELVA3
+                  DO 300 II = 1,N1PTEL
+                    DO 310 III = 1,N1EL
+                      MELVA3.VELCHE(II,III)=
+     &                  1.D0/6.D0*MELVA6.VELCHE(II,III)
+ 310                CONTINUE
+ 300              CONTINUE
+                  SEGSUP MELVA6
+                  GOTO 290
+                ENDIF
+              ELSEIF (INO2.NE.0) THEN
+                IF (NOM4.EQ.NOMTT) THEN
+                  MELVA2=MCHAM2.IELVAL(INO2)
+                  SEGACT MELVA2
+                  GOTO 290
+                ENDIF
+                IF ((IVAR.EQ.2).AND.(NOM5.EQ.NOMTT)) THEN
+                  MELVA3=MCHAM2.IELVAL(INO2)
+                  SEGACT MELVA3
+                  GOTO 290
+                ENDIF
+              ENDIF
+            ELSE
+              ITRO = 0
+              DO 320 INO = 1,NCO1
+                NOM2 = MCHAM2.NOMCHE(INO)
+                IF (IVAR.EQ.1.AND.NOM4.EQ.NOM2) THEN
+                  MELVA2=MCHAM2.IELVAL(INO)
+                  SEGACT MELVA2
+                  GOTO 290
+                ENDIF
+                IF (IVAR.EQ.2) THEN
+                  IF (NOM4.EQ.NOM2) THEN
+                    MELVA2=MCHAM2.IELVAL(INO)
+                    SEGACT MELVA2
+                    ITRO = ITRO + 1
+                  ENDIF
+                  IF (NOM5.EQ.NOM2) THEN
+                    MELVA3=MCHAM2.IELVAL(INO)
+                    SEGACT MELVA3
+                    ITRO = ITRO + 1
+                  ENDIF
+                  IF (ITRO.EQ.2) GOTO 290
+                ENDIF
+ 320          CONTINUE
+            ENDIF
+C
+            SEGDES MCHEL2,MCHAM2,MNUAGE
+            CALL ERREUR(665)
+            GOTO 9910
+C
+ 290        CONTINUE
+
+            N1PTE1=MELVA2.VELCHE(/1)
+            N1E1  =MELVA2.VELCHE(/2)
+            IF (IVAR.EQ.2) THEN
+              N1PTE2=MELVA3.VELCHE(/1)
+              N1E2  =MELVA3.VELCHE(/2)
+            ENDIF
+C  On teste la taille du MCHAML_FLOTTANT
+            IF (N1E1.NE.NEL0.AND.N1E1.NE.1.AND.NEL0.NE.1) THEN
+              SEGDES MCHEL2,MCHAM2
+**            SEGDES MELVA2
+**            IF (IVAR.EQ.2) SEGDES MELVA3
+              MOTERR(1:8)='VARINU  '
+              CALL ERREUR(146)
+              GOTO 9910
+            ENDIF
+            IF (IVAR.EQ.2.AND.
+     &          N1E2.NE.NEL0.AND.N1E2.NE.1.AND.NEL0.NE.1) THEN
+              SEGDES MCHEL2,MCHAM2
+**            SEGDES MELVA2,MELVA3
+              MOTERR(1:8)='VARINU  '
+              CALL ERREUR(146)
+              GOTO 9910
+            ENDIF
+            IF (N1PTE1.NE.1.AND.N1PTE1.NE.NBPGAU) THEN
+              SEGDES MCHEL2,MCHAM2
+**            SEGDES MELVA2,MELVA3
+**            IF (IVAR.EQ.2) SEGDES MELVA3
+              MOTERR(1:8)='VARINU  '
+              CALL ERREUR(146)
+              GOTO 9910
+            ENDIF
+            IF (IVAR.EQ.2.AND.
+     &          N1PTE2.NE.1.AND.N1PTE2.NE.NBPGAU) THEN
+              SEGDES MCHEL2,MCHAM2
+**            SEGDES MELVA2,MELVA3
+              MOTERR(1:8)='VARINU  '
+              CALL ERREUR(146)
+              GOTO 9910
+            ENDIF
+C
+            NUAVFL=NUAPOI(IA1)
+            NUAVIN=NUAPOI(IBBON)
+            SEGACT NUAVFL
+            SEGACT NUAVIN
+            NBC1=NUAFLO(/1)
+            NBC2=NUAINT(/1)
+            IF (IVAR.EQ.2) THEN
+              NUAVF1=NUAPOI(IA2)
+              SEGACT NUAVF1
+              NBC3=NUAVF1.NUAFLO(/1)
+              IF (NBC1.NE.NBC2.OR.NBC2.NE.NBC3) THEN
+                SEGDES MCHEL2,MCHAM2
+**              SEGDES MELVA2,MELVA3,MNUAGE,NUAVFL,NUAVF1,NUAVIN
+                CALL ERREUR(625)
+                GOTO 9910
+              ENDIF
+              IF (NBC1.LE.1) THEN
+                SEGDES MCHEL2,MCHAM2
+**              SEGDES MELVA2,MELVA3,MNUAGE,NUAVFL,NUAVF1,NUAVIN
+                INTERR(1)=MNUAGE
+                INTERR(2)=2
+                INTERR(3)=2
+                CALL ERREUR(628)
+                GOTO 9910
+              ENDIF
+            ELSE
+              IF (NBC1.NE.NBC2) THEN
+                SEGDES MCHEL2,MCHAM2
+**              SEGDES MELVA2,MNUAGE,NUAVFL,NUAVIN
+                CALL ERREUR(625)
+                GOTO 9910
+              ENDIF
+              IF (NBC1.LE.1) THEN
+                SEGDES MCHEL2,MCHAM2
+**              SEGDES MELVA2,MNUAGE,NUAVFL,NUAVIN
+                INTERR(1)=MNUAGE
+                INTERR(2)=2
+                INTERR(3)=2
+                CALL ERREUR(628)
+                GOTO 9910
+              ENDIF
+            ENDIF
+C  En cas de MCHAML de type caracteristiques on verifie
+C  la coherence entre les modules d'young et la pente
+C  des courbes de traction
+            IF (IYOUN.NE.0.AND.NOMCHE(ICOMP).EQ.'TRAC    ') THEN
+              CALL VERINU(IPOI1,ISOUS,IYOUN,ICOMP)
+              IF (IERR.NE.0) THEN
+                SEGDES MCHEL2,MCHAM2
+**              SEGDES MELVA2,MNUAGE,NUAVFL,NUAVIN
+**              IF (IVAR.EQ.2) SEGDES MELVA3
+                GOTO 9910
+              ENDIF
+            ENDIF
+C  La valeur maxi. et mini. de l'objet flottant défini dans NUAGE
+            IF (IVAR.EQ.1) THEN
+              XMAX1=-1.D35
+              XMIN1= 1.D35
+              DO 330 IC=1,NBC1
+                IF (NUAFLO(IC).GT.XMAX1) THEN
+                  XMAX1=NUAFLO(IC)
+                  IMAX1=IC
+                ENDIF
+                IF (NUAFLO(IC).LT.XMIN1) THEN
+                  XMIN1=NUAFLO(IC)
+                  IMIN1=IC
+                ENDIF
+ 330          CONTINUE
+            ENDIF
+            IF (IVAR.EQ.2) THEN
+              XMAX1=-1.D35
+              XMIN1= 1.D35
+              XMAX3=-1.D35
+              XMIN3= 1.D35
+              DO 340 IC=1,NBC1
+                IF (NUAFLO(IC).GT.XMAX1) XMAX1=NUAFLO(IC)
+                IF (NUAFLO(IC).LT.XMIN1) XMIN1=NUAFLO(IC)
+                IF (NUAVF1.NUAFLO(IC).GT.XMAX3) XMAX3=NUAVF1.NUAFLO(IC)
+                IF (NUAVF1.NUAFLO(IC).LT.XMIN3) XMIN3=NUAVF1.NUAFLO(IC)
+ 340          CONTINUE
+              XZOB1  = 0.5D0*(XMIN1+XMAX1)
+              XZOB3  = 0.5D0*(XMIN3+XMAX3)
+              DO 350 IC=1,NBC1
+                TEST1 = (NUAFLO(IC) - XMIN1) / XZOB1
+                TEST3 = (NUAVF1.NUAFLO(IC) - XMIN3) / XZOB3
+                IF (ABS(TEST1).LT.1.D-10.AND.ABS(TEST3).LT.1.D-10)
+     &            IMI1MI3=IC
+                TEST1 = (NUAFLO(IC) - XMIN1) / XZOB1
+                TEST3 = (NUAVF1.NUAFLO(IC) - XMAX3) / XZOB3
+                IF (ABS(TEST1).LT.1.D-10.AND.ABS(TEST3).LT.1.D-10)
+     &            IMI1MA3=IC
+                TEST1 = (NUAFLO(IC) - XMAX1) / XZOB1
+                TEST3 = (NUAVF1.NUAFLO(IC) - XMIN3) / XZOB3
+                IF (ABS(TEST1).LT.1.D-10.AND.ABS(TEST3).LT.1.D-10)
+     &            IMA1MI3=IC
+                TEST1 = (NUAFLO(IC) - XMAX1) / XZOB1
+                TEST3 = (NUAVF1.NUAFLO(IC) - XMAX3) / XZOB3
+                IF (ABS(TEST1).LT.1.D-10.AND.ABS(TEST3).LT.1.D-10)
+     &            IMA1MA3=IC
+ 350          CONTINUE
+C
+C Test : nuage sous forme GRILLE
+C
+              NFLO = NBC1
+              SEGINI IAMO2
+C
+              NFLO = NBC1
+              SEGINI IAMO2
+              IFLO1 = 1
+              IFLO2(IFLO1) = 1
+              FLO1(IFLO1) = NUAFLO(1)
+              FLO2(IFLO1,IFLO2(IFLO1)) = NUAVF1.NUAFLO(1)
+              DO 360 IC1=2,NBC1
+                DO 370 IFL1=1,IFLO1
+                  TEST1 = (NUAFLO(IC1) - FLO1(IFL1)) / XZOB1
+                  IF (ABS(TEST1).LT.1.D-10) GOTO 380
+ 370            CONTINUE
+                IFLO1 = IFLO1 + 1
+                FLO1(IFLO1)  = NUAFLO(IC1)
+                IFLO2(IFLO1) = 1
+                FLO2(IFLO1,IFLO2(IFLO1)) = NUAVF1.NUAFLO(IC1)
+                GOTO 360
+ 380            CONTINUE
+                DO 390 IFL2=1,IFLO2(IFL1)
+                  TEST3 =
+     &              (NUAVF1.NUAFLO(IC1) - FLO2(IFL1,IFL2)) / XZOB3
+                  IF (ABS(TEST3).LT.1.D-10) THEN
+                    SEGDES MCHEL2,MCHAM2
+**                  SEGDES MELVA2,MELVA3,MNUAGE
+                    SEGDES NUAVFL,NUAVF1,NUAVIN
+                    SEGSUP IAMO2
+                    INTERR(1)=MNUAGE
+                    CALL ERREUR(940)
+                    GOTO 9900
+                  ENDIF
+ 390            CONTINUE
+                IFLO2(IFL1) = IFLO2(IFL1) + 1
+                FLO2(IFL1,IFLO2(IFL1)) = NUAVF1.NUAFLO(IC1)
+ 360          CONTINUE
+C
+              DO 400 IFL1=2,IFLO1
+                IF (IFLO2(IFL1).NE.IFLO2(1)) THEN
+                  SEGDES MCHEL2,MCHAM2
+**                SEGDES MELVA2,MELVA3,MNUAGE
+                  SEGDES NUAVFL,NUAVF1,NUAVIN
+                  SEGSUP IAMO2
+                  INTERR(1)=MNUAGE
+                  CALL ERREUR(941)
+                  GOTO 9900
+                ENDIF
+                DO 410 IFL2=1,IFLO2(IFL1)
+                  DO 420 IFL=1,IFLO2(1)
+                    TEST3 = (FLO2(IFL1,IFL2) - FLO2(1,IFL)) / XZOB3
+                    IF (ABS(TEST3).LT.1.D-10) GOTO 410
+ 420              CONTINUE
+                  SEGDES MCHEL2,MCHAM2
+**                SEGDES MELVA2,MELVA3,MNUAGE
+                  SEGDES NUAVFL,NUAVF1,NUAVIN
+                  SEGSUP IAMO2
+                  INTERR(1)=MNUAGE
+                  CALL ERREUR(941)
+                  GOTO 9900
+ 410            CONTINUE
+ 400          CONTINUE
+C
+              SEGSUP IAMO2
+            ENDIF
+C
+            KFLOT = .TRUE.
+            IF (.NOT.KREAL) THEN
+              NOMID=IPNOMC
+              SEGACT NOMID
+              NOTYPE=MOTYPE
+              SEGACT NOTYPE
+              DO 430 IOBL=1,NBROBL
+                IF (LESOBL(IOBL).EQ.NOMCO) THEN
+                  TYPV=TYPE(IOBL)
+                  IF (TYPV(1:6).NE.'REAL*8') KFLOT = .FALSE.
+                  GOTO 440
+                ENDIF
+ 430          CONTINUE
+              DO 450 IFAC=1,NBRFAC
+                IF (LESFAC(IFAC).EQ.NOMCO) THEN
+                  TYPV=TYPE(NBROBL+IFAC)
+                  IF (TYPV(1:6).NE.'REAL*8') KFLOT = .FALSE.
+                  GOTO 440
+                ENDIF
+ 450          CONTINUE
+ 440          CONTINUE
+              SEGDES NOMID
+              SEGDES NOTYPE
+            ENDIF
+C
+            IF (IVAR.EQ.1) THEN
+C
+C Cas du nuage FLOTTANT-EVOLUTION
+C
+C La taille du nouvau MCHAML_EVOLUTION
+              N1PTEL = 0
+              N1EL = 0
+              N2EL = N1E1
+              IF (N1PTE1.EQ.1) THEN
+                N2PTEL=1
+              ELSE
+                N2PTEL=NBPGAU
+              ENDIF
+              SEGINI MELVAL
+              IELVAL(ICOMP)=MELVAL
+C
+              DO 460 IEL=1,N2EL
+                DO 470 IGAU=1,N2PTEL
+                  VA1=MELVA2.VELCHE(IGAU,IEL)
+C  Si la valeur VA1 est tombée pile à un flottant défini dans
+C  nuage, on prend la courbe correspondant au flottant.
+                  DO 480 IN=1,NBC1-1
+                    IF ((NUAFLO(IN+1)-NUAFLO(IN)).EQ.0.D0) THEN
+                      XZOB=0.5D0*(XMIN1+XMAX1)
+                      TEST1 = (VA1-NUAFLO(IN))/XZOB
+                    ELSE
+                      TEST1 = (VA1-NUAFLO(IN))/
+     &                       (NUAFLO(IN+1)-NUAFLO(IN))
+                    ENDIF
+                    IF (ABS(TEST1).LT.1.D-10) THEN
+                      IEV3=NUAINT(IN)
+                      GOTO 490
+                    ENDIF
+ 480              CONTINUE
+C  Si la valeur VA1 est supérieure au flottant maxi.,
+C  on prend la courbe correspondant au flottant maxi..
+                  IF (VA1.GE.NUAFLO(IMAX1)) THEN
+                    IEV3=NUAINT(IMAX1)
+C  Si la valeur VA1 est inférieure au flottant mini.,
+C  on prend la courbe correspondant au flottant mini..
+                  ELSEIF (VA1.LE.NUAFLO(IMIN1)) THEN
+                    IEV3=NUAINT(IMIN1)
+                  ELSE
+                    VMAX1=-1.D35
+                    VMIN1= 1.D35
+                    DO 500 IC=1,NBC1
+                      IF (VA1.GT.NUAFLO(IC).AND.NUAFLO(IC).GT.VMAX1)
+     &                 THEN
+                        VMAX1=NUAFLO(IC)
+                        IGA=IC
+                      ENDIF
+                      IF (VA1.LT.NUAFLO(IC).AND.NUAFLO(IC).LT.VMIN1)
+     &                 THEN
+                        VMIN1=NUAFLO(IC)
+                        IDR=IC
+                      ENDIF
+ 500                CONTINUE
+                    XX1=(NUAFLO(IDR)-VA1)/(NUAFLO(IDR)-NUAFLO(IGA))
+                    XX2=(VA1-NUAFLO(IGA))/(NUAFLO(IDR)-NUAFLO(IGA))
+                    IEV1=NUAINT(IGA)
+                    IEV2=NUAINT(IDR)
+                    IF (IEV1.EQ.IEV2) THEN
+                      IEV3=IEV1
+                    ELSE
+                      CALL EVOLIN(IEV1,XX1,IEV2,XX2,IEV3)
+                      IF (IEV3.EQ.0.OR.IERR.NE.0) THEN
+                        SEGDES MCHEL2,MCHAM2
+**                      SEGDES MELVA2,MNUAGE,NUAVFL,NUAVIN
+                        GOTO 9900
+                      ENDIF
+C  En cas de MCHAML de type caracteristiques on modifie
+C  la courbe de traction issue de EVOLIN pour que la pente
+C  soit interpolée linéairement
+                      IF (IYOUN.NE.0.AND.NOMCHE(ICOMP).EQ.'TRAC    ')
+     &                 THEN
+                        CALL MODICO(IPOI1,IEV3,ISOUS,ICOMP,IGA,IDR,
+     &                              IEV1,IEV2,VA1,1,IEV4)
+                        IF (IEV4.EQ.0.OR.IERR.NE.0) THEN
+                          SEGDES MCHEL2,MCHAM2
+**                        SEGDES MELVA2,MNUAGE,NUAVFL,NUAVIN
+                          GOTO 9900
+                        ENDIF
+                        IEV3=IEV4
+                      ENDIF
+                    ENDIF
+                  ENDIF
+ 490              CONTINUE
+                  IELCHE(IGAU,IEL)=IEV3
+ 470            CONTINUE
+ 460          CONTINUE
+C
+              SEGDES NUAVFL,NUAVIN
+**            SEGDES MELVA1,MELVA2
+C
+              IF (KFLOT) THEN
+                NCO1 = MCHAM2.IELVAL(/1)
+                IEVOL = IELCHE(1,1)
+                MEVOLL = IEVOL
+                SEGACT MEVOLL
+                KEVOLL = IEVOLL(1)
+                SEGACT KEVOLL
+                NOM4 = NOMEVX(1:8)
+C                SEGDES KEVOLL
+C                SEGDES MEVOLL
+                NCO1 = MCHAM2.IELVAL(/1)
+                DO 510 INO = 1,NCO1
+                  NOM2 = MCHAM2.NOMCHE(INO)
+                  IF (NOM2.EQ.NOM4) GO TO 520
+ 510            CONTINUE
+                KFLOT=.FALSE.
+ 520            CONTINUE
+              ENDIF
+C
+              IF (KFLOT) THEN
+                TYPCHE(ICOMP)='REAL*8          '
+                MELVA6=MELVAL
+                ICHAM2=MCHAM2
+                CALL VARIN2(ICHAM2,MELVA6,COQ,MELEME,SWORK,NOMCO,IMELE,
+     &                      MELGEO,MINTE,MINTE1,MELVAL,KERRE1)
+                SEGSUP MELVA6
+              ENDIF
+C
+              IELVAL(ICOMP)=MELVAL
+              SEGDES MCHEL2
+**            IF (.NOT. KFLOT) SEGDES MCHAM2,MELVAL
+C
+            ENDIF
+C
+            IF (IVAR.EQ.2) THEN
+C
+C Cas du nuage FLOTTANT-FLOTTANT-EVOLUTION
+C
+C La taille du nouvau MCHAML_EVOLUTION
+              N1PTEL = 0
+              N1EL = 0
+              N2EL = N1E1
+              IF (N1E1.EQ.1.AND.N1E2.EQ.1) THEN
+                N2EL=1
+              ELSE
+                N2EL=NEL0
+              ENDIF
+              IF (N1PTE1.EQ.1.AND.N1PTE2.EQ.1) THEN
+                N2PTEL=1
+              ELSE
+                N2PTEL=NBPGAU
+              ENDIF
+              SEGINI MELVAL
+              IELVAL(ICOMP)=MELVAL
+C
+              DO 530 IEL=1,N2EL
+                DO 540 IGAU=1,N2PTEL
+                  IEL1  = MIN(IEL,N1E1)
+                  IGAU1 = MIN(IGAU,N1PTE1)
+                  VA1=MELVA2.VELCHE(IGAU1,IEL1)
+                  IEL2  = MIN(IEL,N1E2)
+                  IGAU2 = MIN(IGAU,N1PTE2)
+                  VA2=MELVA3.VELCHE(IGAU2,IEL2)
+C  Si les valeurs VA1 et VA2 sont tombées pile à un flottant défini dans
+C  nuage, on prend la courbe correspondant au flottant.
+                  VMAX1=-1.D35
+                  VMIN1=1.D35
+                  VMAX2=-1.D35
+                  VMIN2=1.D35
+                  IDR1=0
+                  IGA1=0
+                  IDR2=0
+                  IGA2=0
+                  DO 550 IN=1,NBC1-1
+                    IF ((NUAFLO(IN+1)-NUAFLO(IN)).EQ.0.D0) THEN
+                      XZOB=0.5D0*(XMIN1+XMAX1)
+                      TEST1 = (VA1-NUAFLO(IN))/XZOB
+                      TMAX1 = (NUAFLO(IN)-NUAFLO(IMA1MA3))/XZOB
+                      TMIN1 = (NUAFLO(IN)-NUAFLO(IMI1MI3))/XZOB
+                    ELSE
+                      TEST1 = (VA1-NUAFLO(IN))/
+     &                       (NUAFLO(IN+1)-NUAFLO(IN))
+                      TMAX1 = (NUAFLO(IN)-NUAFLO(IMA1MA3))/
+     &                       (NUAFLO(IN+1)-NUAFLO(IN))
+                      TMIN1 = (NUAFLO(IN)-NUAFLO(IMI1MI3))/
+     &                       (NUAFLO(IN+1)-NUAFLO(IN))
+                    ENDIF
+                    IF ((NUAVF1.NUAFLO(IN+1)-NUAVF1.NUAFLO(IN)).EQ.0.D0)
+     &               THEN
+                      XZOB=0.5D0*(XMIN3+XMAX3)
+                      TEST2 = (VA2-NUAVF1.NUAFLO(IN))/XZOB
+                      TMAX2 =
+     &                  (NUAVF1.NUAFLO(IN)-NUAVF1.NUAFLO(IMA1MA3))/XZOB
+                      TMIN2 =
+     &                  (NUAVF1.NUAFLO(IN)-NUAVF1.NUAFLO(IMI1MI3))/XZOB
+                    ELSE
+                      TEST2 = (VA2-NUAVF1.NUAFLO(IN))/
+     &                   (NUAVF1.NUAFLO(IN+1)-NUAVF1.NUAFLO(IN))
+                      TMAX2 =
+     &                  (NUAVF1.NUAFLO(IN)-NUAVF1.NUAFLO(IMA1MA3))/
+     &                       (NUAVF1.NUAFLO(IN+1)-NUAVF1.NUAFLO(IN))
+                      TMIN2 =
+     &                  (NUAVF1.NUAFLO(IN)-NUAVF1.NUAFLO(IMI1MI3))/
+     &                       (NUAVF1.NUAFLO(IN+1)-NUAVF1.NUAFLO(IN))
+                    ENDIF
+                    IF
+     &               (ABS(TEST1).LT.1.D-10.AND.ABS(TEST2).LT.1.D-10)
+     &               THEN
+                      IEV3=NUAINT(IN)
+                      GOTO 560
+                    ELSE
+                      IF (ABS(TEST1).LT.1.D-10.OR.
+     &                   (VA1.GT.NUAFLO(IMA1MA3).AND.
+     &                    ABS(TMAX1).LT.1.D-10).OR.
+     &                   (VA1.LT.NUAFLO(IMI1MI3).AND.
+     &                    ABS(TMIN1).LT.1.D-10)) THEN
+                        IF (IGA1.NE.-1) THEN
+                          VMAX2=-1.D35
+                          VMIN2=1.D35
+                        ENDIF
+                        IF (VA2.GT.NUAVF1.NUAFLO(IN).AND.
+     &                      NUAVF1.NUAFLO(IN).GE.VMAX2) THEN
+                          VMAX2=NUAVF1.NUAFLO(IN)
+                          IGA2=IN
+                          IF (VA2.GT.NUAVF1.NUAFLO(IMA1MA3)) THEN
+                            IDR2=IN
+                          ENDIF
+                        ENDIF
+                        IF (VA2.LT.NUAVF1.NUAFLO(IN).AND.
+     &                      NUAVF1.NUAFLO(IN).LE.VMIN2) THEN
+                          VMIN2=NUAVF1.NUAFLO(IN)
+                          IDR2=IN
+                          IF (VA2.LT.NUAVF1.NUAFLO(IMI1MI3)) THEN
+                            IGA2=IN
+                          ENDIF
+                        ENDIF
+                        IGA1=-1
+                        IDR1=-1
+                        GOTO 550
+                      ELSE
+                        IF (IGA1.EQ.-1)GOTO 550
+                        IF (ABS(TEST2).LT.1.D-10.OR.
+     &                      (VA2.GT.NUAVF1.NUAFLO(IMA1MA3).AND.
+     &                       ABS(TMAX2).LT.1.D-10).OR.
+     &                      (VA2.LT.NUAVF1.NUAFLO(IMI1MI3).AND.
+     &                       ABS(TMIN2).LT.1.D-10)) THEN
+                          IF (IGA2.NE.-1) THEN
+                            VMAX1=-1.D35
+                            VMIN1=1.D35
+                          ENDIF
+                          IF
+     &                     (VA1.GT.NUAFLO(IN).AND.NUAFLO(IN).GE.VMAX1)
+     &                     THEN
+                            VMAX1=NUAFLO(IN)
+                            IGA1=IN
+                            IF (VA1.GT.NUAFLO(IMA1MA3)) THEN
+                              IDR1=IN
+                            ENDIF
+                          ENDIF
+                          IF
+     &                     (VA1.LT.NUAFLO(IN).AND.NUAFLO(IN).LE.VMIN1)
+     &                     THEN
+                            VMIN1=NUAFLO(IN)
+                            IDR1=IN
+                            IF (VA1.LT.NUAFLO(IMI1MI3)) THEN
+                              IGA1=IN
+                            ENDIF
+                          ENDIF
+                          IGA2=-1
+                          IDR2=-1
+                          GOTO 550
+                        ELSE
+                          IF (IGA2.EQ.-1)GOTO 550
+                          IF
+     &                     (VA1.GT.NUAFLO(IN).AND.NUAFLO(IN).GE.VMAX1)
+     &                     THEN
+                            IF (VA2.GT.NUAVF1.NUAFLO(IN).AND.
+     &                          NUAVF1.NUAFLO(IN).GE.VMAX2) THEN
+                              VMAX1=NUAFLO(IN)
+                              VMAX2=NUAVF1.NUAFLO(IN)
+                              IGA1=IN
+                            ENDIF
+                            IF (VA2.LT.NUAVF1.NUAFLO(IN).AND.
+     &                          NUAVF1.NUAFLO(IN).LE.VMIN2) THEN
+                              VMAX1=NUAFLO(IN)
+                              VMIN2=NUAVF1.NUAFLO(IN)
+                              IGA2=IN
+                            ENDIF
+                          ENDIF
+                          IF
+     &                     (VA1.LT.NUAFLO(IN).AND.NUAFLO(IN).LE.VMIN1)
+     &                     THEN
+                            IF (VA2.LT.NUAVF1.NUAFLO(IN).AND.
+     &                          NUAVF1.NUAFLO(IN).LE.VMIN2) THEN
+                              VMIN1=NUAFLO(IN)
+                              VMIN2=NUAVF1.NUAFLO(IN)
+                              IDR2=IN
+                            ENDIF
+                            IF (VA2.GT.NUAVF1.NUAFLO(IN).AND.
+     &                          NUAVF1.NUAFLO(IN).GE.VMAX2) THEN
+                              VMIN1=NUAFLO(IN)
+                              VMAX2=NUAVF1.NUAFLO(IN)
+                              IDR1=IN
+                            ENDIF
+                          ENDIF
+                        ENDIF
+                      ENDIF
+                    ENDIF
+ 550              CONTINUE
+                  IF ((NUAFLO(NBC1)-NUAFLO(NBC1-1)).EQ.0.D0) THEN
+                    XZOB=0.5D0*(XMIN1+XMAX1)
+                    TEST1 = (VA1-NUAFLO(NBC1))/XZOB
+                    TMAX1 = (NUAFLO(NBC1)-NUAFLO(IMA1MA3))/XZOB
+                    TMIN1 = (NUAFLO(NBC1)-NUAFLO(IMI1MI3))/XZOB
+                  ELSE
+                    TEST1 = (VA1-NUAFLO(NBC1))/
+     &                       (NUAFLO(NBC1)-NUAFLO(NBC1-1))
+                    TMAX1 = (NUAFLO(NBC1)-NUAFLO(IMA1MA3))/
+     &                     (NUAFLO(NBC1)-NUAFLO(NBC1-1))
+                    TMIN1 = (NUAFLO(NBC1)-NUAFLO(IMI1MI3))/
+     &                     (NUAFLO(NBC1)-NUAFLO(NBC1-1))
+                  ENDIF
+                  IF
+     &             ((NUAVF1.NUAFLO(NBC1)-NUAVF1.NUAFLO(NBC1-1)).EQ.0.D0)
+     &             THEN
+                    XZOB=0.5D0*(XMIN3+XMAX3)
+                    TEST2 = (VA2-NUAVF1.NUAFLO(NBC1))/XZOB
+                    TMAX2 =
+     &                (NUAVF1.NUAFLO(NBC1)-NUAVF1.NUAFLO(IMA1MA3))/XZOB
+                    TMIN2 =
+     &                (NUAVF1.NUAFLO(NBC1)-NUAVF1.NUAFLO(IMI1MI3))/XZOB
+                  ELSE
+                    TEST2 = (VA2-NUAVF1.NUAFLO(NBC1))/
+     &                (NUAVF1.NUAFLO(NBC1)-NUAVF1.NUAFLO(NBC1-1))
+                    TMAX2 =
+     &                (NUAVF1.NUAFLO(NBC1)-NUAVF1.NUAFLO(IMA1MA3))/
+     &                  (NUAVF1.NUAFLO(NBC1)-NUAVF1.NUAFLO(NBC1-1))
+                    TMIN2 =
+     &                (NUAVF1.NUAFLO(NBC1)-NUAVF1.NUAFLO(IMI1MI3))/
+     &                  (NUAVF1.NUAFLO(NBC1)-NUAVF1.NUAFLO(NBC1-1))
+                  ENDIF
+C
+                  IF (ABS(TEST1).LT.1.D-10.AND.ABS(TEST2).LT.1.D-10)
+     &             THEN
+                    IEV3=NUAINT(NBC1)
+                    GOTO 560
+                  ELSE
+                    IF (ABS(TEST1).LT.1.D-10.OR.
+     &                  (VA1.GT.NUAFLO(IMA1MA3).AND.
+     &                   ABS(TMAX1).LT.1.D-10).OR.
+     &                  (VA1.LT.NUAFLO(IMI1MI3).AND.
+     &                   ABS(TMIN1).LT.1.D-10)) THEN
+                      IF (VA2.GT.NUAVF1.NUAFLO(NBC1).AND.
+     &                    NUAVF1.NUAFLO(NBC1).GE.VMAX2) THEN
+                        VMAX2=NUAVF1.NUAFLO(NBC1)
+                        IGA2=NBC1
+                        IF (VA2.GT.NUAVF1.NUAFLO(IMA1MA3)) THEN
+                          IDR2=NBC1
+                        ENDIF
+                      ENDIF
+                      IF (VA2.LT.NUAVF1.NUAFLO(NBC1).AND.
+     &                    NUAVF1.NUAFLO(NBC1).LE.VMIN2) THEN
+                        VMIN2=NUAVF1.NUAFLO(NBC1)
+                        IDR2=NBC1
+                        IF (VA2.LT.NUAVF1.NUAFLO(IMI1MI3)) THEN
+                          IGA2=NBC1
+                        ENDIF
+                      ENDIF
+                      IGA1=-1
+                      IDR1=-1
+                      GOTO 570
+                    ELSE
+                      IF (IGA1.EQ.-1)GOTO 570
+                      IF (ABS(TEST2).LT.1.D-10.OR.
+     &                   (VA2.GT.NUAVF1.NUAFLO(IMA1MA3).AND.
+     &                    ABS(TMAX2).LT.1.D-10).OR.
+     &                   (VA2.LT.NUAVF1.NUAFLO(IMI1MI3).AND.
+     &                    ABS(TMIN2).LT.1.D-10)) THEN
+                        IF
+     &                   (VA1.GT.NUAFLO(NBC1).AND.NUAFLO(NBC1).GE.VMAX1)
+     &                   THEN
+                          VMAX1=NUAFLO(NBC1)
+                          IGA1=NBC1
+                          IF (VA1.GT.NUAFLO(IMA1MA3)) THEN
+                            IDR1=NBC1
+                          ENDIF
+                        ENDIF
+                        IF
+     &                   (VA1.LT.NUAFLO(NBC1).AND.NUAFLO(NBC1).LE.VMIN1)
+     &                   THEN
+                          VMIN1=NUAFLO(NBC1)
+                          IDR1=NBC1
+                          IF (VA1.LT.NUAFLO(IMI1MI3)) THEN
+                            IGA1=NBC1
+                          ENDIF
+                        ENDIF
+                        IGA2=-1
+                        IDR2=-1
+                        GOTO 570
+                      ELSE
+                        IF (IGA1.EQ.-1.OR.IGA2.EQ.-1)GOTO 570
+                        IF
+     &                   (VA1.GT.NUAFLO(NBC1).AND.NUAFLO(NBC1).GE.VMAX1)
+     &                   THEN
+                          IF (VA2.GT.NUAVF1.NUAFLO(NBC1).AND.
+     &                        NUAVF1.NUAFLO(NBC1).GE.VMAX2) THEN
+                            VMAX1=NUAFLO(NBC1)
+                            VMAX2=NUAVF1.NUAFLO(NBC1)
+                            IGA1=IN
+                          ENDIF
+                          IF (VA2.LT.NUAVF1.NUAFLO(NBC1).AND.
+     &                        NUAVF1.NUAFLO(NBC1).LE.VMIN2) THEN
+                            VMAX1=NUAFLO(NBC1)
+                            VMIN2=NUAVF1.NUAFLO(NBC1)
+                            IGA2=IN
+                          ENDIF
+                        ENDIF
+                        IF
+     &                   (VA1.LT.NUAFLO(NBC1).AND.NUAFLO(NBC1).LE.VMIN1)
+     &                   THEN
+                          IF (VA2.LT.NUAVF1.NUAFLO(NBC1).AND.
+     &                        NUAVF1.NUAFLO(NBC1).LE.VMIN2) THEN
+                            VMIN1=NUAFLO(NBC1)
+                            VMIN2=NUAVF1.NUAFLO(NBC1)
+                            IDR2=IN
+                          ENDIF
+                          IF (VA2.GT.NUAVF1.NUAFLO(NBC1).AND.
+     &                        NUAVF1.NUAFLO(NBC1).GE.VMAX2) THEN
+                            VMIN1=NUAFLO(NBC1)
+                            VMAX2=NUAVF1.NUAFLO(NBC1)
+                            IDR1=IN
+                          ENDIF
+                        ENDIF
+                      ENDIF
+                    ENDIF
+                  ENDIF
+C  Si les valeurs VA1 et VA2 sont supérieures au flottant maxi.,
+C  on prend la courbe correspondant aux flottants maxi.
+ 570              CONTINUE
+                  IF (VA1.GE.NUAFLO(IMA1MA3).AND.
+     &                VA2.GE.NUAVF1.NUAFLO(IMA1MA3)) THEN
+                    IEV3=NUAINT(IMA1MA3)
+                    GOTO 560
+                  ENDIF
+                  IF (VA1.LE.NUAFLO(IMI1MI3).AND.
+     &                VA2.LE.NUAVF1.NUAFLO(IMI1MI3)) THEN
+                    IEV3=NUAINT(IMI1MI3)
+                    GOTO 560
+                  ENDIF
+                  IF (VA1.LE.NUAFLO(IMI1MA3).AND.
+     &                VA2.GE.NUAVF1.NUAFLO(IMI1MA3)) THEN
+                    IEV3=NUAINT(IMI1MA3)
+                    GOTO 560
+                  ENDIF
+                  IF (VA1.GE.NUAFLO(IMA1MI3).AND.
+     &                VA2.LE.NUAVF1.NUAFLO(IMA1MI3)) THEN
+                    IEV3=NUAINT(IMA1MI3)
+                    GOTO 560
+                  ENDIF
+C  Si seule la valeur VA1 est tombée pile à un flottant défini dans
+C  nuage ou est supérieure à la valeur maxi, on interpole sur VA2
+                  IF (IGA1.EQ.-1) THEN
+                    XX1=(NUAVF1.NUAFLO(IDR2)-VA2)/
+     &                  (NUAVF1.NUAFLO(IDR2)-NUAVF1.NUAFLO(IGA2))
+                    XX2=(VA2-NUAVF1.NUAFLO(IGA2))/
+     &                  (NUAVF1.NUAFLO(IDR2)-NUAVF1.NUAFLO(IGA2))
+                    IEV1=NUAINT(IGA2)
+                    IEV2=NUAINT(IDR2)
+                    IF (IEV1.EQ.IEV2) THEN
+                      IEV3=IEV1
+                    ELSE
+                      CALL EVOLIN(IEV1,XX1,IEV2,XX2,IEV3)
+                      IF (IEV3.EQ.0.OR.IERR.NE.0) THEN
+                        SEGDES MCHEL2,MCHAM2
+**                      SEGDES MELVA2,MELVA3,MNUAGE,NUAVFL,NUAVF1
+                        SEGDES NUAVIN
+                        GOTO 9900
+                      ENDIF
+C  En cas de MCHAML de type caracteristiques on modifie
+C  la courbe de traction issue de EVOLIN pour que la pente
+C  soit interpolée linéairement
+                      IF (IYOUN.NE.0.AND.NOMCHE(ICOMP).EQ.'TRAC    ')
+     &                 THEN
+                        CALL MODICO(IPOI1,IEV3,ISOUS,ICOMP,IGA2,IDR2,
+     &                              IEV1,IEV2,VA2,2,IEV4)
+                        IF (IEV4.EQ.0.OR.IERR.NE.0) THEN
+                          SEGDES MCHEL2,MCHAM2
+**                        SEGDES MELVA2,MELVA3,MNUAGE,NUAVFL,NUAVF1
+                          SEGDES NUAVIN
+                          GOTO 9900
+                        ENDIF
+                        IEV3=IEV4
+                      ENDIF
+                    ENDIF
+                    GOTO 560
+                  ENDIF
+C  Si seule la valeur VA2 est tombée pile à un flottant défini dans
+C  nuage ou est supérieure à la valeur maxi, on interpole sur VA1
+                  IF (IGA2.EQ.-1) THEN
+                    XX1=(NUAFLO(IDR1)-VA1)/(NUAFLO(IDR1)-NUAFLO(IGA1))
+                    XX2=(VA1-NUAFLO(IGA1))/(NUAFLO(IDR1)-NUAFLO(IGA1))
+                    IEV1=NUAINT(IGA1)
+                    IEV2=NUAINT(IDR1)
+                    IF (IEV1.EQ.IEV2) THEN
+                      IEV3=IEV1
+                    ELSE
+                      CALL EVOLIN(IEV1,XX1,IEV2,XX2,IEV3)
+                      IF (IEV3.EQ.0.OR.IERR.NE.0) THEN
+                        SEGDES MCHEL2,MCHAM2
+**                      SEGDES MELVA2,MELVA3,MNUAGE,NUAVFL,NUAVF1
+                        SEGDES NUAVIN
+                        GOTO 9900
+                      ENDIF
+C  En cas de MCHAML de type caracteristiques on modifie
+C  la courbe de traction issue de EVOLIN pour que la pente
+C  soit interpolée linéairement
+                      IF (IYOUN.NE.0.AND.NOMCHE(ICOMP).EQ.'TRAC    ')
+     &                 THEN
+                        CALL MODICO(IPOI1,IEV3,ISOUS,ICOMP,IGA1,IDR1,
+     &                              IEV1,IEV2,VA1,1,IEV4)
+                        IF (IEV4.EQ.0.OR.IERR.NE.0) THEN
+                          SEGDES MCHEL2,MCHAM2
+**                        SEGDES MELVA2,MELVA3,MNUAGE,NUAVFL,NUAVF1
+                          SEGDES NUAVIN
+                          GOTO 9900
+                        ENDIF
+                        IEV3=IEV4
+                      ENDIF
+                    ENDIF
+                    GOTO 560
+                  ENDIF
+C  Cas général : on interpole sur VA1 PUIS VA2
+C  -- > sur VA1
+                  XX1=(NUAFLO(IDR1)-VA1)/(NUAFLO(IDR1)-NUAFLO(IGA1))
+                  XX2=(VA1-NUAFLO(IGA1))/(NUAFLO(IDR1)-NUAFLO(IGA1))
+                  IEV1=NUAINT(IGA1)
+                  IEV2=NUAINT(IDR1)
+                  IF (IEV1.EQ.IEV2) THEN
+                    IEV3=IEV1
+                  ELSE
+                    CALL EVOLIN(IEV1,XX1,IEV2,XX2,IEV3)
+                    IF (IEV3.EQ.0.OR.IERR.NE.0) THEN
+                      SEGDES MCHEL2,MCHAM2
+**                    SEGDES MELVA2,MELVA3,MNUAGE,NUAVFL,NUAVF1
+                      SEGDES NUAVIN
+                      GOTO 9900
+                    ENDIF
+C  En cas de MCHAML de type caracteristiques on modifie
+C  la courbe de traction issue de EVOLIN pour que la pente
+C  soit interpolée linéairement
+                    IF (IYOUN.NE.0.AND.NOMCHE(ICOMP).EQ.'TRAC    ')
+     &               THEN
+                      CALL MODICO(IPOI1,IEV3,ISOUS,ICOMP,IGA1,IDR1,
+     &                            IEV1,IEV2,VA1,1,IEV4)
+                      IF (IEV4.EQ.0.OR.IERR.NE.0) THEN
+                        SEGDES MCHEL2,MCHAM2
+**                      SEGDES MELVA2,MELVA3,MNUAGE,NUAVFL,NUAVF1
+                        SEGDES NUAVIN
+                        GOTO 9900
+                      ENDIF
+                      IEV3=IEV4
+                    ENDIF
+                  ENDIF
+                  XX1=(NUAFLO(IDR2)-VA1)/(NUAFLO(IDR2)-NUAFLO(IGA2))
+                  XX2=(VA1-NUAFLO(IGA2))/(NUAFLO(IDR2)-NUAFLO(IGA2))
+                  IEV1=NUAINT(IGA2)
+                  IEV2=NUAINT(IDR2)
+                  IF (IEV1.EQ.IEV2) THEN
+                    IEV4=IEV1
+                  ELSE
+                    CALL EVOLIN(IEV1,XX1,IEV2,XX2,IEV4)
+                    IF (IEV4.EQ.0.OR.IERR.NE.0) THEN
+                      SEGDES MCHEL2,MCHAM2
+**                    SEGDES MELVA2,MELVA3,MNUAGE,NUAVFL,NUAVF1
+                      SEGDES NUAVIN
+                      GOTO 9900
+                    ENDIF
+C  En cas de MCHAML de type caracteristiques on modifie
+C  la courbe de traction issue de EVOLIN pour que la pente
+C  soit interpolée linéairement
+                    IF (IYOUN.NE.0.AND.NOMCHE(ICOMP).EQ.'TRAC    ')
+     &               THEN
+                      CALL MODICO(IPOI1,IEV4,ISOUS,ICOMP,IGA2,IDR2,
+     &                            IEV1,IEV2,VA1,1,IEV5)
+                      IF (IEV5.EQ.0.OR.IERR.NE.0) THEN
+                        SEGDES MCHEL2,MCHAM2
+**                      SEGDES MELVA2,MELVA3,MNUAGE,NUAVFL,NUAVF1
+                        SEGDES NUAVIN
+                        GOTO 9900
+                      ENDIF
+                      IEV4=IEV5
+                    ENDIF
+                  ENDIF
+C
+C  -- > sur VA2
+                  XX1=(NUAVF1.NUAFLO(IDR2)-VA2)/
+     &              (NUAVF1.NUAFLO(IDR2)-NUAVF1.NUAFLO(IDR1))
+                  XX2=(VA2-NUAVF1.NUAFLO(IDR1))/
+     &              (NUAVF1.NUAFLO(IDR2)-NUAVF1.NUAFLO(IDR1))
+                  CALL EVOLIN(IEV3,XX1,IEV4,XX2,IEV5)
+                  IF (IEV5.EQ.0.OR.IERR.NE.0) THEN
+                    SEGDES MCHEL2,MCHAM2
+**                  SEGDES MELVA2,MELVA3,MNUAGE,NUAVFL,NUAVF1
+                    SEGDES NUAVIN
+                    GOTO 9900
+                  ENDIF
+C  En cas de MCHAML de type caracteristiques on modifie
+C  la courbe de traction issue de EVOLIN pour que la pente
+C  soit interpolée linéairement
+                  IF (IYOUN.NE.0.AND.NOMCHE(ICOMP).EQ.'TRAC    ') THEN
+                    CALL MODICO(IPOI1,IEV5,ISOUS,ICOMP,IDR1,IDR2,IEV3,
+     &                          IEV4,VA2,2,IEV6)
+                    IF (IEV6.EQ.0.OR.IERR.NE.0) THEN
+                      SEGDES MCHEL2,MCHAM2
+**                    SEGDES MELVA2,MELVA3,MNUAGE,NUAVFL,NUAVF1
+                      SEGDES NUAVIN
+                      GOTO 9900
+                    ENDIF
+                    IEV5=IEV6
+                  ENDIF
+                  IEV3=IEV5
+C
+ 560              CONTINUE
+                  IELCHE(IGAU,IEL)=IEV3
+ 540            CONTINUE
+ 530          CONTINUE
+C
+              SEGDES NUAVFL,NUAVIN
+**            SEGDES MELVA1,MELVA2
+C
+              IF (KFLOT) THEN
+                NCO1 = MCHAM2.IELVAL(/1)
+                IEVOL = IELCHE(1,1)
+                MEVOLL = IEVOL
+                SEGACT MEVOLL
+                KEVOLL = IEVOLL(1)
+                SEGACT KEVOLL
+                NOM4 = NOMEVX(1:8)
+C                SEGDES KEVOLL
+C                SEGDES MEVOLL
+                NCO1 = MCHAM2.IELVAL(/1)
+                DO 580 INO = 1,NCO1
+                  NOM2 = MCHAM2.NOMCHE(INO)
+                  IF (NOM2.EQ.NOM4) GO TO 590
+ 580            CONTINUE
+                KFLOT=.FALSE.
+ 590            CONTINUE
+              ENDIF
+C
+              IF (KFLOT) THEN
+                TYPCHE(ICOMP)='REAL*8          '
+                MELVA6=MELVAL
+                ICHAM2=MCHAM2
+                CALL VARIN2(ICHAM2,MELVA6,COQ,MELEME,SWORK,NOMCO,IMELE,
+     &                      MELGEO,MINTE,MINTE1,MELVAL,KERRE1)
+                SEGSUP MELVA6
+              ENDIF
+C
+              IELVAL(ICOMP)=MELVAL
+              SEGDES MCHEL2
+**            IF (.NOT. KFLOT) SEGDES MCHAM2,MELVAL
+C
+            ENDIF
+C
+C---------------------------------------------------------
+C               Composante de type LISTMOTS
+C               (evaluation externe)
+C---------------------------------------------------------
+C
+          ELSE IF (CHA1(9:16).EQ.'LISTMOTS') THEN
+*jk
+          if (FORMOD(1).EQ.'LIAISON') THEN
+            TYPCHE(ICOMP)=CHA1
+            N1PTEL=0
+            N1EL  =0
+            N2PTEL=1
+            N2EL  =1
+            SEGINI MELVAL
+            IELVAL(ICOMP)=MELVAL
+            IELCHE(N2PTEL,N2EL)=MELVA1.IELCHE(1,1)
+**          SEGDES MELVAL,MELVA1
+          else
+C
+C           Le LISTMOTS donne les parametres de la composante, en
+C           fonction desquels doit se faire l'evaluation externe.
+C
+C           HYPOTHESE de CHAMP UNIFORME : la composante a les memes
+C           parametres en tout point d'integration de tout element
+C           de la sous-zone.
+C           Cette hypothese est necessaire car une composante ne peut
+C           etre associee qu'a une seule fonction externe.
+C
+            N2PTE1=MELVA1.IELCHE(/1)
+            N2EL1=MELVA1.IELCHE(/2)
+            IF (N2PTE1.NE.1.AND.N2EL1.NE.1) THEN
+              MOTERR(1:8)=NOMCO
+              CALL ERREUR(953)
+              GOTO 9910
+            ENDIF
+            IVALIS(ICOMP) = 1
+*
+            IF (JESIMU.EQ.0) THEN
+C
+C              Acces au MCHAML des parametres sur la sous-zone
+C
+               MCHEL2=IPOI3
+               SEGACT MCHEL2
+               IF (MCHEL2.ICHAML(/1).LT.NSOUS) THEN
+                 CALL ERREUR(553)
+                 SEGDES MCHEL2
+                 GOTO 9910
+               ENDIF
+
+               IF (IMAMOD.NE.MCHEL2.IMACHE(ISOUS).OR.
+     &             CONMOD.NE.MCHEL2.CONCHE(ISOUS)) THEN
+
+                 do is = 1,mchel2.imache(/1)
+                   if (imamod.eq.mchel2.imache(is).and.
+     &                 conmod.eq.mchel2.conche(is)) then
+                     MCHAM2 = mchel2.ICHAML(is)
+                     goto 449
+                   endif
+                 enddo
+
+                 CALL ERREUR(472)
+                 SEGDES MCHEL2
+                 GOTO 9910
+               ENDIF
+
+               MCHAM2=MCHEL2.ICHAML(ISOUS)
+*
+449            CONTINUE
+               SEGACT,MCHAM2
+
+               NCMP2=MCHAM2.NOMCHE(/2)
+C
+C              Verification de la presence des parametres necessaires
+C              Verification que ces parametres sont du type REAL*8
+C              Releve des pointeurs vers les MELVAL correspondants
+C              Determination de la representation du champ de sortie
+C
+               NOMCO4=NOMCO(1:4)
+C
+               MLMOT1=MELVA1.IELCHE(1,1)
+               SEGACT,MLMOT1
+               NPARA=MLMOT1.MOTS(/2)
+*
+               IF (MLMOT1.MOTS(1)(1:4).EQ.NOMSIM) THEN
+                  JESIMU=1
+                  NPARA=NPARA-1
+               ENDIF
+*
+               SEGINI,WRKEXT
+C
+               N1PTEL=1
+               N1EL=1
+C
+               DO 600 IPARA=1,NPARA
+C
+                  JPARA=IPARA+JESIMU
+
+                  ITROUV=0
+                  DO 601 ICMP2=1,NCMP2
+                    IF (MCHAM2.NOMCHE(ICMP2)(1:4).EQ.
+     &                  MLMOT1.MOTS(JPARA)(1:4)) THEN
+                      ITROUV = 1
+                      GOTO 602
+                    ENDIF
+ 601              CONTINUE
+                  IF (ITROUV.EQ.0) THEN
+                    MOTERR(1:4)=MLMOT1.MOTS(JPARA)(1:4)
+                    MOTERR(5:8)=NOMCO4
+                    CALL ERREUR(954)
+                    SEGSUP,WRKEXT
+                    SEGDES,MLMOT1
+                    SEGDES,MCHAM2
+                    SEGDES,MCHEL2
+                    GOTO 9910
+                  ENDIF
+C
+ 602              CONTINUE
+                  IF (MCHAM2.TYPCHE(ICMP2)(1:8).NE.'REAL*8  ') THEN
+                    MOTERR(1:4)=MLMOT1.MOTS(JPARA)(1:4)
+                    MOTERR(5:8)=NOMCO4
+                    CALL ERREUR(955)
+                    SEGSUP,WRKEXT
+                    SEGDES,MLMOT1
+                    SEGDES,MCHAM2
+                    SEGDES,MCHEL2
+                    GOTO 9910
+                  ENDIF
+C
+                  NOMPAR(IPARA)=MLMOT1.MOTS(JPARA)(1:4)
+                  IVAPAR(IPARA)=MCHAM2.IELVAL(ICMP2)
+C
+C             N.B. Toutes les composantes du MCHAML de parametres
+C             s'appuient sur la meme famille de points de Gauss (cf.
+C             changement de support effectue en debut de traitement).
+C             Toutefois la representation peut etre differente d'un
+C             parametre a l'autre : uniforme, constante par element
+C             ou complete. La representation la plus fine sur tous
+C             les parametres impose celle de la variable de sortie.
+C
+                  MELVA2=IVAPAR(IPARA)
+                  SEGACT,MELVA2
+                  N1PTE2=MELVA2.VELCHE(/1)
+                  N1EL2=MELVA2.VELCHE(/2)
+                  IF (N1EL2.GT.1) THEN
+                    IF (N1EL.EQ.1) THEN
+                      N1EL=N1EL2
+                    ELSE IF (N1EL2.NE.N1EL) THEN
+                      MOTERR(1:8)='VARINU  '
+                      CALL ERREUR(146)
+**                    SEGDES,MELVA2
+                      SEGSUP,WRKEXT
+                      SEGDES,MLMOT1
+                      SEGDES,MCHAM2
+                      SEGDES,MCHEL2
+                      GOTO 9910
+                    ENDIF
+                  ENDIF
+                  IF (N1PTE2.GT.1) THEN
+                    IF (N1PTEL.EQ.1) THEN
+                      N1PTEL=N1PTE2
+                    ELSE IF (N1PTE2.NE.N1PTEL) THEN
+                      MOTERR(1:8)='VARINU  '
+                      CALL ERREUR(146)
+**                    SEGDES,MELVA2
+                      SEGSUP,WRKEXT
+                      SEGDES,MLMOT1
+                      SEGDES,MCHAM2
+                      SEGDES,MCHEL2
+                      GOTO 9910
+                    ENDIF
+                  ENDIF
+**                SEGDES,MELVA2
+C
+ 600           CONTINUE
+C
+               NPMAX = N1PTEL
+               NEMAX = N1EL
+C
+               IF (JESIMU.EQ.0) THEN
+
+                  N1PAUX=N1PTEL
+C
+C               Pour les COQ4, le nb de pts de GAUSS vaut 5, mais on
+C               ne prend que les 4 premiers (le 5eme sert uniquement
+C               au cisaillement)
+                  IF (IMELE.EQ.49.AND.N1PAUX.EQ.5) N1PAUX=4
+C
+C              Premier appel au module externe COMPUT pour verifications
+C
+                  IVERI=1
+                  IERUT=0
+                  CALL COMPUT(IVERI,NOMCO4,NOMPAR,VALPAR,NPARA,
+     &                        VALCMP,IERUT)
+                  IF (IERUT.NE.0) THEN
+                    INTERR(1)=IERUT
+                    CALL ERREUR(957)
+                    SEGSUP,WRKEXT
+                    SEGDES,MLMOT1
+                    SEGDES,MCHAM2
+                    SEGDES,MCHEL2
+                    GOTO 9910
+                  ENDIF
+C
+C              Initialisation du MELVAL de sortie
+C
+                  TYPCHE(ICOMP)='REAL*8          '
+                  N2PTEL=0
+                  N2EL=0
+                  SEGINI MELVAL
+                  IELVAL(ICOMP)=MELVAL
+C
+C              Evaluation externe de la composante
+C
+                  IVERI=0
+C
+                  DO IPARA=1,NPARA
+                    MELVA2=IVAPAR(IPARA)
+                    SEGACT,MELVA2
+                  ENDDO
+C
+                  DO 620 IEL=1,N1EL
+                    DO 621 IGAU=1,N1PAUX
+                      DO 622 IPARA=1,NPARA
+                        MELVA2=IVAPAR(IPARA)
+C**                     SEGACT,MELVA2
+                        IBGAU=MIN(IGAU,MELVA2.VELCHE(/1))
+                        IELGA=MIN(IEL,MELVA2.VELCHE(/2))
+                        VALPAR(IPARA)=MELVA2.VELCHE(IBGAU,IELGA)
+C**                     SEGDES,MELVA2
+ 622                  CONTINUE
+                      IERUT=0
+                      CALL COMPUT(IVERI,NOMCO4,NOMPAR,VALPAR,NPARA,
+     &                            VELCHE(IGAU,IEL),IERUT)
+                      IF (IERUT.NE.0) THEN
+                        INTERR(1)=IERUT
+                        CALL ERREUR(957)
+                        DO IPARA=1,NPARA
+                          MELVA2=IVAPAR(IPARA)
+**                        SEGDES,MELVA2
+                        ENDDO
+                        SEGSUP,WRKEXT
+                        SEGDES,MLMOT1
+                        SEGDES,MCHAM2
+                        SEGDES,MCHEL2
+                        GOTO 9900
+                      ENDIF
+ 621                CONTINUE
+ 620              CONTINUE
+C
+                  DO IPARA=1,NPARA
+                    MELVA2=IVAPAR(IPARA)
+**                  SEGDES,MELVA2
+                  ENDDO
+                  SEGSUP,WRKEXT
+C
+               ENDIF
+C
+            ENDIF
+C
+**          SEGDES,MELVAL
+            SEGDES,MLMOT1
+            SEGDES,MCHAM2
+            SEGDES,MCHEL2
+**          SEGDES,MELVA1
+*
+          endif
+C
+C---------------------------------------------------------
+C               Composante de type TABLE
+C               (evaluation externe avec dlopen)
+C---------------------------------------------------------
+C
+         ELSE IF (CHA1(9:16).EQ.'TABLE') THEN
+*jk
+          if (FORMOD(1).EQ.'LIAISON') THEN
+            TYPCHE(ICOMP)=CHA1
+            N1PTEL=0
+            N1EL  =0
+            N2PTEL=1
+            N2EL  =1
+            SEGINI MELVAL
+            IELCHE(N2PTEL,N2EL)=MELVA1.IELCHE(1,1)
+            IELVAL(ICOMP)=MELVAL
+**          SEGDES MELVAL,MELVA1
+          else
+C
+C           La TABLE donne le nom de la loi et les parametres
+C           de la composante, en fonction desquels doit se faire
+C           l'evaluation externe.
+C
+            N2PTE1=MELVA1.IELCHE(/1)
+            N2EL1=MELVA1.IELCHE(/2)
+            IF (N2PTE1.NE.1.AND.N2EL1.NE.1) THEN
+               MOTERR(1:8)=NOMCO
+               CALL ERREUR(953)
+               GOTO 9910
+            ENDIF
+            IVALIS(ICOMP) = 1
+C
+C              Acces au MCHAML des parametres sur la sous-zone
+C
+            MCHEL2=IPOI3
+            SEGACT MCHEL2
+
+            IF (MCHEL2.ICHAML(/1).LT.NSOUS) THEN
+               CALL ERREUR(553)
+               SEGDES MCHEL2
+               GOTO 9910
+            ENDIF
+
+            MCHAM2=MCHEL2.ICHAML(ISOUS)
+            IF (IMAMOD.NE.MCHEL2.IMACHE(ISOUS).OR.
+     &          CONMOD.NE.MCHEL2.CONCHE(ISOUS)) THEN
+              do is = 1,mchel2.imache(/1)
+                if (imamod.eq.mchel2.imache(is).and.
+     &               conmod.eq.mchel2.conche(is)) then
+                  MCHAM2 = mchel2.ICHAML(is)
+                  goto 649
+                endif
+              enddo
+
+              CALL ERREUR(472)
+              SEGDES MCHEL2
+              GOTO 9910
+            ENDIF
+*
+649         CONTINUE
+            SEGACT,MCHAM2
+            NCMP2=MCHAM2.NOMCHE(/2)
+C
+C     Verification de la presence des parametres necessaires
+C     Verification que ces parametres sont du type REAL*8
+C     Releve des pointeurs vers les MELVAL correspondants
+C     Determination de la representation du champ de sortie
+C
+            NOMCO4=NOMCO(1:4)
+
+C     Vérification de la table
+            MTAB1 = MELVA1.IELCHE(1,1)
+            SEGACT,MTAB1
+
+            ITROUV = 0
+            ITROU1 = 0
+            ITROU2 = 0
+C     initialisation des indices
+            lacomm = '                '
+            LMEPRO = 0
+            LMELIB = '                '
+            LMELGB = 0
+            LMEFCT = '                '
+            LMELGT = 0
+            LMEPTR = 0
+            MLMOT1 = 0
+
+C     Recherche sur les noms
+C     Vérification des types des indices correspondants
+            if (NBESC.NE.0) SEGACT,IPILOC
+            IDEBCH=1
+            IFINCH=1
+
+C Voir si ces tests ne pourraient pas etre faits qu'une fois (dans matcar ?)
+            DO 630 IN = 1, MTAB1.MLOTAB
+               IF (MTAB1.MTABTI(IN).NE.'MOT') GOTO 630
+               IP = MTAB1.MTABII(IN)
+               IDEBCH = IPCHAR(IP)
+               IFINCH = IPCHAR(IP+1)-1
+               MOTEMP = ICHARA(IDEBCH:IFINCH)
+C     Liste des parametres de la loi
+               IF ((MOTEMP.EQ.'PARA_LOI')  .OR.
+     &             (MOTEMP.EQ.'VARIABLES')) THEN
+                 IF (MTAB1.MTABTV(IN).NE.'LISTMOTS') GOTO 631
+                 MLMOT1 = MTAB1.MTABIV(IN)
+C     Nom de la loi/fonction a utiliser dans la librairie
+               ELSE IF ((MOTEMP.EQ.'FCT_LOI') .OR.
+     &                  (MOTEMP.EQ.'MODELE')) THEN
+                 IF (MTAB1.MTABTV(IN).NE.'MOT') GOTO 631
+                 IP = MTAB1.MTABIV(IN)
+                 IDEBCH = IPCHAR(IP)
+                 IFINCH = IPCHAR(IP+1)-1
+                 LMELGT = IFINCH-IDEBCH+1
+                 IF (LMELGT.LE.0 .OR. LMELGT.GT.72) THEN
+                   INTERR(1) = LMELGT
+                   MOTERR = ICHARA(IDEBCH:IFINCH)
+                   CALL ERREUR(-2)
+                   CALL ERREUR(36)
+                   RETURN
+                 ENDIF
+                 LMEFCT = ICHARA(IDEBCH:IFINCH)
+                 ITROU1 = 1
+C     Nom de la librairie ou se trouve la loi materiau
+               ELSE IF ((MOTEMP.EQ.'LIB_LOI') .OR.
+     &                  (MOTEMP.EQ.'LIBRAIRIE')) THEN
+                 IF (MTAB1.MTABTV(IN).NE.'MOT') GOTO 631
+                 IP = MTAB1.MTABIV(IN)
+                 IDEBCH = IPCHAR(IP)
+                 IFINCH = IPCHAR(IP+1)-1
+                 LMELGB = IFINCH-IDEBCH+1
+                 IF (LMELGB.GT.510) THEN
+                   INTERR(1) = LMELGB
+                   IFINCH =MAX(IDEBCH,IFINCH)
+                   MOTERR =ICHARA(IDEBCH:IFINCH)
+                   CALL ERREUR(-2)
+                   CALL ERREUR(36)
+                   RETURN
+                 ENDIF
+                 LMELIB = ICHARA(IDEBCH:IFINCH)
+                 ITROU1 = 1
+C     Nom du programme externe
+               ELSE IF (MOTEMP.EQ.'PROGRAMME') THEN
+                 IF (MTAB1.MTABTV(IN).NE.'MOT') GOTO 631
+                 IP = MTAB1.MTABIV(IN)
+                 IDEBCH = IPCHAR(IP)
+                 IFINCH=IPCHAR(IP+1)-1
+                 LMEPRO = IFINCH-IDEBCH+1
+                 IF (LMEPRO.LE.0 .OR. LMEPRO.GT.510) THEN
+                   INTERR(1) = LMEPRO
+                   MOTERR = ICHARA(IDEBCH:IFINCH)
+                   CALL ERREUR(-2)
+                   CALL ERREUR(36)
+                   RETURN
+                 ENDIF
+                 lacomm = ICHARA(IDEBCH:IFINCH)
+                 ITROU2 = 1
+               ENDIF
+ 630        CONTINUE
+
+C     Dernieres verifications de la table
+            IF ((ITROU1.EQ.0).AND.(ITROU2.EQ.0)) THEN
+              write(ioimp,*) 'ERROR : PROGRAMME et LIB_LOI/FCT_LOI ?'
+              GOTO 631
+            ENDIF
+            IF ((ITROU1.NE.0).AND.(ITROU2.NE.0)) THEN
+              write(ioimp,*) 'ERROR : PROGRAMME ou LIB_LOI/FCT_LOI ??'
+              GOTO 631
+            ENDIF
+            IF (MLMOT1.EQ.0) THEN
+              write(ioimp,*) 'ERROR : PARA_LOI ?'
+              GOTO 631
+            ENDIF
+            SEGACT,MLMOT1
+            NPARA = MLMOT1.MOTS(/2)
+            IF (ITROU1.NE.0) THEN
+              IF (LMELGB.EQ.0 .OR. LMELGT.EQ.0) THEN
+                write(ioimp,*) 'ERROR : manque LIB_LOI ou FCT_LOI ? '
+                GOTO 631
+              ENDIF
+              LMELIB = LMELIB(1:LMELGB)//CHAR(0)
+              LMEFCT = LMEFCT(1:LMELGT)//CHAR(0)
+              CALL PTRLOI(LMELIB,LMELGB,LMEFCT,LMELGT,NPARA,LMEPTR)
+              IF (LMEPTR.LE.0) THEN
+                WRITE(ioimp,*) 'ERROR : Option LIB_LOI'
+                CALL ERREUR(21)
+                GOTO 631
+              ENDIF
+            ENDIF
+C     Verification de la table réussie
+            ITROUV = 1
+
+ 631        CONTINUE
+            if (NBESC.NE.0) SEGDES,IPILOC
+            SEGDES,MTAB1
+
+C     Erreur à la lecture de la table
+            IF (ITROUV.EQ.0) THEN
+               INTERR(1)=-3
+               CALL ERREUR(957)
+               SEGDES MCHEL2
+               SEGDES,MCHAM2
+               IF (MLMOT1.NE.0) SEGDES,MLMOT1
+               GOTO 9910
+            ENDIF
+
+C     Vérification de la liste de paramètres
+
+            SEGINI,WRKEXT
+C
+            N1PTEL=1
+            N1EL=1
+C
+            DO 650 IPARA=1,NPARA
+C
+               JPARA=IPARA+JESIMU
+               DO 651 ICMP2 = 1, NCMP2
+                 IF (MCHAM2.NOMCHE(ICMP2)(1:4).EQ.
+     &               MLMOT1.MOTS(JPARA)(1:4)) GOTO 652
+ 651           CONTINUE
+C
+               MOTERR(1:4)=MLMOT1.MOTS(JPARA)(1:4)
+               MOTERR(5:8)=NOMCO4
+               CALL ERREUR(954)
+               SEGSUP,WRKEXT
+               SEGDES,MLMOT1
+               SEGDES,MCHAM2
+               SEGDES,MCHEL2
+               GOTO 9910
+C
+ 652           CONTINUE
+               IF (MCHAM2.TYPCHE(ICMP2)(1:8).NE.'REAL*8  ') THEN
+                 MOTERR(1:4)=MLMOT1.MOTS(JPARA)(1:4)
+                 MOTERR(5:8)=NOMCO4
+                 CALL ERREUR(955)
+                 SEGSUP,WRKEXT
+                 SEGDES,MLMOT1
+                 SEGDES,MCHAM2
+                 SEGDES,MCHEL2
+                 GOTO 9910
+               ENDIF
+C
+               NOMPAR(IPARA)=MLMOT1.MOTS(JPARA)(1:4)
+               IVAPAR(IPARA)=MCHAM2.IELVAL(ICMP2)
+C
+C     N.B. Toutes les composantes du MCHAML de parametres
+C     s'appuient sur la meme famille de points de Gauss (cf.
+C     changement de support effectue en debut de traitement).
+C     Toutefois la representation peut etre differente d'un
+C     parametre a l'autre : uniforme, constante par element
+C     ou complete. La representation la plus fine sur tous
+C     les parametres impose celle de la variable de sortie.
+C
+               MELVA2=IVAPAR(IPARA)
+               SEGACT,MELVA2
+               N1PTE2=MELVA2.VELCHE(/1)
+               N1EL2=MELVA2.VELCHE(/2)
+               IF (N1EL2.GT.1) THEN
+                  IF (N1EL.EQ.1) THEN
+                     N1EL=N1EL2
+                  ELSE IF (N1EL2.NE.N1EL) THEN
+                     MOTERR(1:8)='VARINU  '
+                     CALL ERREUR(146)
+**                   SEGDES,MELVA2
+                     SEGSUP,WRKEXT
+                     SEGDES,MLMOT1
+                     SEGDES,MCHAM2
+                     SEGDES,MCHEL2
+                     GOTO 9910
+                  ENDIF
+               ENDIF
+               IF (N1PTE2.GT.1) THEN
+                  IF (N1PTEL.EQ.1) THEN
+                     N1PTEL=N1PTE2
+                  ELSE IF (N1PTE2.NE.N1PTEL) THEN
+                     MOTERR(1:8)='VARINU  '
+                     CALL ERREUR(146)
+**                   SEGDES,MELVA2
+                     SEGSUP,WRKEXT
+                     SEGDES,MLMOT1
+                     SEGDES,MCHAM2
+                     SEGDES,MCHEL2
+                     GOTO 9910
+                  ENDIF
+               ENDIF
+**             SEGDES,MELVA2
+C
+ 650        CONTINUE
+C
+            NPMAX = N1PTEL
+            NEMAX = N1EL
+C
+            N1PAUX=N1PTEL
+C
+C     Pour les COQ4, le nb de pts de GAUSS vaut 5, mais on
+C     ne prend que les 4 premiers (le 5eme sert uniquement
+C     au cisaillement)
+            IF (IMELE.EQ.49.AND.N1PAUX.EQ.5) N1PAUX=4
+C
+C     Ouverture de la loi et vérification du nombre de paramètres
+C
+C              Initialisation du MELVAL de sortie
+C
+            TYPCHE(ICOMP)='REAL*8          '
+            N2PTEL=0
+            N2EL=0
+            SEGINI MELVAL
+            IELVAL(ICOMP)=MELVAL
+C
+            DO IPARA=1,NPARA
+               MELVA2=IVAPAR(IPARA)
+               SEGACT,MELVA2
+            ENDDO
+C
+            IF (ITROU2.EQ.1) THEN
+C Appel par programme externe
+              ith=0
+              ith=oothrd
+              moterr=lacomm(1:lmepro)
+              CALL lance(lacomm(1:lmepro)//char(0),ith)
+              DO 1670 IPARA=1,NPARA
+                MELVA2=IVAPAR(IPARA)
+                I_CHAMP=1
+                CALL becrdon(MELVA2.VELCHE,ith,IPARA,NPARA,
+     &                       I_CHAMP,N1EL,N1PAUX)
+ 1670         CONTINUE
+              CALL blires(VELCHE,iend,istat,ith)
+*
+            ELSE IF (ITROU1.EQ.1) THEN
+C appel par librairie
+              DO 670 IEL=1,N1EL
+                 DO 671 IGAU=1,N1PAUX
+                    DO 672 IPARA=1,NPARA
+                       MELVA2=IVAPAR(IPARA)
+                       IBGAU=MIN(IGAU,MELVA2.VELCHE(/1))
+                       IELGA=MIN(IEL,MELVA2.VELCHE(/2))
+                       VALPAR(IPARA)=MELVA2.VELCHE(IBGAU,IELGA)
+ 672                CONTINUE
+                    IERUT=0
+                    CALL LOIEXT(LMEPTR,VALPAR,NPARA,
+     &                          VELCHE(IGAU,IEL),IERUT)
+                    IF (IERUT.NE.0) THEN
+                       INTERR(1)=IERUT
+                       CALL ERREUR(957)
+                       DO IPARA=1,NPARA
+                          MELVA2=IVAPAR(IPARA)
+**                        SEGDES,MELVA2
+                       ENDDO
+                       SEGSUP,WRKEXT
+                       SEGDES,MLMOT1
+                       SEGDES,MCHAM2
+                       SEGDES,MCHEL2
+                       GOTO 9900
+                    ENDIF
+ 671             CONTINUE
+ 670          CONTINUE
+
+C Fin appel par librairie
+            ENDIF
+C
+            DO IPARA=1,NPARA
+               MELVA2=IVAPAR(IPARA)
+**             SEGDES,MELVA2
+            ENDDO
+            SEGSUP,WRKEXT
+C
+**          SEGDES,MELVAL
+            SEGDES,MLMOT1
+            SEGDES,MCHAM2
+            SEGDES,MCHEL2
+**          SEGDES,MELVA1
+*
+           endif
+C
+C---------------------------------------------------------
+C       traitement des composante d'autres types
+C       que 'REAL*8' 'EVOLUTIO' ou 'NUAGE   ' ou 'LISTMOTS'
+C---------------------------------------------------------
+C
+          ELSE
+C
+            TYPCHE(ICOMP)=CHA1
+            N1PTEL=0
+            N1EL  =0
+            N2PTEL=1
+            N2EL  =1
+            SEGINI MELVAL
+            IELVAL(ICOMP)=MELVAL
+            IELCHE(N2PTEL,N2EL)=MELVA1.IELCHE(1,1)
+**          SEGDES MELVAL,MELVA1
+C
+          ENDIF
+C
+  70    CONTINUE
+* ajout d une composante pour IMPCOMPL
+            if (inatuu.eq.164.and.iptamo.gt.0) then
+              N2 = N2 + 1
+              segadj mchaml
+              typche(N2) = 'REAL*8'
+              nomche(N2) = 'VISC'
+              ielval(N2) = iptamo
+            endif
+*'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+*       FIN DE BOUCLE SUR LES COMPOSANTES
+*'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+*
+*       cas simul
+*
+        IF (JESIMU.EQ.1) THEN
+*
+*      ON COMMENCE PAR ACTIVER TOUTES LES COMPOSANTES
+*      ET CREER LES MELVALS NON ENCORE CREES
+*
+            DO 700 ICOMP=1,N2
+              IF (IVALIS(ICOMP).EQ.0) THEN
+                 MELVAL=IELVAL(ICOMP)
+                 SEGACT MELVAL
+                 NPMAX = MAX(NPMAX,VELCHE(/1))
+                 NEMAX = MAX(NEMAX,VELCHE(/2))
+              ENDIF
+ 700        CONTINUE
+            DO 701 ICOMP=1,N2
+              IF (IVALIS(ICOMP).EQ.1) THEN
+                 TYPCHE(ICOMP)='REAL*8          '
+                 N1PTEL=NPMAX
+                 N1EL=NEMAX
+                 N2PTEL=0
+                 N2EL=0
+                 SEGINI MELVAL
+                 IELVAL(ICOMP)=MELVAL
+              ENDIF
+ 701        CONTINUE
+C
+C           Evaluation externe de la composante
+C
+            DO IPARA=1,NPARA
+              MELVA2=IVAPAR(IPARA)
+              SEGACT,MELVA2
+            ENDDO
+C* N'est-ce pas redondant avec boucles 700 et 701 car IVALIS=0 ou 1 ?
+            DO ICOMP=1,N2
+              MELVAL=IELVAL(ICOMP)
+              SEGACT,MELVAL*mod
+            ENDDO
+C
+            DO 820 IEL=1,NEMAX
+              DO 821 IGAU=1,NPMAX
+C
+C               Recuperation des parametres
+C
+                DO 822 IPARA=1,NPARA
+                  MELVA2=IVAPAR(IPARA)
+C**               SEGACT,MELVA2
+                  N1PTE2=MELVA2.VELCHE(/1)
+                  N1EL2=MELVA2.VELCHE(/2)
+                  IF (N1PTE2.EQ.1) THEN
+                    IF (N1EL2.EQ.1) THEN
+                      VALPAR(IPARA)=MELVA2.VELCHE(1,1)
+                    ELSE
+                      VALPAR(IPARA)=MELVA2.VELCHE(1,IEL)
+                    ENDIF
+                  ELSE
+                    VALPAR(IPARA)=MELVA2.VELCHE(IGAU,IEL)
+                  ENDIF
+C**               SEGDES,MELVA2
+ 822            CONTINUE
+*
+*                    recuperation du tableau xval
+*
+                DO 824 ICOMP=1,N2
+                  MELVAL=IELVAL(ICOMP)
+C**               SEGACT,MELVAL
+                  N1PTE1=VELCHE(/1)
+                  N1EL1 =VELCHE(/2)
+*
+                  IF (N1PTE1.EQ.0.AND.N1EL1.EQ.0) THEN
+                    XVAL(ICOMP)=0.
+                  ELSE
+                    IF (N1PTE1.EQ.1) THEN
+                      IF (N1EL1.EQ.1) THEN
+                        XVAL(ICOMP)=VELCHE(1,1)
+                      ELSE
+                        XVAL(ICOMP)=VELCHE(1,IEL)
+                      ENDIF
+                    ELSE
+                      XVAL(ICOMP)=VELCHE(IGAU,IEL)
+                    ENDIF
+                  ENDIF
+ 824            CONTINUE
+*
+                IERUT=0
+                CALL COMPUS(NOMVAL,XVAL,IVALIS,N2,
+     &                      NOMPAR,VALPAR,NPARA,CMNAME,IERUT)
+                IF (IERUT.NE.0) THEN
+                  INTERR(1)=IERUT
+                  CALL ERREUR(957)
+                  DO IPARA=1,NPARA
+                    MELVA2=IVAPAR(IPARA)
+**                  SEGDES,MELVA2
+                  ENDDO
+                  DO ICOMP=1,N2
+                    MELVAL=IELVAL(ICOMP)
+**                  SEGDES,MELVAL
+                  ENDDO
+                  SEGSUP,WRKEXT
+                  SEGDES,MLMOT1
+                  SEGDES,MCHAM2
+                  SEGDES,MCHEL2
+                  GOTO 9900
+                ENDIF
+*
+*       remplissage
+*
+                DO 825 ICOMP=1,N2
+                  IF (IVALIS(ICOMP).EQ.1) THEN
+                    MELVAL=IELVAL(ICOMP)
+                    VELCHE(IGAU,IEL) = XVAL(ICOMP)
+                  ENDIF
+ 825            CONTINUE
+*
+ 821          CONTINUE
+ 820        CONTINUE
+*
+*       DESACTIVATIONS
+*
+            DO IPARA=1,NPARA
+              MELVA2=IVAPAR(IPARA)
+**            SEGDES,MELVA2
+            ENDDO
+            DO ICOMP=1,N2
+              MELVAL=IELVAL(ICOMP)
+**            SEGDES,MELVAL
+            ENDDO
+            SEGSUP,WRKEXT
+C
+        ENDIF
+*
+*'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+        SEGSUP SWORK
+        SEGSUP WRK53
+        SEGSUP WRKRES
+        IF (KNUAG) THEN
+          SEGSUP NOTYPE
+          NOMID=IPNOMC
+          if(lsupma)SEGSUP NOMID
+        ENDIF
+        IF (IAMOI.NE.0) SEGSUP IAMOI
+C        SEGDES MCHAML,MCHAM1,IMODEL,MELEME
+C
+        IF (MINTE.NE.0) SEGDES MINTE
+        IF (MINTE1.NE.0) SEGDES MINTE1
+
+  10  CONTINUE
+C
+C  FIN de la boucle sur les sous-zones du MCHAML
+C -----------------------------------------------
+*
+* - STATIQUE - MODAL cree composantes facultatives
+*
+      IF (dstati.and.iret.ne.0) THEN
+        call varin6(ipmodl,iret)
+        if (ierr.ne.0) return
+      ENDIF
+
+C Fin normale de VARINU
+C =====================
+      NSOUS=ICHAML(/1)
+      DO IS = 1,NSOUS
+        MCHAML = ICHAML(IS)
+        SEGACT MCHAML
+        DO im = 1,IELVAL(/1)
+          MELVAL = IELVAL(im)
+          CALL COMRED(MELVAL)
+          SEGDES MELVAL
+        ENDDO
+        SEGDES MCHAML
+      ENDDO
+
+      SEGDES MCHELM
+C      SEGDES MCHEL1
+C      SEGDES MMODEL
+C**   SEGDES MELEME
+
+      RETURN
+
+C Erreur dans une sous zone / desactivation et retour
+C ===================================================
+ 9900 CONTINUE
+      SEGSUP MELVAL
+C
+ 9910 CONTINUE
+**    SEGDES MELVA1
+      SEGSUP MCHAML
+C
+      SEGDES MCHAM1
+      SEGDES MELEME
+C
+      SEGSUP SWORK
+      SEGSUP WRK53
+      SEGSUP WRKRES
+      IF (IAMOI.NE.0) SEGSUP IAMOI
+C
+ 9920 CONTINUE
+ 9930 CONTINUE
+      IRET=0
+      SEGDES IMODEL
+C      SEGDES MMODEL
+      SEGDES MCHEL1
+      SEGSUP MCHELM
+
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

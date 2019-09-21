@@ -1,0 +1,439 @@
+C ENVVO2    SOURCE    GOUNAND   17/12/05    21:16:05     9645
+      SUBROUTINE ENVVO2(icle)
+*
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+*
+*     20160713 : SG nouvelle programmation de envvol, simplifiée, en vue
+*                de traiter les faces TRI7/QUA9 nouvellement rajoutées
+*     dans le bdata. La simplification sera egalement utile pour
+*     les subroutines inspirees de envvol : faced2, faced, envel1,
+*     dicho3
+*     icle=0 : renvoie l'enveloppe (operateur ENVE)
+*     icle=1 : renvoie les face (operateur CHAN FACE)
+
+-INC CCOPTIO
+-INC SMELEME
+-INC CCGEOME
+-INC SMCOORD
+*     Type de faces prises en compte: T3, Q4, T6, Q8, T7, Q9
+*     Numero dans KDFAC               1   2   3   4   7   8
+* Pour ne pas se prendre la tête,  on numerote pareil que KDFAC
+* Pour les 5 (non utilisé), 6 (polygone) et >8, ca restera à 0
+*  NTYFAC=20, codé en dur dans CCGEOME pour KDFAC
+      PARAMETER (NTYFAC=20)
+* Nb de faces de chaque type, sert également de compteur
+      SEGMENT NBFAC(NTYFAC)
+* Tableau d'index de début fin dans les tableaux ???(NFAC)
+      SEGMENT IDXFAC(NTYFAC+1)
+* Pointeurs sur des segments MELEME par type de face
+      SEGMENT IPTFAC(NTYFAC)
+* Un segment pointant sur les IFACI
+      SEGMENT IPOFAC(NTYFAC)
+*     Segment IFACI contenant les noeuds et la couleurs des faces d'un
+*     type donné
+      SEGMENT IFACI(NNODE+1,NFACI)
+*
+      SEGMENT IPPOL(NTPOL)
+      SEGMENT NTFAC(NFAC)
+      SEGMENT KFAK(NFAC)
+      SEGMENT NAUX(max(2,NFAC))
+*SG
+*     Logique loquaf : pour les faces TRI7 et QUA9, normalement, le
+*     dernier noeud de la face est unique à la face : il peut donc
+*     servir de clé de hachage et on peut éviter de vérifier l'égalité
+*     de tous les autres noeuds lorsque l'on teste l'égalité des faces.
+*     C'est ce qu'on fait si loquaf=vrai.
+*
+      LOGICAL LOQUAF,LOPT
+      PARAMETER (LOQUAF=.TRUE.)
+      character*4 lnoid(1)
+* Pour chaque face dans KDFAC, le numéro d'élément associé
+* Ne se trouve pas dans CCGEOME, etonnant
+      INTEGER ITYEL(NTYFAC)
+*     T3, Q4, T6, Q8, ? , POLY, T7, Q9
+      DATA ITYEL/4,8,6,10,0,0,7,11,12*0/
+      data lnoid/'NOID'/
+
+*dbg      write(ioimp,*) 'coucou envvo2 IIMPI=',IIMPI
+c==== LECTURE ET OUVERTURE DU MELEME ==================================
+c     et eventuelle boucle 10 sur les ojbets meleme elementaires
+      CALL LIROBJ('MAILLAGE',MELEME,1,IRETOU)
+      IF (IERR.NE.0) RETURN
+      call lirmot(lnoid,1,inoid,0)
+c     on compte le nombre d elements dont les faces sont de type 1 2 3 4
+c     7 8 dans NBFAC, on gère séparément les polygones
+      SEGINI NBFAC
+      NTPOL = 0
+      IPT1=MELEME
+      SEGACT MELEME
+      DO 10 IOB=1,MAX(1,LISOUS(/1))
+         IF (LISOUS(/1).NE.0) THEN
+            IPT1=LISOUS(IOB)
+            SEGACT IPT1
+         ENDIF
+         NBELEM=IPT1.NUM(/2)
+c     LTEL,LDEL LFAC de CCGEOME remplis par bdata
+         ILTEL=LTEL(1,IPT1.ITYPEL)
+         IF (ILTEL.EQ.0) GOTO 10
+         ILTAD=LTEL(2,IPT1.ITYPEL)
+c --- boucle sur les faces de chaque elements ---
+         DO 13 IF=1,ILTEL
+            IFT=LDEL(1,ILTAD+IF-1)
+            IF (IFT.EQ.6) THEN
+               NTPOL=NTPOL+1
+            ELSE
+               NBFAC(IFT)=NBFAC(IFT)+NBELEM
+            ENDIF
+ 13      CONTINUE
+c --- fin de boucle sur les faces de chaque elements ---
+ 10   CONTINUE
+c       write(6,*) 'dimension de NFAC3,4,6,8=',NFAC3,NFAC4,NFAC6,NFAC8
+
+c==== CREATION DES FACES ==============================================
+      SEGINI IPOFAC
+      DO ITYFAC=1,NTYFAC
+         NNODE=KDFAC(1,ITYFAC)
+         IF (NNODE.GT.0) THEN
+            NFACI=NBFAC(ITYFAC)
+            SEGINI IFACI
+            IPOFAC(ITYFAC)=IFACI
+         ENDIF
+      ENDDO
+      SEGINI IPPOL
+c     NBFAC sert maintenant de compteur
+      DO ITYFAC=1,NTYFAC
+         NBFAC(ITYFAC)=0
+      ENDDO
+      NTPOL=0
+c     eventuelle boucle 50 sur les objets meleme elementaires
+      DO 50 IOB=1,MAX(1,LISOUS(/1))
+         IF (LISOUS(/1).NE.0) IPT1=LISOUS(IOB)
+         segact ipt1
+         NBELEM=IPT1.NUM(/2)
+         ILTEL=LTEL(1,IPT1.ITYPEL)
+         IF (ILTEL.EQ.0) GOTO 52
+         ILTAD=LTEL(2,IPT1.ITYPEL)
+c --- boucle 60 sur faces d'1 type d'element ------------------
+         DO 60 IF=1,ILTEL
+            ITYFAC=LDEL(1,ILTAD+IF-1)
+            IAD=LDEL(2,ILTAD+IF-1)
+            NNODE=KDFAC(1,ITYFAC)
+            IF (NNODE.GT.0) THEN
+               IFACI=IPOFAC(ITYFAC)
+c --- boucle 66 sur elements ---------------------------------
+               DO 66 IEL=1,NBELEM
+                  NBFAC(ITYFAC)=NBFAC(ITYFAC)+1
+                  j=NBFAC(ITYFAC)
+                  DO i=1,NNODE
+                     IFACI(i,j)=IPT1.NUM(LFAC(IAD+i-1),IEL)
+                  ENDDO
+                  IFACI(NNODE+1,j)=IPT1.ICOLOR(IEL)
+ 66            CONTINUE
+c --- fin de boucle 66 sur elements ---------------------------------
+            ENDIF
+*SG   Avant ce if était après le 52 CONTINUE mais alors ITYFAC etait
+*     potentiellement non initialise
+            IF (ITYFAC.EQ.6) THEN
+C     Polygone
+               NTPOL = NTPOL+1
+               IPPOL(NTPOL)= IPT1
+            ENDIF
+ 60      CONTINUE
+c --- fin de boucle 60 sur faces d'1 type d'element ------------------
+ 52      CONTINUE
+         IF (LISOUS(/1).NE.0) SEGDES IPT1
+ 50   CONTINUE
+      SEGDES MELEME
+
+C ======================================================================
+C  IL FAUT MAINTENANT RETASSER ET CLASSER LES TABLEAUX DES FACES
+C  PROBLEME ELLES NE SONT PAS FORCEMENT DECRITES DE LA MEME FACON
+C     SG 20160712 NTFAC sert de cle de hachage, elle est égale à la
+C     somme des numeros de noeuds de la face
+      NFAC=0
+      SEGINI IDXFAC
+      IDXFAC(1)=NFAC+1
+      DO ITYFAC=1,NTYFAC
+         NFAC=NFAC+NBFAC(ITYFAC)
+         IDXFAC(ITYFAC+1)=NFAC+1
+*         write(ioimp,*) 'ityfac=',ityfac,' nbfac=',NBFAC(ITYFAC)
+      ENDDO
+      SEGINI NTFAC,KFAK
+      IFAC=0
+      DO ITYFAC=1,NTYFAC
+         NNODE=KDFAC(1,ITYFAC)
+         IF (NNODE.GT.0) THEN
+            LOPT=LOQUAF.AND.(ITYFAC.EQ.7.OR.ITYFAC.EQ.8)
+            IFACI=IPOFAC(ITYFAC)
+            DO I=1,NBFAC(ITYFAC)
+               IFAC=IFAC+1
+               IF (LOPT) THEN
+                  NTFAC(IFAC)=IFACI(NNODE,I)
+               ELSE
+                  DO J=1,NNODE
+                     NTFAC(IFAC)=NTFAC(IFAC)+IFACI(J,I)
+                  ENDDO
+               ENDIF
+               KFAK(IFAC)=I
+            ENDDO
+         ENDIF
+      ENDDO
+C     IL N'Y A PLUS QU'A TRIER ET RETASSER KFAK SUIVANT NTFAC
+      SEGINI NAUX
+      DO 300 ITYFAC=1,NTYFAC
+         IDEB=IDXFAC(ITYFAC)
+         IFIN=IDXFAC(ITYFAC+1)-1
+         IF (IFIN.LE.IDEB) GOTO 300
+         NAUX(1)=IDEB
+         NAUX(2)=IFIN
+*
+         IZ=2
+ 208     IZ=IZ-1
+         IF (IZ.LE.0) GOTO 209
+         IPB=NAUX(IZ*2-1)
+         IPH=NAUX(IZ*2)
+         IF(IPB.GE.IPH) GOTO 208
+         JPB=IPB-1
+         JPH=IPH+1
+C  CALCUL DU PIVOT
+         NPV=0
+*     DO 207 J=IPB,IPH
+*     NPV=NPV+NTFAC(J)
+*     207  CONTINUE
+*     NPV=NPV/(IPH-IPB+1)
+         NPV=(NTFAC(IPB)+NTFAC(IPH))/2
+ 242     JPB=JPB+1
+         IF (JPH.EQ.JPB) GOTO 245
+         IF (NTFAC(JPB).LE.NPV) GOTO 243
+         GOTO 242
+ 243     JPH=JPH-1
+         IF (JPH.EQ.JPB) GOTO 245
+         IF (NTFAC(JPH).GE.NPV) GOTO 244
+         GOTO 243
+ 244     IAUX=KFAK(JPB)
+         KFAK(JPB)=KFAK(JPH)
+         KFAK(JPH)=IAUX
+         NTAUX=NTFAC(JPB)
+         NTFAC(JPB)=NTFAC(JPH)
+         NTFAC(JPH)=NTAUX
+         GOTO 242
+ 245     IF (JPB.GE.IPB) GOTO 247
+         JPB=JPB+1
+         JPH=JPH+2
+         GOTO 248
+ 247     IF (JPH.LE.IPH) GOTO 249
+         JPB=JPB-2
+         JPH=JPH-1
+         GOTO 248
+ 249     IF (NTFAC(JPB).LE.NPV) GOTO 250
+         IF (JPH.EQ.IPH) GOTO 251
+ 252     JPH=JPH+1
+         GOTO 248
+ 250     IF (JPB.EQ.IPB) GOTO 252
+ 251     JPB=JPB-1
+ 248     IF (JPB.EQ.IPB) GOTO 253
+         NAUX(2*IZ)=JPB
+         IZ=IZ+1
+ 253     IF (JPH.EQ.IPH) GOTO 208
+         NAUX(2*IZ)=IPH
+         NAUX(2*IZ-1)=JPH
+         IZ=IZ+1
+         GOTO 208
+ 209     CONTINUE
+ 300  CONTINUE
+
+C ======================================================================
+C  LES FACES SONT CLASSEES DANS KFAK IL FAUT ELIMINER LES FACES EN DOUBL
+C  ELLES SONT PAR TYPE LES UNES DERRIERES LES AUTRES LES PLUS HAUTES
+C  DEVANT
+      IF (IIMPI.NE.0) WRITE (IOIMP,9111) (KFAK(I),NTFAC(I),I=1,NFAC)
+ 9111 FORMAT(5(2X,2I6))
+      DO 400 ITYFAC=1,NTYFAC
+         IDEB=IDXFAC(ITYFAC)
+         IFIN=IDXFAC(ITYFAC+1)-1
+         IF (IFIN.LE.IDEB) GOTO 400
+         NNODE=KDFAC(1,ITYFAC)
+* A cette etape on doit avoir nnode.gt.0
+         IF (NNODE.LE.0) THEN
+            CALL ERREUR(5)
+            RETURN
+         ENDIF
+         LOPT=LOQUAF.AND.(ITYFAC.EQ.7.OR.ITYFAC.EQ.8)
+         IFACI=IPOFAC(ITYFAC)
+*
+         IFINM=IFIN-1
+         DO 450 I1=IDEB,IFINM
+            NTI1=NTFAC(I1)
+            IF (NTI1.EQ.0) GOTO 450
+            IDEB1=I1+1
+            DO 460 I2=IDEB1,IFIN
+               NTI2=NTFAC(I2)
+               IF (NTI2.EQ.0) GOTO 460
+               IF (NTI2.NE.NTI1) GOTO 450
+               IF (.NOT.LOPT) THEN
+                  IR1=KFAK(I1)
+                  IR2=KFAK(I2)
+                  DO 471 J1=1,NNODE
+                     INU=IFACI(J1,IR1)
+                     DO 472 J2=1,NNODE
+                        IF (INU.EQ.IFACI(J2,IR2)) GOTO 471
+ 472                 CONTINUE
+                     GOTO 460
+ 471              CONTINUE
+               ENDIF
+C  DEUX FACES EGALES ON LES SUPPRIMENT (ENVE)
+               if (icle.eq.0) then
+                  NTFAC(I1)=0
+                  NTFAC(I2)=0
+C  DEUX FACES EGALES ON EN SUPPRIME UNE (CHAN FACE)
+               elseif (icle.eq.1) then
+*     il semble plus astucieux de supprimer la premiere pour le cas qui
+*     ne doit pas arriver ici ou il y ait plus que deux faces egales
+                  NTFAC(I1)=0
+               else
+                  call erreur(5)
+                  return
+               endif
+               GOTO 450
+ 460        CONTINUE
+ 450     CONTINUE
+ 400  CONTINUE
+*
+      IF (IIMPI.NE.0) WRITE (IOIMP,9111) (KFAK(I),NTFAC(I),I=1,NFAC)
+
+      SEGINI IPTFAC
+      NBSOUS=0
+      NBREF=0
+      NBSOU2=0
+      DO 600 ITYFAC=1,NTYFAC
+         IDEB=IDXFAC(ITYFAC)
+         IFIN=IDXFAC(ITYFAC+1)-1
+*         write(ioimp,*) 'ityfac=',ityfac,' ideb=',ideb,' ifin=',ifin
+         IF (IFIN.LT.IDEB) GOTO 600
+         NNODE=KDFAC(1,ITYFAC)
+* A cette etape on doit avoir nnode.gt.0
+         IF (NNODE.LE.0) THEN
+            CALL ERREUR(5)
+            RETURN
+         ENDIF
+         IFACI=IPOFAC(ITYFAC)
+         NBELEM=0
+         DO 611 I=IDEB,IFIN
+            IF (NTFAC(I).NE.0) NBELEM=NBELEM+1
+ 611     CONTINUE
+*         write(ioimp,*) 'nbelem=',nbelem,' nnode=',nnode
+         IF (NBELEM.EQ.0) GOTO 600
+         NBSOU2=NBSOU2+1
+         NBNN=NNODE
+         SEGINI IPT1
+         IPT1.ITYPEL=ITYEL(ITYFAC)
+         JAUX=0
+         DO 612 J=IDEB,IFIN
+            IF (NTFAC(J).EQ.0) GOTO 612
+            JAUX=JAUX+1
+            IPT1.ICOLOR(JAUX)=IFACI(NNODE+1,KFAK(J))
+            DO 613 I=1,NBNN
+               IPT1.NUM(I,JAUX)=IFACI(I,KFAK(J))
+ 613        CONTINUE
+ 612     CONTINUE
+         SEGDES IPT1
+         IPTFAC(ITYFAC)=IPT1
+*         write(ioimp,*) 'ipt1=',ipt1
+ 600  CONTINUE
+*  on rajoute les points et les segments qui pouvaient  etre dans le
+*  maillage initial
+      ipt5=0
+      segact meleme
+      ipt6=meleme
+      do 710 io=1,max(1,lisous(/1))
+         if (lisous(/1).ne.0) ipt6=lisous(io)
+         segact ipt6
+         if (ipt6.itypel.le.3) then
+            nbsou2=nbsou2+1
+            ipt5=ipt6
+         endif
+         segdes ipt6
+ 710  continue
+      segdes meleme
+*      write(ioimp,*) 'nbsou2=',nbsou2
+      IF (NBSOU2.EQ.0.AND.NTPOL.EQ.0.AND.inoid.eq.0) CALL ERREUR(26)
+      IF (NBSOU2.NE.1.OR.NTPOL.GT.0) THEN
+         NBREF=0
+         NBSOUS=NBSOU2+NTPOL
+         NBNN=0
+         NBELEM=0
+         SEGINI IPT5
+         I=0
+         DO ITYFAC=1,NTYFAC
+            IPT1=IPTFAC(ITYFAC)
+            IF (IPT1.NE.0) THEN
+               I=I+1
+               IPT5.LISOUS(I)=IPT1
+            ENDIF
+         ENDDO
+         segact meleme
+         ipt1=meleme
+         do 711 io=1,max(1,lisous(/1))
+            if (lisous(/1).ne.0) ipt1=lisous(io)
+            segact ipt1
+            if (ipt1.itypel.le.3) then
+               I=I+1
+               IPT5.LISOUS(I)=IPT1
+            endif
+            segdes ipt1
+ 711     continue
+         DO 720, IO = 1, NTPOL
+            I = I+1
+            IPT5.LISOUS(I)=IPPOL(IO)
+ 720     CONTINUE
+         if (ipt5.lisous(/1).eq.1) then
+            ipt6=ipt5
+            ipt5=ipt6.lisous(1)
+            segsup ipt6
+         endif
+         segdes meleme
+      ELSE
+* Cas ou il n'y a qu'un meleme
+         IPTF=0
+         DO ITYFAC=1,NTYFAC
+            IPTF=IPTF+IPTFAC(ITYFAC)
+*            write(ioimp,*) 'iptf=',iptf
+         ENDDO
+         IPTF=IPTF+IPT5
+         IPT5=IPTF
+      ENDIF
+      SEGDES IPT5
+      CALL ECROBJ('MAILLAGE',IPT5)
+
+      SEGSUP IPTFAC
+      SEGSUP NAUX
+      SEGSUP NTFAC,KFAK
+      SEGSUP IDXFAC
+      SEGSUP IPPOL
+      DO ITYFAC=1,NTYFAC
+         IFACI=IPOFAC(ITYFAC)
+         IF (IFACI.NE.0) THEN
+            SEGSUP IFACI
+         ENDIF
+      ENDDO
+      SEGSUP IPOFAC
+      SEGSUP NBFAC
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

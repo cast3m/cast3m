@@ -1,0 +1,424 @@
+C TAJPOT    SOURCE    PV        16/04/06    21:15:18     8864
+      SUBROUTINE TAJPOT(IPT,ITD,ITRNOE,NBNMAX,ITRTRI,NBCMAX,
+     >                    NOETRI,NBE,COORD,SPH,NBSMAX,
+     >                    ITVL,IMAX,SZERO,NBTNEW,iarr)
+C     **********************************************************************
+C     OBJET : AJOUT DU POINT IPT DANS UNE TRIANGULATION DE DELAUNAY
+C
+C     EN ENTREE :
+C       IPT      : LE NUMERO (DANS COORD) DU POINT A AJOUTER
+C       ITD     : UN TRIANGLE PROCHE DE IPT (SI POSSIBLE)
+C
+C       ITRNOE,NBNMAX,ITRTRI,NBCMAX,NOETRI : LA TRIANGULATION
+C       COORD   : COORDONNEES DES NOEUDS DE LA TRIANGULATION
+C
+C       SPH     : TABLEAU DES SPHERES CIRCONSCRITES AUX TRIANGLES
+C                 (CF. SPHCERTRI)
+C       NBSMAX  : NOMBRE DE CHAMPS POUR LE CALCUL DES SPHERES (>=2)
+C
+C       ITVL: TABLEAU DE TRAVAIL. ON Y EMPILE SIMULTANEMENT :
+C                  - LES ELEMENTS A DETRUIRE ET LEUR FRONTIERE
+C                  - LES ELEMENTS A CONSTRUIRE ET LES SOMMETS PERDUS
+C       IMAX    : TAILLE DU TABLEAU DE TRAVAIL (6*NBADET+10)
+C
+C       SZERO   : SURFACE MINIMUM DES TRIANGLES CREES
+C                 SI ELLE EST ATTEINTE LE POINT EST REJETE
+C
+C     EN SORTIE : LA TRIANGULATION CONTENANT IPT (SI iarr=0)
+C       NBTNEW  : LE NOMBRE D'ELEMENTS CREES
+C                 LES ELEMENTS CREES SONT LES TRIANGLES DE NUMERO 1 A NBTNEW
+C       iarr    : CODE D'ERREUR 0 SI OK
+C                 -1 LE NOEUD N'A PAS PU ETRE AJOUTE (REJET)
+C                  LA TRIANGULATION RESTE VALIDE
+C                 -2 ITVL TROP PETIT
+C     REMARQUE :
+C       POUR UTILISER TAJPOT ET AJOUTER UN POINT A UNE TRIANGULATION
+C       IL FAUT :
+C       - CREER LA STRUCTURE DU MAILLAGE (CF. SMAOCR)
+C       - INITIALISER SPH EN APPELANT SPHCERTRI POUR CHAQUE TRIANGLE
+C       - AJOUTER LES COORDONNEES DU POINT A COORD.
+C     **********************************************************************
+      IMPLICIT INTEGER(I-N)
+      INTEGER    IPT,ITD,NBSMAX,NBTNEW
+      INTEGER    ITRNOE(*),NBNMAX,ITRTRI(*),NBCMAX
+      INTEGER    NOETRI(*),NBE,ITVL(*),IMAX,iarr
+      REAL*8       SPH(*),COORD(*),SZERO
+C
+C     --- POUR LE DEBUG ---
+C
+C      COMMON /DEBUG/ ITEST, iarrOR, IMESS
+C      INTEGER       ITEST, iarrOR
+C      CHARACTER*256 IMESS
+C
+C     --- POUR LES STATS ---
+C
+C      COMMON /STATS/ ICARD(100),TEMPSCPU(100)
+C      INTEGER       ICARD
+C      REAL        TEMPSCPU
+C     --- VARIABLES INTERNES ---
+      INTEGER IDE,NBC,IADETR,NADETR,NBCSTR,IACSTR,NTCMAX
+C      INTEGER ITRAV,NBTRAV,
+      INTEGER NBFNOE
+      INTEGER I,J,K, IND, IFR,NIFMAX,NBIFR,ISOMP,NBSOMP
+      INTEGER NBIFR1,IT,IF,IT1,IFR2,NBCOL,NP, NOEMAX
+      INTEGER ISENS, IDIMC
+      INTEGER  GORIEN
+      EXTERNAL GORIEN
+C
+C     ---- POUR LE DEBUG ----
+      INTEGER  ITERR, ITAMPO
+      INTEGER  ITERR2, IAERR, NT, IPTDSC, IPTDS2, IPOINT(3),IOR
+      INTEGER  SPPOIN, SPPOI2
+      EXTERNAL SPPOIN, SPPOI2
+      REAL*8     TAILLE, ZERO
+C      REAL   TIMED, TIMEF, TABTIME(2), ETIME
+C      EXTERNAL ETIME
+C
+      IDIMC = 2
+      NBTNEW = 0
+      ZERO = 1.D-30
+      IDE = IDIMC
+      NBC = IDIMC + 1
+      NOEMAX = 1
+C
+C     ---- 1. RECHERCHE DES ELEMENTS A DETRUIRE --------------------
+C     LES ELEMENTS DONT LE CERCLE CIRCONSCRIT CONTIENT LE POINT "IPT"
+C     SONT MIS DANS LE TABLEAU ITVL DE "IADETR" JUSQU'A "NADETR"
+C     --------------------------------------------------------------
+C      TIMED = ETIME(TABTIME)
+C
+      IADETR   = 1
+      IF( ITD.GT.0 )THEN
+C        ------------------------------------------------
+C     --- ON CONNAIT 1 TRIANGLE CONTENANT LE POINT : ITD ---
+C        ------------------------------------------------
+        ITVL(IADETR) = ITD
+        NADETR = 1
+        CALL RTCONN(COORD((IPT-1)*IDIMC+1),IDIMC,ITRNOE,NBNMAX,
+     >              ITRTRI,NBCMAX,COORD,SPH,
+     >              ITVL(IADETR),NADETR,IMAX,ZERO,iarr)
+
+      ELSE
+C        -----------------------------------------------------
+C     --- ON RECHERCHE LES TRIANGLES CONTENANT LE POINT : ITD ---
+C        -----------------------------------------------------
+        NADETR = 0
+        CALL RTADET(COORD((IPT-1)*IDIMC+1),IDIMC,ITRNOE,NBNMAX,
+     >              ITRTRI,NBCMAX,NBE,COORD,SPH,
+     >              ITVL(IADETR),NADETR,IMAX,ZERO,iarr)
+      ENDIF
+      IF((NADETR.LT.1).OR.(iarr .NE. 0))THEN
+         iarr = -1
+         CALL DSERRE(1,iarr,'TAJPOT','DANS LA RECHERCHE')
+         GOTO 999
+      ELSE
+      ENDIF
+C
+      NTCMAX = 2
+C
+C      TIMEF = ETIME(TABTIME)
+C      TEMPSCPU(1) = TEMPSCPU(1) + TIMEF - TIMED
+C
+C
+C     ---- 2. CALCUL DE LA FRONTIERE -----------------------------
+C
+C      TIMED = TIMEF
+C
+      CALL ENSTRI(ITVL(IADETR),NADETR)
+C
+      DO 10 I=1,NTCMAX
+        ITVL(IADETR+NADETR+I-1) = I + NBE
+        DO 5 K=1,NBNMAX
+          ITRNOE(((I+NBE)-1)*NBNMAX + K ) = 0
+   5    CONTINUE
+        DO 6 K=1,NBCMAX
+          ITRTRI(((I+NBE)-1)*NBCMAX + K ) = 0
+   6    CONTINUE
+   10 CONTINUE
+C      PRINT *,'AVANT RENUMEROTATION'
+C      CALL DEBTABIPR(ITRNOE,NBE,NBNMAX,1)
+C      CALL DEBTABIPR(ITRTRI,NBE,NBCMAX,1)
+      CALL NUCOMP(IDE,ITRNOE,NBNMAX,ITRTRI,NBCMAX,NOETRI,
+     >            NOEMAX,(NBE+NTCMAX),ITVL(IADETR),
+     >            (NADETR+NTCMAX),iarr)
+      IF(iarr .NE. 0)THEN
+         CALL DSERRE(1,iarr,'NUCOMP','COMPRESSION EL')
+         GOTO 999
+      ENDIF
+C     ---- COMPACTAGE DES SPHERES --------------------------------
+      CALL SPCOMP(SPH, NBSMAX, (NBE+NTCMAX),ITVL(IADETR),
+     >              (NADETR+NTCMAX),iarr)
+      IF(iarr .NE. 0)THEN
+         CALL DSERRE(1,iarr,'SPCOMP','COMPRESSION SPH')
+         GOTO 999
+      ENDIF
+      IND = 1
+      IFR = IADETR + NADETR
+      NBIFR = 0
+      NIFMAX = IMAX - NADETR
+      CALL TMAFRT(IDE,ITRNOE,NBNMAX,ITRTRI,NBCMAX,IND,NADETR,
+     >             ITVL(IFR),NBIFR,NIFMAX,iarr)
+C     ---- POUR LE DEBUG ----------
+      IF( iarr .NE. 0 )THEN
+        CALL DSERRE(1,iarr,'TAJPOT','FRONTIERE T A DET.')
+C        CALL DEBTABIPR(ITRNOE,NBE+NTCMAX,NBNMAX,1)
+C        CALL DEBTABIPR(ITRTRI,NBE+NTCMAX,NBCMAX,1)
+        GOTO 999
+      ENDIF
+C
+C      TIMEF = ETIME(TABTIME)
+C      TEMPSCPU(2) = TEMPSCPU(2) + TIMEF - TIMED
+C
+C     ---- 3. VERIFICATION DE L'ORIENTATION ----------------------
+C
+      IACSTR = IFR + ( NBIFR * 2 )
+      NBCSTR = NBIFR
+      IF( NBCSTR .LT. (NADETR+2))THEN
+C     --- POUR LE CAS 2D ---
+        iarr = -1
+        CALL DSERRE(1,iarr,'TAJPOT','SOMMET PERDU')
+C        ICARD(4) = ICARD(4) + 1
+        GOTO 100
+      ENDIF
+C
+      IF( NBCSTR .GT. (NADETR+2))THEN
+C     --- POUR LE CAS 2D ---
+        iarr = -1
+        CALL DSERRE(1,iarr,'TAJPOT','TRI NON CONNEXES')
+C        ICARD(5) = ICARD(5) + 1
+        GOTO 100
+      ENDIF
+C
+      DO 20 I=1,NBIFR
+C        ITVL((I-1)*NBC+IACSTR) = IPT
+C        CALL TNOFRT(IDE,ITRNOE,NBNMAX,ITVL((I-1)*2+IFR),
+C     >        ITVL((I-1)*2+IFR+1),ITVL((I-1)*NBC+IACSTR+1))
+C
+C
+        ITVL((I-1)*NBC+IACSTR+2) = IPT
+        CALL TNOFRT(IDE,ITRNOE,NBNMAX,ITVL((I-1)*2+IFR),
+     >        ITVL((I-1)*2+IFR+1),ITVL((I-1)*NBC+IACSTR))
+        IF( GORIEN(ITVL((I-1)*NBC+IACSTR),NBC,COORD,IDIMC,SZERO)
+     >       .NE.1 )THEN
+C
+C          ---- REPRISE SUR ERREUR : RECOMPACTAGE ----
+
+           iarr = -1
+C           CALL DSERRE(1,iarr,'TAJPOT','ORIENTATION ELEMENT')
+C           ICARD(5) = ICARD(5) + 1
+C
+C          --- ON PERTURBE LE CALCUL DES SPHERES ---
+C
+           ITERR = ITVL((I-1)*2+IFR)
+           IAERR = ITVL((I-1)*2+IFR+1)
+           ITERR2 = ITRTRI((ITERR-1)*NBCMAX+IAERR)
+           ITAMPO = ITRNOE(ITERR*NBNMAX)
+           ITRNOE(ITERR*NBNMAX)   = ITRNOE(ITERR*NBNMAX-1)
+           ITRNOE(ITERR*NBNMAX-1) = ITRNOE(ITERR*NBNMAX-2)
+           ITRNOE(ITERR*NBNMAX-2) = ITAMPO
+           ITAMPO = ITRTRI(ITERR*NBCMAX)
+           ITRTRI(ITERR*NBCMAX)   = ITRTRI(ITERR*NBCMAX-1)
+           ITRTRI(ITERR*NBCMAX-1) = ITRTRI(ITERR*NBCMAX-2)
+           ITRTRI(ITERR*NBCMAX-2) = ITAMPO
+C
+           CALL SPCREE(IDIMC,ITERR,ITRNOE((ITERR-1)*NBNMAX+1),
+     >                  COORD,SPH,ZERO,iarr)
+C
+C          --- ON PERTURBE AUSSI LE VOISIN ---
+C
+           IF( ITERR2.LE.0 )GOTO 100
+           ITERR = ITERR2
+           ITAMPO = ITRNOE(ITERR*NBNMAX)
+           ITRNOE(ITERR*NBNMAX)   = ITRNOE(ITERR*NBNMAX-1)
+           ITRNOE(ITERR*NBNMAX-1) = ITRNOE(ITERR*NBNMAX-2)
+           ITRNOE(ITERR*NBNMAX-2) = ITAMPO
+           ITAMPO = ITRTRI(ITERR*NBCMAX)
+           ITRTRI(ITERR*NBCMAX)   = ITRTRI(ITERR*NBCMAX-1)
+           ITRTRI(ITERR*NBCMAX-1) = ITRTRI(ITERR*NBCMAX-2)
+           ITRTRI(ITERR*NBCMAX-2) = ITAMPO
+C
+           CALL SPCREE(IDIMC,ITERR,ITRNOE((ITERR-1)*NBNMAX+1),
+     >                  COORD,SPH,ZERO,iarr)
+
+           GOTO 100
+         ENDIF
+   20 CONTINUE
+C
+C     ---- 4. FRONTIERE EXTERIEUR DU TROU ---------
+C             LES VOISINS SUR LA FRONTIERES DES ELEMENTS A DETRUIRE
+C
+      NBIFR1 = 0
+      DO 50 I=1,NBIFR
+        IT = ITVL((I-1)*2+IFR)
+        IF = ITVL((I-1)*2+IFR+1)
+C       --- MULTI-MAT ---
+        ISENS = 1
+        IF( IF.LT.0 )ISENS = -1
+        IT1 = ABS(ITRTRI((IT-1)*NBCMAX+(IF*ISENS)))
+        IF( IT1.NE.0 )THEN
+          DO 30 J=1,NBCMAX
+            IF(ABS(ITRTRI((IT1-1)*NBCMAX+J)).EQ.IT)GO TO 40
+   30     CONTINUE
+          iarr = -1
+          CALL DSERRE(1,iarr,'TAJPOT','ERREUR TROU')
+          GO TO 999
+   40     NBIFR1 = NBIFR1 + 1
+          ITVL((NBIFR1-1)*2+IFR)   = ABS(IT1)
+          ITVL((NBIFR1-1)*2+IFR+1) = ISENS*J
+         ENDIF
+   50 CONTINUE
+C
+C     ---- 5. DESTRUCTION DES MAILLES ----------------------------
+C
+C      TIMED = ETIME(TABTIME)
+C
+      NBFNOE = 0
+      NBSOMP = 0
+      ISOMP   = IACSTR + (NBCSTR * NBC)
+      DO 60 I=1,NADETR
+        CALL SMADET(IDE,ITRNOE,NBNMAX,ITRTRI,NBCMAX,NBE,NOETRI,
+     >              NBFNOE,I,NBC,ITVL(ISOMP+NBSOMP),NBSOMP,iarr)
+        IF( iarr .NE. 0  )THEN
+          CALL DSERRE(1,iarr,'TAJPOT','ERREUR DESTRUCTION')
+          GOTO 999
+        ENDIF
+   60 CONTINUE
+      NBE = NBE - NADETR
+      IF( NBSOMP.NE.0 )THEN
+       iarr = -1
+       CALL DSERRE(1,iarr,'TAJPOT','SOMMETS PERDUS')
+C       PRINT *, (ITVL(ISOMP),I=1,NBSOMP)
+       GO TO 999
+      ENDIF
+C
+C      TIMEF = ETIME(TABTIME)
+C      TEMPSCPU(5) = TEMPSCPU(5) + TIMEF - TIMED
+C
+C     ---- 6. CONSTRUCTION DES NOUVEAUX ELEMENTS -----------------
+C
+C      TIMED = TIMEF
+C
+      NBFNOE = 0
+C      ITRAV  = ISOMP
+C      NBTRAV = IMAX - ITRAV + 1
+C      CALL STRCREE(IDE,ITVL(IACSTR),NBCSTR,
+C     >             ITRNOE,NBNMAX,ITRTRI,NBCMAX,NOETRI,NBFNOE,
+C     >             ITVL(ITRAV),NBTRAV,iarr)
+C     REMPLACE PAR :
+C     =========================================================
+      DO 63 I=1,NBCSTR
+        DO 61 J=1,NBC
+          ITRNOE((I-1)*NBNMAX+J)=ITVL((I-1)*NBC+IACSTR-1+J)
+          ITRTRI((I-1)*NBCMAX+J)=0
+   61   CONTINUE
+      DO 62 J=1,(I-1)
+        IF( ITRNOE((J-1)*NBNMAX+1).EQ.ITRNOE((I-1)*NBNMAX+2) )THEN
+          ITRTRI((J-1)*NBCMAX+3) = I
+          ITRTRI((I-1)*NBCMAX+2) = J
+        ENDIF
+        IF( ITRNOE((J-1)*NBCMAX+2).EQ.ITRNOE((I-1)*NBCMAX+1) )THEN
+          ITRTRI((J-1)*NBCMAX+2) = I
+          ITRTRI((I-1)*NBCMAX+3) = J
+        ENDIF
+   62 CONTINUE
+   63 CONTINUE
+C      DO 62 J=1,(I-1)
+C        IF( ITRNOE((J-1)*NBNMAX+3).EQ.ITRNOE((I-1)*NBNMAX+2) )THEN
+C          ITRTRI((J-1)*NBCMAX+3) = I
+C          ITRTRI((I-1)*NBCMAX+1) = J
+C        ENDIF
+C        IF( ITRNOE((J-1)*NBCMAX+2).EQ.ITRNOE((I-1)*NBCMAX+3) )THEN
+C          ITRTRI((J-1)*NBCMAX+1) = I
+C          ITRTRI((I-1)*NBCMAX+3) = J
+C        ENDIF
+C        62 CONTINUE
+C        63 CONTINUE
+C      NOETRI(ITVL((I-1)*NBC+IACSTR)) = 1
+C     BUG4 O.STAB 08.08.95 REMPLACER PAR :
+      NOETRI(IPT) = 1
+C      CALL DEBTABIPR(ITRNOE,NBCSTR,NBNMAX,1)
+C      CALL DEBTABIPR(ITRTRI,NBCSTR,NBCMAX,1)
+C     ==========================================================
+      DO 70 I=1,NBCSTR
+C       ---------------------
+        CALL SPCREE(IDIMC,I,ITRNOE((I-1)*NBNMAX+1),COORD,SPH,
+     >              ZERO,iarr)
+        IF( iarr .NE. 0  )THEN
+          CALL DSERRE(1,iarr,'TAJPOT','CALCUL SPHERES')
+          GOTO 999
+        ENDIF
+   70 CONTINUE
+C
+C      TIMEF = ETIME(TABTIME)
+C      TEMPSCPU(6) = TEMPSCPU(6) + TIMEF - TIMED
+C
+C     --- 7. CONNECTION AVEC LES ANCIENS ---
+C
+C      TIMED = TIMEF
+C
+      IND = 1
+      IFR2 = IACSTR
+      NIFMAX = IMAX - IACSTR
+      CALL TMAFRT(IDE,ITRNOE,NBNMAX,ITRTRI,NBCMAX,IND,NBCSTR,
+     >             ITVL(IFR2),NBIFR,NIFMAX,iarr)
+      IF( iarr .NE. 0  )THEN
+        CALL DSERRE(1,iarr,'TAJPOT','FRONTIERE T CREES')
+        GOTO 999
+        ENDIF
+C
+C     --- MISE A JOUR DE ITRTRI -----------------
+C
+      CALL S2GLAR(ITVL(IFR),NBIFR1,ITVL(IFR2),NBIFR,
+     >                ITRNOE,NBNMAX,ITRTRI,NBCMAX,NBCOL)
+C
+C     --- MISE A JOUR DE NOETRI -----------------
+C
+      DO 90 I=1,NBCSTR
+        DO 80 J=1,NBNMAX
+          NP = ITRNOE((I-1)*NBNMAX+J)
+          IF( NP .NE. 0 )NOETRI(NP)=I
+   80   CONTINUE
+   90 CONTINUE
+      NBE = NBE + NBCSTR
+      NBTNEW = NBCSTR
+C      ICARD(6) = ICARD(6) + NBCSTR
+C      ICARD(7) = ICARD(7) + NADETR
+C
+C      TIMEF = ETIME(TABTIME)
+C      TEMPSCPU(7) = TEMPSCPU(7) + TIMEF - TIMED
+      GOTO 999
+C
+C     ---- REPRISE SUR ERREUR : RECOMPACTAGE ----
+C
+  100 iarr = 0
+      IF( NADETR .EQ. NBE )GO TO 999
+      DO 110 J=1,NADETR
+             ITVL(J) = J
+  110 CONTINUE
+      DO 120 J=1,NTCMAX
+             ITVL(NADETR+J) = NBE + J
+  120 CONTINUE
+C      DO 110 J=1, (NADETR+NTCMAX)
+C             ITVL(IADETR+J-1) = NBE - NADETR + J
+C     110 CONTINUE
+      CALL NUCOMP(IDE,ITRNOE,NBNMAX,ITRTRI,NBCMAX,NOETRI,
+     >                NOEMAX,(NBE+NTCMAX),ITVL(IADETR),
+     >                (NADETR+NTCMAX),iarr)
+      IF(iarr .NE. 0)THEN
+         CALL DSERRE(1,iarr,'NUCOMP','COMPRESS 2 EL')
+         GOTO 999
+      ENDIF
+      CALL SPCOMP(SPH, NBSMAX, (NBE+NTCMAX),ITVL(IADETR),
+     >             (NADETR+NTCMAX),iarr)
+      IF(iarr .NE. 0)THEN
+         CALL DSERRE(1,iarr,'SPCOMP','COMPRESS 2 SPH')
+         GOTO 999
+      ENDIF
+      iarr = -1
+C
+  999 END
+
+
+
+
+

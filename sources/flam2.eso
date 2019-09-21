@@ -1,0 +1,116 @@
+C FLAM2     SOURCE    CHAT      05/01/13    00:03:11     5004
+      SUBROUTINE FLAM2(N,RHO,CV,R,YH2,YO2,YN2,YH2O,T,ZK,ZE,YH2u,
+     &                 ZH2,ZO2,ZN2,ZH2O,Q,CEBU,Dt,CMIN,NCVOPT)
+C
+C---------------------------------------------------------------------
+C Combustion turbulente de l'hydrogène : Modèle Eddy Break Up (EBU)
+C---------------------------------------------------------------------
+C E/  N      : Nombre d'états à considérer (dimension des vecteurs)
+C E/  RHO    : Densité du mélange
+C  /S CV     : Chaleur spécifique à volume constant
+C  /S R      : Constante des gaz du mélange
+C E/  YH2, ... Fraction massique de H2, ...
+C E/  T      : Température du mélange
+C E/  ZK     : Energie cinétique turbulente
+C E/  ZE     : Dissipation de l'énergie cinétique turbulente
+C E/  YH2u   : Fraction massique initiale d'hydrogène
+C  /S ZH2, ... Fraction massique de H2, ... après combustion
+C  /S Q      : Energie libérée par la combustion
+C E/  CEBU   : "Constante" du modèle EBU
+C E/  Dt     : Pas de temps considéré
+C E/  CMIN   : Seuil relatif pour le controle de la combustion
+C E/  NCVOPT : Flag pour calcul cv : 1 si linéaire et 2 si quadratique
+C---------------------------------------------------------------------
+C 3/11/99 : Effets de seuil sur la variable de progrès via CMIN
+C---------------------------------------------------------------------
+C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+C
+      DIMENSION RHO(*),YH2(*),YO2(*),YN2(*),YH2O(*),YH2u(*)
+      DIMENSION CV(*),T(*),Q(*),R(*)
+      DIMENSION ZK(*),ZE(*)
+      DIMENSION ZH2(*),ZO2(*),ZN2(*),ZH2O(*)
+C
+      REAL*8 MH2,MO2,MN2,MH2O
+      DATA Rg,MH2,MO2,MN2,MH2O/8.313D0,2.0D-3,32.0D-3,28.0D-3,18.0D-3/
+      DATA Cf,Ta/3.3D5,1.0D4/
+      DATA RRH2,RRO2,RRN2,RRH2O/4156.5D0,259.8D0,296.9D0,461.8D0/
+      DATA ho_H2O/-1.3272D7/
+C
+C- Initialisation des fractions massiques et bornage de la turbulence
+C
+      DO I=1,N
+         ZK(I)   = ABS(ZK(I)) + 1.D-20
+         ZE(I)   = ABS(ZE(I)) + 1.D-20
+         YH2(I)  = MAX(YH2(I),0.D0)
+         YH2(I)  = MIN(YH2(I),YH2u(I))
+         YO2(I)  = ABS(YO2(I))
+         YH2O(I) = ABS(YH2O(I))
+         YN2(I)  = 1.D0 - YH2(I) - YO2(I) - YH2O(I)
+      ENDDO
+C
+C---------------------------
+C- Résolution de Dc/Dt = -wc
+C---------------------------
+C
+      DO I=1,N
+         CALL XCV(T(I),CVH2,CVN2,CVO2,CVH2O,NCVOPT)
+         CV(I) = YH2(I)*CVH2 + YO2(I)*CVO2 + YN2(I)*CVN2 + YH2O(I)*CVH2O
+         R(I)  = YH2(I)*RRH2 + YO2(I)*RRO2 + YN2(I)*RRN2 + YH2O(I)*RRH2O
+*
+         RH2    = YH2(I)*RHO(I)
+         RO2    = YO2(I)*RHO(I)
+         RH2O   = YH2O(I)*RHO(I)
+         ROPREC = RH2
+         VPROG  = 1.D0 - YH2(I)/YH2U(I)
+C
+C- On empeche le démarrage de la combustion pour des variations de
+C- densité de H2 inférieur à CMIN fois la densité de H2 initiale
+C
+         IF (VPROG.LE.CMIN) THEN
+            Q(I) = 0.D0
+         ELSE
+C
+C- Cinétique chimique du modèle : Droh2/Dt = max (Arrhenius,EBU)
+C
+            A_EBU = CEBU*ZE(I)/ZK(I)*VPROG
+            A_ARR = 2.0D0*Cf*RO2/MO2*EXP(-Ta/T(I))
+            A     = MAX(A_EBU,A_ARR)
+C
+C- Si la variable de progrès VPROG vaut 1 à CMIN près, tout brule.
+C
+            IF (VPROG.GE.(1.D0-CMIN)) THEN
+               RH2 = 0.D0
+            ELSE
+               RH2 = ROPREC/(1.0D0 + A*DT)
+            ENDIF
+C
+C- Energie libérée et spéciation pour une masse d'H2 brulée égale à DRHO
+C- Correction éventuelle de DRHO pour le cas où déficit en O2
+C
+            DRHO   = RH2-ROPREC
+            RO2PRE = RO2
+            RO2    = RO2 + MO2/(2.0D0*MH2)*DRHO
+            IF (RO2.LT.0.D0) THEN
+               RO2  = 0.D0
+               DRHO = -2.0D0*MH2/MO2*RO2PRE
+               RH2  = ROPREC + DRHO
+            ENDIF
+            RH2O = RH2O - MH2O/MH2*DRHO
+            Q(I) = MH2O/MH2*DRHO*ho_H2O/DT
+        ENDIF
+C
+C- Répartition entre les différentes espèces après combustion
+C
+        ZH2(I)  = RH2/RHO(I)
+        ZO2(I)  = RO2/RHO(I)
+        ZH2O(I) = RH2O/RHO(I)
+        ZN2(I)  = 1.D0 - ZH2(I) - ZO2(I) - ZH2O(I)
+      ENDDO
+C
+      RETURN
+      END
+
+
+

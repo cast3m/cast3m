@@ -1,0 +1,358 @@
+C ARPITL    SOURCE    BP208322  17/10/03    21:15:05     9580
+      SUBROUTINE ARPITL (IPRTRA,IPMAUP,SIGMA,INVER,SYM,EPSI,OUT)
+
+
+***********************************************************************
+*
+*                          A R P I T L
+*
+* FONCTION:
+* ---------
+*
+*     STEP DE LA FACTORISATION D'ARNOLDI POUR UN PROBLEME LINEAIRE.
+*
+
+* REMARQUE:
+* ---------
+*
+*     ON NOTE:
+*
+*     A=IPRIGI
+*     B=IPMASS
+*
+*     IPRIGI : RIGIDITE
+*     IPMASS : MASSE OU KSIGMA
+*
+*
+* PARAMETRES:  (E)=ENTREE   (S)=SORTIE
+* -----------
+*
+*
+*     IPRTRA  ENTIER     (E)    OPERATEURS DE TRAVAIL
+*
+*     IPMAUP  ENTIER     (E/S)  POINTEUR VARIABLES ARPACK
+*
+*     SIGMA   COMPLEX DP (E)    VALEUR SU SHIFT (PEUT ETRE NUL)
+*
+*     INVER   LOGIQUE    (E)   .TRUE. -> PRODUIT SCALAIRE X'KX
+*                              .FALSE. -> PRODUIT SCALAIRE X'MX
+*
+*     SYM     LOGIQUE    (E)    PROBLEME SYMETRIQUE OU NON
+*
+*     EPSI    REEL DP    (E)    TOLERANCE EIGENPAIRS
+*
+*     OUT     LOGIQUE    (S)    FLAG DE CONVERGENCE
+*
+*
+* SOUS-PROGRAMMES APPELES:
+* ------------------------
+*
+*     DSAUPD,DNAUPD,ARPCH1,MUCPRI,RESOU1,LDMT,DECALE,DTCHPO,ARPERR
+*
+* AUTEUR,DATE DE CREATION:
+* -------------------------
+*
+*     PASCAL BOUDA     29 JUIN 2015
+*
+* LANGAGE:
+* --------
+*
+*     FORTRAN 77 & 90
+*
+***********************************************************************
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCHAMP
+-INC SMRIGID
+-INC TARWORK
+-INC TARTRAK
+
+      SEGMENT idemen(0)
+
+      INTEGER IPRTRA
+      INTEGER IPMAUP
+      COMPLEX*16 SIGMA
+      LOGICAL INVER
+      LOGICAL SYM
+      REAL*8 EPSI
+      LOGICAL OUT
+
+
+      INTEGER IPRIGI,IPMASS,IPKSIM
+      INTEGER TEST
+      CHARACTER*1 SCAL
+      INTEGER OPT
+      INTEGER IPCTRA(4)
+      INTEGER NOID,NOEN
+      INTEGER ndim,ncv,lworkl
+
+
+      SEGINI IDEMEN
+      IDEMEN(**)=0
+      NOID=0
+      NOEN=1
+
+      OUT=.FALSE.
+
+      MAUP=IPMAUP
+      SEGACT MAUP*MOD
+
+      MRITRA=IPRTRA
+      SEGACT MRITRA
+
+*Recuperation des operateurs de travail
+      IPRIGI=RIGI(1)
+      IPMASS=RIGI(2)
+      IPKSIM=RIGI(4)
+
+
+*Récupération de la dimension des tableaux
+      ndim=resid(/1)
+      ncv=v(/2)
+      lworkl=workl(/1)
+
+*Si le probleme est symétrique, on appelle la routine spécifique aux
+*problemes symetriques, sinon on appelle celle pour les problemes
+*quelconques
+
+      IF (SYM) THEN
+        CALL DSAUPD (ido,bmat,ndim,which,nev,EPSI,resid,
+     &      ncv,v,ldv,iparam,ipntr,workd,workl,lworkl,info)
+
+      ELSE
+
+        CALL DNAUPD (ido,bmat,ndim,which,nev,EPSI,resid,
+     &      ncv,v,ldv,iparam,ipntr,workd,workl,lworkl,info)
+
+      ENDIF
+
+*Reverse communication: On récupère les paramètres de sortie et on
+*effectue des actions en fonction de leurs valeurs
+      TEST=ido
+      SCAL=bmat
+      OPT=iparam(7)
+
+      IPMAUP=MAUP
+      SEGDES MAUP
+
+*On verifie si on doit stopper le processus
+      CALL ARPERR (IPMAUP,SYM,OUT)
+      IF (OUT) RETURN
+
+
+*Initialisation des chpoints de travail
+      DO i=1,4
+        IPCTRA(i)=0
+      ENDDO
+
+
+*SCAL: type de probleme
+*'I' si standard
+*'G' si generalise
+
+      IF (SCAL .EQ. 'I') THEN
+
+          IF (IIMPI.GE.10) WRITE(IOIMP,*) '*   PB AUX V.P. STANDARD  *'
+
+          IF (TEST .EQ. -1 .OR. TEST .EQ. 1) THEN
+
+*        &---------------------------------------------------&
+*        |          Calcul du produit matrice vecteur        |
+*        |           Y <---- inv(inv(B)*A-SIGMA*I)*X         |
+*        |                                                   |
+*        |               X : workd(ipntr(1))                 |
+*        |               Y : workd(ipntr(2))                 |
+*        &---------------------------------------------------&
+
+************************************************************************
+* 28/08/2015 : Dans ce cas, le shift est obligatoirement nul
+* decalage spectral avec une matrice identite non implemente
+************************************************************************
+
+            CALL ARPCH1 (IPRIGI,IPRIGI,IPMAUP,IPCTRA(3),1,3)
+
+            CALL MUCPRI (IPCTRA(3),IPMASS,IPCTRA(2))
+
+            CALL ARPCH1 (IPRIGI,IPRIGI,IPMAUP,IPCTRA(2),1,2)
+
+*Mise a sero des inconnues en FLX
+            CALL ARCORC (IPCTRA(2),10)
+*Mise a zero des inconnues en PI  inutile ?
+            CALL ARCORC (IPCTRA(2),15)
+
+            IDEMEN(1)=IPCTRA(2)
+
+            IF (SYME(1) .EQ. 0) THEN
+              CALL RESOU1 (IPRIGI,IDEMEN,NOID,NOEN,1.D-18,0)
+            ELSEIF (SYME(1) .EQ. 1) THEN
+              CALL LDMT (IPRIGI,IDEMEN,NOID,NOEN,1.D-18)
+            ENDIF
+            IF(IERR.NE.0) RETURN
+
+            IPCTRA(1)=IDEMEN(1)
+
+            CALL ARPCH1 (IPRIGI,IPRIGI,IPMAUP,IPCTRA(1),2,1)
+
+
+          ENDIF
+
+      ELSEIF (SCAL .EQ. 'G') THEN
+
+        IF (IIMPI.GE.10)
+     &  WRITE(IOIMP,*) '*   PB AUX V.P. GENERALISE  *',TEST,INVER
+
+
+        IF (TEST .EQ. -1)  THEN
+
+*        &--------------------------------------------------&
+*        |          Calcul du produit matrice vecteur       |
+*        |                                                  |
+*        |        Y <---- inv(A-SIGMA*B)*B*X                |
+*        |                                                  |
+*        |              X : workd(ipntr(1))                 |
+*        |              Y : workd(ipntr(2))                 |
+*        &--------------------------------------------------&
+
+c             WRITE(*,*) 'X1 :'
+            CALL ARPCH1 (IPRIGI,IPRIGI,IPMAUP,IPCTRA(1),1,3)
+
+            CALL MUCPRI (IPCTRA(1),IPMASS,IPCTRA(3))
+*Mise a sero des inconnues en FLX
+            CALL ARCORC (IPCTRA(3),10)
+*Mise a zero des inconnues en PI inutile ?
+            CALL ARCORC (IPCTRA(3),15)
+
+c             WRITE(*,*) '{B*X1} :'
+            CALL ARPCH1 (IPRIGI,IPRIGI,IPMAUP,IPCTRA(3),1,2)
+
+c             WRITE(*,*) 'avant RESOU :',SYME(4)
+            IDEMEN(1)=IPCTRA(3)
+            IF (SYME(4) .EQ. 0) THEN
+              CALL RESOU1 (IPKSIM,IDEMEN,NOID,NOEN,1.D-18,0)
+            ELSEIF (SYME(4) .EQ. 1) THEN
+              CALL LDMT (IPKSIM,IDEMEN,NOID,NOEN,1.D-18)
+            ENDIF
+            IF (IERR.NE.0) RETURN
+
+c             WRITE(*,*) 'Y1=[OP^-1]*{B*X1} :'
+            IPCTRA(2)=IDEMEN(1)
+cbp            CALL ARPCH1 (IPKSIM,IPRIGI,IPMAUP,IPCTRA(2),2,1)
+            CALL ARPCH1 (IPRIGI,IPRIGI,IPMAUP,IPCTRA(2),2,1)
+
+
+        ELSEIF (TEST .EQ. 1) THEN
+
+*        &--------------------------------------------------&
+*        |        Calcul du produit matrice vecteur         |
+*        |                                                  |
+*        |        si INVER :                                |
+*        |        Y <---- inv(A-SIGMA*B)*B*X                |
+*        |                                                  |
+*        |              X : workd(ipntr(1))                 |
+*        |              Y : workd(ipntr(2))                 |
+*        |                                                  |
+*        |        sinon :                                   |
+*        |        Y <---- inv(A-SIGMA*B)*X                  |
+*        |                                                  |
+*        |              X : workd(ipntr(3))                 |
+*        |              Y : workd(ipntr(2))                 |
+*        &--------------------------------------------------&
+
+          IF (INVER) THEN
+
+              CALL ARPCH1(IPRIGI,IPRIGI,IPMAUP,IPCTRA(1),1,3)
+
+              CALL MUCPRI (IPCTRA(1),IPMASS,IPCTRA(3))
+*Mise a sero des inconnues en FLX
+              CALL ARCORC (IPCTRA(3),10)
+*Mise a zero des inconnues en PI
+              CALL ARCORC (IPCTRA(3),15)
+
+              CALL ARPCH1 (IPRIGI,IPRIGI,IPMAUP,IPCTRA(3),1,2)
+
+          ELSE
+
+c               WRITE(*,*) 'X2 :'
+cbp              CALL ARPCH1 (IPKSIM,IPRIGI,IPMAUP,IPCTRA(3),3,4)
+              CALL ARPCH1 (IPRIGI,IPRIGI,IPMAUP,IPCTRA(3),3,4)
+
+*Mise a sero des inconnues en FLX
+              CALL ARCORC (IPCTRA(3),10)
+*Mise a zero des inconnues en PI
+              CALL ARCORC (IPCTRA(3),15)
+c               WRITE(*,*) '{X2} : uniquement le chpoint '
+
+          ENDIF
+
+          IDEMEN(1)=IPCTRA(3)
+
+          IF (SYME(4) .EQ. 0) THEN
+            CALL RESOU1 (IPKSIM,IDEMEN,NOID,NOEN,1.D-18,0)
+          ELSEIF (SYME(4) .EQ. 1) THEN
+            CALL LDMT (IPKSIM,IDEMEN,NOID,NOEN,1.D-18)
+          ENDIF
+          IF (IERR.NE.0) RETURN
+
+c           WRITE(*,*) 'Y2=[OP^-1]*{X2} :'
+          IPCTRA(2)=IDEMEN(1)
+cbp          CALL ARPCH1 (IPKSIM,IPRIGI,IPMAUP,IPCTRA(2),2,1)
+          CALL ARPCH1 (IPRIGI,IPRIGI,IPMAUP,IPCTRA(2),2,1)
+
+
+        ELSEIF (TEST .EQ. 2) THEN
+
+*        &-------------------------------------&
+*        |  Calcul du produit matrice vecteur  |
+*        |                                     |
+*        |    Si INVER                         |
+*        |        Y <---- A*X                  |
+*        |                                     |
+*        |    Sinon                            |
+*        |        Y <---- B*X                  |
+*        |                                     |
+*        |         X : workd(ipntr(1))         |
+*        |         Y : workd(ipntr(2))         |
+*        &-------------------------------------&
+
+            CALL ARPCH1 (IPRIGI,IPRIGI,IPMAUP,IPCTRA(1),1,3)
+
+            IF (.NOT. INVER) THEN
+
+              CALL MUCPRI (IPCTRA(1),IPMASS,IPCTRA(2))
+c               WRITE(*,*) 'Y3=B*X3 :'
+
+            ELSE
+
+              CALL MUCPRI (IPCTRA(1),IPRIGI,IPCTRA(2))
+
+*Mise a sero des inconnues en FLX
+              CALL ARCORC (IPCTRA(2),10)
+*Mise a zero des inconnues en PI
+              CALL ARCORC (IPCTRA(2),15)
+c               WRITE(*,*) 'Y3={B*X3} :'
+            ENDIF
+
+            CALL ARPCH1 (IPRIGI,IPRIGI,IPMAUP,IPCTRA(2),2,2)
+
+
+          ENDIF
+
+      ENDIF
+
+*Destruction des chpoints de travail
+        DO i=1,4
+          IF (IPCTRA(i) .NE. 0) THEN
+            CALL DTCHPO (IPCTRA(i))
+          ENDIF
+        ENDDO
+
+      SEGDES MRITRA
+
+      END
+
+
+
+

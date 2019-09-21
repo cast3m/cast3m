@@ -1,0 +1,401 @@
+C KONV14    SOURCE    PV        16/11/17    22:00:14     9180
+      SUBROUTINE KONV14()
+C************************************************************************
+C
+C PROJET            :  CASTEM 2000
+C
+C NOM               :  KONV14
+C
+C DESCRIPTION       :  Subroutine appellée par KONV1
+C
+C                      Modelisation 2D/3D du transport des scalaires
+C
+C                      Calcul du residu / jacobien / DELTAT
+C
+C LANGAGE           :  FORTRAN 77 + ESOPE 2000 (avec estensions CISI)
+C
+C AUTEUR            :  A. BECCANTINI, DM2S/SFME
+C
+C************************************************************************
+C
+C APPELES (Calcul)  :
+C
+C************************************************************************
+C
+C*** SYNTAXE
+C
+C  Discrétisation en VF "cell-centered" du transport des scalaires
+C          -->  --->
+C  d/dt S + u . grad (S) = 0
+C           -->
+C  avec div( u ) = 0
+C
+C  RCHPO1 RFLOT1 = 'KONV' 'VF' 'CLAUDEIS' 'FACE' MOT1 MOT2
+C                         MOD1 CHPO1 MCHAM1 ;
+C
+C  or
+C
+C  RMAT1 = 'KONV' 'VF' 'CLAUDEIS' 'FACE' 'JACO' MOT2
+C                         MOD1 CHPO1 MCHAM1 ;
+C
+C  ENTREES
+C
+C MOT1    : objet de type MOT
+C           Il vaut 'RESI' si on veut calculer le résidu,
+C           (i.e. l'increment des scalaires passives par unité
+C           de temps)
+C           Il vaut 'FLUX' si on veut calculer le flux
+C
+C MOT2    : objet de type MOT
+C           Il indique la méthode de calcul du flux
+C           Pour l'instant
+C           'UPWIND'
+C           'CENTERED'
+C
+C MOD1    : objet modele de type Navier_Stokes
+C
+C CHPO1   : CHPOINT contenant la vitesse aux FACEs
+C           (SPG = l'indice 'FACE' de TAB1)
+C           2/3 composantes, 'UX', 'UY', 'UZ'
+C
+C MCHAM1  : MCHAML contenant les scalaires à transporter
+C           SPG (support géométrique) l'indice 'FACEL' de
+C           TAB1
+C
+C SORTIES
+C
+C RCHPO1  : objet de type CHPOINT (memes composantes que MCHAM1)
+C           Residu si MOT2 = 'RESI' (SPG = TAB1 . 'CENTRE')
+C           Flux si MOT2 = 'FLUX'    (SPG = TAB1 . 'FACE')
+C
+C RFLOT1  : objet de type FLOTTANT
+C           Il est le temps caracteristique associé à l'onde la plus
+C           rapide.
+C
+C RMAT1   : objet de type MATRIK
+C           (SPG =  TAB1 . 'CENTRE')
+C           (inconnues primales = inconnues duales = memes composantes
+C            que MCHAM1)
+C
+C***********************************************************************
+C
+C************************************************************************
+C
+C HISTORIQUE (Anomalies et modifications éventuelles)
+C
+C HISTORIQUE : créée le 29.11.01
+C
+C************************************************************************
+C
+      IMPLICIT INTEGER(I-N)
+-INC CCOPTIO
+-INC SMLMOTS
+-INC SMCHAML
+-INC SMMATRIK
+-INC SMCHPOI
+       POINTEUR MLMVIT.MLMOTS, MLMSF.MLMOTS
+C
+C**** Variables de COOPTIO
+C
+C      INTEGER IPLLB, IERPER, IERMAX, IERR, INTERR
+C     &        ,IOTER,   IOLEC,  IOIMP,     IOCAR,  IOACQ
+C     &        ,IOPER,   IOSGB,  IOGRA,     IOSAU,  IORES
+C     &        ,IECHO,   IIMPI,  IOSPI
+C     &        ,IDIM
+C     &        ,MCOORD
+C     &        ,IFOMOD, NIFOUR, IFOUR, NSDPGE, IONIVE
+C     &        ,NGMAXY, IZROSF, ISOTYP, IOSCR,LTEXLU
+C     &        ,NORINC,NORVAL,NORIND,NORVAD
+C     &        ,NUCROU, IPSAUV
+C
+      INTEGER IDOMA, MELEMC, MELEMF, MELEFE, ICHPSU, ICHPDI , ICHPVO
+     &      , INORM, ICELL, NBMET, NBDIS,INDMET, IRES, IRET
+     &      , ISF
+     &      , INDIC, NBCOMP, IVN, IJACO
+     &      , JGM, JGN
+     &      , ICHFLU, ICHRES
+     &      , N1, N2, I1, INEFMD, ICOND
+C
+      PARAMETER (NBMET=2,NBDIS=1)
+      REAL*8 DT
+      CHARACTER*8 LMETO(NBMET), TYPE, LVITE(NBDIS)
+      CHARACTER*4 MOT, LFLUX(3)
+      CHARACTER*(40) MESERR
+      LOGICAL LOGAN
+C
+      DATA LVITE/'FACE    '/
+      DATA LMETO/'UPWIND  ','CENTERED'/
+      DATA LFLUX/'FLUX','RESI','JACO'/
+C
+C**** Initialisation des variables pour la gestion des erreurs.
+C
+      LOGAN  = .FALSE.
+      MESERR  = '                                        '
+C
+C***** Vitesse aux faces???
+C
+      CALL LIRMOT(LVITE,NBDIS,ICELL,1)
+      IF(IERR .NE. 0)GOTO 9999
+      IF(ICELL .EQ. 0)THEN
+C
+C******** Message d'erreur standard
+C         251 2
+C         Tentative d'utilisation d'une option non implémentée
+C
+         CALL ERREUR(251)
+      ENDIF
+C
+C******* Flux, residu, ou jacobien ???
+C
+      CALL LIRMOT(LFLUX,3,IRES,1)
+      IF(IERR .NE. 0)GOTO 9999
+C
+C**** Metode utilisée
+C
+      CALL LIRMOT(LMETO,NBMET,INDMET,1)
+      IF(IERR .NE. 0)GOTO 9999
+      IF(INDMET .EQ. 0)THEN
+C
+C******** Message d'erreur standard
+C         251 2
+C         Tentative d'utilisation d'une option non implémentée
+C
+         CALL ERREUR(251)
+      ENDIF
+C
+C**********************************
+C**** Lecture de l'objet MODELE ***
+C**********************************
+C
+      ICOND = 1
+      CALL QUETYP(TYPE,ICOND,IRET)
+
+      IF(IRET.EQ.0.AND.TYPE.NE.'MMODEL')THEN
+        WRITE(6,*)' On attend un objet MMODEL'
+        RETURN
+      ENDIF
+      CALL LIROBJ('MMODEL',MMODEL,ICOND,IRET)
+      IF(IERR.NE.0)GOTO 9999
+      CALL LEKMOD(MMODEL,IDOMA,INEFMD)
+      IF(IERR.NE.0)GOTO 9999
+C
+C**** Centre, FACE, FACEL, ELTFA
+C
+      CALL LEKTAB(IDOMA,'CENTRE',MELEMC)
+      IF(IERR .NE. 0) GOTO 9999
+C
+      CALL LEKTAB(IDOMA,'FACE',MELEMF)
+      IF(IERR .NE. 0) GOTO 9999
+C
+      CALL LEKTAB(IDOMA,'FACEL',MELEFE)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Lecture du CHPOINT contenant les surfaces des faces.
+C
+      CALL LEKTAB(IDOMA,'XXSURFAC',ICHPSU)
+      IF(IERR .NE. 0) GOTO 9999
+      INDIC = 1
+      NBCOMP = 1
+      MOT = 'SCAL'
+      CALL QUEPOI(ICHPSU, MELEMF, INDIC, NBCOMP, MOT)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Lecture du CHPOINT contenant les diametres minimums.
+C
+      CALL LEKTAB(IDOMA,'XXDIEMIN',ICHPDI)
+      IF(IERR .NE. 0) GOTO 9999
+      INDIC = 1
+      NBCOMP = 1
+      MOT = 'SCAL'
+      CALL QUEPOI(ICHPDI, MELEMC, INDIC, NBCOMP, MOT)
+      IF(IERR .NE. 0) GOTO 9999
+
+C
+C**** Lecture du CHPOINT contenant les volumes
+C
+      CALL LEKTAB(IDOMA,'XXVOLUM',ICHPVO)
+      IF(IERR .NE. 0) GOTO 9999
+      INDIC = 1
+      NBCOMP = 1
+      MOT = 'SCAL'
+      CALL QUEPOI(ICHPVO, MELEMC, INDIC, NBCOMP, MOT)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Les normales aux faces
+C
+C     Que les normales
+      CALL LEKTAB(IDOMA,'XXNORMAF',INORM)
+      IF(IERR .NE. 0) GOTO 9999
+      JGN = 4
+      JGM = IDIM
+      SEGINI MLMVIT
+      MLMVIT.MOTS(1) = 'UX  '
+      MLMVIT.MOTS(2) = 'UY  '
+      IF(IDIM.EQ.3) MLMVIT.MOTS(3) = 'UZ  '
+      CALL QUEPO1(INORM, MELEMF, MLMVIT)
+      SEGSUP MLMVIT
+      IF(IERR .NE. 0) GOTO 9999
+C
+C********************************
+C**** Fin table domaine *********
+C********************************
+C
+C**** La vitesse aux faces
+C
+      TYPE = 'CHPOINT '
+      CALL LIROBJ(TYPE,IVN,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+C
+      JGN = 4
+      JGM = IDIM
+      SEGINI MLMVIT
+      MLMVIT.MOTS(1) = 'UX  '
+      MLMVIT.MOTS(2) = 'UY  '
+      IF(IDIM .EQ. 3) MLMVIT.MOTS(3) = 'UZ  '
+      CALL QUEPO1(IVN, MELEMF, MLMVIT)
+      IF(IERR .NE. 0) GOTO 9999
+      SEGSUP MLMVIT
+C
+C**** On va lire le pointeur du MCHAML
+C
+      TYPE='MCHAML  '
+      CALL  LIROBJ(TYPE,ISF,1,IRET)
+      IF(IERR.NE.0) GOTO 9999
+C
+C**** On lit les composantes du MCHAML
+C
+      MCHELM=ISF
+      SEGACT MCHELM
+      N1=MCHELM.IMACHE(/1)
+      IF(N1 .NE. 1)THEN
+         MOTERR(1:40)='MCHAM1 = ???           '
+         WRITE(IOIMP,*) MOTERR
+C
+C******** Message d'erreur standard
+C         251 2
+C         Tentative d'utilisation d'une option non implémentée
+C
+         CALL ERREUR(251)
+         GOTO 9999
+      ENDIF
+      MCHAML=MCHELM.ICHAML(1)
+      SEGDES MCHELM
+      SEGACT MCHAML
+      N2=MCHAML.IELVAL(/1)
+      JGN = 4
+      JGM = N2
+      SEGINI MLMSF
+      DO I1=1,N2,1
+        MLMSF.MOTS(I1) = MCHAML.NOMCHE(I1)
+      ENDDO
+C
+C
+C**** Calcul du flux/residu
+C
+      IF((IRES .EQ. 1) .OR. (IRES .EQ. 2))THEN
+         IJACO=0
+         TYPE = 'CHPOINT '
+         CALL KRCHP1(TYPE, MELEMF, ICHFLU, MLMSF)
+         IF(IERR.NE.0) GOTO 9999
+C
+         CALL KONSF1(INDMET,ISF,IVN,INORM,ICHPSU,ICHPDI,
+     &      MELEMC,MELEMF,MELEFE,ICHFLU,DT,LOGAN,
+     &      MESERR)
+         IF(IERR.NE.0)GOTO 9999
+         IF(LOGAN)THEN
+C
+C******* Anomalie detectée
+C
+C
+C******* Message d'erreur standard
+C        -301 0
+C        %m1:40
+C
+            MOTERR(1:40) =  MESERR(1:40)
+            WRITE(IOIMP,*) MOTERR(1:40)
+C
+C******* Message d'erreur standard
+C        5 3
+C        Erreur anormale.contactez votre support
+C
+            CALL ERREUR(5)
+            GOTO 9999
+         ENDIF
+C
+C**** Calcul de residu (IRES=2)
+C
+         IF(IRES .EQ. 2)THEN
+            TYPE = 'CHPOINT '
+            CALL KRCHP1(TYPE, MELEMC, ICHRES, MLMSF)
+            IF(IERR.NE.0)GOTO 9999
+C
+            CALL KONRE1(MELEMC,MELEMF,MELEFE,ICHPVO,
+     &           ICHFLU, ICHRES,
+     &           LOGAN,MESERR)
+            IF(IERR.NE.0)GOTO 9999
+            ICHFLU=0
+            IF(LOGAN)THEN
+C
+C******* Anomalie detectée
+C
+C
+C******* Message d'erreur standard
+C        -301 0
+C        %m1:40
+C
+               MOTERR(1:40) =  MESERR(1:40)
+               WRITE(IOIMP,*) MOTERR(1:40)
+C
+C******* Message d'erreur standard
+C        5 3
+C        Erreur anormale.contactez votre support
+C
+               CALL ERREUR(5)
+               GOTO 9999
+            ENDIF
+         ELSE
+            ICHRES = 0
+         ENDIF
+      ELSEIF(IRES.EQ.3)THEN
+C
+C**** Calcul du jacobien
+C
+         ICHRES=0
+         ICHFLU=0
+         CALL KONJS1(INDMET,MLMSF,ISF,IVN,INORM,ICHPVO,
+     &    ICHPSU,MELEMC,MELEMF,MELEFE,IJACO)
+          IF(IERR .NE. 0) GOTO 9999
+      ELSE
+         CALL ERREUR(251)
+         GOTO 9999
+      ENDIF
+C
+      SEGSUP MLMSF
+C
+C**** Ecriture des resultats
+C
+      IF(IJACO .EQ. 0)CALL ECRREE(DT)
+      TYPE = 'CHPOINT '
+      IF(ICHRES .NE. 0) CALL ECROBJ(TYPE,ICHRES)
+      IF(ICHFLU .NE. 0) CALL ECROBJ(TYPE,ICHFLU)
+      TYPE='MATRIK '
+      IF(IJACO .NE. 0)  CALL ECROBJ(TYPE,IJACO)
+ 9999 CONTINUE
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

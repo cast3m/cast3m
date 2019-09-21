@@ -1,0 +1,406 @@
+C URGCST    SOURCE    CB215821  17/11/30    21:17:23     9639
+      SUBROUTINE URGCST(WRK0,WRK1,WRK4,NSTRSS,NCOMAT,
+     1  KERRE,MELE,IFOUR,NCARR,MFR,DT,TEMP0,
+     2  CMATE,IB,IGAU,HCAR,IVIS)
+C---------------------------------------------------------------------
+C             PLASTICITE MODELE BETON
+C
+C ENTREES
+C     SIG0(NSTRS)   = CONTRAINTES INITIALES
+C     NSTRS         = NOMBRE DE CONTRAINTES
+C     DEPST(NSTRS)  = INCREMENT DE DEFORMATIONS TOTALES
+C     VAR0(NVARI)   =  VARIABLES INTERNES DEBUT
+C     VAR0(  1  )   = IFIS    :Indicateur de fissuration (0 1 2)
+C     VAR0(  2  )   = ANGL    :Angle de fissuration
+C     VAR0(  3  )   = IPLA    :Indicateur d'etat en bicompres. (0 1 2 3)
+C     VAR0(  4  )   = SIG1    :Force d écrouissage de traction
+C     VAR0(  5  )   = SIG2    :Force d écrouissage de compression
+C     VAR0(  6  )   = EPS1    :Variable d écrouissage de traction
+C     VAR0(  7  )   = EPS2    :Variable d écrouissage de compression
+C     VAR0(  8  )   = TDEF      :Taux de déformation
+C     VAR0(  9  )   = TCON      :Taux de contrainte
+C     VAR0( 10  )   = SIGP(1):Contrainte plastique en mode
+C                              viscoplastique
+C     VAR0( 11  )   = SIGP(2):
+C     VAR0( 12  )   = SIGP(3):
+C     VAR0( 13  )   = SIGP(4):
+C     VAR0( 14  )   = DPSTV1 :Variable d'écrouissage plastique
+C                              en mode viscoplastique
+C     VAR0( 15  )   = DPSTV2 :
+C     VAR0( 16  )   = SIGV1  :Force d ecrouissage de traction
+C                             en mode viscoplastique
+C     VAR0( 17  )   = SIGV2  :Force d ecrouissage de compression
+C                             en mode viscoplastique
+C
+C     XMAT(NCOMAT)  =  COMPOSANTES DE MATERIAU
+C     NCOMAT        = NOMBRE DE COMPOSANTES DE MATERIAU
+C  SORTIES
+C     SIGF(NSTRS)   = CONTRAINTES FINALES
+C     VARF(NVARI)   = VARIABLES INTERNES FINALES
+C     KERRE         = 0    TOUT OK
+C---------------------------------------------------------------------
+C
+C  IFOUR    INDICE DU TYPE DE PROBLEME
+C            -2  CONTRAINTES PLANES
+C            -1  DEFORMATIONS PLANES
+C             0  AXISYMETRIQUE
+C             1  SERIE DE FOURIER
+C             2  TRIDIMENSIONNEL
+C---------------------------------------------------------------------
+C        COMPOSANTES DE MATERIAU
+C=====================================================================
+C  YOUN : Module d'Young
+C  XNU  : Coeficient de Poisson
+C  RHO  : Masse volumique (Facultatif)
+C  ALPH : Coeficient de dilation thermique (Facultatif)
+C  ALFA : Resis. tract. simple / resis. compr. simple
+C  BETA : Resis. compr. biax. / resis. compr. simple (Modele de NADAI)
+C  RB   : Resis. compr. simple
+C  GFC : Energie de rupt en compression
+C  GFT : Energie de rupt en traction
+C  ETA : parametre de viscosite
+C  ICT  : Choix de la courbe de traction (Calibrage)
+C  ICC : Choix de la courbe de compression (Calibrage)
+C
+C  IVIS : Modele visqueux ou non
+C            0 : non visqueux
+C            1 : visqueux
+C            2 : viscoélastoplastique
+C
+C  IMOD : Choix du modele Beton
+C          1 = Modele BETON_INSA ( Von MISES + Sigma Max en trac.)
+C              Rheologie 2D
+C          2 = Modele BETON_INSA ( Von MISES + Sigma Max en trac.)
+C              Rheologie 3D
+C          3 = Modele BETON_INSA ( Druck Prager + Sigma Max en trac.)
+C              Rheologie 2D
+C          4 = Modele BETON_INSA ( Druck Prager + Sigma Max en trac.)
+C              Rheologie 3D
+C  ITER : nombre d'iterations internes admissibles
+C---------------------------------------------------------------------
+C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+
+      SEGMENT WRK0
+        REAL*8 XMAT(NCXMAT)
+      ENDSEGMENT
+      SEGMENT WRK1
+        REAL*8 DDHOOK(LHOOK,LHOOK),SIG0(NSTRS),DEPST(NSTRS)
+        REAL*8 SIGF(NSTRS),VAR0(NVARI),VARF(NVARI)
+        REAL*8 DEFP(NSTRS),XCAR(ICARA)
+      ENDSEGMENT
+      SEGMENT WRK4
+        REAL*8 XE(3,NBNN)
+      ENDSEGMENT
+
+      SEGMENT BETJEF
+       REAL*8 AA,BETA,RB,ALFA,YOUN,XNU,GFC,GFT,CAR,ETA,TDEF,
+     &          TCON,DPSTF1,DPSTF2,TETA,PDT
+       INTEGER ICT,ICC,IMOD,IVISS,ITER,
+     &                ISIM,IBB,IGAU1,IZON
+      ENDSEGMENT
+      SEGMENT VISCO
+       REAL*8 DPSTV1,DPSTV2,SIGV1,SIGV2
+      ENDSEGMENT
+      SEGMENT BETFLU
+       REAL*8 DATCOU,TP0,E28,TAU1
+       INTEGER NBRC,NCOE,NTPS,NTZERO,IFLU,MC,NC
+      ENDSEGMENT
+*
+      CHARACTER*(*) CMATE
+      CHARACTER*40 FMT,TITRE
+      DIMENSION SIR(9,4),EPST(4),SIGP(4)
+      DIMENSION D(6,6),D1(6,6),STRN(6)
+      DIMENSION EPSR(9),SIGR(9),VART(200),VV(36),SIGMF(6)
+      DIMENSION CODU(9,9)
+C
+*     COMMON /DBETJEF/AA,BETA,RB,ALFA,YOUN,XNU,GFC,GFT,CAR,ETA,TDEF,
+*    &          TCON,DPSTF1,DPSTF2,TETA,PDT,ICT,ICC,IMOD,IVISS,ITER,
+*    &                ISIM,IBB,IGAU1,IZON
+*     COMMON /VISCO/ DPSTV1,DPSTV2,SIGV1,SIGV2
+*     COMMON /DBETFLU/DATCOU,TP0,E28,TAU1,NBRC,NCOE,NTPS,NTZERO,IFLU,
+*    &                MC,NC
+C
+
+      NBNN=XE(/2)
+      NVARI=VAR0(/1)
+      SEGINI BETJEF
+      SEGINI VISCO
+      SEGINI BETFLU
+      PDT = DT
+      TP0=TEMP0
+      CAR = HCAR
+C
+C TEST DE CONSISTANCE DES DONNEES
+C
+      YOUN = 0.D0
+      XNU  = 0.D0
+      RHO  = 0.D0
+      ALPH = 0.D0
+      ALFA = 0.D0
+      BETA = 0.D0
+      RB   = 0.D0
+      GFC  = 0.D0
+      GFT  = 0.D0
+      ETA  = 0.D0
+      ICT  = 0
+      ICC  = 0
+      ITER = 0
+      IMOD = 0
+C
+      AA=0.D0
+      BB=0.D0
+      DK1=0.D0
+      DK2=0.D0
+      CNC1=0.D0
+      CNC1=0.D0
+      CNT1=0.D0
+      CNT2=0.D0
+C
+      YOUN = XMAT( 1)
+      XNU  = XMAT( 2)
+      RHO  = XMAT( 3)
+      ALPH = XMAT( 4)
+      ALFA = XMAT( 5)
+      BETA = XMAT( 6)
+      RB   = XMAT( 7)
+      GFC  = XMAT( 8)
+      GFT  = XMAT( 9)
+      ICT  = INT(REAL(XMAT(10)))
+      ICC  = INT(REAL(XMAT(11)))
+      ITER = INT(REAL(XMAT(12)))
+      IMOD = INT(REAL(XMAT(13)))
+      IF (IVIS.EQ.1) THEN
+      ETA  = XMAT(14)
+      ISIM = 1
+      ENDIF
+      IF (IVIS.EQ.2) THEN
+      DATCOU  = XMAT(14)
+      NBRC = INT(REAL(XMAT(15)))
+      E28=YOUN
+      ENDIF
+C
+C---------------------------------------------------------------------
+C
+C     CORRESPONDANCE DES VARIABLES POUR URGCST
+C
+      CALL ZERO(D,6,6)
+      CALL ZERO(D1,6,6)
+      CALL ZERO(EPSR,9,1)
+      CALL ZERO(VART,NVARI,1)
+      CALL ZERO(SIGR,9,1)
+C
+      IVISS = IVIS
+      IBB = IB
+      IGAU1 = IGAU
+      EPAIST=1.D0
+      NSTRS=NSTRSS
+      IFOU=IFOUR
+*
+      DO 1 I=1,NSTRS
+        SIGR(I)=SIG0(I)/EPAIST
+*       WRITE(*,*)'SIG0',I,'=',SIG0(I)
+        STRN(I)=DEPST(I)
+*       WRITE(*,*)'DEPST',I,'=',DEPST(I)
+    1 CONTINUE
+*
+      IF((MELE.EQ.28.OR.MFR.EQ.3).AND.NSTRSS.EQ.4) THEN
+        NSTRS=3
+        IFOU=-2
+        SIGR(3)=SIG0(4)
+        STRN(3)=DEPST(4)
+        STRN(4)=DEPST(3)
+      ENDIF
+*
+      IF((NSTRS.EQ.4).AND.IFOUR.EQ.-2.AND.
+     *         (IMOD.NE.2.AND.IMOD.NE.4)) THEN
+         NSTRS=3
+         SIGR(3)=SIG0(4)
+         STRN(3)=DEPST(4)
+         STRN(4)=DEPST(3)
+      ENDIF
+*
+      DO 22 II=1,NVARI
+        VART(II)=VAR0(II)
+   22 CONTINUE
+C------------------------------------------------------
+C   INITIALISATION DES VARIABLES INTERNES
+C------------------------------------------------------
+        IFISU  = INT(REAL(VART(1)))
+        ANGL   = VART(2)
+        IPLA   = INT(REAL(VART(3)))
+        SIG1= VART(4)
+        SIG2= VART(5)
+        DPSTF1 = VART(6)
+        DPSTF2 = VART(7)
+        IF (IVIS.EQ.1) THEN
+        TDEF    = VART( 8)
+        TCON    = VART( 9)
+        SIGP(1) = VART(10)
+        SIGP(2) = VART(11)
+        SIGP(3) = VART(12)
+        SIGP(4) = VART(13)
+        DPSTV1 = VART(14)
+        DPSTV2 = VART(15)
+        SIGV1 = VART(16)
+        SIGV2 = VART(17)
+        ENDIF
+        IF (IVIS.EQ.2) THEN
+        MC = NBRC + 1
+      DO 101 I1 = 1,MC
+      DO 102 J1 = 1,NSTRS
+         NV = NSTRS * (I1 - 1) + J1
+         SIR(I1,J1) = VART(7 + NV)
+  102 CONTINUE
+  101 CONTINUE
+      DO 121 I1 = 1,MC
+      DO 122 J1 = 1,MC
+         K = MC * (I1 - 1) + J1
+         CODU(I1,J1) = VART(43 + K)
+  122 CONTINUE
+  121 CONTINUE
+        ENDIF
+C  -------------------------------------
+      TETA=ANGL
+C---------------------------------------------------------------------
+C
+      GO TO (10,10,30,40),NSTRS
+   10 CONTINUE
+      KERRE=437
+      WRITE(*,*) '!! ATTENTION DANS BETON  NSTRS=',NSTRS
+      STOP
+      GO TO 1000
+C
+   40 CONTINUE
+C
+   30 CONTINUE
+C
+C---------------------------------------------------------------------
+C
+      IF(IMOD.GE.1.AND.IMOD.LE.4) THEN
+*     *-----------------------*
+*     *   MODELE URGC ST      *
+*     *-----------------------*
+*
+         WRITE(*,*) 'PROGRAMMATION A CORRIGER!'
+         STOP
+***      CALL BONE(SIGR,SIGMF,STRN,IPLA,IFISU,SIG1,SIG2
+***  A        ,NSTRS,D,D1,IFOU,SIGP,EPST,SIR,CODU,
+***  A         BETJEF,VISCO,BETFLU)
+C
+      ELSE
+         WRITE(*,*) '!! ATTENTION CE MODELE N EXISTE PAS (URGCST)'
+         STOP
+         RETURN
+      ENDIF
+C---------------------------------------------------------------------
+C
+C
+      IF((NSTRS.EQ.3).AND.IFOU.EQ.-2.AND.
+     *                                (IMOD.NE.2.AND.IMOD.NE.4)) THEN
+         SIGMF(4)=SIGMF(3)
+         SIGMF(3)=0.D0
+      ENDIF
+C
+      IF((MELE.EQ.28.OR.MFR.EQ.3).AND.NSTRSS.EQ.3) THEN
+        SIGMF(3)=0.D0
+        SIGMF(4)=SIGMF(3)
+      ENDIF
+C
+      DO 2 I=1,NSTRSS
+        SIGF(I)=SIGMF(I)
+    2 CONTINUE
+C
+C---------------------------------------------------------------------
+C
+      VART( 1)=FLOAT(IFISU)
+      VART( 2)=TETA
+      VART( 3)=FLOAT(IPLA)
+      VART( 4)=SIG1
+      VART( 5)=SIG2
+      VART( 6)=DPSTF1
+      VART( 7)=DPSTF2
+      K1 = 7
+      IF (IVIS.EQ.1) THEN
+      VART(8)=TDEF
+      VART(9)=TCON
+      VART(10)=SIGP(1)
+      VART(11)=SIGP(2)
+      VART(12)=SIGP(3)
+      VART(13)=SIGP(4)
+      VART(14)=DPSTV1
+      VART(15)=DPSTV2
+      VART(16)=SIGV1
+      VART(17)=SIGV2
+      K1 = 17
+      ENDIF
+      IF (IVIS.EQ.2) THEN
+        MC = NBRC + 1
+      DO 103 I1 = 1,MC
+      DO 104 J1 = 1,NSTRS
+         NV = NSTRS * (I1 - 1) + J1
+         VART(7 + NV) = SIR(I1,J1)
+  104 CONTINUE
+  103 CONTINUE
+      DO 123 I1 = 1,MC
+      DO 124 J1 = 1,MC
+         K = MC * (I1 - 1) + J1
+         VART(43 + K) = CODU(I1,J1)
+  124 CONTINUE
+  123 CONTINUE
+      K1=124
+        ENDIF
+C
+      GO TO (11,11,31,41),NSTRS
+   11 CONTINUE
+      KERRE=437
+      WRITE(*,*) '!! ATTENTION DANS BETON  NSTRS=',NSTRS
+      STOP
+      GO TO 1000
+C
+   41 CONTINUE
+C
+   31 CONTINUE
+C
+C     CONTRAINTES OU DEFORMATIONS PLANES
+C       SANS CISAILLEMENTS TRANSVERSAL
+C
+      L1=0
+      DO 66 I1 = 1,NSTRS
+      DO 67 J1 = 1,NSTRS
+         L1=L1+1
+         VV(L1) = D(J1,I1)
+   67 CONTINUE
+   66 CONTINUE
+*
+      L1=0
+      DO 62 I1 = 1,NSTRS
+      DO 63 J1 = 1,NSTRS
+        K=K1+(I1-1)*NSTRS+J1
+        L1=L1+1
+        VART(K)=VV(L1)
+   63 CONTINUE
+   62 CONTINUE
+C
+      DO 23 II=1,NVARI
+        VARF(II)=VART(II)
+   23 CONTINUE
+C
+C---------------------------------------------------------------------
+C
+ 1000 CONTINUE
+      SEGSUP BETJEF
+      SEGSUP VISCO
+      SEGSUP BETFLU
+C
+      RETURN
+      END
+
+
+
+
+
+
+
+

@@ -1,0 +1,193 @@
+C ADFEFP    SOURCE    CB215821  16/04/21    21:15:05     8920
+
+c**************************************************************************
+      subroutine apf_driver_fefp(BE,VARF,SIGF,DDHOOK,
+     .                           NDEF,NVARI,NSTRS,LHOOK,
+     .                           XMAT,xdensi,PRECIS,NITMAX,KERRE,
+     .                           nescri,nues,nmodel,nnumer,deltax,
+     .                           level,kmax,iaugla,caugla,ib,igau,izone)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+c IN:
+c    be(NDEF)      = deformaciones trial
+c    VARF(NVARI)   = variables internas trial
+c    XMAT(*)       = propiedades materiales
+c    PRECIS        = precision nivel local
+c    NITMAX        = numero maximo de iteraciones
+c    KERRE         = control de error
+c    nescri,nues,nmodel,nnumer,deltax,level,kmax,iaugla,caugla
+c                  = parametros varios
+c OUT:
+c    be(NDEF)            = deformaciones finales
+c    VARF(NVARI)         = variables internas finales
+c    SIGF(NSTRS)         = tensiones de kirkhoff finales
+c    DDHOOK(LHOOK,LHOOK) = MTC
+
+      integer NDEF,NVARI,NSTRS,LHOOK,NITMAX,KERRE,nescri,
+     .        nues,nmodel,nnumer,level,kmax,iaugla,ib,igau,izone
+      real*8  be(NDEF),VARF(NVARI),SIGF(NSTRS),DDHOOK(LHOOK,LHOOK)
+      real*8  XMAT(*),PRECIS,deltax,caugla,xdensi
+      integer i,j,k,ndimx,iterlocal
+      real*8  bpr(3),qen(3,3),q(6,6),qt(6,6),xlamt(3),xeps(4),xsig(4),
+     .        beta(3),cep(3,3),xepstr(4),aap(6,6)
+      real*8  p,void(1),resu,lini
+      real*8           sigy0,kiso,siginf,velo,cpar,mpar
+      common /miehdata/sigy0,kiso,siginf,velo,cpar,mpar
+      integer lev,kma,iau
+      real*8  cau
+      common /linesearch/lev,kma
+      common /auglagrang1/iau
+      common /auglagrang2/cau
+c      nescri=0
+10    continue
+      call zzero (qen,9)
+      call zzero (cep,9)
+      call zzero (q,36)
+      call zzero (qt,36)
+      call zzero (aap,36)
+      lev=level
+      kma=kmax
+      iau=iaugla
+      cau=caugla
+c     calcula direc-prales, valores y bases
+      call prin35(be,bpr,qen,q,qt)
+c     pasa a espacio direc-prales
+      do i = 1,3
+        xlamt(i) = LOG(bpr(i))/2.D0
+      end do
+c     inicializa variables generales
+      ndimx=3
+      p=0.D0
+c     inicializa epsilon y var_interna
+      if (nmodel.eq.2) then
+        call equv(xeps,xlamt,3)
+        call carac_mate_rhmc(XMAT)
+      elseif (nmodel.eq.5) then
+        call equv(xeps,xlamt,3)
+        call carac_mate_densi(XMAT,xdensi,nmodel)
+      elseif (nmodel.eq.6) then
+        call equv(xeps,xlamt,3)
+        call carac_mate_densi(XMAT,xdensi,nmodel)
+      elseif (nmodel.eq.8) then
+        call invari_p(xlamt,3,p)
+        call desviador(xlamt,xeps,3)
+        call carac_mate_miehe(XMAT)
+        if ((kiso.ne.0.D0).or.(velo.ne.0.D0)) ndimx=4
+      else
+        write(nues,*)'  Model not defined',nmodel
+      endif
+c     trial
+      call der_enerelas_dpral(xeps,xsig,nmodel)
+      if (nmodel.eq.6) then
+        call determina_ls_kma(xsig,nescri,kma,izone)
+      else
+        izone = 0
+      endif
+      if (ndimx.eq.3) then
+        void(1)  =0.D0
+        call yieldd(xsig,3,void,1,resu,nmodel)
+      else
+        call yieldd(xsig,3,VARF,1,resu,nmodel)
+      endif
+c     elastico
+      if (resu.le.0.D0) then
+         call equv(beta,xsig,3)
+         VARF(2)=-1.D0
+         iterlocal=0
+         call der2_enerelas_dpral(xeps,cep,3,nmodel)
+      else
+c     plastico
+         lini=0.D0
+         if (ndimx.eq.4) xeps(ndimx)=VARF(1)
+         call equv(xepstr,xeps,ndimx)
+         if (level.eq.2) then
+          call Integra_ls_2levels(xepstr,xeps,ndimx,lini,nmodel,precis,
+     .         nitmax,nescri,nues,nnumer,deltax,kerre,iterlocal)
+         else
+          call Integra_ls_dpral(xepstr,xeps,ndimx,lini,nmodel,precis,
+     .         nitmax,nescri,nues,nnumer,deltax,kerre,iterlocal)
+         endif
+         if (kerre.eq.1) then
+             write(*,*) ' GP LEVEL - Problems ',iterlocal,ib,igau
+             write(nues,*) ' GP LEVEL - Problems ',iterlocal,ib,igau
+             read(*,*) kk
+             if (kk.eq.1) stop
+             nescri=1
+             goto 10
+         endif
+         call der_enerelas_dpral(xeps,beta,nmodel)
+         if ( ((nmodel.eq.2).and.(xdensi.ge.0.D0)) .or.
+     .        (nmodel.eq.5) .or. (nmodel.eq.6)) then
+          call mtc_ls_dpral_densi(cep,3,xeps,ndimx,lini,xdensi,xmat,
+     .                        nmodel,nescri,nues,nnumer,deltax)
+         else
+          call mtc_ls_dpral(cep,3,xeps,ndimx,lini,
+     .                      nmodel,nescri,nues,nnumer,deltax)
+         endif
+         if (ndimx.eq.3) then
+           VARF(1)=VARF(1)+SQRT(2.D0/3.D0)*lini
+         else
+           VARF(1)=xeps(ndimx)
+         endif
+         VARF(2)=lini
+c        actualizar deformaciones plasticas (en referencia)
+         call zzero(be,4)
+         do i = 1,3
+          xlamt(i)= EXP(2.D0*(xeps(i)-p))
+          do j = 1,4
+           be(j) = be(j) + xlamt(i) * q(j,i)
+          enddo
+         enddo
+      endif
+      VARF(3)=iterlocal
+      if (NVARI.gt.3) then
+       do i=4,NVARI
+         VARF(i)=0.D0
+       enddo
+      endif
+c     construye CTM a partir del nucleo
+      do i=1,3
+       k=1+mod(i,3)
+       j=i+3
+       if(abs(bpr(i)-bpr(k)).gt.1.d-10)then
+        aap(j,j)=2.d0*(bpr(i)*beta(k)-bpr(k)*beta(i))/(bpr(k)-bpr(i))
+       else
+        aap(j,j)=cep(i,i)-cep(k,i)-2.d0*beta(i)
+       endif
+       aap(i,i)=-2.d0*beta(i)
+       do j=1,3
+        aap(i,j)=aap(i,j)+cep(i,j)
+       end do
+      end do
+c     pasa las tensiones y el CTM de dprales a generales
+      do j = 1,4
+        SIGF(j)=0.D0
+        do i = 1,3
+          SIGF(j) = SIGF(j) + beta(i)*q(j,i)
+        end do
+      end do
+      do i=1,4
+      do j=1,4
+        DDHOOK(i,j)=0.D0
+        do k=1,6
+        do l=1,6
+          DDHOOK(i,j) = DDHOOK(i,j) + q(i,k)*aap(k,l)*qt(l,j)
+        end do
+        end do
+      end do
+      end do
+*      do i=2,4
+*      do j=1,i
+*          aux = (DDHOOK(i,j) + DDHOOK(j,i))*0.5D0
+*          DDHOOK(i,j) = aux
+*          DDHOOK(j,i) = aux
+*      end do
+*      end do
+
+      return
+      end
+
+
+
+
+

@@ -1,0 +1,1064 @@
+C COML2     SOURCE    CB215821  18/09/13    21:15:15     9917
+
+       SUBROUTINE COML2(IPMODL,IPMEL,INDESO,IRETOU)
+
+*---------------------------------------------------------------------
+* coml2 : trie et boucle sur les modeles elementaires
+*         selectionne les composantes de meme support
+*         passe a coml6
+*         complete les deche resultats
+*----------------------------------------------------------------
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCGEOME
+-INC CCHAMP
+-INC SMCHAML
+-INC SMELEME
+-INC SMCOORD
+-INC SMMODEL
+-INC SMINTE
+-INC SMLENTI
+* segment deroulant le mcheml
+-INC DECHE
+      SEGMENT icorre
+        integer mel2(nmel1),icor(nmel1),idej
+      ENDSEGMENT
+      SEGMENT INFO
+         INTEGER INFELL(16)
+      ENDSEGMENT
+      segment igard(lilmel(/1))
+      segment izozo(nzo+1)
+      segment ipozo(lilmel(/1))
+      segment ncop
+       character*8 ncopi(ncopj)
+      endsegment
+** pile des deche contruits pour changer de support
+      segment lichan(iichan)
+** pile des deche pour construire le champ de caracteristiques geometriques
+      segment licarb(iicarb)
+** pile des noms de composantes a proteger
+      segment linomp(iinomp)
+** pile modeles elementaires
+      segment limode(i100)
+** segment sous-structures dynamiques
+      segment struli
+       integer itlia,itbmod,momoda, mostat,itmail,molia
+       integer ldefo(np1),lcgra(np1),lsstru(np1)
+       integer nsstru,nndefo,nliab,nsb,na2,idimb
+       integer ktliab,ktphi,ktq,ktres,kpref,ktkam,kcpr,ktpas
+       INTEGER NIPALB,NXPALB,NPLBB,NPLB,NIP,jliaib
+* ichain segment MLENTI initialise dans dyne12 (tjs actif si > 0)
+       INTEGER ICHAIN
+      endsegment
+c
+      logical lome1,lome2,lsupca
+
+      PARAMETER (MFORMC=1, MFORMU=19, MFORMT=MFORMC+MFORMU)
+      CHARACTER*16 LISFOR(MFORMT)
+c Liste des formulations simples (cf. MODELI et NOMATE) et combinees
+      DATA (LISFOR(i), i=1,MFORMU)
+     &     / 'THERMIQUE       ','MECANIQUE       ','LIQUIDE         ',
+     &       'CONVECTION      ','POREUX          ','DARCY           ',
+     &       'FROTTEMENT      ','RAYONNEMENT     ','MAGNETODYNAMIQUE',
+     &       'NAVIER_STOKES   ','MELANGE         ','EULER           ',
+     &       'FISSURE         ','LIAISON         ','THERMOHYDRIQUE  ',
+     &       'ELECTROSTATIQUE ','DIFFUSION       ','MECANIQUE+LIQUID',
+     &       'METALLURGIE     '/
+
+*      call  gibtem (xkt)
+*      write(ioimp,*) ' entree coml2 ', xkt
+c
+c  active modele
+c
+      mmodel = ipmodl
+      segact mmodel*nomod
+      NSOUS = kmodel(/1)
+c
+c        moterr(1:6) = 'COML2  '
+c        moterr(7:15) = 'MMODEL  '
+c        interr(1) = mmodel
+c        call erreur(-329)
+c
+*  On cree un nouveau mmodel en deroulant le modele d'entree :
+*  Important en cas de modele melange !
+      i100=100
+      segini limode
+c
+      nlimod = 0
+      nmomel = 0
+      do im = 1, NSOUS
+        imodel = kmodel(im)
+        segact,imodel*nomod
+        nlimod = nlimod+1
+        if (nlimod.gt.i100) then
+           i100=i100+100
+           segadj limode
+        endif
+        limode(nlimod) = imodel
+        if (formod(1)(1:8).eq.'MELANGE ') then
+         nmomel = nmomel + 1
+         if (matmod(1)(1:6).ne.'SERIE ') then
+          if (ivamod(/1).ge.1) then
+            do ivm1 = 1,ivamod(/1)
+              if (tymode(ivm1).eq.'IMODEL  ') then
+                imode1 = ivamod(ivm1)
+                segact imode1
+                nlimod = nlimod+1
+                if (nlimod.gt.i100) then
+                  i100=i100+100
+                  segadj limode
+                endif
+                limode(nlimod) = imode1
+              endif
+            enddo
+          endif
+         endif
+        endif
+      enddo
+*pv      segdes mmodel
+*  Ajustement du segment limode (inutile)
+*of      i100 = nlimod
+*of      segadj limode
+      if (nlimod.le.0) then
+        write(ioimp,*) 'Erreur anormale : MMODEL vide !'
+        call erreur(5)
+        return
+      endif
+*      write(ioimp,*) ' nlimod ' ,nlimod
+*      write(ioimp,*) ' limode ',(limode(i),i=1,nlimod)
+*  Test de non redondance des sous-modeles
+      N1 = 1
+      DO 1161 it1 = nlimod, 2, -1
+        imode1 = limode(it1)
+        DO it2 = (it1 - 1), 1, -1
+          imode2 = limode(it2)
+          if (imode1.EQ.imode2) then
+            limode(it1) = 0
+            goto 1161
+          else if (imode1.imamod.eq.imode2.imamod .and.
+     &          imode1.conmod(1:LCONMO).eq.imode2.conmod(1:LCONMO)) then
+            limode(it1) = 0
+*of            segdes,imode1
+            goto 1161
+          endif
+        ENDDO
+        N1 = N1 + 1
+ 1161 CONTINUE
+*  Initialisation du modele de travail (ipmod7)
+* => Cas particulier de la formulation MELANGE :
+*    On met les sous-modeles de formulation MELANGE a la fin du modele
+*    de travail pour qu'ils soient traites en dernier car ils dependent
+*    des resultats des autres sous-modeles !
+      SEGINI,mmodel
+      it1 = 0
+      it2 = N1 - nmomel
+      do im = 1, nlimod
+        imodel = limode(im)
+        if (imodel.gt.0) then
+          if (formod(1)(1:8).NE.'MELANGE ') then
+            it1 = it1 + 1
+            kmodel(it1) = imodel
+          else
+            it2 = it2 + 1
+            kmodel(it2) = imodel
+          endif
+        endif
+      enddo
+*      if (it1.ne.(N1-nmomel) .and. it2.ne.N1) then
+*        write(ioimp,*) 'Erreur anormale : traitement MELANGE !'
+*        call erreur(5)
+*        return
+*      endif
+      NSOUS = N1
+      ipmod7 = mmodel
+
+*  Cas particulier de la formulation LIAISON :
+      itruli = 0
+      struli = 0
+      iplia  = 0
+*  Test sur la presence de la formulation LIAISON
+*  On utilise limode pour stocker les modeles elementaires associes
+      N1 = 0
+      DO im = 1, NSOUS
+        imodel = kmodel(im)
+        if (formod(1)(1:8).EQ.'LIAISON ') then
+          N1 = N1 + 1
+          limode(N1) = imodel
+        endif
+      ENDDO
+*  Definition du modele (iplia) associe a la seule formulation LIAISON
+      if (N1.ne.0) then
+        segini,mmode1
+        DO im = 1, N1
+          mmode1.kmodel(im) = limode(im)
+        ENDDO
+        iplia = mmode1
+*  Initialisation du segment struli
+        np1 = 0
+        segini struli
+        itruli = struli
+        itlia = iplia
+*  Remplissage avec les donnees dependant des sous-modeles MODAL / STATIQUE
+        call comalo(ipmodl,itruli,ipmel)
+      endif
+*
+*  Destruction du segment limode (devenu inutile)
+      segsup,limode
+*
+*  Tri prealable sur les pointeurs de maillage
+*
+      lilmel = ipmel
+      iimel  = lilmel(/1)
+*      write(ioimp,*) 'iou  imadec, nomdec condec indec'
+      deche = lilmel(1)
+      ijmin = imadec
+      ijmax = imadec
+*      write(ioimp,*) 1,imadec,' ',nomdec ,' ', condec,' ',indec
+      do im = 2, iimel
+        deche = lilmel(im)
+        ijmin = min(ijmin,imadec)
+        ijmax = max(ijmax,imadec)
+*        write(ioimp,*) im,imadec,' ',nomdec ,' ', condec,' ',indec
+      enddo
+*      write(ioimp,*) 'lilmel(/1) ijmin ,ijmax ',iimel,ijmin,ijmax
+      ijdif = ijmax-ijmin+1
+      izo = max(1,ijdif/(nsous*40))
+*      if (izo.gt.11) izo=izo/3
+      nzo = ijdif / izo + 1
+*      write(ioimp,*) ' nzo izo ijmax ijmin ',nzo,izo,ijmax,ijmin
+      segini izozo
+      do im = 1, iimel
+        deche = lilmel(im)
+        ivamad = imadec-ijmin
+        izu = ivamad/izo + 1
+        izozo(izu)=izozo(izu) + 1
+      enddo
+      ia = izozo(1)
+      do im = 2 , nzo+1
+        ia = ia + izozo(im)
+        izozo(im) = ia
+      enddo
+      segini ipozo
+      do im = 1, iimel
+        deche = lilmel(im)
+        ivamad=imadec-ijmin
+        izu=ivamad/izo+1
+        ipa=izozo(izu)
+        ipozo(ipa)=im
+        izozo(izu)=ipa-1
+      enddo
+*      write(ioimp,*) 'izozo' ,izozo(1),izozo(2),izozo(3),izozo(4)
+*      write(ioimp,*) 'ipozo ',(ipozo(izu),izu=1,20)
+c
+      mmodel = ipmod7
+      segact,mmodel
+      NSOUS = kmodel(/1)
+
+* On va creer d'office un modele contenant seulement le sous-modele
+* elementaire (isous) au cours de la boucle (1000) utile en cas de
+* projection et ou de changement de support !
+* Attention : Il faut reactiver le sous-modele apres utilisation
+* pour la bonne suite du traitement du comportement.
+      N1 = 1
+      SEGINI,mmode1
+      IPMOD1 = mmode1
+*
+* Idem on cree un mchaml a une sous-zone et une composante qui sera a
+* mettre a jour a chaque fois que besoin par le deche en cours
+      N1 = 1
+      L1 = 1
+      N3 = 6
+      SEGINI,mchelm
+      titche = ' '
+      conche(1) = '        '
+c*      ifoche = 0
+c*      imache(1) = 0
+c*      DO i = 1, N3
+c*        infche(1,i) = 0
+c*      ENDDO
+      n2 = 1
+      SEGINI,mchaml
+      ichaml(1) = mchaml
+      nomche(1) = '        '
+      typche(1) = '                '
+c*      ielval(1) = 0
+      IPOI1 = mchelm
+c
+c
+c  Boucle (1000) sur les modeles elementaires
+c --------------------------------------------
+c
+      ir10=0
+      DO 1000 isous = 1, NSOUS
+*
+        imodel = kmodel(isous)
+        segact imodel*nomod
+        iqmod = imodel
+
+        mmode1 = IPMOD1
+        SEGACT,mmode1*MOD
+        mmode1.kmodel(1) = iqmod
+C*      SEGDES,mmode1
+*
+*        write(ioimp,*) 'coml2 modele elementaire numero ',im
+*        write(6,*) 'coml2 formulation ',formod(1),' cons ',conmod
+*        moterr(1:6) = 'COML2  '
+*        moterr(7:15) = 'IMODEL  '
+*        interr(1) = im
+*        call erreur(-329)
+c
+c  Determination de la formulation du modele :
+c
+        nformu = FORMOD(/2)
+        iform1 = 0
+        CALL PLACE(LISFOR,MFORMU,iform1,FORMOD(1))
+        lformu = iform1
+        IF (nformu.EQ.2) THEN
+          iform2 = 0
+          CALL PLACE(LISFOR,MFORMU,iform2,FORMOD(2))
+          lformu = 0
+          IF ( (iform1.eq.2 .and. iform2.eq.3) .or.
+     &         (iform1.eq.3 .and. iform2.eq.2) )  lformu = 18
+        ENDIF
+        if (lformu.eq.0) then
+          write(ioimp,*) 'COML2 : formulation non prevue ici'
+          goto 1000
+        endif
+
+        MELE1 =NEFMOD
+        MELEME=IMAMOD
+c
+c  Indicateur de support
+cof : a stocker dans un segment de travail pour la suite ?
+c  Par defaut, on initialise le support : lesupp = 5
+        lesupp = 5
+*  Formulation MECANIQUE+LIQUIDE
+*        if (lformu.eq.18) lesupp = 5
+*  Formulation THERMIQUE then
+        if (lformu.eq.1 .OR. lformu.EQ.19) then
+          lesupp = 6
+*  Formulation MECANIQUE ou POREUX ou DIFFUSION ou ELECTROSTATIQUE
+*        else if (lformu.eq. 2 .OR. lformu.EQ. 5 .OR. lformu.EQ.16 .OR.
+*                 lformu.eq.17) then
+*          lesupp = 5
+        else if (lformu.eq.11) then
+          if (ivamod(/1).gt.0) then
+            lesupp = 5
+          else
+            lesupp = 3
+          endif
+        else if (lformu.EQ.14) then
+          lesupp = 1
+        endif
+c
+c cas particulier de la formulation LIAISON
+        jtruli = 0
+        if (lformu.EQ.14) jtruli = itruli
+c formulation DIFFUSION
+        if (lformu.eq.17.and.inatuu.lt.5) goto 1000
+c____________________________________________________________________
+c
+c     information sur l'element fini
+c____________________________________________________________________
+        info = 0
+        ipinf = 0
+        if (infmod(/1).lt.2+lesupp) then
+          CALL ELQUOI(MELE1,0,lesupp,IPINF,IMODEL)
+          IF (IERR.NE.0) THEN
+            SEGDES IMODEL*NOMOD,MMODEL*NOMOD
+            RETURN
+          ENDIF
+          INFO = IPINF
+          mfr2 = infell(13)
+        else
+          mfr2 = infele(13)
+        endif
+*
+        iinomp=lilmel(/1)
+        ijnomp=0
+        segini,linomp,igard
+        ivamad=imamod-ijmin
+        izu=ivamad/izo + 1
+*        write(ioimp,*) ' ijmin izo izu ',ijmin,izo,izu
+        if (izu.le.nzo+1.and.izu.gt.0) then
+         ideb=izozo(izu) + 1
+         ifin=izozo(izu+1)
+        else
+         ideb=1
+         ifin=0
+         write(ioimp,*) ' coml2 en dehors du zonage '
+        endif
+        do iopo=ideb,ifin
+          idn=ipozo(iopo)
+*        do idn = 1,lilmel(/1)
+          deche = lilmel(idn)
+*****          segact deche
+          if (imamod.eq.imadec.and.
+     &        conmod(1:LCONMO).eq.condec(1:LCONMO))then
+              ijnomp=ijnomp+1
+              igard(idn)=1
+              linomp(ijnomp) = deche
+          endif
+        enddo
+*        write(ioimp,*) ' ijnomp ' , ijnomp
+        ncopj=ijnomp
+        segini ncop
+*        inop=1
+*        deche=linomp(1)
+*        ncopi(1)=nomdec
+        do 648 idn=1,ijnomp
+          deche=linomp(idn)
+*          do iyu=1,inop
+*             if(nomdec.eq.ncopi(iyu)) go to 648
+*          enddo
+          ncopi(idn)=nomdec
+  648   continue
+*        write(ioimp,*) ' premier passage ijnomp ',ijnomp,ideb,ifin
+*
+* on met maintenant tous les champs qui sont sur le bon imamod
+* et qui n ont pas le bon constituant
+        ncopjj=ncopj
+        do 650 iopo=ideb,ifin
+          idn=ipozo(iopo)
+          if(igard(idn).eq.1) go to 650
+          deche=lilmel(idn)
+          if(imadec.ne.imamod) go to 650
+          do iou=1,ncopjj
+             if(ncopi(iou).eq.nomdec) go to 650
+          enddo
+*          write(6,*) ' composante ajoutée ' , nomdec
+          ncopj=ncopJ+1
+          segadj ncop
+          ijnomp=ijnomp+1
+          linomp(ijnomp)=deche
+          igard(idn)=1
+          ncopi(ncopj)=nomdec
+  650 continue
+*        write(6,*) ' apres deuxielme passage ijnomp ' ,ijnomp
+        iinomp=ijnomp
+        segadj linomp
+*        write(6,*) 'linomp ', linomp(/1)
+*         do iou=1,linomp(/1)
+*          deche=linomp(iou)
+*          write(6,*)'condec nomdec indec ',condec,' ', nomdec,' ',indec
+*         enddo
+* on met à -1 les deche que l'on peut sauter
+        do 649 idn=1,lilmel(/1)
+           deche= lilmel(idn)
+           if(igard(idn).eq.1) go to 649
+           do iyu=1,iinomp
+             if (nomdec.eq.ncopi(iyu)) then
+               igard(idn)=-1
+               go to 649
+             endif
+           enddo
+  649    continue
+
+*        write(6,*) ' ijnomp ',ijnomp
+
+c composantes des caracteristiques geometriques
+         if(lnomid(7).ne.0) then
+           lsupca=.false.
+           mocomp=lnomid(7)
+           nomid = mocomp
+           segact nomid
+           nobl=lesobl(/2)
+           nfac=lesfac(/2)
+         else
+          lsupca=.true.
+          CALL IDCARB(MELE1,IFOUR,MOCOMP,NOBL,NFAC)
+          nomid = mocomp
+          segact nomid
+         endif
+         ncarb = nobl + nfac
+* cherche les deche correspondants aux caracteristiques geometriques a t1 et t2
+         ipcarb1 = 0
+         ipcarb2 = 0
+*         write(6,*) ' linomp(/1) nobl,nfac',linomp(/1),ncarb,nobl,nfac
+         if (ncarb.gt.0) then
+          iicarb=linomp(/1)
+          segini licarb
+        do minde = 1,2
+          ijcarb=0
+          n3=0
+          do le = 1,linomp(/1)
+             deche = linomp(le)
+*****             segact deche
+*              write(ioimp,*)' le deche nomdec nindec',le,deche,nomdec,indec
+           if (indec.eq.minde) then
+             do jd = 1,nobl
+               if (nomdec.eq.lesobl(jd)) then
+                 ijcarb=ijcarb+1
+                 licarb(ijcarb) = deche
+                 n3 = max (n3,infdec(/1))
+               endif
+             enddo
+             do jd = 1,nfac
+               if (nomdec.eq.lesfac(jd)) then
+                 ijcarb=ijcarb+1
+                 licarb(ijcarb) = deche
+                 n3 = max (n3,infdec(/1))
+               endif
+             enddo
+           endif
+*****             segdes deche
+          enddo
+
+          if (ijcarb.gt.0) then
+c cree un mchelm de caracteristiques
+*       write(6,*) ' ijcarb ', ijcarb
+       n1=ijcarb
+       l1 = 13
+       segini mchelm
+       n2 = 1
+       TITCHE = 'CARACTERISTIQUES'
+       do 108 iga=1,ijcarb
+         deche = licarb(iga)
+       segini mchaml
+       CONCHE(iga)=condec
+       IMACHE(iga)=imadec
+       ICHAML(iga)=mchaml
+       IFOCHE = ifodec
+       do in3=1,infdec(/1)
+        infche(iga,in3) = infdec(in3)
+       enddo
+       NOMCHE(1)=nomdec
+       TYPCHE(1)=typdec
+       IELVAL(1)=ieldec
+*pv       segdes MCHAML
+  108 continue
+*pv       segdes mchelm
+             if (minde.eq.1)  ipcarb1 = mchelm
+             if (minde.eq.2)  ipcarb2 = mchelm
+          endif
+        enddo
+          segsup licarb
+         endif
+         if(lsupca)segsup nomid
+c         write(6,*) 'carac',ipcarb1,ipcarb2
+
+c segment pour changer les supports d integration et geometrique
+        iichan=lilmel(/1)
+        ijchan=0
+        segini lichan
+c segment des composantes qui correspondent au support : on les protege
+*
+* trie les composantes concernees
+* on cherche a descendre le plus d informations possible ... mais
+* il faut certaines fois etre raisonnable
+* on raisonne selon le type d element, le constituant et le support des pg
+        iilcon=iinomp
+        ijlcon=0
+        segini lilcon
+        ipcon = lilcon
+c*
+c pour gagner du temps
+c --- on vise les etudes d ingenierie donc la selection est faite sur
+c la formulation ---  on ne passe dans coml6 que les deche qui correspondent
+c au support. ce n est pas bien parce que la philosophie de COMP
+c est justement de faire descendre le maximum d info. o tristesse.kich (05/01)
+*         write(6,*) 'mfr2', mfr2,conmod
+        if (((mfr2.ge.11.or.mfr2.eq.7).and.mfr2.ne.33) .or.
+     &      lformu.eq.14) then
+         do ldn=1,linomp(/1)
+           lilcon(ldn) = linomp(ldn)
+         enddo
+         ijlcon=iinomp
+         goto 201
+        endif
+c
+*        write(6,*) ' passage a la cloche mfr2 ', mfr2,lilmel(/1)
+        nmel1=50
+        segini icorre
+        do 200 iol=1,lilmel(/1)
+          segact imodel*nomod
+           deche = lilmel(iol)
+          if(igard(iol).eq.1) go to 170
+          if(igard(iol).eq.-1) go to 200
+*****          segact deche
+*        moterr(1:6) = nomdec
+*        moterr(7:22) = condec
+*        interr(1) = deche
+*        call erreur(-329)
+c          write(6,*) 'compo ', nomdec,condec,indec,imadec ,meleme
+*tc          do ldn = 1,linomp(/1)
+* parmi les composantes protegees on privilegie celles qui ont le bon
+* constituant
+*tc            if (deche.eq.linomp(ldn).and.condec.eq.conmod) goto 170
+*tc          enddo
+*tc
+*tc          if (formod(1).ne.'MELANGE'.and.matmod(1).ne.'PARALLELE') then
+*tc          do ldn = 1,linomp(/1)
+* on evite de garder les composantes qui n ont pas le bon constituant
+* pour lesquelles la composante avec le bon constituant existe
+* sauf pour le melange parallele (kich 01/05)
+*tc            dec1 = linomp(ldn)
+*tc            if (nomdec.eq.dec1.nomdec.and.dec1.condec.eq.conmod)
+*tc     &            goto 200
+*tc          enddo
+*tc          endif
+*
+* traite les composantes qui n existent pas sur le bon support :
+* celui du modele ... on va chercher a projeter
+          if (meleme.ne.imadec) then
+*           write(6,*) ' coml2 passage meleme.ne.imadec', nomdec
+            ipt1 = imadec
+            segact meleme,ipt1
+*  si le type des elements est le meme on cree un melval
+            if (itypel.eq.ipt1.itypel) then
+* concretement pour les elments qui ne sont pas massifs ou coque on passe
+* au deche suivant (kich 05/01)
+              ielin = ieldec
+*              write(6,*) ' appel à comail '
+              call comail(meleme,ipt1,ielin,ielout,icorre)
+              if (ielout.eq.0)go to 200
+* qu on range dans un deche que l on cree
+              segini,dec1=deche
+              dec1.ieldec= ielout
+              dec1.imadec = meleme
+*****             segdes meleme,ipt1,deche
+              deche = dec1
+               ijchan=ijchan+1
+               if(ijchan.gt.iichan) then
+                 iichan=iichan+100
+                 segadj lichan
+               endif
+              lichan(ijchan) = deche
+            else if (condec(1:LCONMO).ne.conmod(1:LCONMO)
+     &          .and.itypel.ne.ipt1.itypel
+     &   .and.infdec(6).eq.1) then
+* sinon si le constituant  n est pas le meme on projette aux pts rigidite
+c!!! pour l instant ne marche que pour les mchaml aux noeuds !!!
+****              segdes meleme,ipt1
+            iem = indec
+            if (iem.eq.1.and.ncarb.gt.0.and.ipcarb1.eq.0) goto 200
+            if (iem.gt.1.and.ncarb.gt.0.and.ipcarb2.eq.0) goto 200
+
+* cree un mchaml
+            mchelm = IPOI1
+            segact,mchelm*MOD
+            ifoche=ifodec
+            conche(1) = condec
+            imache(1) = imadec
+            do j = 1,infdec(/1)
+             infche(1,j) = infdec(j)
+            enddo
+            mchaml = ichaml(1)
+            SEGACT,mchaml*MOD
+            nomche(1) = nomdec
+            typche(1) = typdec
+            ielval(1) = ieldec
+c*          SEGDES,mchaml,mchelm
+            call ecrcha('RIGIDITE')
+            call ecrobj('MCHAML  ',IPOI1)
+            if (indec.eq.1.and.ipcarb1.ne.0) then
+               call ecrobj('MCHAML  ',ipcarb1)
+            elseif (indec.gt.1.and.ipcarb2.ne.0) then
+               call ecrobj('MCHAML  ',ipcarb2)
+            else
+            endif
+            call ecrobj('MMODEL  ',IPMOD1)
+            call PROIET
+            IF(IERR.NE.0) RETURN
+            call lirobj('MCHAML',IPCHE,0,IRE2)
+            IF(IERR.NE.0) RETURN
+            mchelm = ipche
+            segact mchelm
+            n1 = ichaml(/1)
+* pas de champ projete passe au suivant
+            if (n1.eq.0) goto 200
+            if (n1.ne.1) then
+* bizarre , contacter support
+             moterr(1:6) = 'COML2'
+             interr(1) = 11
+             call erreur(943)
+             return
+            endif
+            mchaml = ichaml(1)
+            segact mchaml
+            n2 = ielval(/1)
+* pas de champ projete passe au suivant
+            if (n2.eq.0) goto 200
+            if (n2.ne.1) then
+* bizarre , contacter support
+             moterr(17:24) = 'COML2'
+             interr(1) = 12
+             call erreur(943)
+             return
+            endif
+* creer un deche
+            n3 = infche(/2)
+            segini deche
+            indec = iem
+            ieldec = ielval(1)
+            typdec = typche(1)
+            typree = typdec(1:6).eq.'REAL*8'
+            nomdec = nomche(1)
+            imadec = imache(1)
+            condec = conche(1)
+            ifodec = ifoche
+            do in3 = 1, n3
+              infdec(in3) = infche(1,in3)
+            enddo
+* mettre dans une pile
+            ijchan=ijchan+1
+            if(ijchan.gt.iichan) then
+              iichan=iichan+ 100
+              segadj lichan
+            endif
+            lichan(ijchan) = deche
+            segsup mchaml,mchelm
+c
+             else
+* sinon on passe au deche suivant
+****              segdes meleme,ipt1
+              goto 200
+            endif
+          endif
+
+  170    continue
+* on change eventuellement sur les points d integration
+* convenables ... ce qui suppose en fait que l information
+* fournie a COMP n est pas redondante
+* en mecanique on utilise directement les champs fournis aux pgauss rigidite
+            lome1 = infdec(6).eq.3.and.lesupp.eq.5
+            lome2 = nomdec(1:4).eq.'TEMP'.or.
+     &              nomdec(1:4).eq.'LX  '.or.
+     &              nomdec(1:4).eq.'FLX '
+          if (infdec(6).ne.lesupp.and..not.lome1.and..not.lome2) then
+c             write(6,*) 'change ', deche, nomdec
+            iem = indec
+* cree un mchaml
+            mchelm = IPOI1
+            segact,mchelm*MOD
+            ifoche=ifodec
+            conche(1) = condec
+            imache(1) = imadec
+            do j = 1,infdec(/1)
+             infche(1,j) = infdec(j)
+            enddo
+            mchaml = ichaml(1)
+            SEGACT,mchaml*MOD
+            nomche(1) = nomdec
+            typche(1) = typdec
+            ielval(1) = ieldec
+c*          SEGDES,mchaml,mchelm
+*            write(6,*) ' changement de support  nomdec ',nomdec
+            call CHASUP(IPMOD1,IPOI1,IPOI2,IRET,lesupp)
+            if (IRET.NE.0) then
+              CALL ERREUR(IRET)
+              return
+            endif
+            if (ierr.ne.0) return
+            mchelm = ipoi2
+            segact mchelm
+            n1 = ichaml(/1)
+            if (n1.ne.1) then
+* bizarre , contacter support
+             moterr(17:24) = 'COML2'
+             interr(1) = 1
+             call erreur(943)
+             return
+            endif
+            mchaml = ichaml(1)
+            segact mchaml
+            n2 = ielval(/1)
+            if (n2.ne.1) then
+* bizarre , contacter support
+             moterr(17:24) = 'COML2'
+             interr(1) = 2
+             call erreur(943)
+             return
+            endif
+* creer un deche
+            n3 = infche(/2)
+            segini deche
+            indec = iem
+            ieldec = ielval(1)
+            typdec = typche(1)
+            typree = typdec(1:6).eq.'REAL*8'
+            nomdec = nomche(1)
+            imadec = imache(1)
+            condec = conche(1)
+            ifodec = ifoche
+            do in3 = 1, n3
+              infdec(in3) = infche(1,in3)
+            enddo
+            segsup mchaml,mchelm
+* mettre dans une pile
+            ijchan=ijchan+1
+            if(ijchan.gt.iichan) then
+               iichan=iichan+100
+               segadj lichan
+            endif
+            lichan(ijchan) = deche
+          endif
+c
+c           write(6,*) 'lilcon ',deche,nomdec,typdec,condec,imadec,indec
+           ijlcon=ijlcon+1
+           if(ijlcon.gt.iilcon) then
+            iilcon=iilcon+100
+            segadj lilcon
+           endif
+          lilcon(ijlcon) = deche
+
+  200   continue
+         do iou=1,idej
+          mlenti=icor(iou)
+          if(mlenti.ne.0)segsup mlenti
+         enddo
+         segsup icorre
+  201   continue
+
+          imodel = iqmod
+          segact imodel*nomod
+          if (ijchan.ne.iichan) then
+            iichan = ijchan
+            segadj lichan
+          endif
+c passe ce qui reste
+           if (ijlcon.ne.iilcon) then
+             iilcon=ijlcon
+             segadj lilcon
+           endif
+           if (lilcon(/1).ge.1) then
+*             call gibtem(xkt)
+*             write(6,*) ' coml2 : appel a coml6 ', xkt
+*             do ioup=1,lilcon(/1)
+*             deche=lilcon(ioup)
+*        write(6,*)deche,' ',nomdec,' ',imadec,' ',indec,' ',condec
+*             enddo
+       call coml6(iqmod,ipcon,ipinf,indeso,lesupp,jtruli,ir10,IRETOU)
+
+*             call gibtem(xkt)
+*             write(6,*) ' coml2 : retour de coml6 ',xkt
+           else
+c            write(6,*) 'pas de composante pour le sous-model ',imodel
+           endif
+*            write(6,*) 'coml2 : ierr ', ierr , 'iretou ', iretou
+          if (ierr.gt.1) return
+
+* complete la pile des deche en sortie / desactive les DECHE et les MELVAL
+        lilcon = ipcon
+        ijmel=lilmel(/1)
+        do 800 ioc =iilcon+1,lilcon(/1)
+          deche = lilcon(ioc)
+*****           segact deche*nomod
+          if (indec.lt.indeso) then
+          else if (indec.eq.indeso.and.
+     &            condec(1:LCONMO).eq.conmod(1:LCONMO)) then
+* si on a ete coherent on ne peut creer 2 fois le meme deche
+* on ne rajoute que les deche crees sur le constituant
+* on ne met pas dans lilmel les deches intermediaires
+            if (ijchan.gt.0) then
+              do iyf = 1,ijchan
+                if (lichan(iyf).eq.deche) goto 800
+              enddo
+            endif
+            ijmel=ijmel+1
+            if(ijmel.gt.iimel) then
+               iimel=iimel+100
+             segadj lilmel
+            endif
+            lilmel(ijmel) = deche
+c         melval = ieldec
+c         segact melval
+          else
+          endif
+*            melval = ieldec
+***            segdes melval
+c            segdes deche
+  800   continue
+          iimel=ijmel
+          segadj lilmel
+          segsup lilcon,linomp,igard,ncop
+
+* supprime melval intermediaire
+        if (ijchan.gt.0) then
+        do iop = 1,ijchan
+          deche = lichan(iop)
+*******          segact deche
+c            write(6,*) 'deche ', nomdec , indec, ieldec
+           do il = 1,lilmel(/1)
+             dec1 = lilmel(il)
+c            write(6,*) 'de1 ', dec1.nomdec , dec1.indec, dec1.ieldec
+           if (dec1.indec.eq.indeso.and.dec1.ieldec.eq.ieldec) goto 810
+           enddo
+          melval = ieldec
+c            write(6,*) 'supprime deche ',nomdec,melval,deche
+          segsup melval
+ 810     continue
+          segsup deche
+        enddo
+        endif
+        segsup lichan
+
+* supprime les mchaml de caracteristiques
+        mchel1=ipcarb1
+        do minde = 1, 2
+          if (minde.eq.2) mchel1=ipcarb2
+          if (mchel1.gt.0) then
+            segact mchel1
+            do jch1 = 1,mchel1.ichaml(/1)
+              mchaml = mchel1.ichaml(jch1)
+              if (mchaml.gt.0) segsup mchaml
+            enddo
+            segsup mchel1
+          endif
+        enddo
+c          write(6,*) 'supprime caracteristiques ' , ipcarb1,ipcarb2
+
+          if (ierr.ne.0) return
+          if (iretou.ne.0) return
+c
+c  cas traitement non-local MELANGE
+c
+      IF (lformu.EQ.11) THEN
+        IF (ivamod(/1).gt.0) THEN
+c
+c rassemble les deche lies aux phases
+        iilcon=lilmel(/1)
+        ijlcon=0
+        segini lilcon
+        ipcon = lilcon
+        do 910 ide = 1,iilcon
+         deche = lilmel(ide)
+         if (indec.eq.indeso.and.imadec.eq.imamod) then
+          if (condec(1:LCONMO).eq.conmod(1:LCONMO)) then
+                 ijlcon = ijlcon + 1
+                 lilcon(ijlcon) = deche
+          else
+           do im = 1,ivamod(/1)
+             if (tymode(im).eq.'IMODEL  ') then
+               imode1 = ivamod(im)
+               segact imode1
+               if ((condec(1:LCONMO).eq.imode1.conmod(1:LCONMO)).or.
+     &(nomdec(1:4).eq.imode1.conmod(17:20))) then
+                 ijlcon = ijlcon + 1
+                 lilcon(ijlcon) = deche
+               endif
+             endif
+           enddo
+          endif
+         elseif (indec.eq.2.and.imadec.eq.imamod.and.
+     &           condec(1:LCONMO).ne.conmod(1:LCONMO)) then
+           do im = 1,ivamod(/1)
+             if (tymode(im).eq.'IMODEL  ') then
+               imode1 = ivamod(im)
+               segact imode1
+               if ((condec(1:LCONMO).eq.imode1.conmod(1:LCONMO)).or.
+     &(nomdec(1:4).eq.imode1.conmod(17:20))) then
+                 ijlcon = ijlcon + 1
+                 lilcon(ijlcon) = deche
+               endif
+             endif
+           enddo
+         endif
+ 910    continue
+        iilcon = ijlcon
+        segadj lilcon
+        iilcon0 = iilcon
+
+c traite
+            call coml9(iqmod,ipcon,ipinf,indeso,IRETOU,lesupp)
+
+c range
+* complete la pile des deche en sortie
+        lilcon = ipcon
+        ijmel=lilmel(/1)
+        iimel=ijmel
+        do 920 ioc =iilcon0+1,lilcon(/1)
+          deche = lilcon(ioc)
+          if (indec.lt.indeso) then
+          else if (indec.eq.indeso.and.
+     C             condec(1:LCONMO).eq.conmod(1:LCONMO)) then
+* si on a ete coherent on ne peut creer 2 fois le meme deche
+            ijmel=ijmel+1
+            if(ijmel.gt.iimel) then
+              iimel=iimel+100
+              segadj lilmel
+            endif
+            lilmel(ijmel) = deche
+c         melval = ieldec
+c         segact melval
+          else
+          endif
+  920   continue
+          iimel=ijmel
+          segadj lilmel
+c detruit
+          segsup lilcon
+
+c fin traitement non local MELANGE
+        ENDIF
+      ENDIF
+c
+        if (info.ne.0) then
+          segsup info
+          info=0
+        endif
+c
+*pv        segdes meleme
+*pv        segdes,imodel
+
+ 1000 CONTINUE
+      ir10=0
+c------------------------------------
+c   fin boucle modeles elementaires
+c------------------------------------
+
+c  Destruction du segment struli (si utilise)
+      if (itruli.ne.0) then
+        if (momoda.gt.0) then
+          mmode2 = momoda
+          segsup mmode2
+        endif
+        if (mostat.gt.0) then
+          mmode2 = mostat
+          segsup mmode2
+        endif
+        if (itbmod.gt.0) then
+          mmode2 = itbmod
+          segsup mmode2
+        endif
+        if (itlia.gt.0) then
+          mmode2 = itlia
+          segsup mmode2
+        endif
+        if (ichain.gt.0) then
+          mlent3 = ichain
+          segsup mlent3
+        endif
+        segsup struli
+      endif
+c  Destruction modele deroule
+c*      mmodel = impod7
+      segsup mmodel
+      segsup ipozo,izozo
+c  Destruction autres segments
+      mmode1 = IPMOD1
+      segsup mmode1
+      mchelm = IPOI1
+      segact,mchelm
+      mchaml = ichaml(1)
+      segsup,mchaml,mchelm
+
+*      call gibtem (xkt)
+*      write(ioimp,*) ' sortie coml2 ' , xkt
+
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+

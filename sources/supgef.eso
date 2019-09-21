@@ -1,0 +1,486 @@
+C SUPGEF    SOURCE    PV        15/04/10    21:15:34     8474
+      SUBROUTINE SUPGEF(FN,GR,PG,XYZ,HR,PGSQ,RPG,AJ,
+     & NES,NP,NPG,IAXI,XCOOR,
+     & LE,KDEB,KFIN,LRV,IDCEN,CMD,IKOMP,
+     & TN,IPADT,UN,IPADU,NPTD,ANUK,
+     & WT,WS,HK,PGSK,RPGK,AJK,AIRE,UIL,DUIL,
+     & DTM1,DT,DTT1,DTT2,DIAEL,NUEL)
+C--------------------------------------------------------------------
+C Calcul des fonctions tests associées à la formulation Eléments
+C Finis Petrov-Galerkin afin de stabiliser les termes de convection.
+C On en profite pour calculer des temps caractéristiques.
+C--------------------------------------------------------------------
+C Cette subroutine étant écrite en fortran pur, certains arguments
+C servent uniquement au dimensionnement des tableaux.
+C Afin de doper les calculs, on decoupe la boucle sur les éléments
+C par paquets afin de bénéficier à fond de la vectorisation.
+C--------------------------------------------------------------------
+C
+C--------------------------
+C Paramètre Entrée/Sortie :
+C--------------------------
+C
+C  /S FN     : Fonction de forme associé à la transformation géométrique
+C  /S GR     : Gradient de FN dans l'élément de référence
+C  /S PG     : Poids d'intégration associé à chaque point de Gauss
+C  /S XYZ    : Coordonnées des sommets de l'élément
+C  /S AJ     : Jacobien
+C  /S HR     : Gradient des fonctions de forme dans l'élément courant
+C  /S PGSQ   : Produit du poids d'intégration par detJ
+C  /S RPG    : Rayon associé à chaque point de Gauss (cas axisymétrique)
+C
+C E/  NES    : Dimension en espace du problème traité (2 en 2D et 3 en 3D)
+C E/  NP     : Nombre de points support de ddl pour l'élément considéré
+C E/  NPG    : Nombre de points de Gauss
+C E/  IAXI   : Précise l'axe de symétrie dans le cas axisymétrique
+C              (en fait l'axe de symétrie est toujours y -> IAXI=2)
+C E/  XCOOR  : Coordonnées de l'ensemble des points (voir SMCOORD.INC)
+C              Petrov-Galerkin choisi pour stabiliser la convection
+C              Petrov-Galerkin choisi pour stabiliser la convection
+C  /S HK     : Gradient de FN dans l'élément courant
+C  /S PGSK   : Produit du poids d'intégration par detJ
+C  /S RPGK   : Rayon associé à chaque point de Gauss (cas axisymétrique)
+C  /S AIRE   : Volume de chaque élément
+C  /S AJK    : Jacobien
+C  /S UIL    : Vecteur vitesse aux points de Gauss
+C  /S DUIL   : Gradient du champ de vitesse
+C              (la divergence est obtenue par sommation)
+C E/  KDEB   : Indice du début de la fenetre
+C E/  KFIN   : Indice de fin de la fenetre
+C E/  LRV    : Dimension de la fenetre
+C E/  TN     : Inconnue transportée au pas de temps précédent
+C E/  IPADT  : Correspondance numérotation locale et globale pour les
+C              points SOMMET : J=LECT(I) : le point numéro I est rangé
+C              en Jème position   pour le CHAMP TN
+C E/  UN     : Champ de vitesse transportant aux sommets des éléments
+C E/  IPADU  : Correspondance numérotation locale et globale pour les
+C              points SOMMET : J=LECT(I) : le point numéro I est rangé
+C              en Jème position   pour le CHAMP UN
+C E/  NPTD   : Nombre de points sous-tendant le spg associé à UN
+C E/  ANUK   : Champ contenant le coefficient de diffusion (diffusivité
+C              pour l'énergie, rapport viscosité sur densité pour qdm)
+C E/  IDCEN  : Contient le schéma associé au terme convectif
+C              (1=CENTREE 2=SUPGDC 3=SUPG 4=TVISQUEUX 5=CNG)
+C E/  DTM1   : Pas de temps imposé
+C E/S DT     : Pas de temps
+C  /S DTT1   : Temps caractéristique associé à la diffusion/convection
+C  /S DTT2   : Temps caractéristique associé à la diffusion
+C  /S DIAEL  : Longueur carac. de l'élément le plus pénalisant pour dt
+C  /S NUEL   : Numéro de l'élément le plus pénalisant pour dt
+C
+C  Variable locale
+C
+C  DDUIL     : gradient de chaque composante de la vitesse au pt Gauss
+C              pour un élément.
+C
+C  RTNL      : valeur de TN au point de gauss
+C
+C--------------------------------------------------------------------
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+-INC CCOPTIO
+-INC CCREEL
+      DIMENSION IPADT(*),IPADU(*),LE(NP,*)
+
+      DIMENSION XCOOR(*)
+      DIMENSION UN(NPTD,IDIM),TN(*)
+      DIMENSION ANUK(LRV)
+
+      DIMENSION FN(NP,NPG),GR(IDIM,NP,NPG),PG(NPG),XYZ(IDIM,NP)
+      DIMENSION HR(IDIM,NP,NPG),PGSQ(NPG),RPG(NPG),AJ(IDIM,IDIM,NPG)
+      DIMENSION WT(LRV,NP,NPG),WS(LRV,NP,NPG),HK(LRV,IDIM,NP,NPG)
+      DIMENSION PGSK(LRV,NPG),RPGK(LRV,NPG),AIRE(LRV)
+      DIMENSION AJK(LRV,IDIM,IDIM,NPG)
+C
+      DIMENSION UIL(LRV,IDIM,NPG),DUIL(LRV,IDIM,NPG)
+      DIMENSION UPIL(3),GRAD(3)
+      DATA ACCT,ACC2/1.,1./  , ipas/0/
+C
+      REAL*8   DDUIL(3,3),RTNL
+C
+C
+C- Pour les éléments de la fenetre KDEB:KFIN initialisations des
+C- données associées à l'élément fini utilisé : fonctions de forme,
+C- gradients des fonctions de forme, aire de l'élément, poids des
+C- points de Gauss et rayon des points de Gauss pour le cas axi.
+C
+C?      write(6,*)'UN(NPTD,IDIM) ',nptd,idim
+C?      write(6,1002)un
+         XPETI=1.D-30
+         CALL INITD(UPIL,3,0.D0)
+
+         DO 5020 K=KDEB,KFIN
+            KP = K-KDEB+1
+
+         DO 20 I=1,NP
+            J = LE(I,K)
+            DO 10 N=1,IDIM
+               XYZ(N,I) = XCOOR((J-1)*(IDIM+1)+N)
+  10        CONTINUE
+  20     CONTINUE
+
+         CALL CALJBR(FN,GR,PG,XYZ,HR,PGSQ,RPG,
+     &        NES,IDIM,NP,NPG,IAXI,AIRE(KP),AJ,SGN)
+
+         DO 8934 N=1,IDIM
+         DO 8934 M=1,IDIM
+         DO 8934 L=1,NPG
+         AJK(KP,M,N,L)=AJ(M,N,L)
+ 8934    CONTINUE
+
+         CALL CALJTR(GR,XYZ,NES,IDIM,NP,NPG,AJ)
+
+C
+      DO 5030 L=1,NPG
+
+            DO 40 N=1,IDIM
+               DO 30 I=1,NP
+                  HK(KP,N,I,L) = HR(N,I,L)
+  30           CONTINUE
+  40        CONTINUE
+
+            PGSK(KP,L) = PGSQ(L)
+            RPGK(KP,L) = RPG(L)
+C
+C- Calcul en chaque élément, pour chaque point de Gauss
+C-    UIL  : Vitesse
+C
+      DO 230 N=1,IDIM
+               DUIL(KP,N,L) = XPETI
+               UIL(KP,N,L)  = XPETI
+            DO 210 I=1,NP
+                  NF = IPADU(LE(I,K))
+                  UIL(KP,N,L)  = UIL(KP,N,L)  + UN(NF,N)*FN(I,L)
+                  DUIL(KP,N,L) = DUIL(KP,N,L) + UN(NF,N)*HK(KP,N,I,L)
+ 210        CONTINUE
+ 230  CONTINUE
+C
+C     Dans le cas d'une formulation conservative du transport,
+C     La vitesse de transport réelle est d(uT)/d(T). Cela revient
+C     à rajouter le terme T (dU/dT) à la vitesse U.
+C     Le terme dU/dT peut s'écrite pour chaque composante :
+C     dx/dT dU/dx + dy/dT dU/dy
+C     Lorsque dx/dT ou dy/dT est infini, cela signifie que les variables
+C     sont indépendantes de T. Le terme correspondant doit alors être
+C     éliminé du caclul.
+C
+      IF (IDCEN .EQ. 2 .OR. IDCEN .EQ. 3) THEN
+         IF (IKOMP .EQ. 1 .OR. IKOMP .EQ. 2) THEN
+C
+C        Evaluation du gradient de TN.
+C
+         DO 171 N=1,IDIM
+            GRAD(N)=0.D0
+            DO 172 I=1,NP
+               NT = IPADT(LE(I,K))
+               GRAD(N) = GRAD(N) + TN(NT)  *HK(KP,N,I,L)
+ 172        CONTINUE
+            IF (ABS(GRAD(N)) .LT. 1.D-10) THEN
+C              La variable x ou y est indépendante de T. On met le
+C              gradient à l'infini pour le déconnecter des calculs
+C              suivants.
+               GRAD(N) = 1.D+100
+            ENDIF
+ 171     CONTINUE
+*            WRITE(*,*) 'GRADT', GRAD(1),GRAD(2)
+C
+C        On évalue le gradient de chaque composante de la vitesse.
+C
+         DO 231 N=1,IDIM
+            DO 231 M=1,IDIM
+               DDUIL(N,M) = XPETI
+            DO 211 I=1,NP
+                  NF = IPADU(LE(I,K))
+                  DDUIL(N,M) = DDUIL(N,M) + UN(NF,N)*HK(KP,M,I,L)
+ 211        CONTINUE
+ 231     CONTINUE
+C
+C        Correction en axisymetrique
+C
+C?         IF (IAXI .EQ. 1) THEN
+C?            DO 212 I=1,NP
+C?                  NF = IPADU(LE(I,K))
+C?                  DDUIL(1,1)=DDUIL(1,1)+(UN(NF,1)*FN(I,L)/RPGK(KP,L))
+C? 212        CONTINUE
+C?         ENDIF
+C
+C        On évalue la variable scalaire TN au point de gauss L
+C
+         RTNL=0.D0
+         DO 173 I=1,NP
+            NT = IPADT(LE(I,K))
+            RTNL = RTNL + TN(NT) * FN(I,L)
+ 173     CONTINUE
+*         WRITE(*,*) 'RTNL', RTNL
+C
+C        Modification de la vitesse U
+C
+         IF (IKOMP .EQ. 1) THEN
+c           decentrement de UN*TN en UN + TN*(dUN/dTN).
+            DO 174 N=1,IDIM
+               DO 174 M=1,IDIM
+                 UIL(KP,N,L) = UIL(KP,N,L)+RTNL*(DDUIL(N,M)/GRAD(M))
+ 174        CONTINUE
+         ELSE
+c           décentrement de JN=UN*TN en dJN/dTN
+            DO 175 N=1,IDIM
+               DO 175 M=1,IDIM
+                 UIL(KP,N,L) = DDUIL(N,M)/GRAD(M)
+ 175        CONTINUE
+         ENDIF
+C
+         ENDIF
+      ENDIF
+C
+C- Calcul pour chaque point de Gauss de chaque élément de :
+C- /L UML : Norme de la vitesse aux points de Gauss
+C-    BM  : module  d'un temps caractéristique associé à la convection
+C-    XMB : caractéristique géométrique  1/2 He
+C
+
+C
+          BMI=0.D0
+          UL=0.D0
+          DO 310 N=1,IDIM
+             UHAT=0.D0
+             DO 311 M=1,IDIM
+             UHAT=UHAT+AJ(M,N,L)*UIL(KP,M,L)
+ 311         CONTINUE
+
+          BMI=BMI+UHAT*UHAT
+          UL=UL+UIL(KP,N,L)*UIL(KP,N,L)
+ 310   CONTINUE
+       BM=SQRT(BMI) + XPETI
+       UML=SQRT(UL)
+       XMB=UML/BM
+
+
+C
+C
+C- Calcul en chaque élément, pour chaque point de Gauss de
+C-     GRAD : vecteur unitaire porté par le gradient du champ scalaire
+C-     UP   : projection de la vitesse sur la direction donnée par GRAD
+C-     UPIL  : vecteur UP*GRAD aux points de Gauss
+C- pour l'option SUPGDC
+C
+      IF (IDCEN.EQ.2) THEN
+            DO 170 N=1,IDIM
+            GRAD(N)=0.D0
+            DO 170 I=1,NP
+               NT = IPADT(LE(I,K))
+               GRAD(N) = GRAD(N) + TN(NT)  *HK(KP,N,I,L)
+ 170        CONTINUE
+
+            AX=0.D0
+            DO 2301 M=1,IDIM
+            AX = AX + GRAD(M)*GRAD(M)
+ 2301       CONTINUE
+            AX = SQRT(AX) + XPETI
+
+            UPL=0.D0
+            DO 2302 N=1,IDIM
+            GRAD(N) = GRAD(N) / AX
+            UPL  = UPL + GRAD(N) * UIL(KP,N,L)
+ 2302       CONTINUE
+
+            DO 2303 N=1,IDIM
+            UPIL(N)  = GRAD(N) * UPL
+ 2303       CONTINUE
+
+C
+          BPI=0.D0
+          DO 410 N=1,IDIM
+             UPHAT=0.D0
+             DO 411 M=1,IDIM
+             UPHAT=UPHAT+AJ(M,N,L)*UPIL(M)
+ 411         CONTINUE
+
+          BPI=BPI+UPHAT*UPHAT
+ 410   CONTINUE
+       BP=SQRT(BPI) + XPETI
+       XPB=UPL/BP
+
+      ENDIF
+C
+C-----------------------------
+C- DECENTREMENT suivant IDCEN
+C-----------------------------
+C     On calcule dans chaque cas TO1 et TO2 ainsi que le tenseur
+C     associé à la viscosité numérique afin d'évaluer le pas de
+C     temps de stabilité pour les schémas explicites.
+C
+C----------
+C CENTREE :
+C----------
+      IF (IDCEN.EQ.1) THEN
+         SI1 = 0.D0
+         SI2 = 0.D0
+               TO1 = 0.D0
+               TO2 = 0.D0
+C---------
+C SUPGDC : Base théorique dans : A New FE formulation for computational
+C fluid dynamics, II Beyond SUPG, HUGHES et al., in Comp.Meth.Appl.Mech.
+C Eng., vol 54, pp 341-355 (1986).
+C---------
+      ELSEIF (IDCEN.EQ.2) THEN
+         SI1 = 1.D0
+         SI2 = 1.D0
+C
+C- Approximation "doublement asymptotique" basée sur la vitesse moyenne
+C-    HMK  : Distance basé sur la vitesse moyenne
+C-    ALFA : Peclet de maille basé sur la vitesse moyenne
+C
+               ALFA = UML * XMB / (ANUK(KP)+XPETI) / 3.D0
+               AKSI = MIN(1.D0,ALFA)
+               CCT     = AKSI / BM * ACCT * CMD
+C
+C- Approximation "doublement asymptotique" basée sur la projection de
+C- la vitesse sur le gradient du champ scalaire
+C-    HMK  : Distance basée sur la vitesse projetée
+C-    ALFA : Peclet de maille basé sur la vitesse projetée
+C
+               ALFA = UPL * XPB / (ANUK(KP)+XPETI) / 3.D0
+               AKSI = MIN(1.D0,ALFA)
+               CCP = AKSI / BP
+C
+               CPT = CCP - CCT
+               CC2 = MAX(0.D0,CPT) * ACC2 * CMD
+C
+               TO1 = CCT
+               TO2 = CC2
+C-------
+C SUPG :
+C-------
+      ELSEIF (IDCEN.EQ.3) THEN
+         SI1 = 1.D0
+         SI2 = 1.D0
+C
+C- Approximation "doublement asymptotique" basée sur la vitesse moyenne
+C-    HMK  : Distance basé sur la vitesse moyenne
+C-    ALFA : Peclet de maille basé sur la vitesse moyenne
+C
+               ALFA = UML * XMB / (ANUK(KP)+XPETI) / 3.D0
+               AKSI = MIN(1.D0,ALFA)
+               CCT     = AKSI / BM * ACCT * CMD
+C
+               TO1 = CCT
+               TO2 = 0.D0
+C-------------------
+C Tenseur Visqueux :
+C-------------------
+      ELSEIF (IDCEN.EQ.4) THEN
+         SI1  =-1.D0
+         SI2  = 1.D0
+         DT19 = DTM1 * 0.5D0
+               TO1 = DT19
+               TO2 = 0.D0
+C-----------------------------
+C Crank Nicholson généralisé :
+C-----------------------------
+      ELSEIF (IDCEN.EQ.5) THEN
+         SI1  =-1.D0
+         SI2  = 1.D0
+         DT19 = DTM1/6.D0
+               TO1 = DT19
+               TO2 = 0.D0
+      ENDIF
+C
+C---------------------------
+C Pas de temps de stabilité
+C---------------------------
+C
+C La viscosité utilisée dans l'évaluation des pas de temps de stabilité
+C explicite ajoute à la viscosité physique la viscosité numérique :
+C   DT1 : Correspond à une CFL de 1 et un Peclet de maille de 1
+C               CFL=1 -> dx=Vdt  |
+C                                |-> dt=2D/V2
+C                Pe=1 -> dx=2D/V |
+C   DT2 : Correspond au pas de temps de stabilité lié à la diffusion
+C               FOU=1 -> dt=0.5 dx2/D
+C
+      IF (IDCEN.NE.5) THEN
+               DT0 = DT
+C              DT1 = 2.D0 /
+C    &             ( UIL(KP,1,L)*UIL(KP,1,L)/(ANUK(KP)+XPETI)
+C    &             + UIL(KP,2,L)*UIL(KP,2,L)/(ANUK(KP)+XPETI) )
+C              DT2 = 0.5D0 /
+C    &             ( ANUK(KP)*AL2(KP)
+C    &             + ANUK(KP)*AH2(KP) )
+*  faut il provoquer une erreur?
+               if (abs(uml).lt.xpetit) then
+                dt1=xgrand
+               else
+                DT1 = 2.D0 * ANUK(KP) / (UML * UML)
+               endif
+               DT2 = DT1
+C
+               IF (DT1.LT.DT) DT=DT1
+               IF (DT2.LT.DT) DT=DT2
+               IF (DT.NE.DT0) THEN
+                  DTT1  = DT1
+                  DTT2  = DT2
+                    DIAEL = XMB * 2.D0
+                  NUEL  = K
+               ENDIF
+      ENDIF
+C
+C---------------------------------------------------
+C Fonction test pour la formulation Petrov-Galerkin
+C---------------------------------------------------
+C   Ce qui est diffusion numérique en explicite se transforme en
+C   ajoutant de la viscosité numérique (Tenseurs visqueux et CNG).
+C       WS : Fonction test pour la partie explicite
+C
+      IF(IDIM.EQ.2)THEN
+      DO 2050 I=1,NP
+         WT(KP,I,L) = FN(I,L) + SI1 *
+     &  (TO1*(UIL(KP,1,L)*HK(KP,1,I,L)+UIL(KP,2,L)*HK(KP,2,I,L))
+     &  +TO2*(UPIL(1)*HK(KP,1,I,L)+UPIL(2)*HK(KP,2,I,L)))
+         WS(KP,I,L) = FN(I,L) + SI2 *
+     &  (TO1*(UIL(KP,1,L)*HK(KP,1,I,L)+UIL(KP,2,L)*HK(KP,2,I,L))
+     &  +TO2*(UPIL(1)*HK(KP,1,I,L)+UPIL(2)*HK(KP,2,I,L)))
+ 2050 CONTINUE
+C
+      ELSEIF(IDIM.EQ.3)THEN
+      DO 2051 I=1,NP
+         WT(KP,I,L) = FN(I,L) + SI1 *
+     &  (TO1*(UIL(KP,1,L)*HK(KP,1,I,L)+UIL(KP,2,L)*HK(KP,2,I,L)+
+     &        UIL(KP,3,L)*HK(KP,3,I,L) )
+     & +TO2*(UPIL(1)*HK(KP,1,I,L)+UPIL(2)*HK(KP,2,I,L)+
+     &       UPIL(3)*HK(KP,3,I,L) ))
+
+         WS(KP,I,L) = FN(I,L) + SI2 *
+     &  (TO1*(UIL(KP,1,L)*HK(KP,1,I,L)+UIL(KP,2,L)*HK(KP,2,I,L)+
+     &        UIL(KP,3,L)*HK(KP,3,I,L))
+     & + TO2*(UPIL(1)*HK(KP,1,I,L)+UPIL(2)*HK(KP,2,I,L)+
+     &        UPIL(3)*HK(KP,3,I,L) ))
+ 2051 CONTINUE
+      ENDIF
+C
+C-    Si on est en conservatif, on rétablit les valeurs de la vitesse
+C     de transport qui ont été modifiées car elles sont utilisées
+C     dans d'autres subroutines ultérieures.
+C
+      IF (IKOMP .EQ. 1) THEN
+         DO 235 N=1,IDIM
+               UIL(KP,N,L)  = XPETI
+            DO 215 I=1,NP
+                  NF = IPADU(LE(I,K))
+                  UIL(KP,N,L)  = UIL(KP,N,L)  + UN(NF,N)*FN(I,L)
+ 215        CONTINUE
+ 235     CONTINUE
+      ENDIF
+C
+ 5030    CONTINUE
+
+ 5020 CONTINUE
+
+      RETURN
+ 1001 FORMAT(20(1X,I5))
+ 1002 FORMAT(10(1X,1PE11.4))
+      END
+
+
+
+
+

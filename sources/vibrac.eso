@@ -1,0 +1,249 @@
+C VIBRAC    SOURCE    BP208322  16/07/06    21:15:10     9009
+      SUBROUTINE VIBRAC
+*
+************************************************************************
+*                       CALCUL DE MODES COMPLEXES                      *
+*                         PAR L'ALGORITHME DU QZ                       *
+* _____________________________________________________________________*
+*                                                                      *
+*      AUTEUR :-VIBC calcul des modes Nicolas BENECH  le 24/02/95      *
+*              -option 'BALOU' Jerome CHARPENTIER le 29/11/96          *
+*              -amelioration rapidité VIBC 'MODES' BP208322 16/12/2008 *
+*              -chercher des valeurs propres de la matrice monodromie  *
+*               LX236206   09/07/2014                                  *
+*              -suppression de l'option 'BALOU' BP, 09/09/2015         *
+*              -ajout nombre de modes souhaites BP, 13/01/2016         *
+* _____________________________________________________________________*
+*                                                                      *
+*      MODULE(S) APPELANT(S) :                                         *
+*                                                                      *
+*      MODULE(S) APPELE(S) : LIROBJ, LIRMOT, QZTRIR, QZADRG, QZCONS,   *
+*                            QZHESS, QZREDU, QZVALP, QZVECP, QZBASC,   *
+*                            QZREST, ECROBJ                            *
+*                                                                      *
+* _____________________________________________________________________*
+*                                                                      *
+*      SYNTAXE 1 : RESOLUTION DE M X'' + C X' + K X = 0                *
+*                  EN METTANT LE PB SOUS LA FORME D'ETAT :             *
+*                         [ A -  \lambda B ] . Y = 0                   *
+*                             | - K |  0  |             |  C  |  M  |  *
+*                  OU     A = | ----+---- |   et    B = | ----+---- |  *
+*                             |  0  |  M  |             |  M  |  0  |  *
+*      EN ENTREE :                                                     *
+*      IPMAS, IPRIG, (IPAMO): rigidités Masse, Raideur, (Amortissement)*
+*                             projetées sur une base de modes reels.   *
+*      (IBASR)   : base de modes reels ayant servie a la projection.   *
+*      ('MATA'), ('MATB') : option pour recuperer les matrices         *
+*                                                                      *
+*      EN SORTIE :                                                     *
+*      IBASC: base de modes propres complexes, physique si IBASR est   *
+*             fournie.                                                 *
+*                                                                      *
+* _____________________________________________________________________*
+*                                                                      *
+*      SYNTAXE 2 : RESOLUTION DE [ A - \lambda I ] . X = 0             *
+*                  OU   A = [ RIG1  RIG2 ]                             *
+*                           [ RIG3  RIG4 ]                             *
+*      EN ENTREE :                                                     *
+*      RIG1,RIG2,RIG3,RIG4                                             *
+*                                                                      *
+*      EN SORTIE :                                                     *
+*      IBASC: base de modes propres complexes, physique si IBASR est   *
+*             fournie.                                                 *
+*                                                                      *
+************************************************************************
+*
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+      DATA ZERO / 0.0D0 /
+      INTEGER ERR, NUMAFF
+      LOGICAL CALV, RESTIT, AFFICH
+      REAL*8 XPREC1
+      PARAMETER (LMOOPT=1)
+      CHARACTER*5 MOOPT(LMOOPT)
+      DATA MOOPT/'BALOU'/
+c       CHARACTER*4 MOOPT1(1),MOOPT2(1)
+c       DATA MOOPT1/'AFF1'/
+c       DATA MOOPT2/'AFF2'/
+* --------------------------------------------------------------------
+-INC CCOPTIO
+-INC SMRIGID
+      POINTEUR MAT1.MRIGID, MAT2.MRIGID
+      POINTEUR CHPO1.MCHPOI, CHPO2.MCHPOI, CHPO4.MCHPOI
+      POINTEUR MATA.XMATRI, MATB.XMATRI, MATZ.XMATRI
+
+* --------------------------------------------------------------------
+*     INITIALISATIONS
+*     indique si l'on calcule ou non les vecteurs propres
+      CALV = .TRUE.
+*     indique si l'on recombine ou non les vecteurs propres
+      RESTIT = .FALSE.
+*     indique si l'on affiche ou non des messages de deroulement
+c       AFFICH = .FALSE.
+      AFFICH = (IIMPI.GE.1)
+*     indique si l'on est en syntaxe "monodromie" ou pas
+      IMONO = 0
+
+* --------------------------------------------------------------------
+*     LECTURE DES ARGUMENTS
+
+*     mot-cle
+      CALL LIRMOT(MOOPT,LMOOPT,IMOT,0)
+      IF(IMOT.NE.0) THEN
+        WRITE(IOIMP,*) 'Option BALOU de VIBC obsolete !'
+        WRITE(IOIMP,*) 'Veuillez utiliser IMPE, RESO et RECO...'
+        CALL ERREUR(19)
+      ENDIF
+
+*     rigidites
+      CALL LIROBJ('RIGIDITE',IPMAS,1,IRET)
+      IF (IERR.NE.0) RETURN
+      CALL LIROBJ('RIGIDITE',IPRIG,1,IRET)
+      IF (IERR.NE.0) RETURN
+      CALL LIROBJ('RIGIDITE',IPAMO,0,IRET)
+      IF (IERR.NE.0) RETURN
+      IF (IRET.ne.0) then
+        CALL LIROBJ('RIGIDITE',IPMON,0,IMONO)
+        IF (IERR.NE.0) RETURN
+        IF (IMONO.eq.1) THEN
+          IF (AFFICH) write(ioimp,*) 'syntaxe monodromie'
+c *         DANS LE CAS MONODROMIE, ON NE CALCUL PAS LES VECTEURS PROPRES
+c           CALV = .FALSE.
+          GOTO 2000
+        ENDIF
+      ENDIF
+
+*     table de base modale
+      CALL LIROBJ('TABLE   ',IBASR,0,IRET)
+      IF (IERR.NE.0) RETURN
+      RESTIT = (IRET.EQ.1)
+
+*     nombre de modes souhaites
+      NWANTED=0
+      CALL LIRENT(NWANTED,0,IRET)
+      IF (IERR.NE.0) RETURN
+*
+* --------------------------------------------------------------------
+*     RECONNAISSANCE ET TRI DES RIGIDITES
+      CALL QZTRIR(IPMAS, IPRIG, IPAMO)
+
+c * --------------------------------------------------------------------
+c *     ADDITION DES RIGIDITES ELEMENTAIRES DE RI1
+c *     POUR GENERER UNE SEULE RIGIDITE ELEMENTAIRE RI2
+c       CALL QZADRG(IPMAS,IPM)
+c       CALL QZADRG(IPRIG,IPR)
+c       IF (IPAMO.NE.0) THEN
+c          CALL QZADRG(IPAMO,IPA)
+c          IF (IERR.NE.0) RETURN
+c       ELSE
+c         IPA=0
+c       ENDIF
+
+c c     cas de BALOURD on saute la partie suivante
+c       IF (IMOT.EQ.1) GOTO 1010
+
+ 2000 continue
+* -------------------------------------------------------------------
+*     CONSTITUTION DES MATRICES A ET B DE TAILLE 2Nx2N POUR LE QZ
+      if (IMONO.eq.1) then
+        CALL QZCON3(IPMAS,IPRIG,IPAMO,IPMON,MATA,MATB,MELEME,MCOMP,
+     &              .true.)
+c      &              (.NOT.RESTIT))
+      else
+c         CALL QZCONS(IPM,IPR,IPA,MATA,MATB,MELEME,MCOMP,(.NOT.RESTIT))
+         CALL QZCONS(IPMAS,IPRIG,IPAMO,MATA,MATB,MELEME,MCOMP,
+     &              .false.)
+c      &              (.NOT.RESTIT))
+      endif
+      IF (IERR.NE.0) RETURN
+
+* -------------------------------------------------------------------
+*     MISE SOUS FORME DE HESSENBERG SUPERIEURE DE MATA
+*     ET TRIANGULARISATION SUPERIEURE SIMULATANEE DE MATB
+*premier pas
+      CALL QZHESS(MATA,MATB,CALV,IPRI3)
+      IF (IERR.NE.0) RETURN
+      XPREC1 = ZERO
+      CALL LIRREE(XPREC1,0,IRETOU)
+*deuxieme pas
+      CALL QZREDU(MATA,MATB,XPREC1,CALV,IPRI3,ERR)
+      IF (IERR.NE.0) RETURN
+      IF (ERR.NE.0) WRITE (*,*) 'Mode ',ERR,' : trop d iterations !'
+     &,' L exécution continu ...'
+
+* -------------------------------------------------------------------
+*     EXTRACTION DES VALEURS PROPRES
+*troisieme pas
+      CALL QZVALP(MATA,MATB,IPAR,IPAI,IPBE,CALV,IPRI3)
+      IF (IERR.NE.0) RETURN
+
+* -------------------------------------------------------------------
+*     CALCUL DES VECTEURS PROPRES COMPLEXES
+*quatrieme pas
+      CALL QZVECP(MATA,MATB,IPAR,IPAI,IPBE,IPRI3)
+      IF (IERR.NE.0) RETURN
+
+* -------------------------------------------------------------------
+*     CREATION D'UNE BASE DE MODES PROPRES COMPLEXES POUR VIBC
+      CALL QZBASC(IPAR,IPAI,IPBE,IPRI3,MELEME,MCOMP,IBASC,ERR,NWANTED)
+      IF (IERR.NE.0) RETURN
+
+* -------------------------------------------------------------------
+*     RESTITUTION D'UNE BASE DE MODES COMPLEXES A PARTIR
+*     D'UNE BASE DE MODES REELS (= RECOMBINAISON MODALE)
+      IF (RESTIT) THEN
+       CALL QZREST(IBASR, IBASC, IBASC)
+      ENDIF
+
+* -------------------------------------------------------------------
+      CALL ECROBJ('TABLE   ',IBASC)
+      RETURN
+
+
+
+c * -------------------------------------------------------------------
+c *     OPTION BALOURD
+c
+c *lecture de la force de balourd
+c 1010  CALL LIROBJ('CHPOINT ',IFPROJ,1,IRET)
+c       IF (IERR.NE.0) RETURN
+c       CALL LIRREE(ROMEGA,1,IRET)
+c       IF (IERR.NE.0) RETURN
+c       CALL LIRMOT(MOOPT1,1,IMOT1,0)
+c       CALL LIRMOT(MOOPT2,1,IMOT2,0)
+c       CALL QZCON2(IPM,IPR,IPA,ROMEGA,MAT1,IFPROJ)
+c       IF (IERR.NE.0) RETURN
+c       IF (IMOT1.EQ.1) THEN
+c        CALL PRRIGI(MAT1,0)
+c       ENDIF
+c *call RESOU
+c       CALL ECROBJ('RIGIDITE',MAT1)
+c       CALL ECROBJ('CHPOINT ',IFPROJ)
+c       CALL RESOU
+c       CALL LIROBJ('CHPOINT ',CHPO1,1,IRET)
+c       IF (IMOT2.EQ.1) THEN
+c        CALL ECCHPO(CHPO1,0)
+c       ENDIF
+c *RECOMBINAISON MODALE DE LA REPONSE BALOURD (CHPOINT) A PARTIR
+c *DES DEFORMEES MODALES DE LA BASE REELLE
+c       CALL RECOBAL(IBASR,CHPO1,CHPO2,CHPO4)
+c       CALL ECROBJ('CHPOINT ',CHPO2)
+c       CALL ECROBJ('CHPOINT ',CHPO4)
+
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

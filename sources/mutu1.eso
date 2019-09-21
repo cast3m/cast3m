@@ -1,0 +1,321 @@
+C MUTU1     SOURCE    PV        17/09/29    21:15:37     9578
+      SUBROUTINE MUTU1(IPMODE,IPCHEL,IPMAIL,IPRIGI)
+************************************************************************
+*
+*                             M U T U 1
+*                             ---------
+*
+*
+* FONCTION:
+* ---------
+*     CREATION DE LA MATRICE DE MUTUELLES
+*     GESTION DES SEGMENTS ET TESTS DE COMPATIBILITE
+*
+* PARAMETRES:  (E)=ENTREE    (S)=SORTIE   (+)=CONTENU DANS UN COMMUN
+* -----------
+*
+*     IPMODE   (E)  POINTEUR SUR LE SEGMENT MMODEL
+*     IPCHEL   (E)  POINTEUR SUR LE SEGMENT MCHELM
+*     IPMAIL   (E)  POINTEUR SUR LE SEGMENT MELEME S'il existe
+*     IPRIGI   (S)  POINTEUR SUR LE SEGMENT MRIGID
+*    +IFOMOD   (E)  VOIR CCOPTIO
+*
+* MODULES UTILISES:
+* -----------------
+*
+      IMPLICIT INTEGER(I-N)
+-INC CCOPTIO
+-INC CCHAMP
+-INC SMRIGID
+-INC SMCHAML
+-INC SMELEME
+-INC SMMODEL
+-INC SMCOORD
+      SEGMENT ICPR(XCOOR(/1)/(IDIM+1))
+      SEGMENT ICPR2(XCOOR(/1)/(IDIM+1))
+*
+*
+* VARIABLES:
+* ----------
+*
+*     NBNN        NOMBRE DE NOEUDS DANS L'ELEMENT CONSIDERE
+*     NEF         NUMERO DE L'ELEMENT FINI DANS NOMTP
+*     NBMAIL      NOMBRE DE MAILLAGES ELEMENTAIRES
+*     NBELEM      NOMBRE D'ELEMENTS DANS LE MAILLAGE ELEMENTAIRE
+*
+      LOGICAL OK
+      CHARACTER*4 MOTHER,MOCHAL
+      PARAMETER ( MOTHER='FC   ' )
+      PARAMETER ( MOCHAL='ED   ' )
+*
+* AUTEUR, DATE DE CREATION:
+* -------------------------
+*
+*     YANN STEPHAN, LE 28 FEVRIER 1997 (COPIE DE RESI1).
+*
+* LANGAGE:
+* --------
+*
+*     ESOPE + FORTRAN77
+*
+************************************************************************
+*
+*
+*       VERIFICATION DU LIEU SUPPORT DU CHAMELEM DE CARACTERISTIQUES
+*
+      CALL QUESUP(IPMODE,IPCHEL,2,0,ISUP,IRETCA)
+      IF(ISUP.GT.1)RETURN
+*
+*     SI LE CHAMELEM EST APPUYE AUX NOEUDS ,ON CHANGE LE SUPPORT
+*     POUR LES CENTRES DE GRAVITE
+*
+       IF(ISUP.EQ.1)THEN
+          CALL CHASUP(IPMODE,IPCHEL,IPCHE1,IRET,2)
+          IF(IRET.NE.0)THEN
+             CALL ERREUR(IRET)
+             RETURN
+          ENDIF
+       ELSE
+          IPCHE1=IPCHEL
+      ENDIF
+*
+*     ACTIVATION DES SEGMENTS MCHELM ET MMODEL
+*
+      MCHELM=IPCHE1
+      SEGACT,MCHELM
+      NBMAIC=IMACHE(/1)
+      SEGDES MCHELM
+*
+      MMODEL=IPMODE
+      SEGACT,MMODEL
+      NBMAIM=KMODEL(/1)
+      IF (NBMAIM.GT.NBMAIC) THEN
+*
+*        IL MANQUE LES CARACTERISTIQUES D'UNE OU PLUSIEURS PARTIES
+*        DU MODELE
+*
+         CALL ERREUR(404)
+         SEGDES,MMODEL*NOMOD
+         IF(ISUP.EQ.1)SEGSUP MCHELM
+         RETURN
+      ENDIF
+*
+      NBMAIL=NBMAIM
+*
+*     INITIALISATION DU CHAPEAU DE L'OBJET RIGIDITE
+*
+      NRIGE=8
+      NRIGEL=1
+      SEGINI,MRIGID
+      IPRIGI=MRIGID
+      ICHOLE=0
+      IMGEO1=0
+      IMGEO2=0
+      IFORIG=IFOMOD
+      ISUPEQ=0
+      MTYMAT='RIGIDITE'
+      NBGEOR=0
+      NELRIG=1
+*      SEGINI,xMATRI
+      IRIGEL(2,1)=0
+      IRIGEL(4,1)=0
+      IRIGEL(5,1)=0
+      IRIGEL(6,1)=0
+      IRIGEL(7,1)=2
+      COERIG(1)=1.D0
+
+      IFOI=0
+*
+* creation d'une numerotation locale dans le but de creer un
+* element unique support de toute la matrice de mutuelle on prend
+* d'abord le maillage issu du modele puis on fait la meme chosepour
+* celui issu de IPMAIL
+*
+      SEGINI ICPR,ICPR2
+      IB=0
+      DO 41 IMAIL=1,NBMAIL
+         IMODEL=KMODEL(IMAIL)
+         SEGACT,IMODEL
+         MELEME=IMAMOD
+         SEGACT,MELEME
+         DO 42 I=1,NUM(/2)
+         DO 42 J=1,NUM(/1)
+         IA = NUM(J,I)
+         IF(ICPR(IA).EQ.0) THEN
+         IB=IB+1
+         ICPR(IA)=IB
+         ENDIF
+   42    CONTINUE
+   41 CONTINUE
+      IF( IPMAIL.EQ.0) THEN
+*
+*  on travail sur lui meme
+*
+*   on le cree de tel facon qu'il soit identique en structure a
+*   celui issu du modele
+*
+        DO 65 KI=1,ICPR(/1)
+   65   ICPR2(KI)=ICPR(KI)
+        NBSOUS = NBMAIL
+        IF( NBSOUS.EQ.1) THEN
+           IPMAIL=MELEME
+        ELSE
+           NBREF=0
+           NBNN=0
+           NBELEM=0
+           SEGINI IPT5
+           IPMAIL=IPT5
+           DO 63 KI=1,NBSOUS
+           IMODEL=KMODEL(KI)
+           IPT5.LISOUS(KI)=IMAMOD
+   63      CONTINUE
+        ENDIF
+      ELSE
+*
+*  on a fournit un deuxieme maillage. il faut verifier qu'il y a
+*  concordance topologique on boucle sur les zones de ce maillage pour
+* construire une numerotation et on verifie qu'eele est compatible
+*  avec l'autre
+*
+      IPT1=IPMAIL
+      MELEME=IPT1
+      SEGACT IPT1
+      IC=0
+      IH=MAX(1,IPT1.LISOUS(/1))
+      IF(IH.NE.KMODEL(/1)) THEN
+         CALL ERREUR(910)
+         RETURN
+       ENDIF
+      DO 43 K=1,MAX(1,IPT1.LISOUS(/1))
+         IF(IPT1.LISOUS(/1).NE.0) THEN
+           MELEME= IPT1.LISOUS(K)
+           SEGACT MELEME
+         ENDIF
+         IMODEL=KMODEL(K)
+         IPT5=IMAMOD
+         IF( IPT5.NUM(/2).NE.NUM(/2) )THEN
+           CALL ERREUR(910)
+         RETURN
+         ENDIF
+         IF( IPT5.NUM(/1).NE.NUM(/1) )THEN
+           CALL ERREUR(910)
+           RETURN
+         ENDIF
+         DO 44 I=1,NUM(/2)
+         DO 44 J=1,NUM(/1)
+         IA = NUM(J,I)
+         IF(ICPR2(IA).EQ.0) THEN
+         IC=IC+1
+         ICPR2(IA)=IC
+         ENDIF
+         IH=IPT5.NUM(J,I)
+         IM = ICPR(IH)
+         IF(IM.NE.ICPR2(IA)) THEN
+           CALL ERREUR(910)
+           RETURN
+         ENDIF
+   44    CONTINUE
+   43 CONTINUE
+      ENDIF
+* initialisations du maillages support de la mutuelle
+      NBNN=IB
+      NBELEM=1
+      NBSOUS=0
+      NBREF=0
+      SEGINI MELEME
+      ITYPEL=28
+      DO 49 K=1,ICPR(/1)
+      IF( ICPR(K).NE.0) THEN
+        IA = ICPR(K)
+        NUM(IA,1) = K
+      ENDIF
+   49 CONTINUE
+      IPRESU=MELEME
+      IRIGEL(1,1)=MELEME
+*
+*  initialisation du segment descripteur
+*
+      NLIGRP=IB
+      NLIGRD=IB
+      SEGINI DESCR
+      SEGINI XMATRI
+*      IMATTT(1)=XMATRI
+*      SEGDES IMATRI
+      IRIGEL(3,1)=DESCR
+      irigel(4,1)=xmatri
+      xmatri.symre=irigel(7,1)
+      DO 48 K=1,NLIGRP
+      LISINC(K)=MOTHER
+      LISDUA(K)=MOCHAL
+      NOELEP(K)=K
+      NOELED(K)=K
+   48 CONTINUE
+      SEGDES DESCR
+* Il reste a calculer les matrices (3*3 por les rot3)
+*  et a les assembler (l'assemblage aura lieu dans rot3M
+*
+*
+*     BOUCLE SUR LES MAILLAGES ELEMENTAIRES,ZONE IMAIL
+*
+      DO 50 IMAIL=1,NBMAIL
+*
+         IFOI=IFOI+1
+         IMODEL=KMODEL(IMAIL)
+         SEGACT,IMODEL
+         ICOQ = 0
+         NEF=NEFMOD
+         MELEME=IMAMOD
+         IPT4=IMAMOD
+         SEGACT,MELEME
+         NBNNC=NUM(/1)
+         NBELEC=NUM(/2)
+         NBELEM=0
+         IPT1=IPMAIL
+         SEGACT,IPT1
+         NBSOUJ=IPT1.LISOUS(/1)
+         IF(NBSOUJ.EQ.0) NBSOUJ=1
+         NBNNJ=0
+         DO 70 ISOUJ=1,NBSOUJ
+           IF(NBSOUJ.EQ.1) THEN
+             IPT2=IPT1
+           ELSE
+             IPT2=IPT1.LISOUS(ISOUJ)
+             SEGACT, IPT2
+           ENDIF
+           NBELEJ=IPT2.NUM(/2)
+           NBELEM=NBELEM+NBELEC*NBELEJ
+           NBNNJ=MAX(NBNNJ,IPT2.NUM(/1))
+   70    CONTINUE
+*
+*        LES 2 MAILLAGES DOIVENT AVOIR LE MEME NOMBRE
+*        DE MAILLES
+*         IF(NBELEC.NE.NBELEJ) THEN
+*          write(6,*) ' cest bien ce message 1'
+**           CALL ERREUR(21)
+*           RETURN
+*         ENDIF
+*
+*
+         CALL MUTU3(NEF,IMAIL,IMODEL,IPCHE1,IPMAIL,XMATRI,ICPR,
+     $  ICPR2)
+         SEGDES,MELEME*NOMOD
+         IF (IERR.NE.0)GOTO 99
+ 50      CONTINUE
+               SEGDES,MRIGID,XMATRI
+ 99   CONTINUE
+      SEGSUP ICPR,ICPR2
+      DO 60 I=1,IFOI
+         IMODEL=KMODEL(I)
+         SEGDES,IMODEL*NOMOD
+ 60      CONTINUE
+*     END DO
+      SEGDES,MMODEL*NOMOD
+      IF(ISUP.EQ.1)SEGSUP MCHELM
+*
+      RETURN
+      END
+
+
+
+
+

@@ -1,0 +1,291 @@
+C THNUMAC   SOURCE    BP208322  17/03/01    21:18:32     9325
+
+C=======================================================================
+C=                            T H N U M A C                            =
+C=                            -----------                              =
+C=                      (TNUMAC dans le cas de la thermique)           =
+C=  Fonction :                                                         =
+C=  ----------                                                         =
+C=  Calcul de la matrice de CONDUCTIVITE THERMOHYDRIQUE pour les       =
+C=  elements finis MASSIFs a integration NUMERIQUE                     =
+C=                                                                     =
+C=  Parametres :  (E)=Entree  (S)=Sortie                               =
+C=  ------------                                                       =
+C=   NEF      (E)   Numero de l'ELEMENT FINI dans NOMTP (cf. CCHAMP)   =
+C=   IMAIL    (E)   Numero du segment IMODEL dans le segment MMODEL    =
+C=   IPCHEM   (E)   Pointeur sur un segment MCHELM de CARACTERISTIQUES =
+C=   IPRIGI  (E/S)  Pointeur sur l'objet RIGIDITE (CONDUCTIVITE)       =
+C=                                                                     =
+C=   Zakaria HABIBI le 30 juin 2008.                                   =
+C=======================================================================
+
+      SUBROUTINE THNUMAC (NEF,ipmail,ipinte,ipint1,IVAMAT,NMATT,
+     &                    ipmatr,LRE)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCREEL
+
+-INC SMCHAML
+-INC SMCOORD
+-INC SMELEME
+-INC SMINTE
+-INC SMRIGID
+
+      SEGMENT MMAT1
+        REAL*8 VALMAT(NV1)
+        REAL*8 CEL1(NBNN,NBNN),CEL2(NBNN,NBNN),CEL3(NBNN,NBNN)
+        REAL*8 CEL4(NBNN,NBNN),CEL5(NBNN,NBNN),CEL6(NBNN,NBNN)
+        REAL*8 CEL7(NBNN,NBNN),CEL8(NBNN,NBNN),CEL9(NBNN,NBNN)
+        REAL*8 CE10(NBNN,NBNN),CE11(NBNN,NBNN),CE12(NBNN,NBNN)
+        REAL*8 XE(3,NBNN),GDT1(IDIM),GDT2(IDIM),GDT3(IDIM)
+        REAL*8 SHP(6,NBNN),GRAD(NDIM,NBNN),FORME(NBNN)
+        REAL*8 CMAT(NDIM,NDIM),CMAT1(IDIM,IDIM),CMAT2(IDIM,IDIM)
+      ENDSEGMENT
+
+      SEGMENT MAXE
+        REAL*8 TXR(IDIM,IDIM),XLOC(3,3),XGLOB(3,3)
+      ENDSEGMENT
+
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS),NSOF(NS),IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+
+C  1 - INITIALISATIONS ET VERIFICATIONS
+C ======================================
+C Recuperation d'informations sur le maillage elementaire
+C =====
+      MELEME = ipmail
+c*      SEGACT,MELEME
+      NBNN   = NUM(/1)
+      NBELEM = NUM(/2)
+C =====
+C Recuperation d'informations sur l'element fini
+C =====
+      MINTE = IPINTE
+c*      SEGACT,MINTE
+      NBPGAU = POIGAU(/1)
+C =====
+C Recuperation des fonctions de forme et de leurs derivees au
+C centre de gravite de l'element pour le calcul des axes locaux
+C d'orthotropie ou d'anisotropie
+C =====
+      IF (ipint1.NE.0) THEN
+        MINTE1 = IPINT1
+c*        SEGACT,MINTE1
+        NBSH = MINTE1.SHPTOT(/2)
+      ENDIF
+C =====
+C Initialisation des segments de travail
+C =====
+      MPTVAL = IVAMAT
+      IF (IFOMOD.EQ.1) THEN
+        NDIM=3
+      ELSE
+        NDIM=IDIM
+      ENDIF
+      NV1 = NMATT
+      SEGINI,MMAT1
+      MAXE = 0
+      IF (ipint1.GT.0) THEN
+        SEGINI,MAXE
+      ENDIF
+
+C =====
+C Matrice CONDUCTIVITE GLOBALE a calculer
+C =====
+      XMATRI = ipmatr
+C*      SEGACT,xMATRI*MOD
+      NLIGRP = LRE
+      NLIGRD = LRE
+
+C  2 - BOUCLE SUR LES ELEMENTS DU MAILLAGE ELEMENTAIRE IMAIL/IMAMOD
+C ==================================================================
+      DO iElt = 1, NBELEM
+C ===
+C  - Mise a zero de la matrice de CONDUCTIVITE de l'element iElt
+C ===
+        CALL ZERO(CEL1,NBNN,NBNN)
+        CALL ZERO(CEL2,NBNN,NBNN)
+        CALL ZERO(CEL3,NBNN,NBNN)
+        CALL ZERO(CEL4,NBNN,NBNN)
+        CALL ZERO(CEL5,NBNN,NBNN)
+        CALL ZERO(CEL6,NBNN,NBNN)
+        CALL ZERO(CEL7,NBNN,NBNN)
+        CALL ZERO(CEL8,NBNN,NBNN)
+        CALL ZERO(CEL9,NBNN,NBNN)
+        CALL ZERO(CE10,NBNN,NBNN)
+        CALL ZERO(CE11,NBNN,NBNN)
+        CALL ZERO(CE12,NBNN,NBNN)
+C ===
+C  - Recuperation des coordonnees GLOBALES des noeuds de l'element
+C ===
+        CALL DOXE(XCOOR,IDIM,NBNN,NUM,iElt,XE)
+C ===
+C  - Calculs des axes locaux d'orthotropie ou d'anisotropie
+C ===
+        IF (ipint1.NE.0) THEN
+          CALL RLOCAL(XE,MINTE1.SHPTOT,NBSH,NBNN,TXR)
+          IF (nbsh.EQ.-1) THEN
+            CALL ERREUR(525)
+            GOTO 9990
+          ENDIF
+        ENDIF
+C ===
+C  - Boucle sur les points de Gauss de l'element iElt
+C ===
+        iFois=0
+        DO iGau = 1, NbPGau
+C =======
+C  2.4.1 - Calcul du jacobien, des fonctions de forme et de leurs
+C          derivees au point de Gauss iGau
+C =======
+          CALL TCOND5(iGau,NBNN,NDIM,XE,SHPTOT,SHP,GRAD,DJAC)
+          IF (IERR.NE.0) GOTO 9990
+          IF (DJAC.LT.XZERO) iFois=iFois+1
+          DJAC=ABS(DJAC)
+C =======
+C  2.4.2 - Erreur si le jacobien est nul en ce point de Gauss
+C =======
+          IF (DJAC.LT.XPetit) THEN
+            INTERR(1)=iElt
+            CALL ERREUR(259)
+            GOTO 9990
+          ENDIF
+
+C*    VALEURS DES COMPOSANTES DES GRADIENTS POUR G
+C               MELVAL=IVAL(19)
+C               IBMN=MIN(iElt,VELCHE(/2))
+C               IGMN=MIN(iGau,VELCHE(/1))
+C               GDT1(1)=VELCHE(IGMN,IBMN)
+C               MELVAL=IVAL(20)
+C               IBMN=MIN(iElt,VELCHE(/2))
+C               IGMN=MIN(iGau,VELCHE(/1))
+C               GDT1(2)=VELCHE(IGMN,IBMN)
+C*    VALEURS DES COMPOSANTES DES GRADIENTS POUR C
+C               MELVAL=IVAL(19)
+C               IBMN=MIN(iElt,VELCHE(/2))
+C               IGMN=MIN(iGau,VELCHE(/1))
+C               GDT2(1)=VELCHE(IGMN,IBMN)
+C               MELVAL=IVAL(20)
+C               IBMN=MIN(iElt,VELCHE(/2))
+C               IGMN=MIN(iGau,VELCHE(/1))
+C               GDT2(2)=VELCHE(IGMN,IBMN)
+C*    VALEURS DES COMPOSANTES DES GRADIENTS POUR T
+C               MELVAL=IVAL(19)
+C               IBMN=MIN(iElt,VELCHE(/2))
+C               IGMN=MIN(iGau,VELCHE(/1))
+C               GDT3(1)=VELCHE(IGMN,IBMN)
+C               MELVAL=IVAL(20)
+C               IBMN=MIN(iElt,VELCHE(/2))
+C               IGMN=MIN(iGau,VELCHE(/1))
+C               GDT3(2)=VELCHE(IGMN,IBMN)
+
+C =======
+C  2.4.3 - Recuperation de la ou des valeurs de conductibilite au point
+C          de Gauss iGau (tableau VALMAT)
+C =======
+          DJAC=DJAC*POIGAU(iGau)
+          DO i = 1, NMATT
+            IF (IVAL(i).NE.0) THEN
+              MELVAL=IVAL(i)
+              IBMN=MIN(iElt,VELCHE(/2))
+              IGMN=MIN(iGau,VELCHE(/1))
+              VALMAT(i)=VELCHE(IGMN,IBMN)
+            ELSE
+              VALMAT(i)=XZERO
+            ENDIF
+          ENDDO
+C =======
+C  2.4.4 - Cas d'un materiau ISOTROPE de conductibilite K
+C          Calcul de la contribution du point de Gauss a la matrice
+C          CONDUCTIVITE elementaire de cet element fini
+C          Ajout du terme XK*transposee(GRAD)*GRAD
+C          Seul cas valide en dimension 1
+C =======
+             XK=VALMAT(1)*DJAC
+             CALL NTNST(GRAD,XK,NBNN,NDIM,CEL1)
+             XK=VALMAT(2)*DJAC
+             CALL NTNST(GRAD,XK,NBNN,NDIM,CEL2)
+             XK=VALMAT(3)*DJAC
+             CALL NTNST(GRAD,XK,NBNN,NDIM,CEL3)
+             XK=VALMAT(4)*DJAC
+             CALL NTNST(GRAD,XK,NBNN,NDIM,CEL4)
+             XK=VALMAT(5)*DJAC
+             CALL NTNST(GRAD,XK,NBNN,NDIM,CEL5)
+             XK=VALMAT(6)*DJAC
+             CALL NTNST(GRAD,XK,NBNN,NDIM,CEL6)
+             XK=VALMAT(7)*DJAC
+             CALL NTNST(GRAD,XK,NBNN,NDIM,CEL7)
+             XK=VALMAT(8)*DJAC
+             CALL NTNST(GRAD,XK,NBNN,NDIM,CEL8)
+             XK=VALMAT(9)*DJAC
+             CALL NTNST(GRAD,XK,NBNN,NDIM,CEL9)
+
+CC Calcul des termes en GRAD(PG,PC,T)
+C               RK =DJAC
+C               DO   700 K=1,IDIM
+C                  XK1 = GDT1(K)*RK
+C                  DO   300 I=1,NBNN
+C                     DO   400 J=1,NBNN
+C                        CE10(J,I) = CE10(J,I) + SHP(1,I)*GRAD(K,J)*XK1
+C 400                 CONTINUE
+C 300              CONTINUE
+C 700           CONTINUE
+C
+C               DO   701 K=1,IDIM
+C                  XK2 = GDT2(K)*RK
+C                  DO   301 I=1,NBNN
+C                     DO   401 J=1,NBNN
+C                        CE11(J,I) = CE11(J,I) + SHP(1,I)*GRAD(K,J)*XK2
+C 401                 CONTINUE
+C 301              CONTINUE
+C 701           CONTINUE
+C
+C
+C               DO   702 K=1,IDIM
+C                  XK3 = GDT3(K)*RK
+C                  DO   302 I=1,NBNN
+C                     DO   402 J=1,NBNN
+C                        CE12(J,I) = CE12(J,I) + SHP(1,I)*GRAD(K,J)*XK3
+C 402                 CONTINUE
+C 302              CONTINUE
+C 702           CONTINUE
+        ENDDO
+
+C =====
+C  2.5 - Erreur si, en un point de Gauss, le jacobien change de signe.
+C =====
+        IF (iFois.NE.0.AND.iFois.NE.NbPGau) THEN
+          INTERR(1)=iElt
+          CALL ERREUR(195)
+          GOTO 9990
+        ENDIF
+C =====
+C  2.6 - Stockage de la matrice de CONDUCTIVITE pour cet element fini
+C =====  (remplissage de XMATRI)
+C Note : CE10,CE11,CE12 servaient a calculer les termes en Grad(PG,PC,T)
+C        du couplage. Desormais laisses a 0. en attendant de voir com-
+C        -ment traiter le couplage (champ (PG,PC,T) en entree de COND ?)
+       CALL REMPTH
+     & (CEL1,CEL2,CEL3,CEL4,CEL5,CEL6,
+     &  CEL7,CEL8,CEL9,CE10,CE11,CE12,NBNN,RE(1,1,ielt))
+
+      ENDDO
+
+C  3 - MENAGE : DESACTIVATION/DESTRUCTION DE SEGMENTS
+C ====================================================
+ 9990 CONTINUE
+      SEGSUP,MMAT1
+      IF (IPINT1.GT.0) THEN
+        SEGSUP,MAXE
+      ENDIF
+
+      RETURN
+      END
+
+
+

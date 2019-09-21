@@ -1,0 +1,2414 @@
+C BETOCY    SOURCE    PV        11/03/07    21:15:06     6885
+      SUBROUTINE BETOCY(WRK0,WRK1,WRK2,NCURVT,NCURVC,KERRE)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+C
+C MODELE DE MACONNERIE ENDOMMAGEABLE EN CYCLIQUE
+C
+C=======================================================================
+C CETTE ROUTINE EST APPELE DANS ECOUL2
+C
+C ENTREES:
+C -------
+C SIG0      = CONTRAINTES AU DEBUT DU PAS D'INTEGRATION
+C DSIGT     = INCREMENT DE CONT. CALCULE ELASTIQUEMENT A PARTIR DE
+C             L'INCREMENT DES DEFORMATIONS TOTALES
+C VAR0      = VARIABLES INTERNES AU DEBUT DU PAS D'INTEGRATION
+C
+C XMAT      = CARACTERISTIQUES MECANIQUES DU MATERIAU
+C
+C SORTIES:
+C -------
+C SIGF      = CONTR. A LA FIN DU PAS D'INTEGRATION
+C VARF      = VARIABLES INTERNES A LA FIN DU PAS D'INTEGRATION
+C DEFP      = INCREMENT DES DEFORM. PLASTIQUES A LA FIN DU PAS
+C             D'INTEGRATION
+C KERRE      = INDICE QUI REGIT LES ERREURS
+C
+C=========================================================================
+C      VARIABLES NECESSAIRES
+C=========================================================================
+-INC CCOPTIO
+C
+C  Segment pour le Broyden
+C
+      SEGMENT QUASIN
+        REAL*8 XH0(MN,MN)
+        REAL*8 WUP(MN,ITM),YUP(MN,ITM)
+        INTEGER IT
+        REAL*8 R(MN)
+        REAL*8 D(MN),DES(MN)
+      ENDSEGMENT
+C  Segment des materiaux
+       SEGMENT WRK0
+         REAL*8 XMAT(NCXMAT)
+       ENDSEGMENT
+C  Segment des courbes d'ecrouissage
+       SEGMENT WRK2
+         REAL*8 TRAC(LTRAC)
+       ENDSEGMENT
+C  Segment des entrees/sortie de ecoul2
+C  Les contraintes sont sous la forme [SXX,SYY,0,SXY]
+C  Vecteurs de contrainte totale
+C          4 composantes pour les contraintes SIGT
+       SEGMENT WRK1
+         REAL*8 DDHOOK(LHOOK,LHOOK),SIG0(NSTRS),DEPST(NSTRS)
+         REAL*8 SIGF(NSTRS),VAR0(NVARI),VARF(NVARI)
+         REAL*8 DEFP(NSTRS),XCAR(ICARA)
+       ENDSEGMENT
+       DIMENSION DSIGT(4)
+       DIMENSION SIGT(4), SIGI(4), DSIGI(4), DSIGIDI(4)
+C  Matrice de compliance (C-1)
+       DIMENSION CINV(3)
+C  Variables d'ecrouissage isotrope
+       DIMENSION XKISO(2)
+C  Travaux plastiques cycliques et Deformations plastiques equivalentes
+C  associes au mecanisme de compression  de la grande surf.
+       REAL*8 WORK
+       DIMENSION EPSI(2),EPSI0(2),EPSII(2)
+C  Contraintes principales et variables d'ecrouissage cinematique
+       DIMENSION SIGTP(2), SIGHP(2),SIGHP0(2)
+C  Cos et Sin  de l'angle definissant la premiere direction principale
+       REAL*8 CPHI, CPHI0, CPHI00, SPHI, SPHI0, SPHI00
+C  Indicateur du contact
+       DIMENSION KONTAC(4),KONTA0(4)
+C  Vecteurs contrainte transitoire
+       DIMENSION SITPRO(4)
+C  Jacobien initial
+       DIMENSION XJ00(3,3)
+C  Variable phi apparaissant au denominateur (calcul de la normale et de A)
+       REAL*8  PHI
+C  Matrices contenant A-1
+C  AINV --> Inverse de A pour la grande surface
+C                      [ A B 0] A=AINV(1)
+C  AINVGRANDESURFACE = [-B A 0] B=AINV(2)
+C                      [ 0 0 C] C=AINV(3)
+       DIMENSION AINV(3)
+C  Vecteurs normaux aux surface
+C         XNOR1 --> 1eme mecanisme
+C         XNOR2 --> 2eme mecanisme
+       DIMENSION XNOR1(4), XNOR2(4)
+C
+C  Multiplicateurs plastiques 2 mecanismes + 2 surfaces dans GAMBDA
+C  Valeurs des criteres dans FFF
+C  Valeurs des limites dans RESIST
+C Ordre pour les 3 tableaux:
+C            1 --> Traction petite surface direction 1
+C            2 --> Traction petite surface direction 2
+C            3 --> Compression petite surface direction 1
+C            4 --> Compression petite surface direction 2
+C            5 --> Traction grande surface
+C            6 --> Compression grande surface
+       DIMENSION GAMBDA(6), FFF(6), RESIST(6)
+C Valeur necessaire pour le calcul des residus de la grande surface
+       DIMENSION XKISO0(2),XKISOI(2)
+C
+C  Separation de l'increment en deux ou trois parties dans le cas du contact
+C
+       REAL*8 SPLITT
+       REAL*8 XFFFS
+C
+C  Pour differencier les differents cas
+C     ICAS --> NUMERO DU MULTIPLICATEUR PLASTIQUE  A METTRE A JOUR
+C     IHARD --> NUMERO DE LA VARIABLE D'ECROUISSAGE CINEMATIQUE
+C     ISGNTC --> Signe indiquant si on est en traction ou compression
+C     ISGN2  --> Signe indiquant si on prend la plus grande ou la plus
+C                petite contrainte principale
+C     NCORNER --> Revient-on sur la pointe ?
+      INTEGER ICAS, IHARD, ISGNTC, ISGN2
+      INTEGER ICASB, IHARDB, ISGNTCB, ISGN2B
+      INTEGER NCORNER
+C
+C  Variable intermediaire valant la resistance de la grande surface
+C
+      DIMENSION FG(2)
+C
+C  Critere de convergence
+C
+      DIMENSION EPSIL(6)
+      CHARACTER*8  CMATE
+C========================================================================
+C Parametres utiles
+C========================================================================
+      PARAMETER (XZER=0.D0,UN=1.D0,DEUX=2.D0,UNDEMI=.5D0)
+      PARAMETER (UNRADE=0.707106781D0)
+      PARAMETER (EPSILO=1.D-8,EPSILO2=-1.D-10)
+C========================================================================
+C
+C     CALCUL DE DSIGT
+C
+C     calcul de la matrice elastique
+C
+      CMATE = 'ISOTROPE'
+      KCAS=1
+      CALL DOHMAS(XMAT,CMATE,IFOUR,4,KCAS,DDHOOK,IRTD)
+      DO IE1=1,4
+        DSIGT(IE1)=XZER
+        DO IE2=1,4
+          DSIGT(IE1)=DSIGT(IE1)+DDHOOK(IE1,IE2)*DEPST(IE2)
+        ENDDO
+      ENDDO
+      DSIGT(3)=XZER
+C=========================================================================
+C      LECTURE DES PARAMETRES DU MATERIAU
+C
+C=========================================================================
+C Module d'Young YOUN, Poisson XNU, Shear GG
+C Ecrouissage cinematique XHH1 ,
+      YOUN = XMAT(1)
+      XNU  = XMAT(2)
+      GGG  = YOUN/(2*(UN+XNU))
+      XHH1 = XMAT(5)
+      CPI  = YOUN/(UN-XNU)
+C
+      RESIST(1) = XMAT(6)
+      RESIST(2) = XMAT(6)
+      RESIST(3) = XMAT(7)
+      RESIST(4) = XMAT(7)
+      RESIST(5) = XMAT(8)
+      RESIST(6) = XMAT(9)
+C Deformation plastique equivalente et travail plastique de ref.
+C pour la dissipation cyclique
+      EPS0      = XMAT(10)
+      WOR0      = XMAT(11)
+      DEGRAD    = EPS0/WOR0
+      XLCAT      = XMAT(14)
+      XLCAC      = XMAT(15)
+C
+C
+C  Evolution des variables d'ecrouissage isotrope
+C
+C  Voila les positions des points d'entree des deux courbes dans TRAC
+      IPT    = 1
+      IPC    = IPT+2*NCURVT
+C     NCURVT : nombre de point de la courbe de traction
+C     NCURVC : nombre de point de la courbe de compression
+C===========================================================
+C   Fin lecture des caracteristiques
+C   On passe aux contraintes et variables d'etat
+C===========================================================
+C
+C  CONTRAINTES ELASTIQUES
+C
+      SIGI(1) = SIG0(1)
+      SIGI(2) = SIG0(2)
+      SIGI(4) = SIG0(4)
+C DELTA SIGMA TRIAL
+      DSIGI(1) = DSIGT(1)
+      DSIGI(2) = DSIGT(2)
+      DSIGI(4) = DSIGT(4)
+C
+C  ECROUISSAGE CINEMATIQUE
+C
+      SIGHP0(1) = VAR0(1)
+      SIGHP0(2) = VAR0(2)
+C
+C   ECROUISSAGE ISOTROPE
+C
+      EPSI0(1) = VAR0(3)
+      EPSI0(2) = VAR0(4)
+C
+      CPHI00 = VAR0(5) + 1.D0
+      CPHI0 = CPHI00
+      SPHI00 = VAR0(6)
+      SPHI0 = SPHI00
+C
+      KONTA0(1) = nint(VAR0( 7))
+      KONTA0(2) = nint(VAR0( 8))
+      KONTA0(3) = nint(VAR0( 9))
+      KONTA0(4) = nint(VAR0(10))
+C
+C  Variables de contact
+C
+      SPLITT = 0.D0
+      NCON = 0
+      IDICHO = 0
+      NDICHO = 0
+      NPASS = 0
+      DSIGIDI(1) = XZER
+      DSIGIDI(2) = XZER
+      DSIGIDI(4) = XZER
+C===============================================
+C  Fin de la lecture des contraintes et des variables d'etat
+C================================================
+C
+C  Premier calcul des residus puis DRIVER
+C================================================
+C
+C   Entree quand on revient des routines, dernier test avant de finir
+C
+ 10   CONTINUE
+      SIGT(1) = SIGI(1) + DSIGI(1)
+      SIGT(2) = SIGI(2) + DSIGI(2)
+      SIGT(4) = SIGI(4) + DSIGI(4)
+      CALL CONPRI (SIGT,CPHI0,SPHI0,SIGTP,CPHI,SPHI)
+      EPSI(1) = EPSI0(1)
+      EPSI(2) = EPSI0(2)
+      CALL VALEUR(EPSI(1),TRAC(IPT),NCURVT,XLCAT,
+     &XKISO(1),DUMM,KERRE)
+      CALL VALEUR(EPSI(2),TRAC(IPC),NCURVC,XLCAC,
+     &XKISO(2),DUMM,KERRE)
+      SIGHP(1) = SIGHP0(1)
+      SIGHP(2) = SIGHP0(2)
+      NPASS2 = 0
+      KONTAC(1) = KONTA0(1)
+      KONTAC(2) = KONTA0(2)
+      KONTAC(3) = KONTA0(3)
+      KONTAC(4) = KONTA0(4)
+C
+C Calcul des residus initiaux
+C
+      NMEC   = 0
+      FFF(1) = XZER
+      FFF(2) = XZER
+      FFF(3) = XZER
+      FFF(4) = XZER
+      FFF(5) = XZER
+      FFF(6) = XZER
+      FINT1  = XZER
+      FINT2  = XZER
+      GAMBDA(1) = XZER
+      GAMBDA(2) = XZER
+      GAMBDA(3) = XZER
+      GAMBDA(4) = XZER
+      GAMBDA(5) = XZER
+      GAMBDA(6) = XZER
+      ICAS = 0
+      ICASB = 0
+C
+C Critere de convergence
+C
+      EPSIL(1) = ABS(RESIST(1)*EPSILO)
+      EPSIL(2) = ABS(RESIST(2)*EPSILO)
+      EPSIL(3) = ABS(RESIST(3)*EPSILO)
+      EPSIL(4) = ABS(RESIST(4)*EPSILO)
+      EPSIL(5) = ABS(RESIST(5)*EPSILO)
+      EPSIL(6) = ABS(RESIST(6)*EPSILO)
+C
+C
+      IF (KONTAC(1).EQ.0) THEN
+        CALL CRITPE (SIGTP(1), SIGHP0(1), RESIST(1), 1, FFF(1))
+        FINT1 = 0.
+        IF (FFF(1).GE.EPSIL(1)) THEN
+         NMEC = NMEC + 1
+         IF (NMEC.EQ.1) THEN
+           ICAS = 1
+           ISGNTC = 1
+           IHARD = 1
+         ELSE
+           ICASB = 1
+           ISGNTCB = 1
+           IHARDB = 1
+         ENDIF
+        ENDIF
+      ELSE
+        FG(1) = XKISO(1)*RESIST(5)
+        CALL CRITPE (SIGTP(1), XZER, FG(1), 1, FINT1)
+      ENDIF
+C
+      IF (KONTAC(2).EQ.0) THEN
+        CALL CRITPE (SIGTP(2), SIGHP0(2), RESIST(2), 1, FFF(2))
+        FINT2 = 0.
+        IF (FFF(2).GE.EPSIL(2)) THEN
+         NMEC = NMEC + 1
+         IF (NMEC.EQ.1) THEN
+           ICAS = 2
+           ISGNTC = 1
+           IHARD = 2
+         ELSE
+           ICASB = 2
+           ISGNTCB = 1
+           IHARDB = 2
+         ENDIF
+        ENDIF
+      ELSE
+        FG(1) = XKISO(1)*RESIST(5)
+        CALL CRITPE (SIGTP(2), XZER, FG(1), 1, FINT2)
+      ENDIF
+C
+      IF ((FINT1.GE.EPSIL(5)).OR.(FINT2.GE.EPSIL(5))) THEN
+       NMEC = NMEC + 1
+       IF (FINT1.GE.FINT2) THEN
+         FFF(5) = FINT1
+         IF (NMEC.EQ.1) THEN
+           IHARD = 1
+           ICAS = 5
+           ISGNTC = 1
+         ELSE
+           IHARDB = 1
+           ICASB = 5
+           ISGNTCB = 1
+         ENDIF
+       ELSE
+         FFF(5) = FINT2
+         IF (NMEC.EQ.1) THEN
+           IHARD = 2
+           ICAS = 5
+           ISGNTC = 1
+         ELSE
+           IHARDB = 2
+           ICASB = 5
+           ISGNTCB = 1
+         ENDIF
+       ENDIF
+      ENDIF
+C
+      IF (KONTAC(3).EQ.0) THEN
+        CALL CRITPE (SIGTP(1), SIGHP0(1), RESIST(3), -1, FFF(3))
+        FINT1 = 0.
+        IF (FFF(3).GE.EPSIL(3)) THEN
+         NMEC = NMEC + 1
+         IF (NMEC.EQ.1) THEN
+           ICAS = 3
+           ISGNTC = -1
+           IHARD = 1
+         ELSE
+           ICASB = 3
+           ISGNTCB = -1
+           IHARDB = 1
+         ENDIF
+        ENDIF
+      ELSE
+        FG(1) = XKISO(2)*RESIST(6)
+        CALL CRITPE (SIGTP(1), XZER, FG(1), -1, FINT1)
+      ENDIF
+C
+      IF (KONTAC(4).EQ.0) THEN
+        CALL CRITPE (SIGTP(2), SIGHP0(2), RESIST(4), -1, FFF(4))
+        FINT2 = 0.
+        IF (FFF(4).GE.EPSIL(4)) THEN
+         NMEC = NMEC + 1
+         IF (NMEC.EQ.1) THEN
+           ICAS = 4
+           ISGNTC = -1
+           IHARD = 2
+         ELSE
+           ICASB = 4
+           ISGNTCB = -1
+           IHARDB = 2
+         ENDIF
+        ENDIF
+      ELSE
+        FG(1) = XKISO(2)*RESIST(6)
+        CALL CRITPE (SIGTP(2), XZER, FG(1), -1, FINT2)
+      ENDIF
+C
+      IF ((FINT1.GE.EPSIL(6)).OR.(FINT2.GE.EPSIL(6))) THEN
+        NMEC = NMEC + 1
+        IF (FINT1.GE.FINT2) THEN
+          FFF(6) = FINT1
+          IF (NMEC.EQ.1) THEN
+            IHARD = 1
+            ICAS = 6
+            ISGNTC = -1
+          ELSE
+            IHARDB = 1
+            ICASB = 6
+            ISGNTCB = -1
+          ENDIF
+        ELSE
+          FFF(6) = FINT2
+          IF (NMEC.EQ.1) THEN
+            IHARD = 2
+            ICAS = 6
+            ISGNTC = -1
+          ELSE
+            IHARDB = 2
+            ICASB = 6
+            ISGNTCB = -1
+          ENDIF
+        ENDIF
+      ENDIF
+C
+C
+C Le tableau FFF contient les residus
+C
+C================================================
+C               DRIVER
+C================================================
+      IF (NMEC.EQ.0) GOTO 9999
+C
+      IF (NMEC.EQ.1) GOTO 1000
+C
+      IF (NMEC.EQ.2) GOTO 4000
+C
+      GOTO 9999
+C==================================================
+C               CAS 1:
+C      Un seul mecanisme  est active
+C==================================================
+ 1000 CONTINUE
+C
+        CALL CONPRI (SIGT,CPHI0,SPHI0,SIGTP,CPHI,SPHI)
+C
+C Mis a jour de isgn2
+C
+        IF (IHARD.EQ.1) THEN
+          IF (SIGTP(1).GE.SIGTP(2)) THEN
+            ISGN2 = 1
+          ELSE
+            ISGN2 = -1
+          ENDIF
+          HARDC = 2
+        ELSE
+          IF (IHARD.EQ.2) THEN
+            IF (SIGTP(2).GE.SIGTP(1)) THEN
+              ISGN2 = 1
+            ELSE
+              ISGN2 = -1
+            ENDIF
+          ENDIF
+          HARDC = 1
+        ENDIF
+C
+        IF (IHARD.EQ.1) THEN
+          IHARDC = 2
+        ELSE
+          IHARDC = 1
+        ENDIF
+C
+        NCORNER = 0
+C
+ 1010 CONTINUE
+C
+C  Definition du segment
+C
+       ITM = 30
+       MN = 1
+       SEGINI,QUASIN
+       IT = -1
+C
+C  Calcul de xhh2 et xkiso
+C
+       IF (ICAS.GE.5) THEN
+         IF (ICAS.EQ.5) THEN
+          CALL VALEUR (EPSI0(1),TRAC(IPT),NCURVT,XLCAT,
+     &XKISO(1),XHH2,KERRE)
+          CALL VALEUR (EPSI0(2),TRAC(IPC),NCURVC,XLCAC,
+     &XKISO(2),DUMM,KERRE)
+         ELSE
+          CALL VALEUR (EPSI0(1),TRAC(IPT),NCURVT,XLCAT,
+     &XKISO(1),DUMM,KERRE)
+          CALL VALEUR (EPSI0(2),TRAC(IPC),NCURVC,XLCAC,
+     &XKISO(2),XHH2,KERRE)
+         ENDIF
+         EPSI(1) = EPSI0(1)
+         XKISO0(1) = XKISO(1)
+         EPSI(2) = EPSI0(2)
+         XKISO0(2) = XKISO(2)
+         XHH2I = XHH2
+         EPSII(1) = EPSI0(1)
+         XKISOI(1) = XKISO(1)
+         EPSII(2) = EPSI0(2)
+         XKISOI(2) = XKISO(2)
+       ENDIF
+C
+       DO 1011,IE1=1,6
+         FFF(IE1) = XZER
+ 1011  CONTINUE
+C
+        IF (ICAS.LE.4) THEN
+          CALL CRITPE (SIGTP(IHARD),SIGHP0(IHARD),RESIST(ICAS),
+     &               ISGNTC,FFF(ICAS))
+        ELSE
+          FG(1) = XKISOI(ICAS-4)*RESIST(ICAS)
+          CALL CRITPE (SIGTP(IHARD),XZER,FG(1),ISGNTC,FINT1)
+          CALL CRITPE (SIGTP(IHARDC),XZER,FG(1),ISGNTC,FINT2)
+          FFF(ICAS) = MAX(FINT1,FINT2)
+        ENDIF
+C
+C Calcul de la normale et du jacobien
+C
+       IF (ICAS.LE.4) THEN
+         CALL NORMBL(SIGT,RESIST(ICAS),ISGNTC,ISGN2,1,XNOR1)
+         XJ00(1,1) = -XXCCYY(XNOR1, XNOR1, YOUN, XNU)-XHH1
+       ELSE
+         CALL NORMBL(SIGT,RESIST(ICAS),ISGNTC,ISGN2,2,XNOR1)
+         XJ00(1,1) = -XXCCYY(XNOR1,XNOR1,YOUN,XNU)
+     &            -ISGNTC*RESIST(ICAS)*XHH2
+       ENDIF
+C
+       R(1) = + FFF(ICAS)
+       GAMBDA(1)=XZER
+       GAMBDA(2)=XZER
+       GAMBDA(3)=XZER
+       GAMBDA(4)=XZER
+       GAMBDA(5)=XZER
+       GAMBDA(6)=XZER
+C
+       XJ0INV = UN/XJ00(1,1)
+C
+       CALL ZERO(D,1,MN)
+       XH0(1,1) = XJ0INV
+C
+C  On rentre dans les iterations internes
+C
+      DO I=0,ITM
+C
+C  Appel de Broyden
+C
+        CALL BROYDE (QUASIN)
+C
+        GAMBDA(ICAS) = D(1)
+C
+C  Calcul du phi et des termes de la matrice A et A-1
+C
+        SITPRO(1) = SIGI(1) + DSIGI(1)
+     &       - UNDEMI*(GAMBDA(1) + GAMBDA(2) + GAMBDA(5))*CPI
+     &       + UNDEMI*(GAMBDA(3) + GAMBDA(4) + GAMBDA(6))*CPI
+        SITPRO(2) = SIGI(2) + DSIGI(2)
+     &       - UNDEMI*(GAMBDA(1) + GAMBDA(2) + GAMBDA(5))*CPI
+     &       + UNDEMI*(GAMBDA(3) + GAMBDA(4) + GAMBDA(6))*CPI
+        SITPRO(4) = SIGI(4) + DSIGI(4)
+C
+C Mis a jour des variables d'ecrouissage
+C
+        SIGHP(1) = SIGHP0(1) + XHH1*(GAMBDA(1)-GAMBDA(3))
+        SIGHP(2) = SIGHP0(2) + XHH1*(GAMBDA(2)-GAMBDA(4))
+        EPSI(1) = EPSI0(1) + GAMBDA(5)
+        IF (ICAS.LE.4) THEN
+          WORK = GAMBDA(ICAS)*RESIST(ICAS)*ISGNTC
+        ELSE
+          WORK = XZER
+        ENDIF
+        EPSI(2) = EPSI0(2) + GAMBDA(6) + DEGRAD*WORK
+C
+        IF (ICAS.LE.4) THEN
+           CALL VALEUR(EPSI(1),TRAC(IPT),NCURVT,XLCAT,
+     &XKISO(1),DUMM,KERRE)
+           CALL VALEUR(EPSI(2),TRAC(IPC),NCURVC,XLCAC,
+     &XKISO(2),DUMM,KERRE)
+        ELSE
+          IF (ICAS.EQ.5) THEN
+            CALL VALEUR(EPSI(1),TRAC(IPT),NCURVT,XLCAT,
+     &XKISO(1),XHH2,KERRE)
+            CALL VALEUR(EPSI(2),TRAC(IPC),NCURVC,XLCAC,
+     &XKISO(2),DUMM,KERRE)
+          ELSE
+            CALL VALEUR(EPSI(1),TRAC(IPT),NCURVT,XLCAT,
+     &XKISO(1),DUMM,KERRE)
+            CALL VALEUR(EPSI(2),TRAC(IPC),NCURVC,XLCAC,
+     &XKISO(2),XHH2,KERRE)
+          ENDIF
+        ENDIF
+C
+C Calcul des phi
+C
+        IF (ICAS.LE.4) THEN
+          PHI = ISGNTC*(-UNDEMI*(SITPRO(1) + SITPRO(2)) + SIGHP(IHARD)
+     &      +  RESIST(ICAS))
+        ELSE
+          PHI = ISGNTC*(-UNDEMI*(SITPRO(1)+SITPRO(2))
+     &         +(XKISOI(ICAS - 4)+(EPSI(ICAS-4) - EPSII(ICAS-4))*XHH2I)
+     &         *RESIST(ICAS))
+        ENDIF
+C
+C  Calcul de AINV
+C
+        SOMLAM = GAMBDA(1) + GAMBDA(2) + GAMBDA(3) + GAMBDA(4)
+     & + GAMBDA(5) + GAMBDA(6)
+        AINV(1) = (DEUX*PHI+GGG*SOMLAM)/(DEUX*PHI+DEUX*GGG*SOMLAM)
+        AINV(2) = GGG*SOMLAM/(DEUX*PHI + DEUX*GGG*SOMLAM)
+        AINV(3) = PHI/(PHI + (GGG*SOMLAM))
+C
+C   Calcul des contraintes a l'aide de AINV
+C
+        SIGT(1) = AINV(1)*SITPRO(1) + AINV(2)*SITPRO(2)
+        SIGT(2) = AINV(2)*SITPRO(1) + AINV(1)*SITPRO(2)
+        SIGT(4) = AINV(3)*SITPRO(4)
+C
+C   Nouvelles contraintes principales
+C
+        CALL CONPRI (SIGT,CPHI0,SPHI0,SIGTP,CPHI,SPHI)
+C
+C
+        IF (ICAS.LE.4) THEN
+          CALL CRITPE (SIGTP(IHARD),SIGHP(IHARD),RESIST(ICAS),
+     &               ISGNTC,FFF(ICAS))
+          R(1)= + FFF(ICAS)
+        ELSE
+           FG(1) = (XKISOI(ICAS-4)+(EPSI(ICAS-4)-EPSII(ICAS-4))*XHH2I)
+     &             *RESIST(ICAS)
+C
+          CALL CRITPE (SIGTP(IHARD),XZER,FG(1),ISGNTC,FINT1)
+          CALL CRITPE (SIGTP(IHARDC),XZER,FG(1),ISGNTC,FINT2)
+          FFF(ICAS) = MAX (FINT1,FINT2)
+C
+          R(1) = + FFF(ICAS)
+     &         - ISGNTC*RESIST(ICAS)
+     &         * (XKISO(ICAS-4) - XKISOI(ICAS-4)
+     &            -(EPSI(ICAS-4) - EPSII(ICAS-4))*XHH2I)
+          IF (ABS(EPSI(ICAS-4) - EPSII(ICAS-4)).LT.EPSILO2) THEN
+            XHH2I=XHH2
+          ELSE
+            XHH2I = (XKISO(ICAS-4) - XKISOI(ICAS-4))/
+     &              (EPSI(ICAS-4) - EPSII(ICAS-4))
+          ENDIF
+          XKISOI(ICAS-4) = XKISO(ICAS-4)
+          EPSII(ICAS-4) = EPSI(ICAS-4)
+        ENDIF
+C
+C  Test de convergence
+C
+C        IF (ABS(FFF(ICAS)).LT.EPSIL(ICAS)) GOTO 1020
+        IF ((ABS(FFF(ICAS)).LT.EPSIL(ICAS))
+     &      .AND.(ABS(R(1)).LT.EPSIL(ICAS))) GOTO 1020
+      ENDDO
+C
+C  Pas de convergence
+C
+      SEGSUP,QUASIN
+      GOTO 6000
+C
+ 1020 CONTINUE
+      SEGSUP,QUASIN
+C
+        IF (GAMBDA(ICAS).LT.EPSILO2) THEN
+           WRITE (IOIMP,*)'BETOCY: Multiplicateurs plastiques < 0'
+           KERRE = 2
+           RETURN
+         ELSE
+           CONTINUE
+         ENDIF
+C
+C  On verifie qu'on ne viole pas les autres criteres
+C
+        IF (IHARD.EQ.2) THEN
+          IHARDC=1
+        ELSE
+          IHARDC=2
+        ENDIF
+C
+        IF (ICAS.LE.2) THEN
+          FG(1) = XKISO(1)*RESIST(5)
+          FG(2) = XKISO(2)*RESIST(6)
+        ELSE
+          IF (ICAS.LE.4) THEN
+            FG(1) = XKISO(2)*RESIST(6)
+            FG(2) = XKISO(1)*RESIST(5)
+          ELSE
+            IF (ICAS.EQ.5) THEN
+              FG(1) = XKISO(1)*RESIST(5)
+              FG(2) = XKISO(2)*RESIST(6)
+            ELSE
+              FG(1) = XKISO(2)*RESIST(6)
+              FG(2) = XKISO(1)*RESIST(5)
+            ENDIF
+          ENDIF
+        ENDIF
+C
+C  Test GS
+C
+        IF (ICAS.GE.5) THEN
+C Regles de suivi si on est sur la grande surface
+C 1- Direction de l'ecoulement
+          SIGHP(IHARD) = FG(1) -RESIST(2*ICAS-10+IHARD)
+C 2- Direction perpendiculaire a l'ecoulement
+C (si on se trouve dans le coin)
+            XLIMIT = FG(1) -RESIST(2*ICAS-10+IHARDC)
+            IF (ISGNTC*(SIGHP(IHARDC)-XLIMIT).GT.XZER) THEN
+              SIGHP(IHARDC) = XLIMIT
+              KONTAC(2*ICAS-10+IHARDC)=1
+            ENDIF
+       ENDIF
+C
+C
+C  On teste les autres mecanismes
+C
+C Test des contacts lateraux
+C     Meme signe signtc
+        IF ((ICAS.EQ.1).OR.(ICAS.EQ.3)) THEN
+          ICASB = ICAS + 1
+        ELSE
+          IF ((ICAS.EQ.2).OR.(ICAS.EQ.4)) THEN
+            ICASB = ICAS -1
+          ELSE
+            ICASB = 2*ICAS-10+IHARDC
+          ENDIF
+        ENDIF
+        IF (KONTAC(ICASB).EQ.0) THEN
+          CALL CRITPE(SIGTP(IHARDC), SIGHP(IHARDC), RESIST(ICASB),
+     &ISGNTC,XFFFS)
+          IF (((XFFFS.GE.EPSIL(5)).AND.(ICASB.LE.2)).OR.
+     &((XFFFS.GE.EPSIL(6)).AND.(ICASB.GE.3))) THEN
+            IHARDB = IHARDC
+            ISGNTCB = ISGNTC
+            GOTO 1100
+          ELSE
+            IF (((ABS(XFFFS).LT.EPSIL(5)).AND.(ICASB.LE.2)).OR.
+     &((ABS(XFFFS).LT.EPSIL(6)).AND.(ICASB.GE.3))) THEN
+              KONTAC(ICASB)=1
+            ENDIF
+          ENDIF
+        ELSE
+          CALL CRITPE(SIGTP(IHARDC), XZER, FG(1), ISGNTC,XFFFS)
+          IF (ICASB.LE.2) THEN
+            ICASB = 5
+          ELSE
+            ICASB = 6
+          ENDIF
+          IF (XFFFS.GE.EPSIL(ICASB)) THEN
+            IHARDB = IHARDC
+            ISGNTCB = ISGNTC
+            GOTO 1100
+          ENDIF
+        ENDIF
+C     Autre signe signtc
+        IF ((ICAS.EQ.1).OR.(ICAS.EQ.3)) THEN
+          ICASB = ICAS + 1
+        ELSE
+          IF ((ICAS.EQ.2).OR.(ICAS.EQ.4)) THEN
+            ICASB = ICAS - 1
+          ELSE
+            ICASB = 2*ICAS-10+IHARDC
+          ENDIF
+        ENDIF
+        IF (ICASB.LE.2) THEN
+           ICASB = ICASB +2
+        ELSE
+           ICASB = ICASB -2
+        ENDIF
+        IF (KONTAC(ICASB).EQ.0) THEN
+          CALL CRITPE(SIGTP(IHARDC), SIGHP(IHARDC), RESIST(ICASB),
+     &-ISGNTC,XFFFS)
+          IF (((XFFFS.GE.EPSIL(5)).AND.(ICASB.LE.2)).OR.
+     &((XFFFS.GE.EPSIL(6)).AND.(ICASB.GE.3))) THEN
+            IHARDB = IHARDC
+            ISGNTCB = -ISGNTC
+            GOTO 1100
+          ELSE
+            IF (((ABS(XFFFS).LT.EPSIL(5)).AND.(ICASB.LE.2)).OR.
+     &((ABS(XFFFS).LT.EPSIL(6)).AND.(ICASB.GE.3))) THEN
+              KONTAC(ICASB)=1
+            ENDIF
+          ENDIF
+        ELSE
+          CALL CRITPE(SIGTP(IHARDC), XZER, FG(2), -ISGNTC,XFFFS)
+          IF (ICASB.LE.2) THEN
+            ICASB = 5
+          ELSE
+            ICASB = 6
+          ENDIF
+          IF (XFFFS.GE.EPSIL(ICASB)) THEN
+            IHARDB = IHARDC
+            ISGNTCB = -ISGNTC
+            GOTO 1100
+          ENDIF
+        ENDIF
+C Test du contact frontal
+        IF (ICAS.LE.4) THEN
+          CALL CRITPE(SIGTP(IHARD), XZER, FG(1), ISGNTC,XFFFS)
+          IF (((XFFFS.GE.EPSIL(5)).AND.(ICAS.LE.2)).OR.
+     &((XFFFS.GE.EPSIL(6)).AND.(ICAS.GE.3))) THEN
+            GOTO 1040
+          ELSE
+            IF (((ABS(XFFFS).LT.EPSIL(5)).AND.(ICAS.LE.2)).OR.
+     &((ABS(XFFFS).LT.EPSIL(6)).AND.(ICAS.GE.3))) THEN
+              KONTAC(ICAS) = 1
+            ENDIF
+          ENDIF
+        ENDIF
+C
+C Il faut faire suivre la petite surface si la grande se retrecit trop vite
+C
+        IF (ICAS.LE.4) THEN
+            IF ((ICAS.EQ.1).OR.(ICAS.EQ.3)) THEN
+              ICASB = ICAS +1
+            ELSE
+              ICASB = ICAS -1
+            ENDIF
+            XLIMIT = FG(1) -RESIST(ICASB)
+            IF (ISGNTC*(SIGHP(IHARDC)-XLIMIT).GT.XZER) THEN
+              SIGHP(IHARDC) = XLIMIT
+              KONTAC(ICASB) = 1
+            ENDIF
+            IF (ICASB.LE.2) THEN
+              ICASB = ICASB +2
+            ELSE
+              ICASB = ICASB -2
+            ENDIF
+            XLIMIT = FG(2) -RESIST(ICASB)
+            IF (-ISGNTC*(SIGHP(IHARDC)-XLIMIT).GT.XZER) THEN
+              SIGHP(IHARDC) = XLIMIT
+              KONTAC(ICASB) = 1
+            ENDIF
+        ENDIF
+C
+C  Mis a jour des indicateurs de contact
+C
+        IF ((XKISO(1)*RESIST(5)-XKISO(2)*RESIST(6)).GT.
+     &(RESIST(1)-RESIST(3))) THEN
+          IF ((ICAS.EQ.1).OR.(ICAS.EQ.2)) KONTAC(ICAS+2)=0
+          IF ((ICAS.EQ.3).OR.(ICAS.EQ.4)) KONTAC(ICAS-2)=0
+        ELSE
+          KONTAC(1) = 1
+          KONTAC(2) = 1
+          KONTAC(3) = 1
+          KONTAC(4) = 1
+        ENDIF
+C
+        ICASB = ICAS
+        GOTO 9999
+C
+C Cas ou on trouve le contact frontal
+C
+ 1040   CONTINUE
+          SIGHP(1) = SIGHP0(1)
+          SIGHP(2) = SIGHP0(2)
+          SIGT(1) = SIGI(1) + DSIGI(1)
+          SIGT(2) = SIGI(2) + DSIGI(2)
+          SIGT(4) = SIGI(4) + DSIGI(4)
+          GOTO 3000
+C
+C Cas ou on viole un critere lateral
+C
+ 1100   CONTINUE
+          SIGHP(1) = SIGHP0(1)
+          SIGHP(2) = SIGHP0(2)
+          SIGT(1) = SIGI(1) + DSIGI(1)
+          SIGT(2) = SIGI(2) + DSIGI(2)
+          SIGT(4) = SIGI(4) + DSIGI(4)
+          IF (ICAS.EQ.ICASB) THEN
+            IF (ICAS.GE.5) THEN
+              GOTO 1000
+            ELSE
+              KERRE = 2
+              RETURN
+            ENDIF
+          ELSE
+            GOTO 4000
+          ENDIF
+C================================================================
+C                 CAS 2
+C    Un seul mecanisme de chaque surface
+C    mais entree en contact des 2 mecanismes
+C================================================================
+ 3000  CONTINUE
+C
+        CALL CONPRI (SIGT,CPHI0,SPHI0,SIGTP,CPHI,SPHI)
+C
+C
+C Calcul de la normale a l'estimation elastique et du jacobien initial
+C
+        IF (IHARD.EQ.1) THEN
+          IF (SIGTP(1).GE.SIGTP(2)) THEN
+            ISGN2 = 1
+          ELSE
+            ISGN2 = -1
+          ENDIF
+        ELSE
+          IF (IHARD.EQ.2) THEN
+            IF (SIGTP(2).GE.SIGTP(1)) THEN
+              ISGN2 = 1
+            ELSE
+              ISGN2 = -1
+            ENDIF
+          ENDIF
+        ENDIF
+C
+ 3010 CONTINUE
+C
+C  Definition du segment
+C
+      ITM = 30
+      MN = 2
+      SEGINI,QUASIN
+      IT = -1
+      CALL ZERO(D,1,MN)
+C
+C  Calcul de xhh2 et xkiso
+C
+      IF (ICAS.LE.2) THEN
+        CALL VALEUR (EPSI0(1),TRAC(IPT),NCURVT,XLCAT,
+     &XKISO(1),XHH2,KERRE)
+        CALL VALEUR (EPSI0(2),TRAC(IPC),NCURVC,XLCAC,
+     &XKISO(2),DUMM,KERRE)
+      ELSE
+        CALL VALEUR (EPSI0(1),TRAC(IPT),NCURVT,XLCAT,
+     &XKISO(1),DUMM,KERRE)
+        CALL VALEUR (EPSI0(2),TRAC(IPC),NCURVC,XLCAC,
+     &XKISO(2),XHH2,KERRE)
+      ENDIF
+      EPSI(1) = EPSI0(1)
+      XKISO0(1) = XKISO(1)
+      EPSI(2) = EPSI0(2)
+      XKISO0(2) = XKISO(2)
+      XHH2I = XHH2
+      EPSII(1) = EPSI0(1)
+      XKISOI(1) = XKISO(1)
+      EPSII(2) = EPSI0(2)
+      XKISOI(2) = XKISO(2)
+C
+       DO 3011,IE1=1,6
+         FFF(IE1) = XZER
+ 3011  CONTINUE
+C
+        IF (ISGNTC.GT.0) THEN
+          FG(1) = XKISO(1)*RESIST(5)
+        ELSE
+          FG(1) = XKISO(2)*RESIST(6)
+        ENDIF
+        CALL CRITPE (SIGTP(IHARD),SIGHP0(IHARD)
+     &              ,RESIST(ICAS),ISGNTC,FFF(ICAS))
+        CALL CRITPE (SIGTP(IHARD), XZER, FG(1), ISGNTC, XFFFS)
+C
+      CALL NORMBL(SIGT,RESIST(ICAS),ISGNTC,ISGN2,1,XNOR1)
+      XJ00(1,1) = -XXCCYY(XNOR1, XNOR1, YOUN, XNU)-XHH1
+      XJ00(2,2) = -XXYY(XNOR1,DSIGI)
+      XJ00(1,2) = -XXYY(XNOR1,DSIGI)
+      XJ00(2,1) = -XXCCYY(XNOR1, XNOR1, YOUN, XNU)
+      IF (ISGNTC.LT.0) THEN
+        XJ00(2,1)=XJ00(2,1)+RESIST(6)*XHH2*DEGRAD*ISGNTC*RESIST(ICAS)
+      ENDIF
+      R(1) = FFF(ICAS)
+      R(2) = XFFFS
+      GAMBDA(1)=XZER
+      GAMBDA(2)=XZER
+      GAMBDA(3)=XZER
+      GAMBDA(4)=XZER
+      GAMBDA(5)=XZER
+      GAMBDA(6)=XZER
+C
+C  Inverse du jacobien
+C
+      XH0(1,1) = XJ00(1,1)
+      XH0(1,2) = XJ00(1,2)
+      XH0(2,1) = XJ00(2,1)
+      XH0(2,2) = XJ00(2,2)
+      CALL INVALM (XH0, MN , MN , IRD, 1.D-12)
+      IF (IRD.NE.0) THEN
+        SEGSUP,QUASIN
+        GOTO 6000
+      ENDIF
+C
+C  On rentre dans les iterations internes
+C
+      DO I=0,ITM
+C
+C  Appel de Broyden
+C
+        CALL BROYDE (QUASIN)
+C
+        GAMBDA(ICAS) = D(1)
+        SPLITT = D(2)
+C
+C  Calcul du phi et des termes de la matrice A et A-1
+C
+        SITPRO(1) = SIGI(1) + ((UN-SPLITT)*DSIGI(1))
+     &            - UNDEMI*(GAMBDA(1) + GAMBDA(2))*CPI
+     &            + UNDEMI*(GAMBDA(3) + GAMBDA(4))*CPI
+        SITPRO(2) = SIGI(2) + ((UN-SPLITT)*DSIGI(2))
+     &            - UNDEMI*(GAMBDA(1) + GAMBDA(2))*CPI
+     &            + UNDEMI*(GAMBDA(3) + GAMBDA(4))*CPI
+        SITPRO(4) = SIGI(4) + (UN-SPLITT)*DSIGI(4)
+C
+        SIGHP(1) = SIGHP0(1) + XHH1*(GAMBDA(1)-GAMBDA(3))
+        SIGHP(2) = SIGHP0(2) + XHH1*(GAMBDA(2)-GAMBDA(4))
+        EPSI(1)  = EPSI0(1)
+        WORK =  GAMBDA(ICAS)*ISGNTC*RESIST(ICAS)
+        EPSI(2)  = EPSI0(2) + DEGRAD*WORK
+        CALL VALEUR(EPSI(2),TRAC(IPC),NCURVC,XLCAC,
+     &XKISO(2),XHH2,KERRE)
+C
+        PHI = ISGNTC*(-UNDEMI*(SITPRO(1)+SITPRO(2))+SIGHP(IHARD)
+     &    + RESIST(ICAS))
+C
+C
+        SOMLAM = GAMBDA(1) + GAMBDA(2) + GAMBDA(3) + GAMBDA(4)
+        AINV(1) = (DEUX*PHI+GGG*SOMLAM)/(DEUX*PHI+DEUX*GGG*SOMLAM)
+        AINV(2) = GGG*SOMLAM/(DEUX*PHI + DEUX*GGG*SOMLAM)
+        AINV(3) = PHI/(PHI + GGG*SOMLAM)
+C
+C   Calcul des contraintes a l'aide de AINV
+C
+        SIGT(1) = AINV(1)*SITPRO(1)+AINV(2)*SITPRO(2)
+        SIGT(2) = AINV(2)*SITPRO(1)+AINV(1)*SITPRO(2)
+        SIGT(4) = AINV(3)*SITPRO(4)
+C
+C   Nouvelles contraintes principales
+C
+        CALL CONPRI (SIGT,CPHI0,SPHI0,SIGTP,CPHI,SPHI)
+C
+        NMEC = 0
+C
+        IF (ISGNTC.GT.0) THEN
+          FG(1) = XKISO(1)*RESIST(5)
+        ELSE
+          FG(1) = (XKISOI(2) + XHH2I*(EPSI(2)-EPSII(2)))*RESIST(6)
+        ENDIF
+        CALL CRITPE (SIGTP(IHARD),SIGHP(IHARD)
+     &              ,RESIST(ICAS),ISGNTC,FFF(ICAS))
+        R(1) = + FFF(ICAS)
+        IF (ABS(FFF(ICAS)).GE.EPSIL(ICAS)) THEN
+          NMEC = NMEC + 1
+        ENDIF
+        CALL CRITPE (SIGTP(IHARD), XZER, FG(1), ISGNTC, XFFFS)
+        R(2) =  XFFFS
+        IF (ICAS.GE.3) THEN
+           R(2) = R(2) + RESIST(6)*(XKISO(2) - XKISOI(2)
+     &              - (EPSI(2) - EPSII(2))*XHH2I)
+          IF (ABS(EPSI(2) - EPSII(2)).LT.EPSILO2) THEN
+            XHH2I=XHH2
+          ELSE
+            XHH2I = (XKISO(2) - XKISOI(2))/
+     &              (EPSI(2) - EPSII(2))
+          ENDIF
+          EPSII(2) = EPSI(2)
+          XKISOI(2) = XKISO(2)
+        ENDIF
+        IF (((ABS(XFFFS).GE.EPSIL(5)).AND.(ICAS.LE.2)).OR.
+     &((ABS(XFFFS).GE.EPSIL(6)).AND.(ICAS.GE.3))) THEN
+            NMEC = NMEC + 1
+        ENDIF
+C
+C  Test de convergence
+C
+        IF (NMEC.EQ.0) GOTO 3020
+      ENDDO
+C
+C  Pas de convergence
+C
+      SEGSUP,QUASIN
+      GOTO 6000
+C
+ 3020 CONTINUE
+C
+C  On verifie que la convergence ne s'est pas faite sur un point debile
+C
+      SEGSUP,QUASIN
+      IF (((SPLITT-1.).LE.EPSILO).AND.(SPLITT.GE.(-1.*EPSILO))) THEN
+C
+        IF (IHARD.EQ.2) THEN
+          IHARDC=1
+        ELSE
+          IHARDC=2
+        ENDIF
+        IF ((ICAS.EQ.1).OR.(ICAS.EQ.3)) ICASC = ICAS + 1
+        IF ((ICAS.EQ.2).OR.(ICAS.EQ.4)) ICASC = ICAS - 1
+C
+        IF (ICAS.LE.2) THEN
+          FG(1) = XKISO(1)*RESIST(5)
+          FG(2) = XKISO(2)*RESIST(6)
+        ELSE
+          FG(1) = XKISO(2)*RESIST(6)
+          FG(2) = XKISO(1)*RESIST(5)
+        ENDIF
+C
+C Test des contacts lateraux
+C     Meme signe signtc
+        IF ((ICAS.EQ.1).OR.(ICAS.EQ.3)) THEN
+          ICASB = ICAS + 1
+        ELSE
+          ICASB = ICAS -1
+        ENDIF
+        IF (KONTAC(ICASB).EQ.0) THEN
+          CALL CRITPE(SIGTP(IHARDC), SIGHP(IHARDC),
+     & RESIST(ICASB), ISGNTC,XFFFS)
+          IF (((XFFFS.GE.EPSIL(5)).AND.(ICASB.LE.2)).OR.
+     &((XFFFS.GE.EPSIL(6)).AND.(ICASB.GE.3))) THEN
+            IHARDB = IHARDC
+            ISGNTCB = ISGNTC
+            GOTO 3100
+          ELSE
+            IF (((ABS(XFFFS).LT.EPSIL(5)).AND.(ICASB.LE.2)).OR.
+     &((ABS(XFFFS).LT.EPSIL(6)).AND.(ICASB.GE.3))) THEN
+              KONTAC(ICASB)=1
+            ENDIF
+          ENDIF
+        ELSE
+          CALL CRITPE(SIGTP(IHARDC), XZER, FG(1), ISGNTC,XFFFS)
+          IF (ICASB.LE.2) THEN
+             ICASB = 5
+          ELSE
+             ICASB = 6
+          ENDIF
+          IF (XFFFS.GE.EPSIL(ICASB)) THEN
+            IHARDB = IHARDC
+            ISGNTCB = -ISGNTC
+            GOTO 3100
+          ENDIF
+        ENDIF
+C     Autre signe signtc
+        IF ((ICAS.EQ.1).OR.(ICAS.EQ.3)) THEN
+          ICASB = ICAS + 1
+        ELSE
+          ICASB = ICAS -1
+        ENDIF
+        IF (ICASB.LE.2) THEN
+           ICASB = ICASB +2
+        ELSE
+           ICASB = ICASB -2
+        ENDIF
+        IF (KONTAC(ICASB).EQ.0) THEN
+          CALL CRITPE(SIGTP(IHARDC), SIGHP(IHARDC),RESIST(ICASB),
+     & -ISGNTC,XFFFS)
+          IF (((XFFFS.GE.EPSIL(5)).AND.(ICASB.LE.2)).OR.
+     &((XFFFS.GE.EPSIL(6)).AND.(ICASB.GE.3))) THEN
+            IHARDB = IHARDC
+            ISGNTCB = ISGNTC
+            GOTO 3100
+          ELSE
+            IF (((ABS(XFFFS).LT.EPSIL(5)).AND.(ICASB.LE.2)).OR.
+     &((ABS(XFFFS).LT.EPSIL(6)).AND.(ICASB.GE.3))) THEN
+              KONTAC(ICASB)=1
+            ENDIF
+          ENDIF
+        ELSE
+          CALL CRITPE(SIGTP(IHARDC), XZER, FG(2), -ISGNTC,XFFFS)
+          IF (ICASB.LE.2) THEN
+             ICASB = 5
+          ELSE
+             ICASB = 6
+          ENDIF
+          IF (XFFFS.GE.EPSIL(ICASB)) THEN
+            IHARDB = IHARDC
+            ISGNTCB = -ISGNTC
+            GOTO 3100
+          ENDIF
+        ENDIF
+C
+C Il faut faire suivre la petite surface si la grande se retrecit trop vite
+C
+        IF (ICAS.LE.4) THEN
+            IF ((ICAS.EQ.1).OR.(ICAS.EQ.3)) THEN
+              ICASB = ICAS +1
+            ELSE
+              ICASB = ICAS -1
+            ENDIF
+            XLIMIT = FG(1) -RESIST(ICASB)
+            IF (ISGNTC*(SIGHP(IHARDC)-XLIMIT).GT.XZER) THEN
+              SIGHP(IHARDC) = XLIMIT
+              KONTAC(ICASB) = 1
+            ENDIF
+            IF (ICASB.LE.2) THEN
+              ICASB = ICASB +2
+            ELSE
+              ICASB = ICASB -2
+            ENDIF
+            XLIMIT = FG(2) -RESIST(ICASB)
+            IF (-ISGNTC*(SIGHP(IHARDC)-XLIMIT).GT.XZER) THEN
+              SIGHP(IHARDC) = XLIMIT
+              KONTAC(ICASB) = 1
+            ENDIF
+        ENDIF
+C
+C
+C  Mis a jour des indicateurs de contact
+C
+        KONTAC(ICAS) = 1
+        IF ((XKISO(1)*RESIST(5)-XKISO(2)*RESIST(6)).GT.
+     &(RESIST(1)-RESIST(3))) THEN
+          IF ((ICAS.EQ.1).OR.(ICAS.EQ.2)) KONTAC(ICAS+2)=0
+          IF ((ICAS.EQ.3).OR.(ICAS.EQ.4)) KONTAC(ICAS-2)=0
+        ELSE
+          KONTAC(1) = 1
+          KONTAC(2) = 1
+          KONTAC(3) = 1
+          KONTAC(4) = 1
+        ENDIF
+        SIGI(1) = SIGT(1)
+        SIGI(2) = SIGT(2)
+        SIGI(4) = SIGT(4)
+        DSIGI(1) = DSIGI(1)*SPLITT
+        DSIGI(2) = DSIGI(2)*SPLITT
+        DSIGI(4) = DSIGI(4)*SPLITT
+        SIGT(1) = SIGI(1) + DSIGI(1)
+        SIGT(2) = SIGI(2) + DSIGI(2)
+        SIGT(4) = SIGI(4) + DSIGI(4)
+        SIGHP0(1) = SIGHP(1)
+        SIGHP0(2) = SIGHP(2)
+        EPSI0(1) = EPSI(1)
+        EPSI0(2) = EPSI(2)
+        CPHI0 = CPHI
+        SPHI0 = SPHI
+        NPASS2 = 0
+        IF (ICAS.LE.2) THEN
+           ICAS = 5
+        ELSE
+           ICAS = 6
+        ENDIF
+        GOTO 1000
+C
+C
+      ELSE
+        GOTO 6000
+      ENDIF
+C
+C Cas ou on viole un critere lateral
+C
+ 3100   CONTINUE
+          SIGHP(1) = SIGHP0(1)
+          SIGHP(2) = SIGHP0(2)
+          SIGT(1) = SIGI(1) + DSIGI(1)
+          SIGT(2) = SIGI(2) + DSIGI(2)
+          SIGT(4) = SIGI(4) + DSIGI(4)
+          CALL CONPRI ( SIGT ,CPHI0,SPHI0,SIGTP,CPHI,SPHI)
+          CALL VALEUR(EPSI0(1),TRAC(IPT),NCURVT,XLCAT,XKISO(1),
+     &DUMM,KERRE)
+          CALL VALEUR(EPSI0(2),TRAC(IPC),NCURVC,XLCAC,XKISO(2),
+     &DUMM,KERRE)
+            CALL CRITPE(SIGTP(IHARD), SIGHP(IHARD), RESIST(ICAS),
+     & ISGNTC, FFF(ICAS))
+          IF (ICASB.LE.4) THEN
+            CALL CRITPE(SIGTP(IHARDB), SIGHP(IHARDB), RESIST(ICASB),
+     & ISGNTCB, FFF(ICASB))
+          ELSE
+            FG(1) = XKISO(ICASB-4)*RESIST(ICASB)
+            CALL CRITPE (SIGTP(IHARDB), XZER, FG(1),
+     & ISGNTCB,FFF(ICASB))
+          ENDIF
+          IF (ICAS.LE.2) THEN
+            FG(1) = XKISO(1)*RESIST(5)
+          ELSE
+            FG(1) = XKISO(2)*RESIST(6)
+          ENDIF
+          CALL CRITPE (SIGTP(IHARD), XZER, FG(1), ISGNTC, XFFFS)
+          GOTO 5000
+C================================================================
+C                 CAS 4
+C           Deux mecanismes
+C       Petite et Grande surfaces (18/07)
+C================================================================
+ 4000  CONTINUE
+C
+        CALL CONPRI ( SIGT,CPHI0,SPHI0,SIGTP,CPHI,SPHI)
+C
+C
+C Calcul de la normale a l'estimation elastique et du jacobien initial
+C
+        IF (IHARD.EQ.1) THEN
+          IF (SIGTP(1).GE.SIGTP(2)) THEN
+            ISGN2 = 1
+          ELSE
+            ISGN2 = -1
+          ENDIF
+        ELSE
+          IF (IHARD.EQ.2) THEN
+            IF (SIGTP(2).GE.SIGTP(1)) THEN
+              ISGN2 = 1
+            ELSE
+              ISGN2 = -1
+            ENDIF
+          ENDIF
+        ENDIF
+C
+        IF (IHARDB.EQ.1) THEN
+          IF (SIGTP(1).GE.SIGTP(2)) THEN
+            ISGN2B = 1
+          ELSE
+            ISGN2B = -1
+          ENDIF
+        ELSE
+          IF (IHARDB.EQ.2) THEN
+            IF (SIGTP(1).GE.SIGTP(2)) THEN
+              ISGN2B = -1
+            ELSE
+              ISGN2B = 1
+            ENDIF
+          ENDIF
+        ENDIF
+C
+C
+C
+ 4010 CONTINUE
+C
+C  Definition du segment
+C
+      ITM = 30
+      MN = 2
+      SEGINI,QUASIN
+      IT = -1
+      CALL ZERO(D,1,MN)
+C
+C  XKISO et XHH2
+C
+        IF (ICAS.LE.4) THEN
+          IF (ICASB.LE.4) THEN
+           CALL VALEUR (EPSI0(1),TRAC(IPT),NCURVT,XLCAT,
+     &XKISO(1),DUMM,KERRE)
+           CALL VALEUR (EPSI0(2),TRAC(IPC),NCURVC,XLCAC,
+     &XKISO(2),DUMM,KERRE)
+          ELSE
+            IF (ICASB.EQ.5) THEN
+              CALL VALEUR (EPSI0(1),TRAC(IPT),NCURVT,XLCAT,XKISO(1)
+     &         ,XHH2B,KERRE)
+              CALL VALEUR (EPSI0(2),TRAC(IPC),NCURVC,XLCAC,XKISO(2)
+     &         ,DUMM,KERRE)
+            ELSE
+              CALL VALEUR (EPSI0(1),TRAC(IPT),NCURVT,XLCAT,XKISO(1)
+     &         ,DUMM,KERRE)
+              CALL VALEUR (EPSI0(2),TRAC(IPC),NCURVC,XLCAC,XKISO(2)
+     &         ,XHH2B,KERRE)
+            ENDIF
+          ENDIF
+        ELSE
+          IF (ICASB.LE.4) THEN
+            IF (ICAS.EQ.5) THEN
+              CALL VALEUR (EPSI0(1),TRAC(IPT),NCURVT,XLCAT,XKISO(1)
+     &         ,XHH2,KERRE)
+              CALL VALEUR (EPSI0(2),TRAC(IPC),NCURVC,XLCAC,XKISO(2)
+     &         ,DUMM,KERRE)
+            ELSE
+              CALL VALEUR (EPSI0(1),TRAC(IPT),NCURVT,XLCAT,XKISO(1)
+     &         ,DUMM,KERRE)
+              CALL VALEUR (EPSI0(2),TRAC(IPC),NCURVC,XLCAC,XKISO(2)
+     &         ,XHH2,KERRE)
+            ENDIF
+          ELSE
+            IF (ICASB.EQ.5) THEN
+              CALL VALEUR (EPSI0(1),TRAC(IPT),NCURVT,XLCAT,XKISO(1)
+     &         ,XHH2B,KERRE)
+              CALL VALEUR (EPSI0(2),TRAC(IPC),NCURVC,XLCAC,XKISO(2)
+     &         ,XHH2,KERRE)
+            ELSE
+              CALL VALEUR (EPSI0(1),TRAC(IPT),NCURVT,XLCAT,XKISO(1)
+     &         ,XHH2,KERRE)
+              CALL VALEUR (EPSI0(2),TRAC(IPC),NCURVC,XLCAC,XKISO(2)
+     &         ,XHH2B,KERRE)
+            ENDIF
+          ENDIF
+        ENDIF
+      EPSI(1) = EPSI0(1)
+      EPSI(2) = EPSI0(2)
+      XHH2I = XHH2
+      XHH2IB = XHH2B
+      XKISO0(1) = XKISO(1)
+      XKISO0(2) = XKISO(2)
+      EPSII(1) = EPSI0(1)
+      EPSII(2) = EPSI0(2)
+      XKISOI(1) = XKISO(1)
+      XKISOI(2) = XKISO(2)
+C
+       DO 4011,IE1=1,6
+         FFF(IE1) = XZER
+ 4011  CONTINUE
+C
+        IF (ICAS.LE.4) THEN
+          CALL CRITPE (SIGTP(IHARD),SIGHP0(IHARD),RESIST(ICAS),
+     &               ISGNTC,FFF(ICAS))
+        ELSE
+          FG(1) = XKISOI(ICAS-4)*RESIST(ICAS)
+          CALL CRITPE (SIGTP(IHARD),XZER,FG(1),ISGNTC,FFF(ICAS))
+        ENDIF
+C
+        IF (ICASB.LE.4) THEN
+          CALL CRITPE (SIGTP(IHARDB),SIGHP0(IHARDB),RESIST(ICASB),
+     &               ISGNTCB,FFF(ICASB))
+        ELSE
+          FG(1) = XKISOI(ICASB-4)*RESIST(ICASB)
+          CALL CRITPE (SIGTP(IHARDB),XZER,FG(1),ISGNTCB,FFF(ICASB))
+        ENDIF
+C
+C  Jcobien initial
+C
+      CALL NORMBL(SIGT,RESIST(ICAS),ISGNTC,ISGN2,1,XNOR1)
+      CALL NORMBL(SIGT,RESIST(ICASB),ISGNTCB,ISGN2B,1,XNOR2)
+C
+      XJ00(1,1) = -XXCCYY(XNOR1, XNOR1, YOUN, XNU)
+      XJ00(1,2) = -XXCCYY(XNOR1, XNOR2, YOUN, XNU)
+      XJ00(2,1) = -XXCCYY(XNOR2, XNOR1, YOUN, XNU)
+      XJ00(2,2) = -XXCCYY(XNOR2, XNOR2, YOUN, XNU)
+C
+C  Premier Mecanisme
+C
+      IF (ICAS.LE.4) THEN
+        XJ00(1,1) = XJ00(1,1) - XHH1
+      ELSE
+        XJ00(1,1) = XJ00(1,1)-ISGNTC*RESIST(ICAS)*XHH2
+        IF ((ICASB.LE.4).AND.(ICAS.EQ.6)) THEN
+          XJ00(1,2) = XJ00(1,2)
+     & +RESIST(6)*XHH2*DEGRAD*ISGNTCB*RESIST(ICASB)
+        ENDIF
+      ENDIF
+C
+C  Second Mecanisme
+C
+      IF (ICASB.LE.4) THEN
+          XJ00(2,2) = XJ00(2,2) - XHH1
+      ELSE
+        XJ00(2,2) = XJ00(2,2)-ISGNTCB*RESIST(ICASB)*XHH2B
+        IF ((ICAS.LE.4).AND.(ICASB.EQ.6)) THEN
+           XJ00(2,1) = XJ00(2,1)
+     & +RESIST(6)*XHH2B*DEGRAD*ISGNTC*RESIST(ICAS)
+        ENDIF
+      ENDIF
+C
+C
+      R(1) = + FFF(ICAS)
+      R(2) = + FFF(ICASB)
+      GAMBDA(1) = XZER
+      GAMBDA(2) = XZER
+      GAMBDA(3) = XZER
+      GAMBDA(4) = XZER
+      GAMBDA(5) = XZER
+      GAMBDA(6) = XZER
+C
+C  Inverse du jacobien
+C
+      XH0(1,1) = XJ00(1,1)
+      XH0(1,2) = XJ00(1,2)
+      XH0(2,1) = XJ00(2,1)
+      XH0(2,2) = XJ00(2,2)
+      CALL INVALM (XH0, MN , MN , IRD, 1.D-12)
+      IF (IRD.NE.0) THEN
+          SEGSUP,QUASIN
+          GOTO 6000
+      ENDIF
+C
+C  On rentre dans les iterations internes
+C
+      DO I=0,ITM
+C
+C  Appel de Broyden
+C
+        CALL BROYDE (QUASIN)
+C
+        GAMBDA(ICAS) = D(1)
+        GAMBDA(ICASB) = D(2)
+C
+C  Calcul du phi et des termes de la matrice A et A-1
+C
+        SITPRO(1) = SIGI(1) + DSIGI(1)
+     &       - UNDEMI*(GAMBDA(1) + GAMBDA(2) + GAMBDA(5))*CPI
+     &       + UNDEMI*(GAMBDA(3) + GAMBDA(4) + GAMBDA(6))*CPI
+        SITPRO(2) = SIGI(2) + DSIGI(2)
+     &       - UNDEMI*(GAMBDA(1) + GAMBDA(2) + GAMBDA(5))*CPI
+     &       + UNDEMI*(GAMBDA(3) + GAMBDA(4) + GAMBDA(6))*CPI
+        SITPRO(4) = SIGI(4) + DSIGI(4)
+C
+C  PHI et AINV
+C
+        SIGHP(1) = SIGHP0(1) + XHH1*(GAMBDA(1)-GAMBDA(3))
+        SIGHP(2) = SIGHP0(2) + XHH1*(GAMBDA(2)-GAMBDA(4))
+        EPSI(1) = EPSI0(1) + GAMBDA(5)
+        IF (ICAS.LE.4) THEN
+          WORK = GAMBDA(ICAS)*RESIST(ICAS)*ISGNTC
+        ELSE
+          WORK = XZER
+        ENDIF
+        IF (ICASB.LE.4) THEN
+           WORK = WORK + GAMBDA(ICASB)*RESIST(ICASB)*ISGNTCB
+        ENDIF
+        EPSI(2) = EPSI0(2) + GAMBDA(6) + DEGRAD*WORK
+C
+        IF (ICAS.LE.4) THEN
+          IF (ICASB.LE.4) THEN
+           CALL VALEUR (EPSI(1),TRAC(IPT),NCURVT,XLCAT,
+     &XKISO(1),DUMM,KERRE)
+           CALL VALEUR (EPSI(2),TRAC(IPC),NCURVC,XLCAC,
+     &XKISO(2),DUMM,KERRE)
+          ELSE
+            IF (ICASB.EQ.5) THEN
+              CALL VALEUR (EPSI(1),TRAC(IPT),NCURVT,XLCAT,XKISO(1)
+     &         ,XHH2B,KERRE)
+              CALL VALEUR (EPSI(2),TRAC(IPC),NCURVC,XLCAC,XKISO(2)
+     &         ,DUMM,KERRE)
+            ELSE
+              CALL VALEUR (EPSI(1),TRAC(IPT),NCURVT,XLCAT,XKISO(1)
+     &         ,DUMM,KERRE)
+              CALL VALEUR (EPSI(2),TRAC(IPC),NCURVC,XLCAC,XKISO(2)
+     &         ,XHH2B,KERRE)
+            ENDIF
+          ENDIF
+        ELSE
+          IF (ICASB.LE.4) THEN
+            IF (ICAS.EQ.5) THEN
+              CALL VALEUR (EPSI(1),TRAC(IPT),NCURVT,XLCAT,XKISO(1)
+     &         ,XHH2,KERRE)
+              CALL VALEUR (EPSI(2),TRAC(IPC),NCURVC,XLCAC,XKISO(2)
+     &         ,DUMM,KERRE)
+            ELSE
+              CALL VALEUR (EPSI(1),TRAC(IPT),NCURVT,XLCAT,XKISO(1)
+     &         ,DUMM,KERRE)
+              CALL VALEUR (EPSI(2),TRAC(IPC),NCURVC,XLCAC,XKISO(2)
+     &         ,XHH2,KERRE)
+            ENDIF
+          ELSE
+            IF (ICASB.EQ.5) THEN
+              CALL VALEUR (EPSI(1),TRAC(IPT),NCURVT,XLCAT,XKISO(1)
+     &         ,XHH2B,KERRE)
+              CALL VALEUR (EPSI(2),TRAC(IPC),NCURVC,XLCAC,XKISO(2)
+     &         ,XHH2,KERRE)
+            ELSE
+              CALL VALEUR (EPSI(1),TRAC(IPT),NCURVT,XLCAT,XKISO(1)
+     &         ,XHH2,KERRE)
+              CALL VALEUR (EPSI(2),TRAC(IPC),NCURVC,XLCAC,XKISO(2)
+     &         ,XHH2B,KERRE)
+            ENDIF
+          ENDIF
+        ENDIF
+C
+C  Calcul des phi
+C
+        IF (ICAS.LE.4) THEN
+           PHI1=ISGNTC*(-UNDEMI*(SITPRO(1) + SITPRO(2))
+     &      + SIGHP(IHARD) + RESIST(ICAS))
+        ELSE
+           PHI1= ISGNTC*(-UNDEMI*(SITPRO(1)+SITPRO(2))
+     &       +(XKISOI(ICAS-4)+XHH2I*(EPSI(ICAS-4)-EPSII(ICAS-4)))
+     &        *RESIST(ICAS))
+        ENDIF
+C
+        IF (ICASB.LE.4) THEN
+           PHI2=ISGNTCB*(-UNDEMI*(SITPRO(1) + SITPRO(2))
+     &   + SIGHP(IHARDB)+  RESIST(ICASB))
+        ELSE
+           PHI2=ISGNTCB*(-UNDEMI*(SITPRO(1)+SITPRO(2))
+     &     +(XKISOI(ICASB-4)+XHH2IB*(EPSI(ICASB-4)-EPSII(ICASB-4)))
+     &       *RESIST(ICASB))
+        ENDIF
+C
+C   Test sur phi1 et phi2
+C
+        IF ((ABS(PHI2)).GT.(ABS(EPSILO*RESIST(ICASB)))) THEN
+           SOMLAM = GAMBDA(ICAS) + GAMBDA(ICASB)*PHI1/PHI2
+           PHI = PHI1
+        ELSE
+          IF ((ABS(PHI1)).GT.(ABS(EPSILO*RESIST(ICAS)))) THEN
+            SOMLAM = GAMBDA(ICASB) + GAMBDA(ICAS)*PHI2/PHI1
+            PHI = PHI2
+          ELSE
+            SOMLAM = GAMBDA(ICASB) + GAMBDA(ICAS)
+            PHI = PHI1
+          ENDIF
+        ENDIF
+C
+        AINV(1) = (DEUX*PHI+GGG*SOMLAM)/(DEUX*PHI+DEUX*GGG*SOMLAM)
+        AINV(2) = (GGG*SOMLAM)/(DEUX*PHI + DEUX*GGG*SOMLAM)
+        AINV(3) = PHI/(PHI + GGG*SOMLAM)
+C
+C   Calcul des contraintes a l'aide de AINV
+C
+        SIGT(1) = AINV(1)*SITPRO(1)+AINV(2)*SITPRO(2)
+        SIGT(2) = AINV(2)*SITPRO(1)+AINV(1)*SITPRO(2)
+        SIGT(4) = AINV(3)*SITPRO(4)
+C
+C   Nouvelles contraintes principales
+C
+        CALL CONPRI ( SIGT,CPHI0,SPHI0,SIGTP,CPHI,SPHI)
+C
+C
+        IF (ICAS.LE.4) THEN
+          CALL CRITPE (SIGTP(IHARD),SIGHP(IHARD),RESIST(ICAS),
+     &               ISGNTC,FFF(ICAS))
+          R(1)= + FFF(ICAS)
+        ELSE
+          FG(1) = (XKISOI(ICAS-4)+XHH2I*(EPSI(ICAS-4)-EPSII(ICAS-4)))
+     &           *RESIST(ICAS)
+          CALL CRITPE (SIGTP(IHARD),XZER,FG(1),ISGNTC,FFF(ICAS))
+          R(1) = + FFF(ICAS)
+     &         - ISGNTC*RESIST(ICAS)
+     &         * (XKISO(ICAS-4) - XKISOI(ICAS-4)
+     &            -(EPSI(ICAS-4) - EPSII(ICAS-4))*XHH2I)
+          IF (ABS(EPSI(ICAS-4) - EPSII(ICAS-4)).LT.EPSILO2) THEN
+            XHH2I=XHH2
+          ELSE
+            XHH2I = (XKISO(ICAS-4) - XKISOI(ICAS-4))/
+     &              (EPSI(ICAS-4) - EPSII(ICAS-4))
+          ENDIF
+          EPSII(ICAS-4) = EPSI(ICAS-4)
+          XKISOI(ICAS-4) = XKISO(ICAS-4)
+        ENDIF
+C
+        IF (ICASB.LE.4) THEN
+          CALL CRITPE (SIGTP(IHARDB),SIGHP(IHARDB),RESIST(ICASB),
+     &               ISGNTCB,FFF(ICASB))
+          R(2)= + FFF(ICASB)
+        ELSE
+          FG(1) = (XKISOI(ICASB-4)+XHH2IB*(EPSI(ICASB-4) -
+     &     EPSII(ICASB-4)))*RESIST(ICASB)
+          CALL CRITPE (SIGTP(IHARDB),XZER,FG(1),ISGNTCB,FFF(ICASB))
+          R(2) = + FFF(ICASB)
+     &         - ISGNTCB*RESIST(ICASB)
+     &         * (XKISO(ICASB-4) - XKISOI(ICASB-4)
+     &            -(EPSI(ICASB-4) - EPSII(ICASB-4))*XHH2IB)
+          IF (ABS(EPSI(ICASB-4) - EPSII(ICASB-4)).LT.EPSILO2) THEN
+            XHH2IB=XHH2B
+          ELSE
+            XHH2IB = (XKISO(ICASB-4) - XKISOI(ICASB-4))/
+     &              (EPSI(ICASB-4) - EPSII(ICASB-4))
+          ENDIF
+          XKISOI(ICASB-4) = XKISO(ICASB-4)
+          EPSII(ICASB-4) = EPSI(ICASB-4)
+        ENDIF
+C
+C  Test de convergence
+C
+        IF ((ABS(FFF(ICAS)).LE.EPSIL(ICAS))
+     &.AND.(ABS(FFF(ICASB)).LE.EPSIL(ICASB)).AND.
+     &(ABS(R(1)).LE.EPSIL(ICAS)).AND.(ABS(R(2)).LE.EPSIL(ICASB))) THEN
+           GOTO 4020
+        ENDIF
+      ENDDO
+C
+C  Pas de convergence
+C
+      SEGSUP,QUASIN
+      GOTO 6000
+C
+ 4020 CONTINUE
+      SEGSUP,QUASIN
+C
+         IF ((GAMBDA(ICAS).LT.EPSILO2).OR.
+     &(GAMBDA(ICASB).LT.EPSILO2)) THEN
+ 4030 CONTINUE
+             IF (NPASS.LE.5) THEN
+                NPASS = NPASS + 1
+             ELSE
+               GOTO 6000
+             ENDIF
+           IF ((GAMBDA(ICAS).LT.EPSILO2).AND.
+     &(GAMBDA(ICASB).LT.EPSILO2)) THEN
+C  Ce cas n'arrive que si les normales ont ete mal estimes:
+C   (increment elastique trop grand) --> on bissecte
+              GOTO 6000
+           ELSE
+             IF (GAMBDA(ICAS).LT.EPSILO2) THEN
+               ICAS = ICASB
+               IHARD = IHARDB
+               ISGNTC = ISGNTCB
+             ELSE
+               CONTINUE
+             ENDIF
+           ENDIF
+           SIGHP(1) = SIGHP0(1)
+           SIGHP(2) = SIGHP0(2)
+           SIGT(1) = SIGI(1) + DSIGI(1)
+           SIGT(2) = SIGI(2) + DSIGI(2)
+           SIGT(4) = SIGI(4) + DSIGI(4)
+           GOTO 1000
+         ENDIF
+C  On teste les mecanismes de la grande surface
+C  Si un des criteres est viole (et donc s'il n'y a pas contact)
+C  il faut trouver le point de contact
+C
+      CALL CONPRI ( SIGT ,CPHI0,SPHI0,SIGTP,CPHI,SPHI)
+C
+      NCON = 0
+      FINT1 = 0.
+      FINT2 = 0.
+C
+      XFFFS = XZER
+      XFFFSB = XZER
+      IF (ICAS.LE.4) THEN
+        IF (ICAS.LE.2) THEN
+          FG(1) = XKISO(1)*RESIST(5)
+        ELSE
+          FG(1) = XKISO(2)*RESIST(6)
+        ENDIF
+        CALL CRITPE (SIGTP(IHARD),XZER,FG(1),ISGNTC,XFFFS)
+        IF (((XFFFS.GE.EPSIL(5)).AND.(ICAS.LE.2)).OR.
+     &       ((XFFFS.GE.EPSIL(6)).AND.(ICAS.GE.3))) THEN
+          NCON = NCON +1
+        ELSE
+          IF (((ICAS.LE.2).AND.(ABS(XFFFS).LT.EPSIL(5))).OR.
+     &((ICAS.GE.3).AND.(ABS(XFFFS).LT.EPSIL(6)))) THEN
+            KONTAC(ICAS) = 1
+          ELSE
+            CONTINUE
+          ENDIF
+        ENDIF
+      ENDIF
+C
+      IF (ICASB.LE.4) THEN
+        IF (ICASB.LE.2) THEN
+          FG(1) = XKISO(1)*RESIST(5)
+        ELSE
+          FG(1) = XKISO(2)*RESIST(6)
+        ENDIF
+        CALL CRITPE (SIGTP(IHARDB),XZER,FG(1),ISGNTCB,XFFFSB)
+        IF (((XFFFSB.GE.EPSIL(5)).AND.(ICASB.LE.2)).OR.
+     &       ((XFFFSB.GE.EPSIL(6)).AND.(ICASB.GE.3))) THEN
+          NCON = NCON +1
+        ELSE
+          IF (((ICASB.LE.2).AND.(ABS(XFFFSB).LT.EPSIL(5))).OR.
+     &((ICASB.GT.3).AND.(ABS(XFFFSB).LT.EPSIL(6)))) THEN
+            KONTAC(ICASB) = 1
+          ELSE
+            CONTINUE
+          ENDIF
+        ENDIF
+      ENDIF
+C
+      IF (NCON.EQ.1) THEN
+        IF (((XFFFS.GE.EPSIL(5)).AND.(ICAS.LE.2)).OR.
+     &       ((XFFFS.GE.EPSIL(6)).AND.(ICAS.GE.3))) THEN
+          GOTO 4040
+        ELSE
+          ICASI = ICAS
+          ISGNTCI = ISGNTC
+          IHARDI = IHARD
+          ICAS = ICASB
+          ISGNTC = ISGNTCB
+          IHARD = IHARDB
+          ICASB = ICASI
+          ISGNTCB = ISGNTCI
+          IHARDB = IHARDI
+          GOTO 4040
+        ENDIF
+      ELSE
+        IF (NCON.EQ.2) THEN
+          GOTO 4040
+        ELSE
+          CONTINUE
+        ENDIF
+        CONTINUE
+      ENDIF
+C
+C Regles de suivi avant de sortir normalement
+C   Direction de l'ecoulement
+      IF (ICAS.GE.5) THEN
+        SIGHP(IHARD) = XKISO(ICAS-4)*RESIST(ICAS)
+     &              -RESIST(2*ICAS-10+IHARD)
+      ENDIF
+      IF (ICASB.GE.5) THEN
+        SIGHP(IHARDB) = XKISO(ICASB-4)*RESIST(ICASB)
+     &              -RESIST(2*ICASB-10+IHARDB)
+      ENDIF
+C
+C  Mis a jour des indicateurs de contact
+C
+      IF ((XKISO(1)*RESIST(5)-XKISO(2)*RESIST(6)).GT.
+     &(RESIST(1)-RESIST(3))) THEN
+        IF ((ICAS.EQ.1).OR.(ICAS.EQ.2)) KONTAC(ICAS+2)=0
+        IF ((ICAS.EQ.3).OR.(ICAS.EQ.4)) KONTAC(ICAS-2)=0
+        IF ((ICASB.EQ.1).OR.(ICASB.EQ.2)) KONTAC(ICASB+2)=0
+        IF ((ICASB.EQ.3).OR.(ICASB.EQ.4)) KONTAC(ICASB-2)=0
+      ELSE
+        KONTAC(1) = 1
+        KONTAC(2) = 1
+        KONTAC(3) = 1
+        KONTAC(4) = 1
+      ENDIF
+C
+      GOTO 9999
+C
+C  On va au contact
+ 4040 CONTINUE
+      SIGHP(1) = SIGHP0(1)
+      SIGHP(2) = SIGHP0(2)
+      SIGT(1) = SIGI(1) + DSIGI(1)
+      SIGT(2) = SIGI(2) + DSIGI(2)
+      SIGT(4) = SIGI(4) + DSIGI(4)
+      EPSI(1) = EPSI0(1)
+      EPSI(2) = EPSI0(2)
+      GOTO 5000
+C================================================================
+C                 CAS 5
+C    Deux  mecanismes avec
+C    Entree en contact de 2 mecanismes
+C================================================================
+ 5000  CONTINUE
+C
+        CALL CONPRI ( SIGT , CPHI0,SPHI0,SIGTP,CPHI,SPHI)
+C
+C  ISGN2 et ISGN2B
+      IF (IHARD.EQ.1) THEN
+        IF (SIGTP(1).GE.SIGTP(2)) THEN
+          ISGN2 = 1
+        ELSE
+          ISGN2 = -1
+        ENDIF
+      ELSE
+        IF (IHARD.EQ.2) THEN
+          IF (SIGTP(1).GE.SIGTP(2)) THEN
+            ISGN2 = -1
+          ELSE
+            ISGN2 = 1
+          ENDIF
+        ENDIF
+      ENDIF
+C
+        IF (IHARDB.EQ.1) THEN
+          IF (SIGTP(1).GE.SIGTP(2)) THEN
+            ISGN2B = 1
+          ELSE
+            ISGN2B = -1
+          ENDIF
+        ELSE
+          IF (IHARDB.EQ.2) THEN
+            IF (SIGTP(1).GE.SIGTP(2)) THEN
+              ISGN2B = -1
+            ELSE
+              ISGN2B = 1
+            ENDIF
+          ENDIF
+        ENDIF
+C
+ 5010 CONTINUE
+C
+C  Definition du segment
+C
+      ITM = 30
+      MN = 3
+      SEGINI,QUASIN
+      IT = -1
+      CALL ZERO(D,1,MN)
+C  XKISO et XHH2
+        IF (ICASB.LE.4) THEN
+          IF ((ICAS.EQ.1).OR.(ICAS.EQ.2)) THEN
+            CALL VALEUR (EPSI0(1),TRAC(IPT),NCURVT,XLCAT,
+     &XKISO(1),XHH2,KERRE)
+            CALL VALEUR (EPSI0(2),TRAC(IPC),NCURVC,XLCAC,
+     &XKISO(2),DUMM,KERRE)
+          ELSE
+            CALL VALEUR (EPSI0(1),TRAC(IPT),NCURVT,XLCAT,
+     &XKISO(1),DUMM,KERRE)
+            CALL VALEUR (EPSI0(2),TRAC(IPC),NCURVC,XLCAC,
+     &XKISO(2),XHH2,KERRE)
+          ENDIF
+        ELSE
+          IF (ICASB.EQ.5) THEN
+            IF ((ICAS.EQ.1).OR.(ICAS.EQ.2)) THEN
+              CALL VALEUR (EPSI0(1),TRAC(IPT),NCURVT,XLCAT,XKISO(1)
+     &         ,XHH2,KERRE)
+              XHH2B=XHH2
+              CALL VALEUR (EPSI0(2),TRAC(IPC),NCURVC,XLCAC,XKISO(2)
+     &         ,DUMM,KERRE)
+            ELSE
+              CALL VALEUR (EPSI0(1),TRAC(IPT),NCURVT,XLCAT,XKISO(1)
+     &         ,XHH2B,KERRE)
+              CALL VALEUR (EPSI0(2),TRAC(IPC),NCURVC,XLCAC,XKISO(2)
+     &         ,XHH2,KERRE)
+            ENDIF
+          ELSE
+            IF ((ICAS.EQ.1).OR.(ICAS.EQ.2)) THEN
+              CALL VALEUR (EPSI0(1),TRAC(IPT),NCURVT,XLCAT,XKISO(1)
+     &         ,XHH2,KERRE)
+              CALL VALEUR (EPSI0(2),TRAC(IPC),NCURVC,XLCAC,XKISO(2)
+     &         ,XHH2B,KERRE)
+            ELSE
+              CALL VALEUR (EPSI0(1),TRAC(IPT),NCURVT,XLCAT,XKISO(1)
+     &         ,DUMM,KERRE)
+              CALL VALEUR (EPSI0(2),TRAC(IPC),NCURVC,XLCAC,XKISO(2)
+     &         ,XHH2,KERRE)
+              XHH2B = XHH2
+            ENDIF
+          ENDIF
+        ENDIF
+C
+        XKISO0(1)=XKISO(1)
+        EPSI(1)=EPSI0(1)
+        XKISO0(2)=XKISO(2)
+        EPSI(2)=EPSI0(2)
+        XHH2I = XHH2
+        XHH2IB = XHH2B
+        XKISOI(1)=XKISO(1)
+        XKISOI(2)=XKISO(2)
+        EPSII(1)=EPSI0(1)
+        EPSII(2)=EPSI0(2)
+C
+       DO 5011,IE1=1,6
+         FFF(IE1) = XZER
+ 5011  CONTINUE
+C
+          CALL CRITPE (SIGTP(IHARD),SIGHP0(IHARD),RESIST(ICAS),
+     &               ISGNTC,FFF(ICAS))
+C
+        IF (ICASB.LE.4) THEN
+          CALL CRITPE (SIGTP(IHARDB),SIGHP0(IHARDB),RESIST(ICASB),
+     &               ISGNTCB,FFF(ICASB))
+        ELSE
+          FG(1) = XKISOI(ICASB -4)*RESIST(ICASB)
+          CALL CRITPE (SIGTP(IHARDB), XZER, FG(1),ISGNTCB,FFF(ICASB))
+        ENDIF
+C
+        IF ((ICAS.EQ.1).OR.(ICAS.EQ.2)) THEN
+          FG(1) = XKISO(1)*RESIST(5)
+          CALL CRITPE (SIGTP(IHARD), XZER, FG(1), ISGNTC,XFFFS)
+        ELSE
+          FG(1) = XKISO(2)*RESIST(6)
+          CALL CRITPE (SIGTP(IHARD),XZER,FG(1),ISGNTC,XFFFS)
+        ENDIF
+C
+        CALL NORMBL(SIGT,RESIST(ICAS),ISGNTC,ISGN2,1,XNOR1)
+        CALL NORMBL(SIGT,RESIST(ICASB),ISGNTCB,ISGN2B,1,XNOR2)
+C
+C   Jacobien
+C
+      XJ00(1,1) = -XXCCYY(XNOR1, XNOR1, YOUN, XNU) - XHH1
+      XJ00(1,2) = -XXCCYY(XNOR1, XNOR2, YOUN, XNU)
+      XJ00(1,3) = -XXYY(XNOR1 , DSIGI)
+      XJ00(2,1) = -XXCCYY(XNOR2, XNOR1, YOUN, XNU)
+      XJ00(2,2) = -XXCCYY(XNOR2, XNOR2, YOUN, XNU)
+      XJ00(2,3) = -XXYY(XNOR2,DSIGI)
+      XJ00(3,1) = -XXCCYY(XNOR1,XNOR1,YOUN,XNU)
+      XJ00(3,2) = -XXCCYY(XNOR1,XNOR2,YOUN,XNU)
+      XJ00(3,3) = -XXYY(XNOR1,DSIGI)
+C
+      IF ((ICAS.EQ.3).OR.(ICAS.EQ.4)) THEN
+        XJ00(3,1)=XJ00(3,1)+RESIST(6)*XHH2*DEGRAD*ISGNTC*RESIST(ICAS)
+      ENDIF
+C
+      IF (ICASB.LE.4) THEN
+        XJ00(2,2) = XJ00(2,2) - XHH1
+        IF ((ICAS.EQ.3).OR.(ICAS.EQ.4)) THEN
+          XJ00(3,2)=XJ00(3,2)+RESIST(6)*XHH2
+     &*DEGRAD*ISGNTCB*RESIST(ICASB)
+        ENDIF
+      ELSE
+        XJ00(2,2) = XJ00(2,2) - RESIST(ICASB)*XHH2B*ISGNTCB
+      ENDIF
+C
+C
+      R(1) = FFF(ICAS)
+      R(2) = FFF(ICASB)
+      R(3) = XFFFS
+C
+      SPLITT = XZER
+      GAMBDA(1) = XZER
+      GAMBDA(2) = XZER
+      GAMBDA(3) = XZER
+      GAMBDA(4) = XZER
+      GAMBDA(5) = XZER
+      GAMBDA(6) = XZER
+C
+C  Inverse du jacobien
+C
+      XH0(1,1) = XJ00(1,1)
+      XH0(1,2) = XJ00(1,2)
+      XH0(1,3) = XJ00(1,3)
+      XH0(2,1) = XJ00(2,1)
+      XH0(2,2) = XJ00(2,2)
+      XH0(2,3) = XJ00(2,3)
+      XH0(3,1) = XJ00(3,1)
+      XH0(3,2) = XJ00(3,2)
+      XH0(3,3) = XJ00(3,3)
+      CALL INVALM (XH0, MN , MN , IRD, 1.D-12)
+      IF (IRD.NE.0) THEN
+        SEGSUP,QUASIN
+        GOTO 6000
+      ENDIF
+C
+C  On rentre dans les iterations internes
+C
+      DO I=0,ITM
+C
+C  Appel de Broyden
+C
+        CALL BROYDE (QUASIN)
+C
+        GAMBDA(ICAS) = D(1)
+        GAMBDA(ICASB) = D(2)
+        SPLITT = D(3)
+C
+C  Calcul du phi et des termes de la matrice A et A-1
+C
+        SITPRO(1) = SIGI(1) + (UN-SPLITT)*DSIGI(1)
+     &       - UNDEMI*(GAMBDA(1) + GAMBDA(2) + GAMBDA(5))*CPI
+     &       + UNDEMI*(GAMBDA(3) + GAMBDA(4) + GAMBDA(6))*CPI
+        SITPRO(2) = SIGI(2) + (UN-SPLITT)*DSIGI(2)
+     &       - UNDEMI*(GAMBDA(1) + GAMBDA(2) + GAMBDA(5))*CPI
+     &       + UNDEMI*(GAMBDA(3) + GAMBDA(4) + GAMBDA(6))*CPI
+        SITPRO(4) = SIGI(4) + (UN-SPLITT)*DSIGI(4)
+C
+C  PHI et AINV
+C
+        SIGHP(1) = SIGHP0(1) + XHH1*(GAMBDA(1)-GAMBDA(3))
+        SIGHP(2) = SIGHP0(2) + XHH1*(GAMBDA(2)-GAMBDA(4))
+        EPSI(1) = EPSI0(1) + GAMBDA(5)
+        WORK = ISGNTC*RESIST(ICAS)*GAMBDA(ICAS)
+        IF (ICASB.LE.4) THEN
+          WORK = WORK + ISGNTCB*RESIST(ICASB)*GAMBDA(ICASB)
+        ENDIF
+        EPSI(2)=EPSI0(2)+ GAMBDA(6) + DEGRAD*WORK
+C
+        IF (ICASB.LE.4) THEN
+          IF ((ICAS.EQ.1).OR.(ICAS.EQ.2)) THEN
+            CALL VALEUR (EPSI(1),TRAC(IPT),NCURVT,XLCAT,
+     &XKISO(1),XHH2,KERRE)
+            CALL VALEUR (EPSI(2),TRAC(IPC),NCURVC,XLCAC,
+     &XKISO(2),DUMM,KERRE)
+          ELSE
+            CALL VALEUR (EPSI(1),TRAC(IPT),NCURVT,XLCAT,
+     &XKISO(1),DUMM,KERRE)
+            CALL VALEUR (EPSI(2),TRAC(IPC),NCURVC,XLCAC,
+     &XKISO(2),XHH2,KERRE)
+          ENDIF
+        ELSE
+          IF (ICASB.EQ.5) THEN
+            IF ((ICAS.EQ.1).OR.(ICAS.EQ.2)) THEN
+              CALL VALEUR (EPSI(1),TRAC(IPT),NCURVT,XLCAT,XKISO(1)
+     &         ,XHH2,KERRE)
+              XHH2B=XHH2
+              CALL VALEUR (EPSI(2),TRAC(IPC),NCURVC,XLCAC,XKISO(2)
+     &         ,DUMM,KERRE)
+            ELSE
+              CALL VALEUR (EPSI(1),TRAC(IPT),NCURVT,XLCAT,XKISO(1)
+     &         ,XHH2B,KERRE)
+              CALL VALEUR (EPSI(2),TRAC(IPC),NCURVC,XLCAC,XKISO(2)
+     &         ,XHH2,KERRE)
+            ENDIF
+          ELSE
+            IF ((ICAS.EQ.1).OR.(ICAS.EQ.2)) THEN
+              CALL VALEUR (EPSI(1),TRAC(IPT),NCURVT,XLCAT,XKISO(1)
+     &         ,XHH2,KERRE)
+              CALL VALEUR (EPSI(2),TRAC(IPC),NCURVC,XLCAC,XKISO(2)
+     &         ,XHH2B,KERRE)
+            ELSE
+              CALL VALEUR (EPSI(1),TRAC(IPT),NCURVT,XLCAT,XKISO(1)
+     &         ,DUMM,KERRE)
+              CALL VALEUR (EPSI(2),TRAC(IPC),NCURVC,XLCAC,XKISO(2)
+     &         ,XHH2,KERRE)
+              XHH2B = XHH2
+            ENDIF
+          ENDIF
+        ENDIF
+C
+C  Calcul des phi
+C
+        PHI1=ISGNTC*(-UNDEMI*(SITPRO(1) + SITPRO(2))
+     &      + SIGHP(IHARD) + RESIST(ICAS))
+C
+        IF (ICASB.LE.4) THEN
+           PHI2=ISGNTCB*(-UNDEMI*(SITPRO(1) + SITPRO(2))
+     &   + SIGHP(IHARDB)+  RESIST(ICASB))
+        ELSE
+           PHI2=ISGNTCB*(-UNDEMI*(SITPRO(1)+SITPRO(2))
+     &    + (XKISOI(ICASB-4)+XHH2IB*(EPSI(ICASB-4)-EPSII(ICASB-4)))
+     &      *RESIST(ICASB))
+        ENDIF
+C
+C   Test sur phi1 et phi2
+C
+        IF ((ABS(PHI2)).GT.(ABS(EPSILO*RESIST(ICASB)))) THEN
+           SOMLAM = GAMBDA(ICAS) + GAMBDA(ICASB)*PHI1/PHI2
+           PHI = PHI1
+        ELSE
+          IF ((ABS(PHI1)).GT.(ABS(EPSILO*RESIST(ICAS)))) THEN
+            SOMLAM = GAMBDA(ICASB) + GAMBDA(ICAS)*PHI2/PHI1
+            PHI = PHI2
+          ELSE
+            SOMLAM = GAMBDA(ICASB) + GAMBDA(ICAS)
+            PHI = PHI1
+          ENDIF
+        ENDIF
+C
+        AINV(1) = (DEUX*PHI+GGG*SOMLAM)/(DEUX*PHI+DEUX*GGG*SOMLAM)
+        AINV(2) = (GGG*SOMLAM)/(DEUX*PHI + DEUX*GGG*SOMLAM)
+        AINV(3) = PHI/(PHI + GGG*SOMLAM)
+C
+C   Calcul des contraintes a l'aide de AINV
+C
+        SIGT(1) = AINV(1)*SITPRO(1)+AINV(2)*SITPRO(2)
+        SIGT(2) = AINV(2)*SITPRO(1)+AINV(1)*SITPRO(2)
+        SIGT(4) = AINV(3)*SITPRO(4)
+C
+C   Nouvelles contraintes principales
+C
+        CALL CONPRI ( SIGT , CPHI0,SPHI0,SIGTP,CPHI,SPHI)
+C
+          CALL CRITPE (SIGTP(IHARD),SIGHP(IHARD),RESIST(ICAS),
+     &               ISGNTC,FFF(ICAS))
+          R(1)= + FFF(ICAS)
+C
+        IF (ICASB.LE.4) THEN
+          CALL CRITPE (SIGTP(IHARDB),SIGHP(IHARDB),RESIST(ICASB),
+     &               ISGNTCB,FFF(ICASB))
+          R(2)= + FFF(ICASB)
+        ELSE
+          FG(1) = (XKISOI(ICASB -4)+XHH2IB*(EPSI(ICASB-4)
+     & - EPSII(ICASB-4)))*RESIST(ICASB)
+          CALL CRITPE (SIGTP(IHARDB), XZER, FG(1),ISGNTCB,FFF(ICASB))
+          R(2) = + FFF(ICASB)
+     &         - ISGNTCB*RESIST(ICASB)
+     &         * (XKISO(ICASB-4) - XKISOI(ICASB-4)
+     &            -(EPSI(ICASB-4) - EPSII(ICASB-4))*XHH2IB)
+          IF (ABS(EPSI(ICASB-4) - EPSII(ICASB-4)).LT.EPSILO2) THEN
+            XHH2IB=XHH2B
+          ELSE
+            XHH2IB = (XKISO(ICASB-4) - XKISOI(ICASB-4))/
+     &              (EPSI(ICASB-4) - EPSII(ICASB-4))
+          ENDIF
+        ENDIF
+C
+        IF ((ICAS.EQ.1).OR.(ICAS.EQ.2)) THEN
+          FG(1) = XKISO(1)*RESIST(5)
+          CALL CRITPE (SIGTP(IHARD), XZER, FG(1), ISGNTC,XFFFS)
+          R(3) = XFFFS
+        ELSE
+          FG(1) = (XKISOI(2)+XHH2I*(EPSI(2)-EPSII(2)))*RESIST(6)
+          CALL CRITPE (SIGTP(IHARD),XZER,FG(1),ISGNTC,XFFFS)
+          R(3) = XFFFS + RESIST(6)*
+     &     (XKISO(2) - XKISOI(2)-(EPSI(2) - EPSII(2))*XHH2I)
+          IF (ABS(EPSI(2) - EPSII(2)).LT.EPSILO2) THEN
+            XHH2I=XHH2
+          ELSE
+            XHH2I = (XKISO(2) - XKISOI(2))/
+     &              (EPSI(2) - EPSII(2))
+          ENDIF
+        ENDIF
+          XKISOI(1) = XKISO(1)
+          EPSII(1) = EPSI(1)
+          XKISOI(2) = XKISO(2)
+          EPSII(2) = EPSI(2)
+C
+C  Test de convergence
+C
+        IF (ICAS.LE.2) THEN
+          IF ((ABS(FFF(ICAS)).LT.EPSIL(ICAS)).AND.
+     &      (ABS(R(1)).LT.EPSIL(ICAS)).AND.
+     &      (ABS(FFF(ICASB)).LT.EPSIL(ICASB)).AND.
+     &      (ABS(R(2)).LT.EPSIL(ICASB)).AND.
+     &      (ABS(XFFFS).LT.EPSIL(5)).AND.
+     &      (ABS(R(3)).LT.EPSIL(5))) THEN
+             GOTO 5020
+          ENDIF
+        ELSE
+          IF ((ABS(FFF(ICAS)).LT.EPSIL(ICAS)).AND.
+     &      (ABS(R(1)).LT.EPSIL(ICAS)).AND.
+     &      (ABS(FFF(ICASB)).LT.EPSIL(ICASB)).AND.
+     &      (ABS(R(2)).LT.EPSIL(ICASB)).AND.
+     &      (ABS(XFFFS).LT.EPSIL(6)).AND.
+     &      (ABS(R(3)).LT.EPSIL(6))) THEN
+             GOTO 5020
+          ENDIF
+        ENDIF
+      ENDDO
+C
+C  Pas de convergence
+C
+        SEGSUP,QUASIN
+        GOTO 6000
+C
+ 5020 CONTINUE
+        SEGSUP,QUASIN
+C
+C
+       IF (((SPLITT-1.).LE.EPSILO).AND.(SPLITT.GE.(-1.*EPSILO)).AND.
+     &(GAMBDA(ICAS).GE.EPSILO2)
+     &.AND.(GAMBDA(ICASB).GE.EPSILO2)) THEN
+C
+C  On a les contraintes, les variables d'ecrouissage cinemat. et tgphi
+C  Mis a jour des variables d'ecrouissage isotrope ou regles de suivi
+C
+
+      IF (NCON.EQ.2) THEN
+        IF (ICASB.LE.4) THEN
+C
+           IF (ICASB.LE.2) THEN
+             FG(1) = XKISO(1)*RESIST(5)
+           ELSE
+             FG(1) = XKISO(2)*RESIST(6)
+           ENDIF
+           CALL CRITPE (SIGTP(IHARDB),XZER,FG(1),ISGNTCB,XFFFSB)
+C
+C  On regarde si on ne s'est pas trompe d'ordre
+C
+          IF (((XFFFSB.GE.EPSIL(5)).AND.(ICASB.LE.2)).OR.
+     &         ((XFFFSB.GE.EPSIL(6)).AND.(ICASB.GE.3))) THEN
+            ICASI = ICAS
+            ISGNTCI = ISGNTC
+            IHARDI = IHARD
+            ICAS = ICASB
+            ISGNTC = ISGNTCB
+            IHARD = IHARDB
+            ICASB = ICASI
+            ISGNTCB = ISGNTCI
+            IHARDB = IHARDI
+            GOTO 4040
+          ELSE
+            IF ((ICASB.LE.2).AND.(ABS(XFFFSB).LT.EPSIL(5))) THEN
+               KONTAC(ICASB) = 1
+               ICASB=5
+            ENDIF
+            IF (((ICASB.EQ.3).OR.(ICASB.EQ.4))
+     &          .AND.(ABS(XFFFSB).LT.EPSIL(6))) THEN
+              KONTAC(ICASB) = 1
+              ICASB=6
+            ENDIF
+          ENDIF
+C
+        ELSE
+          CONTINUE
+        ENDIF
+      ELSE
+        CONTINUE
+      ENDIF
+C
+C Le contact est realise
+C
+       KONTAC(ICAS) = 1
+       IF ((XKISO(1)*RESIST(5)-XKISO(2)*RESIST(6)).GT.
+     &(RESIST(1)-RESIST(3))) THEN
+         IF ((ICAS.EQ.1).OR.(ICAS.EQ.2)) KONTAC(ICAS+2)=0
+         IF ((ICAS.EQ.3).OR.(ICAS.EQ.4)) KONTAC(ICAS-2)=0
+         IF ((ICASB.EQ.1).OR.(ICASB.EQ.2)) KONTAC(ICASB+2)=0
+         IF ((ICASB.EQ.3).OR.(ICASB.EQ.4)) KONTAC(ICASB-2)=0
+       ELSE
+         KONTAC(1) = 1
+         KONTAC(2) = 1
+         KONTAC(3) = 1
+         KONTAC(4) = 1
+       ENDIF
+C
+       SIGI(1) = SIGT(1)
+       SIGI(2) = SIGT(2)
+       SIGI(4) = SIGT(4)
+       DSIGI(1) = DSIGI(1)*SPLITT
+       DSIGI(2) = DSIGI(2)*SPLITT
+       DSIGI(4) = DSIGI(4)*SPLITT
+       SIGT(1) = SIGI(1) + DSIGI(1)
+       SIGT(2) = SIGI(2) + DSIGI(2)
+       SIGT(4) = SIGI(4) + DSIGI(4)
+       SIGHP0(1) = SIGHP(1)
+       SIGHP0(2) = SIGHP(2)
+       EPSI0(1) = EPSI(1)
+       EPSI0(2) = EPSI(2)
+       NPASS2 = 0
+       CPHI0 = CPHI
+       SPHI0 = SPHI
+       IF ((ICAS.EQ.1).OR.(ICAS.EQ.2)) THEN
+          ICAS = 5
+       ELSE
+          ICAS = 6
+       ENDIF
+        IF (ICASB.LE.4) THEN
+          GOTO 4000
+        ELSE
+          IF (ICASB.EQ.ICAS) THEN
+C On passe de 2 mecanismes a 1 mecanisme
+            GOTO 1000
+          ELSE
+            GOTO 4000
+          ENDIF
+        ENDIF
+C
+C
+       ELSE
+ 5040     CONTINUE
+          IF ((GAMBDA(ICASB).LT.EPSILO2).AND.(NPASS.LE.3)) THEN
+            SIGHP(1) = SIGHP0(1)
+            SIGHP(2) = SIGHP0(2)
+            SIGT(1) = SIGI(1) + DSIGI(1)
+            SIGT(2) = SIGI(2) + DSIGI(2)
+            SIGT(4) = SIGI(4) + DSIGI(4)
+            IF (NPASS.LT.5) THEN
+              NPASS = NPASS + 1
+              GOTO 3000
+            ELSE
+              GOTO 6000
+            ENDIF
+          ELSE
+            IF ((GAMBDA(ICAS).LT.EPSILO2).AND.(NPASS2.EQ.0)) THEN
+              NPASS2 = 1
+              SIGHP(1) = SIGHP0(1)
+              SIGHP(2) = SIGHP0(2)
+              SIGT(1) = SIGI(1) + DSIGI(1)
+              SIGT(2) = SIGI(2) + DSIGI(2)
+              SIGT(4) = SIGI(4) + DSIGI(4)
+              ICAS = ICASB
+              IHARD = IHARDB
+              ISGNTC = ISGNTCB
+              IF (NPASS.LT.5) THEN
+                NPASS = NPASS + 1
+                GOTO 1000
+              ELSE
+                GOTO 6000
+              ENDIF
+            ELSE
+              GOTO 6000
+            ENDIF
+          ENDIF
+        ENDIF
+C
+C On bissecte
+C
+ 6000 CONTINUE
+      NDICHO = NDICHO + 1
+      IF (NDICHO.LE.90) THEN
+        IDICHO = 1
+        DSIGIDI(1) = DSIGIDI(1) + UNDEMI*DSIGI(1)
+        DSIGIDI(2) = DSIGIDI(2) + UNDEMI*DSIGI(2)
+        DSIGIDI(4) = DSIGIDI(4) + UNDEMI*DSIGI(4)
+        DSIGI(1) = DSIGI(1)*UNDEMI
+        DSIGI(2) = DSIGI(2)*UNDEMI
+        DSIGI(4) = DSIGI(4)*UNDEMI
+        CPHI0 = CPHI00
+        SPHI0 = SPHI00
+        GOTO 10
+      ELSE
+        KERRE = 2
+        RETURN
+      ENDIF
+C
+C=================================================================
+C      MIS A JOUR DE TOUTES LES VARIABLES ET CONTRAINTES AVANT
+C      DE SORTIR
+C=================================================================
+ 9999 CONTINUE
+C  Cas de la bissection
+      IF (IDICHO.EQ.1) THEN
+        IDICHO = 0
+        NDICHO = 0
+        NPASS = 0
+        DSIGI(1) = DSIGIDI(1)
+        DSIGI(2) = DSIGIDI(2)
+        DSIGI(4) = DSIGIDI(4)
+        SIGI(1) = SIGT(1)
+        SIGI(2) = SIGT(2)
+        SIGI(4) = SIGT(4)
+        DSIGIDI(1) = XZER
+        DSIGIDI(2) = XZER
+        DSIGIDI(4) = XZER
+        SIGHP0(1) = SIGHP(1)
+        SIGHP0(2) = SIGHP(2)
+        EPSI0(1) = EPSI(1)
+        EPSI0(2) = EPSI(2)
+        CPHI0 = CPHI
+        CPHI00 = CPHI0
+        SPHI0 = SPHI
+        SPHI00 = SPHI0
+        KONTA0(1) = KONTAC(1)
+        KONTA0(2) = KONTAC(2)
+        KONTA0(3) = KONTAC(3)
+        KONTA0(4) = KONTAC(4)
+        GOTO 10
+      ENDIF
+C  STRESS
+      SIGF(1) = SIGT(1)
+      SIGF(2) = SIGT(2)
+      SIGF(4) = SIGT(4)
+      SIGF(3) = XZER
+C  PLASTIC STRAIN
+      CINV(1) = UN/YOUN
+      CINV(2) = -XNU/YOUN
+      CINV(3) = UN/GGG
+      DEFP(1) =CINV(1)*(SIG0(1) + DSIGT(1) - SIGT(1))
+     &        +CINV(2)*(SIG0(2) + DSIGT(2) - SIGT(2))
+      DEFP(2) =CINV(2)*(SIG0(1) + DSIGT(1) - SIGT(1))
+     &        +CINV(1)*(SIG0(2) + DSIGT(2) - SIGT(2))
+      DEFP(4) =CINV(3)*(SIG0(4) + DSIGT(4) - SIGT(4))
+      DEFP(3) = XZER
+C
+C Cas ou la grande surface est a l'interieur de la petite
+C
+      IF ((XKISO(1)*RESIST(5)-XKISO(2)*RESIST(6)).LE.
+     &(RESIST(1)-RESIST(3))) THEN
+        KONTAC(1) = 1
+        KONTAC(2) = 1
+        KONTAC(3) = 1
+        KONTAC(4) = 1
+      ENDIF
+      VARF(1) = SIGHP(1)
+      VARF(2) = SIGHP(2)
+      VARF(3) = EPSI(1)
+      VARF(4) = EPSI(2)
+      VARF(5) = CPHI - 1.D0
+      VARF(6) = SPHI
+      VARF(7) = KONTAC(1)
+      VARF(8) = KONTAC(2)
+      VARF(9) = KONTAC(3)
+      VARF(10) = KONTAC(4)
+      VARF(11) = ICAS
+      VARF(12) = ICASB
+      VARF(13) = GAMBDA(ICAS)
+      VARF(14) = GAMBDA(ICASB)
+C=====================================================
+C            FIN DE LA ROUTINE DU MODELE
+C======================================================
+      RETURN
+      END
+
+
+

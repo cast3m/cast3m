@@ -1,0 +1,432 @@
+C XPOST1    SOURCE    GG250959  17/09/20    21:16:59     9554
+c
+      SUBROUTINE XPOST1(IPCHP1,IPMOD1,IPCHP2)
+c
+c     Construit un Chpoint avec des ddl "physiques" (UX UY) en
+c     RECOmbinant les ddl Xfem (UX AX B1X C1X ...)
+c     -> Utile pour le tracé de déformées
+c
+C     SYNTAXE :
+c       chpo2 = XFEM 'RECO' chpo1 MODEL_XFEM
+C
+c
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+C
+      PARAMETER   (XTOL1=1.d-7)
+      PARAMETER   (NBRMAX=5)
+
+C
+C  SEGMENTS INCLUDE
+-INC CCREEL
+-INC CCOPTIO
+-INC SMCOORD
+-INC SMELEME
+-INC SMCHPOI
+-INC SMCHAML
+-INC SMMODEL
+-INC SMLREEL
+c
+      POINTEUR    MCHEX1.MCHELM,MPHI1.MPOVAL,MPSI1.MPOVAL
+C
+
+c       SEGMENT MRACC
+c          INTEGER        TLENR(NBENR1,NBPTS)
+c       ENDSEGMENT
+      SEGMENT MRACC
+         INTEGER        TLENR(NBENR1,NBPTS)
+         INTEGER        IPOCHA(NBPTS,NCOMP1)
+      ENDSEGMENT
+c       SEGMENT MRACC
+c          INTEGER        NOD2PT(NBPTS)
+c          INTEGER        TLENR(NBENR1,NBPT1)
+c          INTEGER        IPOCHA(NCOMP1,NBPT1)
+c       ENDSEGMENT
+C
+C
+C_____________________________________________________________
+C  INITIALISATION DES INCONNUES obligatoires et facultatives
+      PARAMETER (NOBL=4,NFAC=27)
+      CHARACTER*4 DDLOBL(NOBL),DDLFAC(NFAC),MODDL,MODDL2
+      DATA DDLOBL/'UX  ','UY  ','UZ  ','LX  '/
+      DATA DDLFAC/'AX  ','AY  ','AZ  ',
+     >'B1X ','B1Y ','B1Z ',
+     >'C1X ','C1Y ','C1Z ',
+     >'D1X ','D1Y ','D1Z ',
+     >'E1X ','E1Y ','E1Z ',
+     >'B2X ','B2Y ','B2Z ',
+     >'C2X ','C2Y ','C2Z ',
+     >'D2X ','D2Y ','D2Z ',
+     >'E2X ','E2Y ','E2Z '/
+      INTEGER TENR(NFAC),TNI(NFAC),TF2O(NFAC)
+c     ddlfac correspond a quel enrichissement?
+      DATA TENR/1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3/
+c     ddlfac correspond a quel fonction d'enrichissement?
+      DATA  TNI/1,1,1,1,1,1,2,2,2,3,3,3,4,4,4,1,1,1,2,2,2,3,3,3,4,4,4/
+c     ddlfac correspond a quel ddlobl?
+      DATA TF2O/1,2,3,1,2,3,1,2,3,1,2,3,1,2,3,1,2,3,1,2,3,1,2,3,1,2,3/
+c     tables pour mise en concordance des ddl
+      INTEGER TOBL(NOBL),TFAC(NOBL,4,NBRMAX)
+      INTEGER           TIFAC(NOBL,4,NBRMAX)
+c     fonctions de forme
+      REAL*8  SHPWRK(4)
+
+C_____________________________________________________________
+C  ACTIVATION ...
+
+C     ...DU MODELE
+      MMODEL=IPMOD1
+      SEGACT,MMODEL
+      NSOUS = KMODEL(/1)
+
+C     ...DU CHPOINT avec ddl xfem
+      MCHPOI=IPCHP1
+      SEGACT,MCHPOI
+      NSOUP0 = IPCHP(/1)
+
+C_____________________________________________________________
+C  TRAVAIL PRELIMINAIRE SUR L ENRICHISSEMENT'
+C  on les transforme en 2 chpoints psi et phi
+c  avec le type d enrichissement pour composante
+
+      SEGACT,MCOORD
+      NBPTS = (XCOOR(/1)) / (idim+1)
+      NBENR1= NBRMAX
+      NCOMP1=NFAC
+      SEGINI,MRACC
+      N=NBPTS
+      NC=NBRMAX
+      segini,MPHI1,MPSI1
+      NBPTS = 0
+      NBENR2= 0
+
+c ----boucle sur les zones du modele
+      DO 0001 ISOUS=1,NSOUS
+c         write(6,*) 'zone du modele sISOUS=',ISOUS,'/',NSOUS
+         IMODEL = KMODEL(ISOUS)
+         SEGACT,IMODEL
+         NOBMOD=IVAMOD(/1)
+         IF(NOBMOD.NE.0) THEN
+
+c -------boucle sur les objet ivamod jusqu'a trouver un mchelm d'enrichissement
+         DO 0002 iobmo1=1,NOBMOD
+           if((TYMODE(iobmo1)).ne.'MCHAML')   goto 0002
+           MCHEX1 = IVAMOD(iobmo1)
+           segact,MCHEX1
+           if((MCHEX1.TITCHE).ne.'ENRICHIS')  goto 0003
+
+*          on a trouvé une zone enrichie => on crée une table d'enrichissment nodal
+           N1 = MCHEX1.ICHAML(/1)
+c ---------boucle sur les maillages elementaire du chaml d'enrichissement
+           do 0010 i1=1,N1
+              if((MCHEX1.INFCHE(i1,4)).ne.0)  goto 0010
+
+              MELEME = MCHEX1.IMACHE(i1)
+              MCHAM1 = MCHEX1.ICHAML(i1)
+              segact,MCHAM1,MELEME
+              NBNN = NUM(/1)
+              NBELEM = NUM(/2)
+              N2=MCHAM1.IELVAL(/1)
+              ITYP1 = ITYPEL
+c--------     On exclu les sous zone de relation
+              if (ITYP1.EQ.48) goto 0010
+c ------------boucle sur les enrichissements possibles
+              do i2=1,N2
+                  MELVAL=MCHAM1.IELVAL(i2)
+                  segact,MELVAL
+                  do j=1,NBELEM
+                  do i=1,NBNN
+                    inoeu = NUM(i,j)
+                    NBPTS = max(NBPTS,inoeu)
+                    MLREEL = IELCHE(i,j)
+c                  write(6,*) 'i,j,inoeu,mlreel',i,j,inoeu,MLREEL,NBPTS
+                    if (MLREEL.ne.0) then
+                      TLENR(i2,inoeu) = MLREEL
+                      NBENR2 = max(NBENR2,i2)
+                      segact,MLREEL
+                      if (i2.eq.1)  then
+                        MPHI1.VPOCHA(inoeu,i2) = PROG(i)
+                      else
+                        MPSI1.VPOCHA(inoeu,i2) = PROG(i)
+                        MPHI1.VPOCHA(inoeu,i2) = PROG(NBNN+i)
+                      endif
+c                     avec MPSI1 et MPHI1, on peut fermer MLREEL
+                      segdes,MLREEL
+                    endif
+                  enddo
+                  enddo
+                  segdes,MELVAL
+              enddo
+c ------------fin de boucle sur les enrichissements possibles
+              segdes,MCHAM1,MELEME
+ 0010      continue
+c ---------fin de boucle sur les maillages elementaire du chaml d'enrichissement
+
+ 0003    CONTINUE
+         segdes,MCHEX1
+ 0002    CONTINUE
+c -------fin de boucle sur les objet ivamod
+
+         ENDIF
+         SEGDES,IMODEL
+ 0001 CONTINUE
+c ----fin de boucle sur les zones du modele
+
+      N=NBPTS
+*      NC=NBENR1
+      NC=NBENR2
+      segadj,MPHI1,MPSI1
+
+      SEGDES,MMODEL
+
+C_____________________________________________________________
+C  INITIALISATION
+c
+c  ...du mchpo2
+      NAT=JATTRI(/1)
+      NSOUPO=NSOUP0
+      SEGINI,MCHPO2=MCHPOI
+C      NPOCHA=0
+
+
+C_____________________________________________________________
+C>>>>>>>>>>>>>>>>>>>>>>>  BOUCLE SUR LES ZONES DU CHPOINT
+      DO 1000 ISOUP=1,NSOUP0
+c        write(*,*) 'xpost1: ZONE ',ISOUP,' / ',NSOUP0
+
+C_____________________________________
+C  ACTIVATION DU SOUS CHPOINT
+        MSOUPO = IPCHP(ISOUP)
+        SEGACT,MSOUPO
+        MELEME = IGEOC
+        MPOVAL = IPOVAL
+        SEGACT,MELEME,MPOVAL
+
+c nbre de composante, de points
+        NCOMP = NOCOMP(/2)
+        NBPT0 = NUM(/2)
+        NC = NCOMP
+
+C  INITIALISATION du MSOUP2 (avec NC =celui de départ)
+        SEGINI,MSOUP2=MSOUPO
+        MCHPO2.IPCHP(ISOUP)=MSOUP2
+
+c quelles sont les composantes obligatoires (=physiques) et ou sont elles?
+c on en deduit NC
+        NC=0
+        DO 1001 IOBL=1,NOBL
+           MODDL2 = DDLOBL(IOBL)
+           DO ICOMP=1,NCOMP
+             MODDL = NOCOMP(ICOMP)
+*     on a trouvé cette comp obl dans le chpoint d entree
+             IF(MODDL.eq.MODDL2) THEN
+               NC=NC+1
+               MSOUP2.NOCOMP(NC) = MODDL2
+               MSOUP2.NOCONS(NC) = NOCONS(ICOMP)
+               TOBL(NC) = ICOMP
+               GOTO 1001
+             ENDIF
+          ENDDO
+ 1001   CONTINUE
+        IF(NC.lt.NOBL) THEN
+        DO IOBL=(NC+1),NOBL
+            TOBL(IOBL) = 0
+        ENDDO
+        ENDIF
+
+c ...et les facultatives(enrichissement)?
+        do i1=1,NOBL
+        do i2=1,4
+        do i3=1,NBRMAX
+           TFAC(i1,i2,i3) = 0
+        enddo
+        enddo
+        enddo
+        NF=0
+        IFAC = 0
+        DO 1002 IFAC=1,NFAC
+           MODDL2 = DDLFAC(IFAC)
+           DO ICOMP=1,NCOMP
+              MODDL = NOCOMP(ICOMP)
+*    on a trouvé une comp fac qui va etre ajouté a la comp obl dans le chpoint de sortie
+              IF(MODDL.eq.MODDL2) THEN
+                NF=NF+1
+                IOBL=TF2O(IFAC)
+                INI =TNI (IFAC)
+                IENR=TENR(IFAC)
+                TFAC(IOBL,INI,IENR) = ICOMP
+                TIFAC(IOBL,INI,IENR) = IFAC
+                GOTO 1002
+              ENDIF
+           ENDDO
+*     on n a pas trouvé la composante facultative
+                IOBL=TF2O(IFAC)
+                INI =TNI (IFAC)
+                IENR=TENR(IFAC)
+                TIFAC(IOBL,INI,IENR) = IFAC
+ 1002   CONTINUE
+
+
+C  INITIALISATION du MSOUP2 (avec NC ajusté) et du MPOVA2
+        segadj,MSOUP2
+        N = VPOCHA(/1)
+        SEGINI,MPOVA2
+        MSOUP2.IPOVAL = MPOVA2
+
+        SEGDES,MSOUPO,MSOUP2
+c       actifs a ce stade : MCHPO2,MCHPOI,MELEME,MPOVAL,MPOVA2
+
+C_____________________________________
+C>>>>>>>>>>>>>  BOUCLE SUR LES POINTS
+        DO 2000 J=1,NBPT0
+c          write(*,*) 'point ',J,' / ',NBPT0,NC
+
+C______________________
+C         On commence par recopier les valeurs obligatoires (UX,UY)
+          DO IC2=1,NC
+              ICOMP = TOBL(IC2)
+              MPOVA2.VPOCHA(J,IC2) = VPOCHA(J,ICOMP)
+          ENDDO
+
+C______________________
+C         ce noeud est il IENR2-enrichi?
+          inoeu = NUM(1,J)
+
+          DO 3000 IENR2=1,NBENR2
+
+             MLREEL = TLENR(IENR2,inoeu)
+
+C            si ce noeud n est pas enrichi on ne fait rien
+             IF(MLREEL.eq.0)  GOTO 3000
+
+C            si ce noeud est enrichi,
+c            on recupere les infos relatives a l enrichissement
+
+c            on calcule les fonctions d enrichissement
+
+c------------pour IENR=1, fonction H, ddl AX et AY
+             IF (IENR2.eq.1) THEN
+              PHIX = MPHI1.VPOCHA(inoeu,IENR2)
+              NBNI = 1
+              SHPWRK(1) =  SIGN(1.D0,PHIX)
+              if (abs(phix).lt.xtol1) then
+               SHPWRK(1) =  0.d0
+              else
+               SHPWRK(1) =  SIGN(1.D0,PHIX)
+              endif
+             ENDIF
+c------------fin du cas IENR=1, fonction H
+
+c------------pour IENR>1, 4 fonctions F
+             IF (IENR2.ge.2) THEN
+              PHIX = MPHI1.VPOCHA(inoeu,IENR2)
+              PSIX = MPSI1.VPOCHA(inoeu,IENR2)
+              if (ABS(phix).lt.xtol1) then
+               HX = 0.d0
+              else
+               HX = SIGN(1.D0,PHIX)
+              endif
+              RX   = ( (PSIX**2.) + (PHIX**2.) )**0.5
+              IF (RX.LT.XTOL1) THEN
+                THETAX = 0.d0
+              ELSE
+                THETAX = HX * ((XPI/2.) - (ATAN2(PSIX,ABS(PHIX))))
+              ENDIF
+              SIN1T = SIN(THETAX)
+C              COS1T = COS(THETAX)
+              SIN05T = SIN(THETAX/2.)
+              COS05T = COS(THETAX/2.)
+              NBNI = 4
+              SHPWRK(1) = (RX**0.5) * SIN05T
+              SHPWRK(2) = (RX**0.5) * COS05T
+              SHPWRK(3) = (RX**0.5) * SIN05T * SIN1T
+              SHPWRK(4) = (RX**0.5) * COS05T * SIN1T
+             ENDIF
+c------------fin du cas IENR>1, fonction F
+
+c            on ajoute les fonctions d enrichissement
+             DO 3900 IC2=1,NC
+             DO 3900 INI=1,NBNI
+              ICOMP = TFAC(IC2,INI,IENR2)
+              IFAC = TIFAC(IC2,INI,IENR2)
+c             1ere fois qu on voit le besoin de (composante + noeud)
+              if(IPOCHA(inoeu,IFAC).eq.0) IPOCHA(inoeu,IFAC)=1
+c             cas ou on a pas trouvé cette composante dans cette zone du
+c             chpoint solution => on saute simplement
+              if(ICOMP.eq.0) goto 3900
+              MPOVA2.VPOCHA(J,IC2) = MPOVA2.VPOCHA(J,IC2)
+     $                + ( SHPWRK(INI) * VPOCHA(J,ICOMP) )
+              IPOCHA(inoeu,IFAC) = IPOCHA(inoeu,IFAC)+1
+ 3900        CONTINUE
+
+ 3000     CONTINUE
+C<<<<<<<<< FIN DE BOUCLE SUR LES enrichissements
+
+
+
+ 2000   CONTINUE
+C<<<<<<<<<<<<<<< FIN DE BOUCLE SUR LES POINTS
+
+      SEGDES,MPOVA2,MPOVAL,MELEME
+
+ 1000 CONTINUE
+C<<<<<<<<<<<<<<<<<<<<<<<<< FIN DE BOUCLE SUR LES ZONES
+
+      SEGDES,MCHPOI,MCHPO2
+      segsup,MPHI1,MPSI1
+
+
+C_____________________________________________________________
+C     PETIT AVERTISSEMENT S'IL MANQUE DES ENRICHISSEMENTS
+C
+C   --initialisation du nombre d erreur sur le noms de composantes
+      NBERR1=0
+
+c   --recherche des erreurs
+      DO inoeu=1,NBPTS
+      DO icomp1=1,NCOMP1
+c       -cas ou on a pas besoin de cette composante en ce noeud :
+c        (IPOCHA(inoeu,icomp1).EQ.0)
+c       -Cas ou on a trouvé un noeud enrichi sans la composante associée
+c        dans le chpoint => avertissement :
+         IF (IPOCHA(inoeu,icomp1).EQ.1) THEN
+           NBERR1=NBERR1+1
+           if (IIMPI.ge.1) then
+             write(IOIMP,991) DDLFAC(icomp1),inoeu
+  991        format(2X,'ABSENCE DE LA COMPOSANTE ',A4,' AU NOEUD ',I6,
+     $            ' DANS LE CHPOINT FOURNI a XFEM RECO')
+           endif
+         ENDIF
+      ENDDO
+      ENDDO
+c   --cas ou on a une ou des erreurs--
+      IF (NBERR1.gt.0) THEN
+        write(IOIMP,*) 'OPERATEUR XFEM RECO : ABSENCE DANS LE CHPOINT ',
+     &   'DEPLACEMENT DE CERTAINES INCONNUES ATTENDUES PAR LE MODELE'
+      ENDIF
+
+      segsup,MRACC
+
+
+C_____________________________________________________________
+C     ON RETOURNE LE CHPOINT
+
+      IPCHP2=MCHPO2
+
+
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,879 @@
+C RAYN      SOURCE    PV        17/09/29    21:15:46     9578
+      SUBROUTINE RAYN
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C                                                               C
+C But : Calculer unbe matrice de conductivité due aux échanges  C
+C       par rayonnement                                         C
+C                                                               C
+C Syntaxe :   CND1 = RAYN MO1 CHTEM CHRAY (CONSSB) ;            C
+C                                                               C
+C               MO1    : modèle                                 C
+C               CHTEM  : temperature moyenne (MCHAML)           C
+C               CHRAY  : matrice de rayonnement (MCHAML)        C
+C               CONSSB : constante de Stefan (REEL)             C
+C                                                               C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+-INC CCOPTIO
+-INC CCREEL
+*-
+-INC SMCOORD
+-INC SMELEME
+-INC SMCHAML
+-INC SMRIGID
+-INC SMMODEL
+-INC SMINTE
+
+      POINTEUR CHAMTM.MCHELM,CHAMR.MCHELM
+      POINTEUR MELBMA.MELEME,MELCOQ.MELEME
+      POINTEUR MAPBMA.MELEME,MAPCOQ.MELEME
+      POINTEUR MAPCOM.MELEME
+
+      SEGMENT ,INFOEL
+        LOGICAL KCOQ(N1),KQUAD(N1)
+      ENDSEGMENT
+
+      SEGMENT,GL2LOC
+         INTEGER IEQUIV(3,IECART)
+      ENDSEGMENT
+
+      SEGMENT/INFO/(INFELL(JG)),INFO1.INFO,INFO2.INFO
+      SEGMENT LESINF
+         INTEGER LINFO(NBSZEL)
+      ENDSEGMENT
+
+      SEGMENT LESAIJ
+         REAL*8 AIJ(NBNNMX,NBELMX,NBSZEL)
+      ENDSEGMENT
+
+      DIMENSION T3(2)
+C ... Attention !!! 20 correspond ici au nombre maxi de noeuds par
+C     élément
+C ... XEL - coordonnées d'origine, XCH - coordonnées choisies pour
+C     VPAST (ou VPAST2),
+C     XTR - coordonnées transformées par VCORL1 ...
+      DIMENSION XEL(3,20),XCH(3,3),XTR(3,20)
+C ... BPSS - matrice de transformation ...
+      DIMENSION BPSS(3,3)
+      DIMENSION SHP(6,20)
+
+C-------- Fin des déclarations  -------------------------------
+
+      CHARACTER*8 TYPE
+      DATA INTTYP /3/
+      DATA CONSSB /5.67D-8/
+
+C----------- Fin des DATA  ------------------------------------
+
+C ... Lecture ...
+
+      TYPE='MMODEL  '
+      CALL LIROBJ(TYPE,IRET,1,IRETOU)
+      IF(IRETOU.EQ.0) THEN
+         MOTERR(1:8)=TYPE
+        CALL ERREUR(37)
+        RETURN
+      ENDIF
+      IF(IRETOU.EQ.1) MMODEL=IRET
+      SEGACT MMODEL
+
+      TYPE='MCHAML  '
+      CALL LIROBJ(TYPE,IRET,1,IRETOU)
+      IF(IRETOU.EQ.0) THEN
+         MOTERR(1:8)=TYPE
+        CALL ERREUR(37)
+        RETURN
+      ENDIF
+      IF(IRETOU.EQ.1) MCHEL1=IRET
+
+      TYPE='MCHAML  '
+      CALL LIROBJ(TYPE,IRET,1,IRETOU)
+      IF(IRETOU.EQ.0) THEN
+         MOTERR(1:8)=TYPE
+        CALL ERREUR(37)
+        RETURN
+      ENDIF
+      IF(IRETOU.EQ.1) MCHEL2=IRET
+
+      SEGACT, MCHEL1, MCHEL2
+      IF((MCHEL1.TITCHE).EQ.'MATRICE DE RAYONNEMENT') THEN
+        CHAMR = MCHEL1
+        CHAMTM= MCHEL2
+      ELSEIF((MCHEL2.TITCHE).EQ.'MATRICE DE RAYONNEMENT') THEN
+        CHAMR = MCHEL2
+        CHAMTM= MCHEL1
+      ELSE
+        CALL ERREUR(21)
+        RETURN
+      ENDIF
+      SEGDES, MCHEL1, MCHEL2
+
+      CALL LIRREE(XVAL,0,IRETOU)
+      IF(IRETOU.EQ.1) CONSSB=XVAL
+
+C ... Verification  que les supports du MMODEL et des
+C     MCHAML sont bien les mêmes ...
+
+      CALL RAYN1(MMODEL,CHAMR)
+      CALL RAYN1(MMODEL,CHAMTM)
+
+C     CHAMTM = pointeur vers le MCHAML de température moyenne
+C     CHAMR  = pointeur vers le MCHAML de matrices de rayonnement
+C     MMODEL = pointeur vers le modèle
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C ... Recherche du support géométrique de la rigidité ... C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+      SEGACT,MMODEL
+
+C ... On créé un MELEME contenant tous les maillages-supports
+C     du CHAMTM ...
+      NBSZEL=KMODEL(/1)
+      N1=NBSZEL
+      SEGINI,INFOEL
+      DO 1000 I=1,NBSZEL
+         IMODEL=KMODEL(I)
+         SEGACT,IMODEL
+         IF(FORMOD(1).NE.'THERMIQUE'.or.matmod(2).NE.'RAYONNEMENT')THEN
+            CALL ERREUR(21)
+            RETURN
+         ENDIF
+         MELEME=IMAMOD
+         SEGACT,MELEME
+
+          IF (IDIM.EQ.3) THEN
+C
+                IF ((NEFMOD.EQ.4).OR.(NEFMOD.EQ.8)) THEN
+C                  TRI3 ou QUA4
+                   KQUAD(I)=.FALSE.
+                   KCOQ(I) =.FALSE.
+                ELSEIF ((NEFMOD.EQ.27).OR.(NEFMOD.EQ.49)) THEN
+C                  COQ3 ou COQ4
+                   KQUAD(I)=.FALSE.
+                   KCOQ(I) =.TRUE.
+                ELSEIF ((NEFMOD.EQ.6).OR.(NEFMOD.EQ.10)) THEN
+C                  TRI6 ou QUA8
+                   KQUAD(I)=.TRUE.
+                   KCOQ(I) =.FALSE.
+                ELSEIF ((NEFMOD.EQ.56).OR.(NEFMOD.EQ.41)) THEN
+C                  COQ6 ou COQ8
+                   KQUAD(I)=.TRUE.
+                   KCOQ(I) =.TRUE.
+                ELSE
+                   CALL ERREUR(16)
+                   RETURN
+                ENDIF
+C
+          ELSEIF (IDIM.EQ.2) THEN
+C
+                IF (NEFMOD.EQ.2) THEN
+C                  SEG2
+                   KQUAD(I)=.FALSE.
+                   KCOQ(I) =.FALSE.
+                ELSEIF (NEFMOD.EQ.44) THEN
+C                  COQ2
+                   KQUAD(I)=.FALSE.
+                   KCOQ(I) =.TRUE.
+                ELSEIF (NEFMOD.EQ.3)  THEN
+C                  SEG3
+                   KQUAD(I)=.TRUE.
+                   KCOQ(I) =.FALSE.
+                ELSE
+                   CALL ERREUR(16)
+                   RETURN
+                ENDIF
+C
+          ELSE
+                CALL ERREUR(14)
+                RETURN
+          ENDIF
+
+C              SEGDES,IMODEL
+ 1000 CONTINUE
+
+      NBMCOQ=0
+      DO 1010 I=1,NBSZEL
+         IF(KCOQ(I)) NBMCOQ=NBMCOQ+1
+ 1010 CONTINUE
+      NBMBMA=NBSZEL-NBMCOQ
+
+      NBNN=0
+      NBELEM=0
+      NBREF=0
+      NBSOUS=NBMBMA
+      IF(NBMBMA.GT.0) THEN
+         SEGINI MELBMA
+         J=0
+         DO 1020 I=1,NBSZEL
+            IF(.NOT.KCOQ(I)) THEN
+               J=J+1
+               IMODEL=KMODEL(I)
+               MELBMA.LISOUS(J)=IMAMOD
+            ENDIF
+ 1020    CONTINUE
+      ELSE
+         MELBMA=0
+      ENDIF
+      IF(IIMPI.GE.4) write(*,*) ' MELBMA',MELBMA
+
+      NBNN=0
+      NBELEM=0
+      NBREF=0
+      NBSOUS=NBMCOQ
+      IF(NBMCOQ.GT.0) THEN
+         SEGINI MELCOQ
+         J=0
+         DO 1030 I=1,NBSZEL
+            IF(KCOQ(I)) THEN
+               J=J+1
+               IMODEL=KMODEL(I)
+               MELCOQ.LISOUS(J)=IMAMOD
+            ENDIF
+ 1030    CONTINUE
+      ELSE
+         MELCOQ=0
+      ENDIF
+      IF(IIMPI.GE.4) write(*,*) ' MELCOQ',MELCOQ
+
+C ... On les transforme en maillages composés de POI1 ...
+      IF(NBMBMA.GT.0) THEN
+         MAPBMA=MELBMA
+         CALL CHANGE(MAPBMA,1)
+
+c      CALL ECROBJ('MAILLAGE',MAPBMA)
+c      CALL NBNO
+c      CALL LIRENT(NBNBMA,1,IRETOU)
+c      IF(IERR.NE.0) GOTO 9999
+         NBNBMA=MAPBMA.NUM(/2)
+      ELSE
+         MAPBMA=0
+         NBNBMA=0
+      ENDIF
+
+      IF(NBMCOQ.GT.0) THEN
+         MAPCOQ=MELCOQ
+         CALL CHANGE(MAPCOQ,1)
+
+c      CALL ECROBJ('MAILLAGE',MAPCOQ)
+c      CALL NBNO
+c      CALL LIRENT(NBNCOQ,1,IRETOU)
+c      IF(IERR.NE.0) GOTO 9999
+         NBNCOQ=MAPCOQ.NUM(/2)
+      ELSE
+         MAPCOQ=0
+         NBNCOQ=0
+      ENDIF
+
+C ... On détruit les maillages chapeaux ...
+      SEGSUP,MELBMA,MELCOQ
+
+C ... On va vérifier si les deux ensembles de POI1 sont distincts ...
+C ... En calculant le nombre de noeuds de la différence symétrique
+C     des deux maillages ...
+
+      IF(NBNBMA*NBNCOQ.NE.0) THEN
+         CALL ECROBJ('MAILLAGE',MAPBMA)
+         CALL ECROBJ('MAILLAGE',MAPCOQ)
+         CALL PRDIFF
+         CALL LIROBJ('MAILLAGE',IPT1,1,IRETOU)
+         IF(IIMPI.GE.4) write(*,*) ' IPT1 ',IPT1
+         IF(IERR.NE.0) GOTO 9999
+
+C!!   segprt,IPT1
+
+c      CALL ECROBJ('MAILLAGE',IPT1)
+c      CALL NBNO
+c      CALL LIRENT(NBNDS,1,IRETOU)
+c      IF(IERR.NE.0) GOTO 9999
+         SEGACT IPT1
+         NBNDS=IPT1.NUM(/2)
+         IF(IIMPI.GE.4) THEN
+         write(*,*) ' NBNDS ',NBNDS
+         write(*,*) 'NBNBMA+NBNCOQ ',NBNBMA+NBNCOQ
+         ENDIF
+
+         SEGSUP,IPT1
+
+C ... Et en le comparant avec la somme des nombres de noeuds ...
+         IF(NBNBMA+NBNCOQ.NE.NBNDS) THEN
+
+            CALL ECROBJ('MAILLAGE',MAPBMA)
+            CALL ECROBJ('MAILLAGE',MAPCOQ)
+            CALL INTERS
+            CALL LIROBJ('MAILLAGE',MAPCOM,1,IRETOU)
+            IF(IERR.NE.0) GOTO 9999
+
+c         CALL ECROBJ('MAILLAGE',MAPCOM)
+c         CALL NBNO
+c         CALL LIRENT(NBNCOM,1,IRETOU)
+c         IF(IERR.NE.0) GOTO 9999
+
+            CALL CHANGE(MAPCOM,1)
+            NBNCOM=MAPCOM.NUM(/2)
+
+C    ... Maintenant on va enlever les noeuds du MAPCOM des deux autres
+C        maillages ...
+
+            CALL ECROBJ('MAILLAGE',MAPBMA)
+            CALL ECROBJ('MAILLAGE',MAPCOM)
+            CALL PRDIFF
+            CALL LIROBJ('MAILLAGE',MAPBMA,1,IRETOU)
+            IF(IERR.NE.0) GOTO 9999
+            NBNBMA=NBNBMA-NBNCOM
+
+            CALL ECROBJ('MAILLAGE',MAPCOQ)
+            CALL ECROBJ('MAILLAGE',MAPCOM)
+            CALL PRDIFF
+            CALL LIROBJ('MAILLAGE',MAPCOQ,1,IRETOU)
+            IF(IERR.NE.0) GOTO 9999
+            NBNCOQ=NBNCOQ-NBNCOM
+         ELSE
+            NBNCOM=0
+            MAPCOM=0
+         ENDIF
+
+      ELSE
+         NBNCOM=0
+         MAPCOM=0
+      ENDIF
+
+      IF (IIMPI.GE.4) THEN
+      write(*,*) 'NBNBMA = ',NBNBMA
+      write(*,*) 'NBNCOQ = ',NBNCOQ
+      write(*,*) 'NBNCOM = ',NBNCOM
+      ENDIF
+
+C ... On créé le maillage - support de la rigidité ...
+C ... En même temps on va chercher les N° mini et maxi des noeuds ...
+      NBNN=NBNBMA+NBNCOQ+NBNCOM
+      NBELEM=1
+      NBSOUS=0
+      NBREF=NBSZEL
+      SEGINI,MELEME
+      ITYPEL=28
+
+      IF(NBNBMA.GT.0) THEN
+         SEGACT,MAPBMA
+         NOMINI=MAPBMA.NUM(1,1)
+         NOMAXI=MAPBMA.NUM(1,1)
+         DO 1100 I=1,NBNBMA
+            NUM(I,1)=MAPBMA.NUM(1,I)
+            IF(MAPBMA.NUM(1,I).LT.NOMINI) NOMINI=MAPBMA.NUM(1,I)
+            IF(MAPBMA.NUM(1,I).GT.NOMAXI) NOMAXI=MAPBMA.NUM(1,I)
+ 1100    CONTINUE
+         SEGDES,MAPBMA
+      ENDIF
+
+      IF(NBNCOQ.GT.0) THEN
+         SEGACT,MAPCOQ
+         IF(NBNBMA.EQ.0) THEN
+            NOMINI=MAPCOQ.NUM(1,1)
+            NOMAXI=MAPCOQ.NUM(1,1)
+         ENDIF
+         DO 1110 I=1,NBNCOQ
+            NUM(I+NBNBMA,1)=MAPCOQ.NUM(1,I)
+            IF(MAPCOQ.NUM(1,I).LT.NOMINI) NOMINI=MAPCOQ.NUM(1,I)
+            IF(MAPCOQ.NUM(1,I).GT.NOMAXI) NOMAXI=MAPCOQ.NUM(1,I)
+ 1110    CONTINUE
+         SEGDES,MAPCOQ
+      ENDIF
+
+      IF(NBNCOM.GT.0) THEN
+         SEGACT,MAPCOM
+         IF(NBNBMA+NBNCOQ.EQ.0) THEN
+            NOMINI=MAPCOM.NUM(1,1)
+            NOMAXI=MAPCOM.NUM(1,1)
+         ENDIF
+         DO 1120 I=1,NBNCOM
+            NUM(I+NBNBMA+NBNCOQ,1)=MAPCOM.NUM(1,I)
+            IF(MAPCOM.NUM(1,I).LT.NOMINI) NOMINI=MAPCOM.NUM(1,I)
+            IF(MAPCOM.NUM(1,I).GT.NOMAXI) NOMAXI=MAPCOM.NUM(1,I)
+ 1120    CONTINUE
+         SEGDES,MAPCOM
+      ENDIF
+
+      DO 1200 I=1,NBREF
+         IMODEL=KMODEL(I)
+         LISREF(I)=IMAMOD
+c-inutile         SEGDES,IMODEL
+C    ... On profite de cette boucle pour activer les maillages ...
+         IPT1=IMAMOD
+         SEGACT,IPT1
+ 1200 CONTINUE
+      ICOLOR(1)=7
+
+cdebug      segprt,meleme
+      SEGDES,MELEME
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C ... Préparation de la structure du MRIGID           ... C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+      NRIGE=7
+      NRIGEL=1
+      SEGINI,MRIGID
+      MTYMAT='RIGIDITE'
+      COERIG(1)=1.D0
+      IRIGEL(1,1)=MELEME
+C ... Les noeuds des massifs ont un seul DDL : T
+C                    coques ont deux DDL : TINF TSUP
+C                    communs ont trois DDL : T TINF et TSUP
+      NLIGRP=NBNBMA+2*NBNCOQ+3*NBNCOM
+      NLIGRD=NLIGRP
+      SEGINI,DESCR
+
+      DO 2000 I=1,NBNBMA
+         LISINC(I)='T   '
+         LISDUA(I)='Q   '
+         NOELEP(I)=I
+         NOELED(I)=I
+ 2000 CONTINUE
+
+      DO 2010 I=1,NBNCOQ
+         LISINC(NBNBMA+2*I-1)='TSUP'
+         LISINC(NBNBMA+2*I  )='TINF'
+         LISDUA(NBNBMA+2*I-1)='QSUP'
+         LISDUA(NBNBMA+2*I  )='QINF'
+         NOELEP(NBNBMA+2*I-1)=NBNBMA+I
+         NOELEP(NBNBMA+2*I  )=NBNBMA+I
+         NOELED(NBNBMA+2*I-1)=NBNBMA+I
+         NOELED(NBNBMA+2*I  )=NBNBMA+I
+ 2010 CONTINUE
+
+      DO 2020 I=1,NBNCOM
+         LISINC(2*NBNCOQ+NBNBMA+3*I-2)='T'
+         LISINC(2*NBNCOQ+NBNBMA+3*I-1)='TSUP'
+         LISINC(2*NBNCOQ+NBNBMA+3*I  )='TINF'
+         LISDUA(2*NBNCOQ+NBNBMA+3*I-2)='Q'
+         LISDUA(2*NBNCOQ+NBNBMA+3*I-1)='QSUP'
+         LISDUA(2*NBNCOQ+NBNBMA+3*I  )='QINF'
+         NOELEP(2*NBNCOQ+NBNBMA+3*I-2)=2*NBNCOQ+NBNBMA+I
+         NOELEP(2*NBNCOQ+NBNBMA+3*I-1)=2*NBNCOQ+NBNBMA+I
+         NOELEP(2*NBNCOQ+NBNBMA+3*I  )=2*NBNCOQ+NBNBMA+I
+         NOELED(2*NBNCOQ+NBNBMA+3*I-2)=2*NBNCOQ+NBNBMA+I
+         NOELED(2*NBNCOQ+NBNBMA+3*I-1)=2*NBNCOQ+NBNBMA+I
+         NOELED(2*NBNCOQ+NBNBMA+3*I  )=2*NBNCOQ+NBNBMA+I
+ 2020 CONTINUE
+
+      IRIGEL(3,1)=DESCR
+
+cdebug      segprt,descr
+      SEGDES,DESCR
+
+      NELRIG=1
+*      SEGINI,IMATRI
+      SEGINI,XMATRI
+C ... On remplira XMATRI plus tard ...
+*      IMATTT(1)=XMATRI
+*      SEGDES,IMATRI
+
+      IRIGEL(4,1)=xMATRI
+      IRIGEL(5,1)=NIFOUR
+      IRIGEL(6,1)=0
+C ... On est dans le cas asymétrique ...
+      IRIGEL(7,1)=2
+      xmatri.symre=2
+      IFORIG=IFOMOD
+      SEGDES,MRIGID
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C ... Calcul proprement dit de la matrice de rigidité ... C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+C ... On commence par préparer le segment GL2LOC ...
+      IECART=NOMAXI-NOMINI+1
+      SEGINI,GL2LOC
+
+C ... et le remplir ...
+      IF(NBNBMA.GT.0) THEN
+         SEGACT,MAPBMA
+         DO 3000 I=1,NBNBMA
+            IEQUIV(1,MAPBMA.NUM(1,I)-NOMINI+1)=I
+ 3000    CONTINUE
+         SEGDES,MAPBMA
+      ENDIF
+
+      IF(NBNCOQ.GT.0) THEN
+         SEGACT,MAPCOQ
+         DO 3010 I=1,NBNCOQ
+            IEQUIV(2,MAPCOQ.NUM(1,I)-NOMINI+1)=NBNBMA+2*I-1
+            IEQUIV(3,MAPCOQ.NUM(1,I)-NOMINI+1)=NBNBMA+2*I
+ 3010    CONTINUE
+         SEGDES,MAPCOQ
+      ENDIF
+
+      IF(NBNCOM.GT.0) THEN
+         SEGACT,MAPCOM
+         DO 3020 I=1,NBNCOQ
+            IEQUIV(1,MAPCOM.NUM(1,I)-NOMINI+1)=NBNBMA+2*NBNCOQ+3*I-2
+            IEQUIV(2,MAPCOM.NUM(1,I)-NOMINI+1)=NBNBMA+2*NBNCOQ+3*I-1
+            IEQUIV(3,MAPCOM.NUM(1,I)-NOMINI+1)=NBNBMA+2*NBNCOQ+3*I
+ 3020    CONTINUE
+         SEGDES,MAPCOM
+      ENDIF
+
+cdebug segprt,gl2loc
+
+C ... On détruit les MAPOIN ? dont on n'aura plus besoin ? vraiment ?...
+***   IF(NBNBMA.GT.0) SEGSUP,MAPBMA
+      IF(NBNCOQ.GT.0) SEGSUP,MAPCOQ
+      IF(NBNCOM.GT.0) SEGSUP,MAPCOM
+
+C ... On commence par extraire un segment INFO pour chaque zone
+C     élémentaire. On profite de cette boucle pour trouver le
+C     maximum des NBNN sur toutes les zones élémentaires ...
+
+      SEGINI,LESINF
+      DO 3900 I=1,NBSZEL
+
+        IMODEL=KMODEL(I)
+        MELE=NEFMOD
+        segact imodel
+        if( 2+inttyp.gt.infmod(/1) ) then
+          CALL ELQUOI(MELE,0,INTTYP,ikk,IMODEL)
+         info = ikk
+        else
+          jg=16
+          segini info
+          do iou=1,16
+          infell(iou)=infele(iou)
+          enddo
+          infell(11)=infmod(2+inttyp)
+        endif
+        LINFO(I)=info
+        MELEME=IMAMOD
+        NBNN=NUM(/1)
+        NBEL=NUM(/2)
+        IF(I.EQ.1) THEN
+           NBNNMX = NBNN
+           NBELMX = NBEL
+        ENDIF
+        IF(NBNN.GT.NBNNMX) NBNNMX = NBNN
+        IF(NBEL.GT.NBELMX) NBELMX = NBEL
+
+ 3900 CONTINUE
+
+C ... NBNNMX et NBELMX servent à dimensionner le segment LESAIJ
+C     qui contiendra les termes suivants :
+C
+C      ik  /
+C     a  = | N    sur l'élément N° k de la zone élémentaire N° i,
+C      j   /  j   j étant l'indice du noeud de l'élément (et de
+C                 la fonction de forme associée)
+C
+
+      SEGINI,LESAIJ
+      IDIM1=IDIM-1
+      DO 3910 I=1,NBSZEL
+
+        IMODEL=KMODEL(I)
+        MELEME=IMAMOD
+        NBNN=NUM(/1)
+        NBEL=NUM(/2)
+
+        INFO=LINFO(I)
+        MINTE=INFELL(11)
+        SEGACT,MINTE
+cdebug      write(*,*) '-----------------------------'
+cdebug      write(*,*) 'ZONE N° ',I
+cdebug      segprt,minte
+        NBNGAU=POIGAU(/1)
+
+        DO 3915 IEL=1,NBEL
+
+          CALL DOXE(XCOOR,IDIM,NBNN,NUM,IEL,XEL)
+
+C     ... SEG2 ...
+          IF(ITYPEL.EQ.2) THEN
+             XCH(1,1)=XEL(1,1)
+             XCH(2,1)=XEL(2,1)
+             XCH(1,2)=XEL(1,2)
+             XCH(2,2)=XEL(2,2)
+C     ... SEG3 ...
+          ELSE IF(ITYPEL.EQ.3) THEN
+             XCH(1,1)=XEL(1,1)
+             XCH(2,1)=XEL(2,1)
+             XCH(1,2)=XEL(1,3)
+             XCH(2,2)=XEL(2,3)
+C     ... TRI3 ou QUA4 ...
+          ELSE IF(ITYPEL.EQ.4 .OR. ITYPEL.EQ.8) THEN
+             XCH(1,1)=XEL(1,1)
+             XCH(2,1)=XEL(2,1)
+             XCH(3,1)=XEL(3,1)
+             XCH(1,2)=XEL(1,2)
+             XCH(2,2)=XEL(2,2)
+             XCH(3,2)=XEL(3,2)
+             XCH(1,3)=XEL(1,3)
+             XCH(2,3)=XEL(2,3)
+             XCH(3,3)=XEL(3,3)
+C     ... TRI6 ou QUA8 ...
+          ELSE IF(ITYPEL.EQ.6 .OR. ITYPEL.EQ.10) THEN
+             XCH(1,1)=XEL(1,1)
+             XCH(2,1)=XEL(2,1)
+             XCH(3,1)=XEL(3,1)
+             XCH(1,2)=XEL(1,3)
+             XCH(2,2)=XEL(2,3)
+             XCH(3,2)=XEL(3,3)
+             XCH(1,3)=XEL(1,5)
+             XCH(2,3)=XEL(2,5)
+             XCH(3,3)=XEL(3,5)
+          ELSE
+             CALL ERREUR(16)
+             RETURN
+          ENDIF
+
+          IF(IDIM.EQ.2)THEN
+             CALL VPAST2(XCH,BPSS)
+          ELSE IF(IDIM.EQ.3) THEN
+             CALL VPAST(XCH,BPSS)
+          ENDIF
+
+          CALL VCORL1(XEL,XTR,BPSS,NBNN)
+
+          DO 3920 IPG=1,NBNGAU
+
+            DO 3930 INN=1,NBNN
+              SHP(1,INN)=SHPTOT(1,INN,IPG)
+              SHP(2,INN)=SHPTOT(2,INN,IPG)
+              SHP(3,INN)=SHPTOT(3,INN,IPG)
+ 3930       CONTINUE
+
+            CALL JACOBI(XTR,SHP,IDIM1,NBNN,DJAC)
+cdebug      write(*,*) 'Zone ',I,', Element ',IEL,', PG ',IPG,
+cdebug     &            '-> J = ',DJAC
+
+           IF(IFOMOD.NE.0) THEN
+
+              DO 3935 INN=1,NBNN
+                AIJ(INN,IEL,I) = AIJ(INN,IEL,I) +
+     &                     SHPTOT(1,INN,IPG)*POIGAU(IPG)*DJAC
+ 3935         CONTINUE
+
+           ELSE
+C      ... axisymetrique : calcul du rayon au point d'integration
+C
+              CALL DISTRR(XEL,SHP,NBNN,RR)
+              RR=RR*2.D0*XPI
+
+              DO 3936 INN=1,NBNN
+                AIJ(INN,IEL,I) = AIJ(INN,IEL,I) +
+     &                     SHPTOT(1,INN,IPG)*POIGAU(IPG)*RR*DJAC
+ 3936         CONTINUE
+           ENDIF
+
+ 3920     CONTINUE
+
+ 3915   CONTINUE
+
+ 3910 CONTINUE
+
+cdebug      segprt,lesaij
+
+C ... Double boucle sur tous les éléments concernés ...
+C ... Tout ce qui se termine par 1 concerne la boucle extérieure :
+C      I1, IMODE1, IPT1, INFO1, MINTE1 ...
+
+      SEGACT,CHAMTM
+      CALL TCHAMR(CHAMR,1)
+
+      BILAN = 0.D0
+      DO 4000 I1=1,NBSZEL
+
+        IMODE1=KMODEL(I1)
+        IPT1=IMODE1.IMAMOD
+        NBNN1=IPT1.NUM(/1)
+
+C   ... On va chercher la température moyenne de l'élément IEL1 ...
+C   ... On commence par trouver les bons numéros de composantes,
+C       puis on active les MELVAL associés ...
+
+        SEGACT,CHAMTM
+        MCHAM1=CHAMTM.ICHAML(I1)
+C       write(*,*) ' I1 MCHAM1 = ',I1,MCHAM1
+        SEGACT,MCHAM1
+        NC=MCHAM1.IELVAL(/1)
+        IF(KCOQ(I1)) THEN
+           NCTINF=0
+           NCTSUP=0
+           DO 4005 I=1,NC
+              IF(MCHAM1.NOMCHE(I).EQ.'TINF    ') NCTINF=I
+              IF(MCHAM1.NOMCHE(I).EQ.'TSUP    ') NCTSUP=I
+ 4005      CONTINUE
+
+           IF(NCTINF.EQ.0) GOTO 9999
+           MELVA1=MCHAM1.IELVAL(NCTINF)
+           SEGACT,MELVA1
+
+           IF(NCTSUP.EQ.0) GOTO 9999
+           MELVA2=MCHAM1.IELVAL(NCTSUP)
+           SEGACT,MELVA2
+        ELSE
+           NCT=0
+           DO 4006 I=1,NC
+              IF(MCHAM1.NOMCHE(I).EQ.'T       ') NCT=I
+ 4006      CONTINUE
+
+           IF(NCT.EQ.0) GOTO 9999
+           MELVA1=MCHAM1.IELVAL(NCT)
+           SEGACT,MELVA1
+        ENDIF
+        SEGDES,MCHAM1
+        SEGDES,CHAMTM
+
+        DO 4010 IEL1=1,IPT1.NUM(/2)
+
+C     ... On trouve la (les) température(s) correspondants à
+C         l'élément IEL1 ...
+
+          IF(KCOQ(I1)) THEN
+              IF(MELVA1.VELCHE(/2).EQ.1) THEN
+                T=MELVA1.VELCHE(1,1)
+              ELSE
+                T=MELVA1.VELCHE(1,IEL1)
+              ENDIF
+              T3(2)=T*T*T
+
+              IF(MELVA2.VELCHE(/2).EQ.1) THEN
+                T=MELVA2.VELCHE(1,1)
+              ELSE
+                T=MELVA2.VELCHE(1,IEL1)
+              ENDIF
+              T3(1)=T*T*T
+          ELSE
+              IF(MELVA1.VELCHE(/2).EQ.1) THEN
+                T=MELVA1.VELCHE(1,1)
+              ELSE
+                T=MELVA1.VELCHE(1,IEL1)
+              ENDIF
+            T3(1)=T*T*T
+          ENDIF
+
+C     ... Deuxième niveau de la boucle sur les éléments ...
+
+          DO 4020 I2=1,NBSZEL
+
+            IMODE2=KMODEL(I2)
+            IPT2=IMODE2.IMAMOD
+            NBNN2=IPT2.NUM(/1)
+
+            DO 4030 IEL2=1,IPT2.NUM(/2)
+
+C       ... On va chercher les surfaces des éléments IEL1 et IEL2 ...
+
+              MCHAML=CHAMR.ICHAML(I2)
+              SEGACT,MCHAML
+              NC2=IELVAL(/1)
+C         ... Ici on suppose que la surface est toujours dernière ...
+              MELVAL=IELVAL(NC2)
+              SURF2=VELCHE(1,IEL2)
+
+              MCHAML=CHAMR.ICHAML(I1)
+              SEGACT,MCHAML
+              NC1=IELVAL(/1)
+C         ... Ici on suppose que la surface est toujours dernière ...
+              MELVAL=IELVAL(NC1)
+              SURF1=VELCHE(1,IEL1)
+
+C         ... On a supposé que dans le champ de facteurs de forme les
+C             composantes sont toujours dans l'ordre suivant :
+C             MIDL SURF       dans le cas des solides
+C             SUPE INFE SURF  dans le cas des coques
+C
+              DO 4040 IC1=1,NC1-1
+                 MELVAL=IELVAL(IC1)
+                 MCHELM=IELCHE(1,IEL1)
+                 MCHAML=ICHAML(I2)
+                 DO 4050 IC2=1,NC2-1
+                    MELVAL=IELVAL(IC2)
+                    COEFF=VELCHE(1,IEL2)
+C             write(*,*)' iel1 iel2 coeff ',IEL1,IEL2,COEFF
+
+                    DO 4060 INN1=1,NBNN1
+                       NGL1=IPT1.NUM(INN1,IEL1)
+                       NDDL1=IC1
+                       IF(KCOQ(I1)) NDDL1=NDDL1+1
+                       NLOC1 = IEQUIV(NDDL1,NGL1-NOMINI+1)
+                       DO 4070 INN2=1,NBNN2
+
+                          NGL2=IPT2.NUM(INN2,IEL2)
+                          NDDL2=IC2
+                          IF(KCOQ(I2)) NDDL2=NDDL2+1
+                          NLOC2 = IEQUIV(NDDL2,NGL2-NOMINI+1)
+
+C             write(*,*)' in1 in2  coeff ',INN1,INN2,COEFF
+                          TERME = COEFF*AIJ(INN1,IEL1,I1)
+     &      *AIJ(INN2,IEL2,I2)*T3(IC1)*CONSSB/(SURF1*SURF2)
+                          RE(NLOC2,NLOC1,1)=RE(NLOC2,NLOC1,1) + TERME
+                          BILAN = BILAN + TERME
+
+cdebug      write(*,*) 'On rajoute ',TERME,' au terme ',NLOC1,NLOC2
+
+ 4070                  CONTINUE
+
+ 4060               CONTINUE
+
+ 4050            CONTINUE
+
+ 4040         CONTINUE
+
+ 4030       CONTINUE
+
+ 4020     CONTINUE
+
+ 4010   CONTINUE
+        SEGDES,MELVA1
+        IF(KCOQ(I1)) SEGDES,MELVA2
+
+ 4000 CONTINUE
+      IF (IIMPI.GE.4) THEN
+      write(*,*) 'Bilan = ',BILAN
+      ENDIF
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C ... Sortie de la rigidité calculée ...                         C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+C!!   segprt,xmatri
+      SEGDES,XMATRI
+      CALL ECROBJ('RIGIDITE',MRIGID)
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C ... Le ménage à la fin ...                                     C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+C ... On désactive le modèle ...
+      DO 5000 I=1,NBSZEL
+         IMODEL=KMODEL(I)
+         MELEME=IMAMOD
+         SEGDES,MELEME
+         SEGDES,IMODEL
+         INFO=LINFO(I)
+         SEGSUP,INFO
+ 5000 CONTINUE
+      SEGDES,MMODEL
+      SEGSUP,LESINF
+
+C ... desactivation de la matrice de rayonnement
+      CALL TCHAMR(CHAMR,0)
+
+C ... On supprime les segments de travail ...
+      SEGSUP,INFOEL
+      SEGSUP,GL2LOC
+      SEGSUP,LESAIJ
+
+      RETURN
+
+ 9999 CONTINUE
+      CALL ERREUR(26)
+      RETURN
+      END
+
+
+
+
+
+

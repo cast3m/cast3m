@@ -1,0 +1,419 @@
+C YFIMP     SOURCE    PV        16/11/17    22:02:08     9180
+      SUBROUTINE YFIMP
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+C***********************************************************************
+C
+C     SYNTAXE :
+C
+C     I)
+C
+C        FIMP  coef
+C                   /             /
+C      On calcule   |  W S  do  = | Ma NbSb do
+C                   /             /
+C       EN 2D
+C              elements SEG2  -> Flux
+C              elements TRI3  -> Source volumique
+C              elements QUA4  -> Source volumique
+C       EN 3D
+C              elements SEG2  -> Pas de sens !!
+C              elements TRI3  -> Flux
+C              elements QUA4  -> Flux
+C              elements CUB8  -> Source volumique
+C              elements PRI6  -> Source volumique
+C              elements TET4  -> Source volumique
+C
+C
+C  MTAB1 : Table type EQEX        -> RV
+C  MTABZ : Table type DOMAINE     -> Zone definition opérateur
+C  MTABD : Table type DOMAINE     -> Zone Totale apres assemblage
+C  MTABX : Table type KIZX        -> Description opérateur
+C
+C
+C    II) Source term into the Euler/Navier Stokes equations
+C        (FV formulation) (see fimpvf.eso)
+C
+C
+C***********************************************************************
+
+-INC CCOPTIO
+-INC CCREEL
+-INC CCGEOME
+-INC SMCHAML
+-INC SMCOORD
+-INC SMLENTI
+-INC SMELEME
+      POINTEUR MELEM1.MELEME,SPGID.MELEME,SPGZ.MELEME
+      POINTEUR MELEMD.MELEME,SPGD.MELEME
+-INC SMCHPOI
+      POINTEUR IZG1.MCHPOI, IZGG1.MPOVAL
+      POINTEUR IZTU1.MPOVAL
+      POINTEUR MZFLU.MPOVAL
+-INC SMMATRIK
+-INC SIZFFB
+      POINTEUR IZF1.IZFFM,IZH2.IZHR,IZW.IZFFM,IZWH.IZHR
+      SEGMENT SAJT
+      REAL*8 AJT(IDIM,IDIM,NPG),RF1(NP,MP,IDIM),SM1(NP,IDIM)
+      REAL*8 TN1(NP,IDIM),TN2(NP,IDIM)
+      ENDSEGMENT
+
+-INC SMLMOTS
+      POINTEUR LINCO.MLMOTS
+      CHARACTER*8 NOMZ,NOMI,NOMA,TYPE,NOM0,TYPC,MTERR,MTYP,CHAI
+      CHARACTER*4 NOMD4,CHAR
+      LOGICAL LOGI,XPG
+      PARAMETER (NTB=1)
+      CHARACTER*8 LTAB(NTB),LNOMD(6)
+      DIMENSION KTAB(NTB),IXV(4)
+      DATA LTAB/'KIZX    '/
+      DATA LNOMD/'SOMMET  ','FACE    ','CENTRE  ','CENTREP0','CENTREP1'
+     & ,'MSOMMET '/
+C*****************************************************************************
+CFIMP
+c     write(6,*)' Debut FIMP'
+C
+C***** FV Euler/Navier-Stokes equations
+C
+      IRET=0
+      CALL LIRCHA(CHAR,0,IRET)
+      IF(IERR.NE.0)GOTO 9999
+      IF(IRET.NE.0)THEN
+         IF(CHAR .EQ. 'VF  ')THEN
+            CALL FIMPVF()
+            GOTO 9999
+         ELSE
+            CALL REFUS
+         ENDIF
+      ENDIF
+C Nouvelle directive EQUA de EQEX
+      MTYP=' '
+      CALL QUETYP(MTYP,0,IRET)
+      IF(IRET.EQ.0)THEN
+C% On attend un des objets : %m1:8 %m9:16 %m17:24 %m25:32 %m33:40
+      MOTERR( 1: 8) = 'CHAI    '
+      MOTERR( 9:16) = 'MMODEL  '
+      MOTERR(17:24) = 'TABLE   '
+      CALL ERREUR(472)
+      RETURN
+      ENDIF
+
+      IF(MTYP.EQ.'MMODEL')THEN
+        CALL YTCLSF('   S    ','FIMP    ')
+        RETURN
+      ELSEIF(MTYP.EQ.'MOT     ')THEN
+        CALL LIRCHA(CHAI,1,IRET)
+        CALL YTCLSF(CHAI,'FIMP    ')
+        RETURN
+      ENDIF
+C Fin Nouvelle directive EQUA de EQEX
+
+      CALL LITABS(LTAB,KTAB,NTB,1,IRET)
+      IF (IERR.NE.0) RETURN
+      MTABX=KTAB(1)
+
+C.......................................................................
+C
+C- Récupération de la table EQEX (pointeur MTAB1)
+C
+
+      CALL LEKTAB(MTABX,'EQEX',MTAB1)
+      IF(MTAB1.EQ.0)THEN
+C Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  EQEX  '
+         MOTERR( 9:16) = '  EQEX  '
+         MOTERR(17:24) = '  KIZX  '
+         CALL ERREUR(786)
+         RETURN
+      ENDIF
+      CALL ACME(MTAB1,'NAVISTOK',NASTOK)
+      IF(NASTOK.EQ.0)THEN
+      CALL ZZFIMP(MTABX,MTAB1)
+      RETURN
+      ENDIF
+C
+C- Récupération de la table INCO (pointeur KINC)
+C
+      CALL LEKTAB(MTAB1,'INCO',KINC)
+      IF(KINC.EQ.0)THEN
+C Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  INCO  '
+         MOTERR( 9:16) = '  INCO  '
+         MOTERR(17:24) = '  EQEX  '
+         CALL ERREUR(786)
+         RETURN
+      ENDIF
+C.......................................................................
+
+      CALL ACMM(MTABX,'NOMZONE',NOMZ)
+
+      CALL LIROBJ('MMODEL',MMDZ,0,IRET)
+      IF(IRET.EQ.0)THEN
+      TYPE=' '
+      CALL ACMO(MTABX,'DOMZ',TYPE,MMDZ)
+       IF(TYPE.NE.'MMODEL')THEN
+C Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  DOMZ  '
+         MOTERR( 9:16) = '  DOMZ  '
+         MOTERR(17:24) = '  KIZX  '
+         CALL ERREUR(786)
+         RETURN
+       ENDIF
+      ENDIF
+
+C*****************************************************************************
+C OPTIONS
+C KFORM = 0 -> SI       1 -> EF       2 -> VF    3 -> EFMC
+C IDCEN = 0->rien   1-> CENTREE  2-> SUPGDC  3-> SUPG     4-> TVISQUEU 5-> CNG
+C KPOIN = 0->SOMMET 1-> FACE     2-> CENTRE  3-> CENTREP0 4-> CENTREP1 5-> MSOMMET
+
+      IAXI=0
+      IF(IFOMOD.EQ.0)IAXI=2
+      DEUPI=1.D0
+      IF(IAXI.NE.0)DEUPI=2.D0*XPI
+C
+C- Récupération de la table des options KOPT (pointeur KOPTI)
+C
+      CALL LEKTAB(MTABX,'KOPT',KOPTI)
+      IF (KOPTI.EQ.0) THEN
+C Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  KOPT  '
+         MOTERR( 9:16) = '  KOPT  '
+         MOTERR(17:24) = '  KIZX  '
+         CALL ERREUR(786)
+         RETURN
+      ENDIF
+
+
+      XPG=.FALSE.
+      CALL ACME(KOPTI,'IDCEN',IDCEN)
+      CALL ACMF(KOPTI,'CMD  ',CMD  )
+      IF(IDCEN.NE.0)XPG=.TRUE.
+      KDIM=1
+      IF(IDCEN.EQ.2)KDIM=IDIM
+      CALL ACME(KOPTI,'KFORM',KFORM)
+      CALL ACME(KOPTI,'KPOIND',KPOIND)
+c     write(6,*)' INCOD=',KPOIND,' IDCEN=',IDCEN
+
+      IF(KFORM.GE.2)THEN
+C        Option %m1:8 incompatible avec les données
+            MOTERR( 1: 8) = 'EF/EFM1 '
+            CALL ERREUR(803)
+            RETURN
+        ENDIF
+      IF (IERR.NE.0) RETURN
+
+C     write(6,*)' Apres les options '
+C*****************************************************************************
+C
+C- Récupération de la table DOMAINE associée au domaine local
+C
+
+C E/  MMODEL : Pointeur de la table contenant l'information cherchée
+C  /S IPOINT : Pointeur sur la table DOMAINE
+C  /S INEFMD : Type formulation INEFMD=1 LINE,=2 MACRO,=3 QUADRATIQUE
+C                               INEFMD=4 LINB
+
+      CALL LEKMOD(MMDZ,MTABZ,INEFMD)
+      CALL LEKTAB(MTABZ,'MAILLAGE',MELEME)
+      IF (IERR.NE.0) RETURN
+c     write(6,*)' INEFMD=',inefmd
+
+C
+C- Vérification des compatiblités Formulation/SPG
+C- Identification du spg de l'inconnue
+C- SPGZ=spg inco duale de la zone; MELEME=connectivité associée ;
+C
+
+C EFM1 / EF
+c       write(6,*)' KFORM=',kform,' KPOIND=',kpoind
+        IF(KPOIND.EQ.99.OR.KPOIND.EQ.0)THEN
+
+        NOMD4= '    '
+        KPOIND=0
+        CALL LEKTAB(MTABZ,'MAILLAGE',MELEMD)
+        CALL LEKTAB(MTABZ,'SOMMET',SPGD)
+c       write(6,*)'SOMMET MTABZ=',MTABZ,'SPGD=',SPGD,'MELEMD=',MELEMD
+        IF (IERR.NE.0) RETURN
+
+        ELSEIF(KPOIND.EQ.2)THEN
+
+        NOMD4= '    '
+c       CALL LEKTAB(MTABZ,'MAILLAGE',MELEMD)
+        CALL LEKTAB(MTABZ,'CENTRE',MELEMD)
+        CALL LEKTAB(MTABZ,'CENTRE  ',SPGD)
+        IF (IERR.NE.0) RETURN
+
+        ELSEIF(KPOIND.EQ.3)THEN
+
+          MTERR='EF CTRP0'
+          IF(INEFMD.EQ.2)NOMD4='MCP0'
+          IF(INEFMD.EQ.3)NOMD4='PRP0'
+          IF(INEFMD.NE.2.AND.INEFMD.NE.3)GO TO 90
+          CALL LEKTAB(MTABZ,'CENTREP0',MELEMD)
+          CALL LEKTAB(MTABZ,'CENTREP0',SPGD)
+          IF(INEFMD.EQ.2)CALL LEKTAB(MTABZ,'MACRO1',MELEME)
+          IF (IERR.NE.0) RETURN
+
+        ELSEIF(KPOIND.EQ.4)THEN
+
+          MTERR='EF CTRP1'
+          IF(INEFMD.EQ.2)NOMD4='MCP1'
+          IF(INEFMD.EQ.3)NOMD4='PRP1'
+          IF(INEFMD.NE.2.AND.INEFMD.NE.3)GO TO 90
+          CALL LEKTAB(MTABZ,'CENTREP1',SPGD)
+          CALL LEKTAB(MTABZ,'ELTP1NC ',MELEMD)
+          IF(INEFMD.EQ.2)CALL LEKTAB(MTABZ,'MACRO1',MELEME)
+          IF (IERR.NE.0) RETURN
+
+        ELSEIF(KPOIND.EQ.5)THEN
+
+          MTERR='EF Pcont'
+          NOMD4= 'P1P1'
+          IF(INEFMD.EQ.2)NOMD4='MCF1'
+          IF(INEFMD.EQ.3)NOMD4='PFP1'
+          CALL LEKTAB(MTABZ,'MSOMMET',SPGD)
+          CALL LEKTAB(MTABZ,'MMAIL  ',MELEMD)
+          IF(INEFMD.EQ.2)CALL LEKTAB(MTABZ,'MACRO1',MELEME)
+          IF (IERR.NE.0) RETURN
+
+        ELSEIF(KPOIND.NE.2.AND.KPOIND.NE.0.AND.KPOIND.NE.3
+     &    .AND.KPOIND.NE.4.AND.KPOIND.NE.5)THEN
+C        Option %m1:8 incompatible avec les données
+            MOTERR( 1: 8) = '  EF    '
+            CALL ERREUR(803)
+            RETURN
+        ENDIF
+
+C*************************************************************************
+C Lecture du coefficient
+C     write(6,*)' Lecture des coefficients '
+
+      CALL ACME(MTABX,'IARG',IARG)
+      IF(IARG.NE.1)THEN
+C           Indice %m1:8 : nombre d'arguments incorrect
+            MOTERR(1:8) = 'IARG    '
+            CALL ERREUR(804)
+      RETURN
+      ENDIF
+
+      XPG=.FALSE.
+      IDCEN=0
+      IVC=0
+c     write(6,*)' KPOIND=',KPOIND,'INEFMD=',INEFMD,MELEME
+      CALL LEKMOF(MTABZ,1,MTABX,KINC,IVC,MCHEL4,KPOIND,0,MCHELG)
+      IF (IERR.NE.0) RETURN
+c     write(6,*)' MCHEL4=',MCHEL4,'IRET=',IRET
+c    &         ,' MELEMD=',MELEMD,'SPGD=',SPGD
+
+C Fin lecture Arguments **************************************************
+
+C*************************************************************************
+C VERIFICATIONS SUR LES INCONNUES
+C
+C- Récupération du nombre d'inconnues et du nom de l'inconnue NOMI
+C
+      TYPE='LISTMOTS'
+      CALL ACMO(MTABX,'LISTINCO',TYPE,LINCO)
+      IF (IERR.NE.0) RETURN
+      SEGACT LINCO
+      NBINC=LINCO.MOTS(/2)
+      IF(NBINC.NE.1)THEN
+C        Indice %m1:8 : contient plus de %i1 %m9:16
+         MOTERR( 1:8) = 'LISTINCO'
+         INTERR(1) = 1
+         MOTERR(9:16) = ' MOTS   '
+         CALL ERREUR(799)
+         RETURN
+      ENDIF
+
+      NOMI=LINCO.MOTS(1)
+
+C --> 1 ere Inconnue
+
+      NOMI=LINCO.MOTS(1)
+C     write(6,*)' NOMI=',nomi
+
+      TYPE=' '
+      CALL ACMO(KINC,NOMI,TYPE,MCHPOI)
+      IF(TYPE.NE.'CHPOINT ')THEN
+C        Indice %m1:8 : ne contient pas un objet de type %m9:16
+         MOTERR( 1: 8) = 'INC '//NOMI
+         MOTERR( 9:16) = 'CHPOINT '
+         CALL ERREUR(800)
+      RETURN
+      ELSE
+      CALL LICHT(MCHPOI,IZTU1,TYPC,SPGID)
+      ENDIF
+
+C*************************************************************************
+C Le domaine de definition est donne par le SPG  de la premiere inconnue
+C Les inconnues suivantes devront posseder ce meme pointeur
+C On verifie que les points de la zone sont tous inclus dans ce SPG
+
+
+      CALL KRIPAD(SPGID,MLENTI)
+      CALL VERPAD(MLENTI,SPGD,IRET)
+      SEGSUP MLENTI
+      IF(IRET.NE.0)THEN
+      WRITE(6,*)'KPOIND =',KPOIND,' SPGD=',SPGD,' SPGID=',SPGID
+C     Indice %m1:8 : L'objet %m9:16 n'a pas le bon support géométrique
+         MOTERR(1: 8) = 'INC '//NOMI
+         MOTERR(9:16) = 'CHPOINT '
+         CALL ERREUR(788)
+      RETURN
+      ENDIF
+
+      NC=IZTU1.VPOCHA(/2)
+      SEGDES IZTU1
+      CALL KRCHPT(LNOMD(KPOIND+1),SPGD,NC,MCHPO1,NOMI(1:4))
+
+      CALL XXSOUR(KPOIND,NOMD4,MCHPO1,XPG,MELEME,MELEMD,SPGD,MCHEL4,
+     &INEFMD)
+
+            NRIGE=7
+            NMATRI=0
+            NKID =9
+            NKMT =7
+            SEGINI MATRIK
+            segdes matrik
+             CALL ECROBJ('MATRIK',MATRIK)
+
+      segdes MCHPO1
+      CALL ECROBJ('CHPOINT',MCHPO1)
+
+      SEGDES LINCO
+
+c     write(6,*)' FIN FIMP'
+ 9999 CONTINUE
+      RETURN
+ 90   CONTINUE
+C        Option %m1:8 incompatible avec les données
+            MOTERR( 1: 8) = MTERR
+            CALL ERREUR(803)
+            RETURN
+
+ 1002 FORMAT(10(1X,1PE11.4))
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

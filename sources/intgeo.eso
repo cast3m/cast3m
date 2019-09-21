@@ -1,0 +1,1826 @@
+C INTGEO    SOURCE    BP208322  16/11/18    21:17:51     9177
+C
+      SUBROUTINE INTGEO(IOB1,IOB2,IOB3,IOB4,ICLE)
+C-----------------------------------------------------------------------
+C
+C     INTERSECTION GEOMETRIQUE DE MAILLAGE
+C
+C-----------------------------------------------------------------------
+C
+C ENTREE :
+C     IOB1   MAILLAGE 1 INITIAL
+C    (IOB2   MAILLAGE 2 INITIAL)
+C
+C SORTIE :
+C     IOB1   MAILLAGE 1 MODIFIE
+C    (IOB2   MAILLAGE 2 MODIFIE)
+C     IOB3   MAILLAGE 3 = SELF-INTERSECTION DU MAILLAGE 1
+C                         ou INTERSECTION DU MAILLAGE 1 AVEC 2
+C    (IOB4   MAILLAGE 3 = INTERSECTION DU MAILLAGE 2 AVEC 1)
+C
+C-----------------------------------------------------------------------
+C
+C  BP208322, 28/08/2012 : Creation
+C
+C  REM   : - self-intersection abandonnée car compliquée : on préfère
+C            chercher à créer directement une bonne surface ...
+C
+C  TO DO : - cas coplanaire à traiter
+c          - optimiser
+C
+C-----------------------------------------------------------------------
+c
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+-INC SMCOORD
+-INC CCOPTIO
+-INC CCGEOME
+-INC SMELEME
+-INC CCREEL
+
+      SEGMENT WORKEL
+        INTEGER IDEJVU(NBELEM)
+        REAL*8  V(3,NBELEM)
+      ENDSEGMENT
+      POINTEUR WORK1.WORKEL,WORK2.WORKEL
+      INTEGER NODE(2)
+
+c     NBNMAX = NomBre de Noeuds MAX
+c     ITA(i) = numero du i^eme noeuds du triangle A courant
+c     XTA(i,k) = k^ieme coordonnee du i^eme noeuds du triangle A courant
+c     XTB(i,k) = k^ieme coordonnee du i^eme noeuds du triangle B courant
+      PARAMETER (NBNMAX=3)
+      INTEGER ITA(NBNMAX),ITB(NBNMAX)
+      REAL*8 XTA(NBNMAX,3),XTB(NBNMAX,3)
+      REAL*8 XSEG(1*2,3)
+      REAL*8 dA1(3),dA2(3),dA3(3)
+      REAL*8 dB1(3),dB2(3),dB3(3)
+      REAL*8 xP2(3),xP3(3),xQ2(3),xQ3(3)
+      LOGICAL SELF
+
+      if(iimpi.GE.10) write(ioimp,*)'====== ENTREE dans INTGEO ======'
+
+C-----------------------------------------------------------------------
+C     RECUP + VERIFICATION DES DONNEES D ENTREE
+
+c     SELF intersection ?
+      SELF = (IOB2.eq.0)
+      if(SELF) then
+        write(ioimp,*) 'Self-intersection non traitée'
+        MOTERR(1:8)='MAILLAGE'
+        call erreur(37)
+      endif
+c     on ne traite pas aujourd'hui... abandonnée car compliquée !
+
+c     option NOVE => IVERI
+      IVERI = ICLE
+
+c     Critere absolu de proximite entre 2 noeuds
+      CALL LIRREE(XELIM,0,IELIM)
+c     Critere absolu de proximite d'un plan (detection du cas coplanaire)
+      CALL LIRREE(XPLAN,0,IPLAN)
+      if(IPLAN.eq.0) XPLAN=XZPREC**(0.66)
+      if(IELIM.ne.0) then
+        XELIM2=2.d0*XELIM
+        XPLAN2=0.01d0*XELIM
+        if(XPLAN2.lt.XPLAN) then
+          XPLAN=XPLAN2
+        endif
+      endif
+      XPLANn=-1.d0*XPLAN
+c     si XELIM non fourni on calcule avec la taille du 1er element tq :
+c     XZPREC << XPLAN << XELIM << taille des elements
+
+C     Operateur disponible en dimension 3
+      IF (IDIM.NE.3) THEN
+        INTERR(1)=IDIM
+        CALL ERREUR(709)
+        RETURN
+      ENDIF
+      idim1 = idim+1
+      segact,MCOORD*mod
+      NBPTS=XCOOR(/1)/idim1
+
+C     Recup
+      IPT1 = IOB1
+      IPT2 = IOB2
+      IPT3 = 0
+      IPT4 = 0
+
+C    +VERIFICATION DE IPT1
+C     un maillage non complexe
+      segact,IPT1
+      NBSOU1=IPT1.LISOUS(/1)
+      if (NBSOU1.gt.0) then
+        call erreur(25)
+        return
+      endif
+C     maillage de TRI3 uniquement
+      ITYPE1=IPT1.ITYPEL
+      if(ITYPE1.ne.4) then
+        call erreur(16)
+        return
+      endif
+      NBNN1  = IPT1.NUM(/1)
+      NBELE1 = IPT1.NUM(/2)
+
+C    +VERIFICATION DE IPT2
+      IF(.not.SELF) THEN
+C     un maillage non complexe
+      segact,IPT2
+      NBSOU2=IPT2.LISOUS(/1)
+      if (NBSOU2.gt.0) then
+        call erreur(25)
+        return
+      endif
+C     maillage de TRI3 uniquement
+      ITYPE2=IPT2.ITYPEL
+      if(ITYPE2.ne.4) then
+        call erreur(16)
+        return
+      endif
+      NBNN2  = IPT2.NUM(/1)
+      NBELE2 = IPT2.NUM(/2)
+      ENDIF
+
+
+
+C-----------------------------------------------------------------------
+C     PREPARATION DES DONNEES DE SORTIE
+
+      NBSOUS = 0
+      NBREF  = 0
+
+C    +NOUVEAU IPT1 (dimensionné + grand)
+      NBNN   = NBNN1
+      NBELEM = NBELE1
+      segini,MELEME=IPT1
+      segdes,IPT1
+      IPT1=MELEME
+      NBELEM = 4*NBELE1
+      segadj,IPT1
+      segini,WORK1
+
+C    +NOUVEAU IPT2
+      IF(.not.SELF) THEN
+      NBNN   = NBNN2
+      NBELEM = NBELE2
+      segini,MELEME=IPT2
+      segdes,IPT2
+      IPT2=MELEME
+      NBELEM = 4*NBELE2
+      segadj,IPT2
+      segini,WORK2
+      ENDIF
+
+C    +IPT3 et IPT4 = lignes de seg2 = intersection des tri3
+      NBNN3 = 2
+      NBNN = NBNN3
+      NBELE3 = 0
+      NBELE4 = 0
+      NBELEM = 3*NBELE1
+      segini,IPT3
+      IPT3.ITYPEL=2
+      IF(.not.SELF) THEN
+        segini,IPT4
+        IPT4.ITYPEL=2
+      ENDIF
+
+
+C-----------------------------------------------------------------------
+C     POUR LE CAS DE LA SELF-INTERSECTION
+      IF(SELF) THEN
+        IPT2=IPT1
+        NBNN2=NBNN1
+        NBELE2=NBELE1
+        WORK2=WORK1
+        IPT4=IPT3
+c       attention : on va remplir IPT2 qui ne refere pas au meme element
+c       que IPT1 mais pas IPT4 (car on remplit deja IPT3)
+      ENDIF
+
+c     pour ajuster la taille par bloc
+      nbloc = max(4,max(NBELE1,NBELE2))
+
+C=======================================================================
+C     BOUCLES POUR LE CALCUL D INTERSECTION
+
+
+C==== BOUCLE SUR LES ELEMENTS A ========================================
+c     on met une grande valeur mais on s'arrete des qu on a fini :
+c     plus de triangles (initiaux + coupés) a traiter (=NBELE1 atteint)
+c       IAFIN = 1000*NBELE1
+      IAFIN = 100*NBELE1+100*NBELE2
+
+      DO 1000 IA=1,IAFIN
+
+C-----------------------------------------------------------------------
+C       CALCULS RELATIFS AU TRIANGLE A
+
+c       1er coup : on prend le triangle "pere" (=avant decoupe)
+        IBDEB0=0
+ 1100   CONTINUE
+        ICOUPA = 0
+        ICOUPB = 0
+
+
+c       coordonnees du Triangle A
+        xAmax=XPETIT
+        yAmax=XPETIT
+        zAmax=XPETIT
+        xAmin=XGRAND
+        yAmin=XGRAND
+        zAmin=XGRAND
+        DO INOD1=1,NBNN1
+           IPA1 = IPT1.NUM(INOD1,IA)
+           if(INOD1.gt.1) then
+           do iprec=1,INOD1-1
+              if(IPA1.eq.ITA(iprec)) then
+c                 write(ioimp,*) '2 noeuds identiques => on saute'
+                goto 900
+              endif
+           enddo
+           endif
+           ITA(INOD1)=IPA1
+           IREF1= idim1*(IPA1-1)
+           XTA(INOD1,1)=XCOOR(IREF1+1)
+           XTA(INOD1,2)=XCOOR(IREF1+2)
+           XTA(INOD1,3)=XCOOR(IREF1+3)
+           xAmax = max(xAmax,XTA(INOD1,1))
+           yAmax = max(yAmax,XTA(INOD1,2))
+           zAmax = max(zAmax,XTA(INOD1,3))
+           xAmin = min(xAmin,XTA(INOD1,1))
+           yAmin = min(yAmin,XTA(INOD1,2))
+           zAmin = min(zAmin,XTA(INOD1,3))
+        ENDDO
+
+        if(iimpi.ge.10) then
+          write(ioimp,*) '____________________________________________'
+          write(ioimp,*) 'TRIANGLE A # ',IA,' / ',NBELE1
+          write(ioimp,FMT="(' noeuds ',I5,I5,I5)")ITA(1),ITA(2),ITA(3)
+c           write(ioimp,*) '     coordx=',(XTA(iou,1),iou=1,3)
+c           write(ioimp,*) '     coordy=',(XTA(iou,2),iou=1,3)
+c           write(ioimp,*) '     coordz=',(XTA(iou,3),iou=1,3)
+        endif
+
+        IF(WORK1.IDEJVU(IA).eq.0) THEN
+
+c         vecteurs des aretes
+          va12x = XTA(2,1) - XTA(1,1)
+          va12y = XTA(2,2) - XTA(1,2)
+          va12z = XTA(2,3) - XTA(1,3)
+          va13x = XTA(3,1) - XTA(1,1)
+          va13y = XTA(3,2) - XTA(1,2)
+          va13z = XTA(3,3) - XTA(1,3)
+
+c         vecteur normal au Triangle A + aire du triangle
+          vax = va12y*va13z - va12z*va13y
+          vay = va12z*va13x - va12x*va13z
+          vaz = va12x*va13y - va12y*va13x
+          xlenA = sqrt(vax*vax + vay*vay + vaz*vaz)
+          if (xlenA.le.XPETIT) then
+              write(ioimp,*) 'TRI3 A de dimension nulle! ',xlenA,XPETIT
+c               write(ioimp,*) 'va12=',va12x,va12y,va12z
+c               write(ioimp,*) 'va13=',va13x,va13y,va13z
+c               write(ioimp,*) 'va12 PVEC va13 = va=',vax,vay,vaz
+              if(IVERI.ge.1) then
+c           write(ioimp,*) 'NOVERIF: ON retourne le maillage en l etat'
+c                 goto 9000
+c         bp : une autre solution est de "sauter" cet element
+          write(ioimp,*) 'NOVERIF: l execution continue malgre tout'
+                goto 900
+              else
+                call erreur(26)
+                return
+              endif
+          endif
+          vax = vax / xlenA
+          vay = vay / xlenA
+          vaz = vaz / xlenA
+          WORK1.V(1,IA) = vax
+          WORK1.V(2,IA) = vay
+          WORK1.V(3,IA) = vaz
+          WORK1.IDEJVU(IA)=1
+          if(iimpi.ge.12) write(ioimp,*) ' normale vA =',vax,vay,vaz
+          if(IELIM.eq.0) then
+            XELIM=1.D-2*xlenA
+            XELIM2=2.d0*XELIM
+            IELIM=1
+            XPLAN2=1.D-2*XELIM
+            if(XPLAN2.lt.XPLAN) then
+              XPLAN=XPLAN2
+              XPLANn=-1.d0*XPLAN
+            endif
+          endif
+
+        ELSE
+          vax = WORK1.V(1,IA)
+          vay = WORK1.V(2,IA)
+          vaz = WORK1.V(3,IA)
+
+        ENDIF
+
+        if(IELIM.eq.0) write(ioimp,*)'Valeur par défaut : XELIM=',XELIM
+        if(IPLAN.eq.0) write(ioimp,*)'Valeur par défaut : XPLAN=',XPLAN
+        IPLAN=1
+        if(iimpi.ge.10) write(ioimp,*)'XELIM,XPLAN=',XELIM,XPLAN
+        if(iimpi.ge.12) write(ioimp,*)'XELIM2,XPLANn=',XELIM2,XPLANn
+
+c       on definit une boite limitant le domaine de recherche
+        xAmax = xAmax + (XELIM2)
+        yAmax = yAmax + (XELIM2)
+        zAmax = zAmax + (XELIM2)
+        xAmin = xAmin - (XELIM2)
+        yAmin = yAmin - (XELIM2)
+        zAmin = zAmin - (XELIM2)
+
+
+C====== BOUCLE SUR LES ELEMENTS B ======================================
+
+c       dans le cas d'une decoupe, on reprend avec l element IB suivant
+        IF(IBDEB0.ne.0) THEN
+          IBDEB=IBDEB0
+        ELSE
+c         dans le cas de la self-intersection on teste les triangles d'apres
+          IF(SELF) THEN
+            IBDEB=IA+1
+          ELSE
+            IBDEB=1
+          ENDIF
+        ENDIF
+        IBFIN=NBELE2
+
+        DO 2000 IB=IBDEB,IBFIN
+
+c         if(iimpi.ge.10) write(ioimp,*) '+ TRIANGLE B # ',IB,' / ',NBELE2
+
+C-----------------------------------------------------------------------
+C         CALCUL DE LA DISTANCE AU PLAN TA DES NOEUDS DU Triangle B
+
+c         coordonnees du triangle B
+          ibxmax=0
+          ibymax=0
+          ibzmax=0
+          ibxmin=0
+          ibymin=0
+          ibzmin=0
+          DO INOD2=1,NBNN2
+             IPB2 = IPT2.NUM(INOD2,IB)
+             if(INOD2.gt.1) then
+             do iprec=1,INOD2-1
+                if(IPB2.eq.ITB(iprec)) then
+                  write(ioimp,*) '2 noeuds identiques de TB => on saute'
+                  goto 1900
+                endif
+             enddo
+             endif
+             ITB(INOD2)=IPB2
+             IREF2= idim1*(IPB2-1)
+             XTB(INOD2,1)=XCOOR(IREF2+1)
+             XTB(INOD2,2)=XCOOR(IREF2+2)
+             XTB(INOD2,3)=XCOOR(IREF2+3)
+             if(XTB(INOD2,1).gt.xAmax) ibxmax=ibxmax+1
+             if(XTB(INOD2,2).gt.yAmax) ibymax=ibymax+1
+             if(XTB(INOD2,3).gt.zAmax) ibzmax=ibzmax+1
+             if(XTB(INOD2,1).lt.xAmin) ibxmin=ibxmin+1
+             if(XTB(INOD2,2).lt.yAmin) ibymin=ibymin+1
+             if(XTB(INOD2,3).lt.zAmin) ibzmin=ibzmin+1
+          ENDDO
+
+c         si on est hors boite selon x y ou z on saute
+          if(ibxmax.eq.NBNN2.or.ibymax.eq.NBNN2.or.ibzmax.eq.NBNN2)
+     &    goto 1900
+          if(ibxmin.eq.NBNN2.or.ibymin.eq.NBNN2.or.ibzmin.eq.NBNN2)
+     &    goto 1900
+
+c         distance au plan TA
+          do iidim=1,idim
+            dB1(iidim) = XTB(1,iidim) - XTA(1,iidim)
+            dB2(iidim) = XTB(2,iidim) - XTA(1,iidim)
+            dB3(iidim) = XTB(3,iidim) - XTA(1,iidim)
+          enddo
+          xddB1 = vax*dB1(1) + vay*dB1(2) + vaz*dB1(3)
+          xddB2 = vax*dB2(1) + vay*dB2(2) + vaz*dB2(3)
+          xddB3 = vax*dB3(1) + vay*dB3(2) + vaz*dB3(3)
+
+c         si tous les points de TB sont en dessous (ou dessus) de TA
+c         + le cas affleurant
+c         => il n'y a pas d'intersection : on saute
+          if(xddB1.lt.XPLANn.and.xddB2.lt.XPLANn.and.xddB3.lt.XPLANn)
+     &    goto 1900
+          if(xddB1.gt.XPLAN.and.xddB2.gt.XPLAN.and.xddB3.gt.XPLAN)
+     &    goto 1900
+
+c         combien de points de TB dans le plan de TA ? => iBinA
+          iBinA = 0
+          if(abs(xddB1).le.XPLAN) iBinA=iBinA+1
+          if(abs(xddB2).le.XPLAN) iBinA=iBinA+2
+          if(abs(xddB3).le.XPLAN) iBinA=iBinA+4
+
+c         si tous les points de TB sont dans le plan de TA,
+c         => on doit traiter le cas coplanaire
+c Il n'est pas traité pour l'instant car assez rare en pratique en 3D.
+          if (iBinA.eq.7) then
+c L'intersection générée pourrait etre consitutée de polygones [Gander]
+c etape 1: calcul des intersection segment de A - segments de B
+c       2: recherche des points de A (/B) a l'interieur de TB (/TA)
+c       3: ordonner dans le sens trigo les points des étapes 1 et 2
+c       4: eliminer les doublons
+            goto 1900
+          endif
+
+c         si 1 seul point de TB est dans le plan de TA,
+c            et les autres dont du meme coté,
+c         => on ne traite pas cette intersection ponctuelle : on saute
+          proB12 = xddB1*xddB2
+          proB23 = xddB2*xddB3
+          proB31 = xddB3*xddB1
+          if(iBinA.eq.1.and.proB23.gt.0.d0) goto 1900
+          if(iBinA.eq.2.and.proB31.gt.0.d0) goto 1900
+          if(iBinA.eq.4.and.proB12.gt.0.d0) goto 1900
+
+c         si 2 points de TB sont dans le plan de TA
+c         ou si on a une traversée franche => on traite
+          if(iimpi.ge.10) then
+            write(ioimp,*) '+ TRIANGLE B # ',IB,' / ',NBELE2
+            write(ioimp,FMT="('noeuds ',I5,I5,I5)")ITB(1),ITB(2),ITB(3)
+c             write(ioimp,*) '+     coordx ',(XTB(iou,1),iou=1,3)
+c             write(ioimp,*) '+     coordy ',(XTB(iou,2),iou=1,3)
+c             write(ioimp,*) '+     coordz ',(XTB(iou,3),iou=1,3)
+            if(iimpi.ge.12)
+     &      write(ioimp,*) ' xddB1,2,3=',xddB1,xddB2,xddB3
+          endif
+
+C-----------------------------------------------------------------------
+C         CALCULS RELATIFS AU TRIANGLE B
+
+          IF(WORK2.IDEJVU(IB).eq.0) THEN
+
+c           vecteurs des aretes
+            vb12x = XTB(2,1) - XTB(1,1)
+            vb12y = XTB(2,2) - XTB(1,2)
+            vb12z = XTB(2,3) - XTB(1,3)
+            vb13x = XTB(3,1) - XTB(1,1)
+            vb13y = XTB(3,2) - XTB(1,2)
+            vb13z = XTB(3,3) - XTB(1,3)
+
+c           vecteur normal au Triangle B + aire du triangle
+            vbx = vb12y*vb13z - vb12z*vb13y
+            vby = vb12z*vb13x - vb12x*vb13z
+            vbz = vb12x*vb13y - vb12y*vb13x
+            xlenB = sqrt(vbx*vbx + vby*vby + vbz*vbz)
+            if (xlenB.le.XPETIT) then
+              write(ioimp,*) 'TRI3 B de dimension nulle! ',xlenB,XPETIT
+              if(IVERI.ge.1) then
+c             write(ioimp,*) 'NOVERIF: ON retourne le maillage en l etat'
+c                 goto 9000
+c         bp : une autre solution est de "sauter" cet element
+          write(ioimp,*) 'NOVERIF: l execution continue malgre tout'
+                goto 1900
+              else
+                call erreur(26)
+                return
+              endif
+            endif
+            vbx = vbx / xlenB
+            vby = vby / xlenB
+            vbz = vbz / xlenB
+            WORK2.V(1,IB) = vbx
+            WORK2.V(2,IB) = vby
+            WORK2.V(3,IB) = vbz
+            WORK2.IDEJVU(IB) = 1
+            if(iimpi.ge.12) write(ioimp,*) ' normale vB =',vbx,vby,vbz
+
+          ELSE
+            vbx = WORK2.V(1,IB)
+            vby = WORK2.V(2,IB)
+            vbz = WORK2.V(3,IB)
+
+          ENDIF
+
+C-----------------------------------------------------------------------
+C         CALCUL DE LA DISTANCE AU PLAN TB DES NOEUDS DU Triangle A
+
+          do iidim=1,idim
+            dA1(iidim) = XTA(1,iidim) - XTB(1,iidim)
+            dA2(iidim) = XTA(2,iidim) - XTB(1,iidim)
+            dA3(iidim) = XTA(3,iidim) - XTB(1,iidim)
+          enddo
+          xddA1 = vbx*dA1(1) + vby*dA1(2) + vbz*dA1(3)
+          xddA2 = vbx*dA2(1) + vby*dA2(2) + vbz*dA2(3)
+          xddA3 = vbx*dA3(1) + vby*dA3(2) + vbz*dA3(3)
+        if(iimpi.ge.12) write(ioimp,*) ' xddA1,2,3=',xddA1,xddA2,xddA3
+
+c         si tous les points de TA sont en dessous (ou dessus) de TB,
+c         il n'y a pas d'intersection : on quitte
+c           if(xddA1.lt.xpetA.and.xddA2.lt.xpetA.and.xddA3.lt.xpetA)
+c      &    goto 1900
+c           if(xddA1.gt.xpetAn.and.xddA2.gt.xpetAn.and.xddA3.gt.xpetAn)
+c      &    goto 1900
+c         idem, mais on traite desormais le cas affleurant
+          if(xddA1.lt.XPLANn.and.xddA2.lt.XPLANn.and.xddA3.lt.XPLANn)
+     &    goto 1900
+          if(xddA1.gt.XPLAN.and.xddA2.gt.XPLAN.and.xddA3.gt.XPLAN)
+     &    goto 1900
+
+c         combien de points de TA dans le plan de TB ? => iAinB
+          iAinB = 0
+          if(abs(xddA1).le.XPLAN) iAinB=iAinB+1
+          if(abs(xddA2).le.XPLAN) iAinB=iAinB+2
+          if(abs(xddA3).le.XPLAN) iAinB=iAinB+4
+
+c         si tous les points de TA sont dans le plan de TB,
+c-------- => on doit traiter le cas coplanaire ------------------------
+          if (iAinB.eq.7.or.iBinA.eq.7) then
+            write(ioimp,*) 'CAS COPLANAIRE EN COURS DE DEVELOPPEMENT'
+            goto 1900
+
+          elseif(SELF) then
+c           si self et 2 points en commun et pas coplanaire => on saute
+            ichev = 0
+            do INOD2=1,NBNN2
+              IPB2 = IPT2.NUM(INOD2,IB)
+              if(IPB2.eq.ITA(1)) ichev=ichev+1
+              if(IPB2.eq.ITA(2)) ichev=ichev+1
+              if(IPB2.eq.ITA(3)) ichev=ichev+1
+            enddo
+            if(ichev.eq.2) goto 1900
+          endif
+c-------- fin du cas coplanaire---------------------------------------
+
+
+c         si 1 seul point de TA est dans le plan de TB
+c            et les autres dont du meme coté,
+c         => on ne traite pas cette intersection ponctuelle : on saute
+          proA12 = xddA1*xddA2
+          proA23 = xddA2*xddA3
+          proA31 = xddA3*xddA1
+          if(iAinB.eq.1.and.proA23.gt.0.d0) goto 1900
+          if(iAinB.eq.2.and.proA31.gt.0.d0) goto 1900
+          if(iAinB.eq.4.and.proA12.gt.0.d0) goto 1900
+
+c         si 2 points de TA sont dans le plan de TB
+c         ou si on a une traversée franche => on traite
+
+C-----------------------------------------------------------------------
+C         VECTEUR DIRECTEUR DE LA DROITE INTERSECTANT LES 2 PLANS
+          dx = vay*vbz - vaz*vby
+          dy = vaz*vbx - vax*vbz
+          dz = vax*vby - vay*vbx
+        if(iimpi.ge.12) write(ioimp,*) ' directrice D=',dx,dy,dz
+
+
+C-----------------------------------------------------------------------
+C         EVENTUELLE PERMUTATION DES NOEUDS DE TA
+c         afin que xddA1 soit de signe opposé à celui de xddA2 et xddA3
+c         on fait attention aux cas ou on a des noeuds de A dans plan TB
+c         noeuds A1 et A2 dans plan TB
+          if(iAinB.eq.3) then
+            proA12 =  1.d0
+            proA23 = -1.d0
+c         noeuds A1 et A3 dans plan TB
+          elseif(iAinB.eq.5) then
+            proA12 = -1.d0
+            proA23 = -1.d0
+c         noeuds A2 et A3 dans plan TB
+          elseif(iAinB.eq.6) then
+            proA12 = 0.d0
+            proA23 = 1.d0
+          else
+            proA12 = xddA1*xddA2
+            proA23 = xddA2*xddA3
+          endif
+          IF(proA23.ge.0.d0) THEN
+c         si xddA2 et xddA3 de meme signe, rien a faire
+c rem: ge possible (au lieu de gt) car on est sur de traverser franchement
+            iA1=1
+            iA2=2
+            iA3=3
+          ELSE
+c           xddA2 et xddA3 de signe oppose : il faut permuter
+            IF(proA12.le.0.d0) THEN
+c             xddA2 different des 2 autres : 1<-2 2<-3 3<-1
+              iA1=2
+              iA2=3
+              iA3=1
+              xddtmp= xddA1
+              xddA1 = xddA2
+              xddA2 = xddA3
+              xddA3 = xddtmp
+            ELSE
+c             xddA3 different des 2 autres : 1<-3 2<-1 3<-2
+              iA1=3
+              iA2=1
+              iA3=2
+              xddtmp= xddA2
+              xddA2 = xddA1
+              xddA1 = xddA3
+              xddA3 = xddtmp
+            ENDIF
+          ENDIF
+          va12x = XTA(iA2,1) - XTA(iA1,1)
+          va12y = XTA(iA2,2) - XTA(iA1,2)
+          va12z = XTA(iA2,3) - XTA(iA1,3)
+          va13x = XTA(iA3,1) - XTA(iA1,1)
+          va13y = XTA(iA3,2) - XTA(iA1,2)
+          va13z = XTA(iA3,3) - XTA(iA1,3)
+c         on recalcule  iAinB
+          iAinB = 0
+          if(abs(xddA1).le.XPLAN) iAinB=iAinB+1
+          if(abs(xddA2).le.XPLAN) iAinB=iAinB+2
+          if(abs(xddA3).le.XPLAN) iAinB=iAinB+4
+c ici A1 (=1er noeud du Triangle A) est situé de l'autre coté du plan TB
+        if(iimpi.ge.12) then
+        write(ioimp,*) ' noeuds A permutés=',ITA(iA1),ITA(iA2),ITA(iA3)
+        write(ioimp,*) ' xddA1,2,3=',xddA1,xddA2,xddA3
+        endif
+
+C-----------------------------------------------------------------------
+C         EVENTUELLE PERMUTATION DES NOEUDS DE TB
+c         afin que xddB1 soit de signe opposé à celui de xddB2 et xddB3
+c         on fait attention aux cas ou on a des noeuds de A dans plan TB
+          if(iBinA.eq.3) then
+            proB12 =  1.d0
+            proB23 = -1.d0
+          elseif(iBinA.eq.5) then
+            proB12 = -1.d0
+            proB23 = -1.d0
+          elseif(iBinA.eq.6) then
+            proB12 = 0.d0
+            proB23 = 1.d0
+          else
+            proB12 = xddB1*xddB2
+            proB23 = xddB2*xddB3
+          endif
+          IF(proB23.ge.0.d0) THEN
+c         si xddB2 et xddB3 de meme signe, rien a faire
+c rem: ge possible (au lieu de gt) car on est sur de traverser franchement
+            iB1=1
+            iB2=2
+            iB3=3
+          ELSE
+c           xddB2 et xddB3 de signe oppose : il faut permuter
+            IF(proB12.le.0.d0) THEN
+c             xddB2 different des 2 autres : 1<-2 2<-3 3<-1
+              iB1=2
+              iB2=3
+              iB3=1
+              xddtmp= xddB1
+              xddB1 = xddB2
+              xddB2 = xddB3
+              xddB3 = xddtmp
+            ELSE
+c             xddB3 different des 2 autres : 1<-3 2<-1 3<-2
+              iB1=3
+              iB2=1
+              iB3=2
+              xddtmp= xddB2
+              xddB2 = xddB1
+              xddB1 = xddB3
+              xddB3 = xddtmp
+            ENDIF
+          ENDIF
+          vb12x = XTB(iB2,1) - XTB(iB1,1)
+          vb12y = XTB(iB2,2) - XTB(iB1,2)
+          vb12z = XTB(iB2,3) - XTB(iB1,3)
+          vb13x = XTB(iB3,1) - XTB(iB1,1)
+          vb13y = XTB(iB3,2) - XTB(iB1,2)
+          vb13z = XTB(iB3,3) - XTB(iB1,3)
+c         on recalcule iBinA
+          iBinA = 0
+          if(abs(xddB1).le.XPLAN) iBinA=iBinA+1
+          if(abs(xddB2).le.XPLAN) iBinA=iBinA+2
+          if(abs(xddB3).le.XPLAN) iBinA=iBinA+4
+c ici B1 (=1er noeud du Triangle B) est situé de l'autre coté du plan TB
+        if(iimpi.ge.12) then
+        write(ioimp,*) ' noeuds B permutés=',ITB(iB1),ITB(iB2),ITB(iB3)
+        write(ioimp,*) ' xddB1,2,3=',xddB1,xddB2,xddB3
+        endif
+
+
+C-----------------------------------------------------------------------
+C         CALCUL DES POINTS P2 et P3
+
+c         P2 = intersection arete 1-2 de TA avec plan TB
+          rap2 = abs(xddA1/(xddA1-xddA2))
+          xP2(1) = XTA(iA1,1) + rap2*va12x
+          xP2(2) = XTA(iA1,2) + rap2*va12y
+          xP2(3) = XTA(iA1,3) + rap2*va12z
+c         P3 = intersection arete 1-3 de TA avec plan TB
+          rap3 = abs(xddA1/(xddA1-xddA3))
+          xP3(1) = XTA(iA1,1) + rap3*va13x
+          xP3(2) = XTA(iA1,2) + rap3*va13y
+          xP3(3) = XTA(iA1,3) + rap3*va13z
+
+c         pour y repondre il faut calculer les points Q2 et Q3
+          if(iimpi.ge.12) write(ioimp,*) ' P2=',(xP2(iou),iou=1,3)
+          if(iimpi.ge.12) write(ioimp,*) ' P3=',(xP3(iou),iou=1,3)
+
+c         le segment [P1-P2] est il inclut dans TB ?
+C-----------------------------------------------------------------------
+C         CALCUL DES POINTS Q2 et Q3
+
+c         Q2 = intersection arete 1-2 de TB avec plan TA
+          rap2 = abs(xddB1/(xddB1-xddB2))
+          xQ2(1) = XTB(iB1,1) + rap2*vb12x
+          xQ2(2) = XTB(iB1,2) + rap2*vb12y
+          xQ2(3) = XTB(iB1,3) + rap2*vb12z
+c         Q3 = intersection arete 1-3 de TB avec plan TB
+          rap3 = abs(xddB1/(xddB1-xddB3))
+          xQ3(1) = XTB(iB1,1) + rap3*vb13x
+          xQ3(2) = XTB(iB1,2) + rap3*vb13y
+          xQ3(3) = XTB(iB1,3) + rap3*vb13z
+
+          if(iimpi.ge.12) write(ioimp,*) ' Q2=',(xQ2(iou),iou=1,3)
+          if(iimpi.ge.12) write(ioimp,*) ' Q3=',(xQ3(iou),iou=1,3)
+
+
+C-----------------------------------------------------------------------
+C         IDENTIFICATION EVENTUELLE DES POINTS P2 P3 Q2 ET Q3
+c         calcul de la distance de P2 aux noeuds A1 et A2
+          IP2=0
+          dP2A2 = sqrt((xP2(1)-XTA(IA2,1))**2
+     &               + (xP2(2)-XTA(IA2,2))**2
+     &               + (xP2(3)-XTA(IA2,3))**2)
+          if (dP2A2.le.XELIM2) then
+             IP2   =ITA(IA2)
+             xP2(1)=XTA(IA2,1)
+             xP2(2)=XTA(IA2,2)
+             xP2(3)=XTA(IA2,3)
+          else
+             dP2A1 = sqrt((xP2(1)-XTA(IA1,1))**2
+     &                  + (xP2(2)-XTA(IA1,2))**2
+     &                  + (xP2(3)-XTA(IA1,3))**2)
+             if (dP2A1.le.XELIM2) then
+                IP2   =ITA(IA1)
+                xP2(1)=XTA(IA1,1)
+                xP2(2)=XTA(IA1,2)
+                xP2(3)=XTA(IA1,3)
+             endif
+          endif
+c         calcul de la distance de P3 aux noeuds A1 et A3
+          IP3=0
+          dP3A3 = sqrt((xP3(1)-XTA(IA3,1))**2
+     &               + (xP3(2)-XTA(IA3,2))**2
+     &               + (xP3(3)-XTA(IA3,3))**2)
+          if (dP3A3.le.XELIM2) then
+             IP3   =ITA(IA3)
+             xP3(1)=XTA(IA3,1)
+             xP3(2)=XTA(IA3,2)
+             xP3(3)=XTA(IA3,3)
+          else
+             dP3A1 = sqrt((xP3(1)-XTA(IA1,1))**2
+     &                  + (xP3(2)-XTA(IA1,2))**2
+     &                  + (xP3(3)-XTA(IA1,3))**2)
+             if (dP3A1.le.XELIM2) then
+                IP3   =ITA(IA1)
+                xP3(1)=XTA(IA1,1)
+                xP3(2)=XTA(IA1,2)
+                xP3(3)=XTA(IA1,3)
+             endif
+          endif
+
+c         calcul de la distance de Q2 aux noeuds B1 et B2
+          IQ2=0
+          dQ2B2 = sqrt((xQ2(1)-XTB(IB2,1))**2
+     &               + (xQ2(2)-XTB(IB2,2))**2
+     &               + (xQ2(3)-XTB(IB2,3))**2)
+          if (dQ2B2.le.XELIM2) then
+             IQ2  = ITB(IB2)
+             xQ2(1)=XTB(IB2,1)
+             xQ2(2)=XTB(IB2,2)
+             xQ2(3)=XTB(IB2,3)
+          else
+             dQ2B1 = sqrt((xQ2(1)-XTB(IB1,1))**2
+     &                  + (xQ2(2)-XTB(IB1,2))**2
+     &                  + (xQ2(3)-XTB(IB1,3))**2)
+             if (dQ2B1.le.XELIM2) then
+                IQ2  = ITB(IB1)
+                xQ2(1)=XTB(IB1,1)
+                xQ2(2)=XTB(IB1,2)
+                xQ2(3)=XTB(IB1,3)
+             endif
+          endif
+c         calcul de la distance de Q3 aux noeuds B1 et B3
+          IQ3=0
+          dQ3B3 = sqrt((xQ3(1)-XTB(IB3,1))**2
+     &               + (xQ3(2)-XTB(IB3,2))**2
+     &               + (xQ3(3)-XTB(IB3,3))**2)
+          if (dQ3B3.le.XELIM2) then
+             IQ3   =ITB(IB3)
+             xQ3(1)=XTB(IB3,1)
+             xQ3(2)=XTB(IB3,2)
+             xQ3(3)=XTB(IB3,3)
+          else
+             dQ3B1 = sqrt((xQ3(1)-XTB(IB1,1))**2
+     &                  + (xQ3(2)-XTB(IB1,2))**2
+     &                  + (xQ3(3)-XTB(IB1,3))**2)
+             if (dQ3B1.le.XELIM2) then
+                IQ3   =ITB(IB1)
+                xQ3(1)=XTB(IB1,1)
+                xQ3(2)=XTB(IB1,2)
+                xQ3(3)=XTB(IB1,3)
+             endif
+          endif
+c rem bp : cette identification déplace la position de P2 P3 Q2 et Q3
+c          vers les A1 A2 etc...
+
+
+C-----------------------------------------------------------------------
+C         ABCISSE s SUR D DES POINTS P2, P3, Q2 et Q3
+          sP2 = xP2(1)*dx + xP2(2)*dy + xP2(3)*dz
+          sP3 = xP3(1)*dx + xP3(2)*dy + xP3(3)*dz
+          sQ2 = xQ2(1)*dx + xQ2(2)*dy + xQ2(3)*dz
+          sQ3 = xQ3(1)*dx + xQ3(2)*dy + xQ3(3)*dz
+          if(iimpi.ge.10) then
+            WRITE(IOIMP,*) 'identif   #P2,3=',IP2,IP3,' Q2,3=',IQ2,IQ3
+            WRITE(IOIMP,*) 'abscisses  P2,3=',sP2,sP3,' Q2,3=',sQ2,sQ3
+          endif
+
+c         si les segments [P2-P3] et [Q2-Q3] ne se chevauchent pas, on quitte
+          if(sP2.lt.sP3) then
+           sminP = sP2
+           smaxP = sP3
+          else
+           sminP = sP3
+           smaxP = sP2
+          endif
+          if(sQ2.lt.sQ3) then
+           sminQ = sQ2
+           smaxQ = sQ3
+          else
+           sminQ = sQ3
+           smaxQ = sQ2
+          endif
+
+c         si pas de chevauchement (exclusion), on saute
+          if (sminP.ge.smaxQ.or.smaxP.le.sminQ) goto 1900
+
+
+C-----------------------------------------------------------------------
+C         PREPARATION DES MAILLAGES DE TA et TB + SEGMENT D'INTERSECTION
+c            write(6,*) 'place dispo dan ipt1=',IPT1.NUM(/2),NBELE1
+c            write(6,*) 'place dispo dan ipt2=',IPT2.NUM(/2),NBELE2
+c         Avant tout on vérifie qu'il reste assez de place
+          if(NBELE1+4.gt.IPT1.NUM(/2)) then
+            NBNN = NBNN1
+            NBELEM = NBELE1+nbloc
+c             segadj,IPT1
+            segadj,IPT1,WORK1
+          endif
+          if(NBELE2+4.gt.IPT2.NUM(/2)) then
+            NBNN = NBNN2
+            NBELEM = NBELE2+nbloc
+            segadj,IPT2,WORK2
+          endif
+          if(NBELE3+1.gt.IPT3.NUM(/2)) then
+            NBNN = NBNN3
+            NBELEM = NBELE3+nbloc
+            segadj,IPT3
+          endif
+          if(NBELE4+1.gt.IPT4.NUM(/2)) then
+            NBNN = NBNN3
+            NBELEM = NBELE4+nbloc
+            segadj,IPT4
+          endif
+
+
+c         si chevauchement exact et 2 points de B dans plan A
+c         et 2 points de A dans plan B => on saute
+          if (   (abs(sminP-sminQ).le.XELIM)
+     &      .and.(abs(smaxP-smaxQ).le.XELIM) ) then
+c           on ajoute les segments a IPT3 et IPT4
+            if (iAinB.eq.6.and.iBinA.eq.6) then
+c            +on crée les segments intersection
+              NBTMP=NBELE3+1
+              NODE(1)=ITA(IA2)
+              NODE(2)=ITA(IA3)
+              call ajouel(NODE,2,2,IPT3,NBTMP)
+              NBELE3=max(NBELE3,NBTMP)
+              if(.not.SELF) then
+                NBTMP=NBELE4+1
+                NODE(1)=ITB(IB2)
+                NODE(2)=ITB(IB3)
+                call ajouel(NODE,2,2,IPT4,NBTMP)
+                NBELE4=max(NBELE4,NBTMP)
+              endif
+              if(iimpi.ge.10) then
+               WRITE(IOIMP,*) 'chevauchement exact IPT3 elem',NBTMP
+               WRITE(IOIMP,*) IPT3.NUM(1,NBTMP),IPT3.NUM(2,NBTMP)
+              endif
+              goto 1900
+            endif
+          endif
+
+c         arrivé ici, on a detecté une intersection entre TA et TB
+          if(iimpi.ge.10) then
+           WRITE(IOIMP,*) 'INTERSECTION DETECTÉE entre ',IA,' et ',IB
+           WRITE(IOIMP,*) 'P=[',sminP,smaxP,']  Q=[',sminQ,smaxQ,']'
+          endif
+
+
+
+
+C-----------------------------------------------------------------------
+C         PREPARATION DE LA CONSTRUCTION DES FILS DE TA
+C         + CONSTRUCTION DU SEGMENT D'INTERSECTION
+
+
+c     --- Cas [P2-P3] inclus dans [Q2-Q3] => segment P2-P3 ---
+          IF (sminQ.lt.(sminP+XELIM).and.(smaxP-XELIM).lt.smaxQ) THEN
+
+c          -on est sur le bord du triangle => on ne decoupe pas A
+            if(IP2.ne.0.and.IP3.ne.0) then
+              ICOUPA=0
+c          -on a 2 points confondus => TA decoupe en 2
+            elseif(IP2.ne.0) then
+              call AJOUPO(xP3,IPT3,XELIM,IP3)
+              ICOUPA=23
+            elseif(IP3.ne.0) then
+              call AJOUPO(xP2,IPT3,XELIM,IP2)
+              ICOUPA=22
+c          -on est dans le cas general => TA decoupe en 3
+            else
+c             on ajoute P2 et P3 a XCOOR
+              call AJOUPO(xP2,IPT3,XELIM,IP2)
+              call AJOUPO(xP3,IPT3,XELIM,IP3)
+              ICOUPA=30
+            endif
+c          +on crée le segment intersection
+            NBTMP=NBELE3+1
+            NODE(1)=IP2
+            NODE(2)=IP3
+            call ajouel(NODE,2,2,IPT3,NBTMP)
+            NBELE3=max(NBELE3,NBTMP)
+
+c     --- Cas [P2-P3] exclus de [Q2-Q3] => segment Q2-Q3 ---
+          ELSEIF(sminQ.gt.(sminP+XELIM).and.(smaxP-XELIM).gt.smaxQ)THEN
+
+c          -on est sur le bord du triangle => TA decoupe en 3
+            if(IP2.ne.0.and.IP3.ne.0) then
+              ICOUPA=31
+c          -on a 2 points confondus => TA decoupe en 5
+            else
+              if(abs(xddA2).ge.abs(xddA3)) then
+                ICOUPA=52
+              else
+                ICOUPA=53
+              endif
+            endif
+              call AJOUPO(xQ2,IPT3,XELIM,IQQ2)
+c             cas particulier IQ2 = IQ3
+              if(IQ2.eq.IQ3) then
+                IQQ3=IQQ2
+              else
+                call AJOUPO(xQ3,IPT3,XELIM,IQQ3)
+              endif
+c           petite astuce pour garder l orientation
+            if ( (sP2.lt.sP3.and.sQ2.lt.sQ3)
+     &       .or.(sP2.gt.sP3.and.sQ2.gt.sQ3) ) then
+              IQQ2=IQQ2
+              IQQ3=IQQ3
+            else
+              IQQtmp=IQQ3
+              IQQ3=IQQ2
+              IQQ2=IQQtmp
+            endif
+c          +on crée le segment intersection
+              NBTMP=NBELE3+1
+              NODE(1)=IQQ2
+              NODE(2)=IQQ3
+              call ajouel(NODE,2,2,IPT3,NBTMP)
+              NBELE3=max(NBELE3,NBTMP)
+c             endif
+
+c     --- Cas chevauchement selon [Q2 P3] ---
+          ELSEIF (((sP2+XELIM).le.sQ2.and.sQ2.le.(sP3-XELIM)
+     &              .and.sQ2.le.sQ3)
+     &        .OR.((sP2-XELIM).ge.sQ2.and.sQ2.ge.(sP3+XELIM)
+     &              .and.sQ2.ge.sQ3)) THEN
+
+c          -on a a minima 2 points confondus
+            if(IP3.ne.0) then
+c             -on est sur le bord du triangle => TA decoupe en 2
+              if(IP2.ne.0) then
+                ICOUPA=21
+c             -on a 2 points confondus => TA decoupe en 3
+              else
+                ICOUPA=39
+              endif
+              call AJOUPO(xQ2,IPT3,XELIM,IQQ)
+c          -TA decoupe en 4
+            else
+              call AJOUPO(xP3,IPT3,XELIM,IP3)
+              call AJOUPO(xQ2,IPT3,XELIM,IQQ)
+              ICOUPA=43
+            endif
+c          +on crée le segment intersection
+              NBTMP=NBELE3+1
+              NODE(1)=IQQ
+              NODE(2)=IP3
+              call ajouel(NODE,2,2,IPT3,NBTMP)
+              NBELE3=max(NBELE3,NBTMP)
+c             endif
+
+c     --- Cas chevauchement selon [Q3 P3] ---
+          ELSEIF (((sP2+XELIM).le.sQ3.and.sQ3.le.(sP3-XELIM)
+     &              .and.sQ3.le.sQ2)
+     &        .OR.((sP2-XELIM).ge.sQ3.and.sQ3.ge.(sP3+XELIM)
+     &              .and.sQ3.ge.sQ2)) THEN
+
+c          -on a a minima 2 points confondus
+            if(IP3.ne.0) then
+c             -on est sur le bord du triangle => TA decoupe en 2
+              if(IP2.ne.0) then
+                ICOUPA=21
+c             -on a 2 points confondus => TA decoupe en 3
+              else
+                ICOUPA=39
+              endif
+              call AJOUPO(xQ3,IPT3,XELIM,IQQ)
+c          -TA decoupe en 4
+            else
+              call AJOUPO(xP3,IPT3,XELIM,IP3)
+              call AJOUPO(xQ3,IPT3,XELIM,IQQ)
+              ICOUPA=43
+            endif
+c          +on crée le segment intersection
+              NBTMP=NBELE3+1
+              NODE(1)=IQQ
+              NODE(2)=IP3
+              call ajouel(NODE,2,2,IPT3,NBTMP)
+              NBELE3=max(NBELE3,NBTMP)
+
+c     --- Cas chevauchement selon [Q2 P2] ---
+          ELSEIF (((sP3+XELIM).le.sQ2.and.sQ2.le.(sP2-XELIM)
+     &              .and.sQ2.le.sQ3)
+     &        .OR.((sP3-XELIM).ge.sQ2.and.sQ2.ge.(sP2+XELIM)
+     &              .and.sQ2.ge.sQ3)) THEN
+
+c          -on a a minima 2 points confondus
+            if(IP2.ne.0) then
+c             -on est sur le bord du triangle => TA decoupe en 2
+              if(IP3.ne.0) then
+                ICOUPA=21
+c             -on a 2 points confondus => TA decoupe en 3
+              else
+                ICOUPA=39
+              endif
+              call AJOUPO(xQ2,IPT3,XELIM,IQQ)
+c          -TA decoupe en 4
+            else
+              call AJOUPO(xP2,IPT3,XELIM,IP2)
+              call AJOUPO(xQ2,IPT3,XELIM,IQQ)
+              ICOUPA=42
+            endif
+c          +on crée le segment intersection
+              NBTMP=NBELE3+1
+              NODE(1)=IQQ
+              NODE(2)=IP2
+              call ajouel(NODE,2,2,IPT3,NBTMP)
+              NBELE3=max(NBELE3,NBTMP)
+c             endif
+
+c     --- Cas chevauchement selon [Q3 P2] ---
+          ELSEIF (((sP3+XELIM).le.sQ3.and.sQ3.le.(sP2-XELIM)
+     &              .and.sQ3.le.sQ2)
+     &        .OR.((sP3-XELIM).ge.sQ3.and.sQ3.ge.(sP2+XELIM)
+     &              .and.sQ3.ge.sQ2)) THEN
+
+c          -on a a minima 2 points confondus
+            if(IP2.ne.0) then
+c             -on est sur le bord du triangle => TA decoupe en 2
+              if(IP3.ne.0) then
+                ICOUPA=21
+c             -on a 2 points confondus => TA decoupe en 3
+              else
+                ICOUPA=39
+              endif
+              call AJOUPO(xQ3,IPT3,XELIM,IQQ)
+c          -TA decoupe en 4
+            else
+              call AJOUPO(xP2,IPT3,XELIM,IP2)
+              call AJOUPO(xQ3,IPT3,XELIM,IQQ)
+              ICOUPA=42
+            endif
+c          +on crée le segment intersection
+              NBTMP=NBELE3+1
+              NODE(1)=IP2
+              NODE(2)=IQQ
+              call ajouel(NODE,2,2,IPT3,NBTMP)
+              NBELE3=max(NBELE3,NBTMP)
+c             endif
+
+          ENDIF
+          if(iimpi.ge.10) then
+            write(ioimp,fmt="('IPT3(1et2',I5,')=',I5,I5)")
+     &      NBELE3,IPT3.NUM(1,NBELE3),IPT3.NUM(2,NBELE3)
+          endif
+
+
+C-----------------------------------------------------------------------
+C         PREPARATION DE LA CONSTRUCTION DES FILS DE TB
+C         + CONSTRUCTION DU SEGMENT D'INTERSECTION
+
+c     --- Cas [Q2-Q3] inclus dans [P2-P3] => segment Q2-Q3 ---
+          IF (sminP.lt.(sminQ+XELIM).and.(smaxQ-XELIM).lt.smaxP) THEN
+
+c          -on est sur le bord du triangle => on ne decoupe pas B
+            if(IQ2.ne.0.and.IQ3.ne.0) then
+              ICOUPB=0
+c          -on a 2 points confondus => TB decoupe en 2
+            elseif(IQ2.ne.0) then
+              call AJOUPO(xQ3,IPT4,XELIM,IQ3)
+              ICOUPB=23
+            elseif(IQ3.ne.0) then
+              call AJOUPO(xQ2,IPT4,XELIM,IQ2)
+              IQ3 = ITB(IB3)
+              ICOUPB=22
+c          -on est dans le cas general => TB decoupe en 3
+            else
+c             on ajoute Q2 et Q3 a XCOOR
+              call AJOUPO(xQ2,IPT4,XELIM,IQ2)
+              call AJOUPO(xQ3,IPT4,XELIM,IQ3)
+              ICOUPB=30
+            endif
+c          +on crée le segment intersection
+            if(.not.SELF) then
+              NBTMP=NBELE4+1
+              NODE(1)=IQ2
+              NODE(2)=IQ3
+              call ajouel(NODE,2,2,IPT4,NBTMP)
+              NBELE4=max(NBELE4,NBTMP)
+            endif
+
+c     --- Cas [Q2-Q3] exclus de [P2-P3] => segment P2-P3 ---
+          ELSEIF(sminP.gt.(sminQ+XELIM).and.(smaxQ-XELIM).gt.smaxP)THEN
+
+c          -on est sur le bord du triangle => TB decoupe en 3
+            if(IQ2.ne.0.and.IQ3.ne.0) then
+              ICOUPB=31
+c          -on a 2 points confondus => TB decoupe en 5
+            else
+              if(abs(xddB2).ge.abs(xddB3)) then
+                ICOUPB=52
+              else
+                ICOUPB=53
+              endif
+            endif
+              call AJOUPO(xP2,IPT4,XELIM,IPP2)
+c             cas particulier IP2 = IP3
+              if(IP2.eq.IP3) then
+                IPP3=IPP2
+              else
+                call AJOUPO(xP3,IPT4,XELIM,IPP3)
+              endif
+c           petite astuce pour garder l orientation
+            if ( (sQ2.lt.sQ3.and.sP2.lt.sP3)
+     &       .or.(sQ2.gt.sQ3.and.sP2.gt.sP3) ) then
+              IPP2=IPP2
+              IPP3=IPP3
+            else
+              IPPtmp=IPP3
+              IPP3=IPP2
+              IPP2=IPPtmp
+            endif
+c          +on crée le segment intersection
+            if(.not.SELF) then
+              NBTMP=NBELE4+1
+              NODE(1)=IPP2
+              NODE(2)=IPP3
+              call ajouel(NODE,2,2,IPT4,NBTMP)
+              NBELE4=max(NBELE4,NBTMP)
+            endif
+
+c     --- Cas chevauchement selon [P2 Q3] ---
+          ELSEIF (((sQ2+XELIM).le.sP2.and.sP2.le.(sQ3-XELIM)
+     &              .and.sP2.le.sP3)
+     &        .OR.((sQ2-XELIM).ge.sP2.and.sP2.ge.(sQ3+XELIM)
+     &              .and.sP2.ge.sP3)) THEN
+
+c          -on a a minima 2 points confondus
+            if(IQ3.ne.0) then
+              IQ3 = ITB(IB3)
+c             -on est sur le bord du triangle => TB decoupe en 2
+              if(IQ2.ne.0) then
+                ICOUPB=21
+c             -on a 2 points confondus => TB decoupe en 3
+              else
+                ICOUPB=39
+              endif
+              call AJOUPO(xP2,IPT4,XELIM,IPP)
+c          -TB decoupe en 4
+            else
+              call AJOUPO(xQ3,IPT4,XELIM,IQ3)
+              call AJOUPO(xP2,IPT4,XELIM,IPP)
+             ICOUPB=43
+            endif
+c          +on crée le segment intersection
+            if(.not.SELF) then
+              NBTMP=NBELE4+1
+              NODE(1)=IPP
+              NODE(2)=IQ3
+              call ajouel(NODE,2,2,IPT4,NBTMP)
+              NBELE4=max(NBELE4,NBTMP)
+            endif
+
+c     --- Cas chevauchement selon [P3 Q3] ---
+          ELSEIF (((sQ2+XELIM).le.sP3.and.sP3.le.(sQ3-XELIM)
+     &              .and.sP3.le.sP2)
+     &        .OR.((sQ2-XELIM).ge.sP3.and.sP3.ge.(sQ3+XELIM)
+     &              .and.sP3.ge.sP2)) THEN
+
+c          -on a a minima 2 points confondus
+            if(IQ3.ne.0) then
+              IQ3 = ITB(IB3)
+c             -on est sur le bord du triangle => TB decoupe en 2
+              if(IQ2.ne.0) then
+                ICOUPB=21
+c             -on a 2 points confondus => TB decoupe en 3
+              else
+                ICOUPB=39
+              endif
+              call AJOUPO(xP3,IPT4,XELIM,IPP)
+c          -TB decoupe en 4
+            else
+              call AJOUPO(xQ3,IPT4,XELIM,IQ3)
+              call AJOUPO(xP3,IPT4,XELIM,IPP)
+              ICOUPB=43
+            endif
+c          +on crée le segment intersection
+            if(.not.SELF) then
+              NBTMP=NBELE4+1
+              NODE(1)=IPP
+              NODE(2)=IQ3
+              call ajouel(NODE,2,2,IPT4,NBTMP)
+              NBELE4=max(NBELE4,NBTMP)
+            endif
+
+c     --- Cas chevauchement selon [P2 Q2] ---
+          ELSEIF (((sQ3+XELIM).le.sP2.and.sP2.le.(sQ2-XELIM)
+     &              .and.sP2.le.sP3)
+     &        .OR.((sQ3-XELIM).ge.sP2.and.sP2.ge.(sQ2+XELIM)
+     &              .and.sP2.ge.sP3)) THEN
+
+c          -on a a minima 2 points confondus
+            if(IQ2.ne.0) then
+c             -on est sur le bord du triangle => TB decoupe en 2
+              if(IQ3.ne.0) then
+                ICOUPB=21
+c             -on a 2 points confondus => TB decoupe en 3
+              else
+                ICOUPB=39
+              endif
+              call AJOUPO(xP2,IPT4,XELIM,IPP)
+c          -TB decoupe en 4
+            else
+              call AJOUPO(xQ2,IPT4,XELIM,IQ2)
+              call AJOUPO(xP2,IPT4,XELIM,IPP)
+              ICOUPB=42
+            endif
+c          +on crée le segment intersection
+            if(.not.SELF) then
+              NBTMP=NBELE4+1
+              NODE(1)=IQ2
+              NODE(2)=IPP
+              call ajouel(NODE,2,2,IPT4,NBTMP)
+              NBELE4=max(NBELE4,NBTMP)
+            endif
+
+c     --- Cas chevauchement selon [P3 Q2] ---
+          ELSEIF (((sQ3+XELIM).le.sP3.and.sP3.le.(sQ2-XELIM)
+     &              .and.sP3.le.sP2)
+     &        .OR.((sQ3-XELIM).ge.sP3.and.sP3.ge.(sQ2+XELIM)
+     &              .and.sP3.ge.sP2)) THEN
+
+c          -on a a minima 2 points confondus
+            if(IQ2.ne.0) then
+c             -on est sur le bord du triangle => TB decoupe en 2
+              if(IQ3.ne.0) then
+                ICOUPB=21
+c             -on a 2 points confondus => TB decoupe en 3
+              else
+                ICOUPB=39
+              endif
+              call AJOUPO(xP3,IPT4,XELIM,IPP)
+c          -TB decoupe en 4
+            else
+              call AJOUPO(xQ2,IPT4,XELIM,IQ2)
+              call AJOUPO(xP3,IPT4,XELIM,IPP)
+              ICOUPB=42
+            endif
+c          +on crée le segment intersection
+            if(.not.SELF) then
+              NBTMP=NBELE4+1
+              NODE(1)=IQ2
+              NODE(2)=IPP
+              call ajouel(NODE,2,2,IPT4,NBTMP)
+              NBELE4=max(NBELE4,NBTMP)
+            endif
+
+          ENDIF
+
+
+          if(ICOUPA.eq.0.and.ICOUPB.eq.0) goto 1900
+C-----------------------------------------------------------------------
+C         CREATION DU SEGMENT INTERSECTION (fait + haut)
+c         CREATION DES TRIANGLES DECOUPES ISSUS DE TA
+          IF    (ICOUPA.EQ.21) THEN
+c           on decoupe TA en 2 triangles (rem: ITA(IA3)=IP3)
+c          -1er sous triangle de TA
+            IPT1.NUM(1,IA)=ITA(IA1)
+            IPT1.NUM(2,IA)=ITA(IA2)
+            IPT1.NUM(3,IA)=IQQ
+c          -2eme sous triangle de TA
+            IPT1.NUM(1, NBELE1+1)=IQQ
+            IPT1.NUM(2, NBELE1+1)=ITA(IA3)
+            IPT1.NUM(3, NBELE1+1)=ITA(IA1)
+            IPT1.ICOLOR(NBELE1+1)=IPT1.ICOLOR(IA)
+            NBELE1  = NBELE1+1
+          ELSEIF(ICOUPA.EQ.22) THEN
+c           on decoupe TA en 2 triangles (rem: ITA(IA3)=IP3)
+c          -1er sous triangle de TA
+            IPT1.NUM(1,IA)=ITA(IA1)
+            IPT1.NUM(2,IA)=IP2
+            IPT1.NUM(3,IA)=ITA(IA3)
+c          -2eme sous triangle de TA
+            IPT1.NUM(1, NBELE1+1)=IP2
+            IPT1.NUM(2, NBELE1+1)=ITA(IA2)
+            IPT1.NUM(3, NBELE1+1)=ITA(IA3)
+            IPT1.ICOLOR(NBELE1+1)=IPT1.ICOLOR(IA)
+            NBELE1  = NBELE1+1
+          ELSEIF(ICOUPA.EQ.23) THEN
+c           on decoupe TA en 2 triangles (rem: ITA(IA2)=IP2)
+c          -1er sous triangle de TA
+            IPT1.NUM(1,IA)=ITA(IA1)
+            IPT1.NUM(2,IA)=ITA(IA2)
+            IPT1.NUM(3,IA)=IP3
+c          -2eme sous triangle de TA
+            IPT1.NUM(1, NBELE1+1)=ITA(IA2)
+            IPT1.NUM(2, NBELE1+1)=ITA(IA3)
+            IPT1.NUM(3, NBELE1+1)=IP3
+            IPT1.ICOLOR(NBELE1+1)=IPT1.ICOLOR(IA)
+            NBELE1  = NBELE1+1
+          ELSEIF(ICOUPA.EQ.30) THEN
+c           on decoupe TA en 3 triangles
+c          -1er sous triangle de TA
+            IPT1.NUM(1,IA)=ITA(IA1)
+            IPT1.NUM(2,IA)=IP2
+            IPT1.NUM(3,IA)=IP3
+c          -2eme sous triangle de TA
+            IPT1.NUM(1, NBELE1+1)=IP2
+            IPT1.NUM(2, NBELE1+1)=ITA(IA2)
+            IPT1.NUM(3, NBELE1+1)=ITA(IA3)
+            IPT1.ICOLOR(NBELE1+1)=IPT1.ICOLOR(IA)
+c          -3eme sous triangle de TA
+            IPT1.NUM(1, NBELE1+2)=ITA(IA3)
+            IPT1.NUM(2, NBELE1+2)=IP3
+            IPT1.NUM(3, NBELE1+2)=IP2
+            IPT1.ICOLOR(NBELE1+2)=IPT1.ICOLOR(IA)
+            NBELE1  = NBELE1+2
+          ELSEIF(ICOUPA.EQ.31) THEN
+c           on decoupe TA en 3 triangles
+c          -1er sous triangle de TA
+            IPT1.NUM(1,IA)=ITA(IA1)
+            IPT1.NUM(2,IA)=ITA(IA2)
+            IPT1.NUM(3,IA)=IQQ2
+c          -2eme sous triangle de TA
+            IPT1.NUM(1, NBELE1+1)=ITA(IA1)
+            IPT1.NUM(2, NBELE1+1)=IQQ2
+            IPT1.NUM(3, NBELE1+1)=IQQ3
+            IPT1.ICOLOR(NBELE1+1)=IPT1.ICOLOR(IA)
+c          -3eme sous triangle de TA
+            IPT1.NUM(1, NBELE1+2)=ITA(IA1)
+            IPT1.NUM(2, NBELE1+2)=IQQ3
+            IPT1.NUM(3, NBELE1+2)=ITA(IA3)
+            IPT1.ICOLOR(NBELE1+2)=IPT1.ICOLOR(IA)
+            NBELE1  = NBELE1+2
+          ELSEIF(ICOUPA.EQ.39) THEN
+c           on decoupe TA en 3 triangles
+c          -1er sous triangle de TA
+            IPT1.NUM(1,IA)=ITA(IA1)
+            IPT1.NUM(2,IA)=ITA(IA2)
+            IPT1.NUM(3,IA)=IQQ
+c          -2eme sous triangle de TA
+            IPT1.NUM(1, NBELE1+1)=ITA(IA2)
+            IPT1.NUM(2, NBELE1+1)=IQQ
+            IPT1.NUM(3, NBELE1+1)=ITA(IA3)
+            IPT1.ICOLOR(NBELE1+1)=IPT1.ICOLOR(IA)
+c          -3eme sous triangle de TA
+            IPT1.NUM(1, NBELE1+2)=ITA(IA3)
+            IPT1.NUM(2, NBELE1+2)=IQQ
+            IPT1.NUM(3, NBELE1+2)=ITA(IA1)
+            IPT1.ICOLOR(NBELE1+2)=IPT1.ICOLOR(IA)
+            NBELE1  = NBELE1+2
+          ELSEIF(ICOUPA.EQ.42) THEN
+c           on decoupe TA en 4 triangles (arete 1-2 coupee)
+c          -1er sous triangle de TA
+            IPT1.NUM(1,IA)=ITA(IA1)
+            IPT1.NUM(2,IA)=IP2
+            IPT1.NUM(3,IA)=IQQ
+c          -2eme sous triangle de TA
+            IPT1.NUM(1, NBELE1+1)=IP2
+            IPT1.NUM(2, NBELE1+1)=ITA(IA2)
+            IPT1.NUM(3, NBELE1+1)=IQQ
+            IPT1.ICOLOR(NBELE1+1)=IPT1.ICOLOR(IA)
+c          -3eme sous triangle de TA
+            IPT1.NUM(1, NBELE1+2)=ITA(IA2)
+            IPT1.NUM(2, NBELE1+2)=ITA(IA3)
+            IPT1.NUM(3, NBELE1+2)=IQQ
+            IPT1.ICOLOR(NBELE1+2)=IPT1.ICOLOR(IA)
+c          -4eme sous triangle de TA
+            IPT1.NUM(1, NBELE1+3)=ITA(IA3)
+            IPT1.NUM(2, NBELE1+3)=ITA(IA1)
+            IPT1.NUM(3, NBELE1+3)=IQQ
+            IPT1.ICOLOR(NBELE1+3)=IPT1.ICOLOR(IA)
+            NBELE1  = NBELE1+3
+          ELSEIF(ICOUPA.EQ.43) THEN
+c           on decoupe TA en 4 triangles (arete 1-3 coupee)
+c          -1er sous triangle de TA
+            IPT1.NUM(1,IA)=ITA(IA1)
+            IPT1.NUM(2,IA)=ITA(IA2)
+            IPT1.NUM(3,IA)=IQQ
+c          -2eme sous triangle de TA
+            IPT1.NUM(1, NBELE1+1)=ITA(IA2)
+            IPT1.NUM(2, NBELE1+1)=ITA(IA3)
+            IPT1.NUM(3, NBELE1+1)=IQQ
+            IPT1.ICOLOR(NBELE1+1)=IPT1.ICOLOR(IA)
+c          -3eme sous triangle de TA
+            IPT1.NUM(1, NBELE1+2)=ITA(IA3)
+            IPT1.NUM(2, NBELE1+2)=IP3
+            IPT1.NUM(3, NBELE1+2)=IQQ
+            IPT1.ICOLOR(NBELE1+2)=IPT1.ICOLOR(IA)
+c          -4eme sous triangle de TA
+            IPT1.NUM(1, NBELE1+3)=IP3
+            IPT1.NUM(2, NBELE1+3)=ITA(IA1)
+            IPT1.NUM(3, NBELE1+3)=IQQ
+            IPT1.ICOLOR(NBELE1+3)=IPT1.ICOLOR(IA)
+            NBELE1  = NBELE1+3
+          ELSEIF(ICOUPA.EQ.52) THEN
+c           on decoupe TA en 5 triangles
+c          -1er sous triangle de TA
+            IPT1.NUM(1,IA)=ITA(IA1)
+            IPT1.NUM(2,IA)=IQQ2
+            IPT1.NUM(3,IA)=IQQ3
+c          -2eme sous triangle de TA
+            IPT1.NUM(1,NBELE1+1)=ITA(IA1)
+            IPT1.NUM(2,NBELE1+1)=ITA(IA2)
+            IPT1.NUM(3,NBELE1+1)=IQQ2
+            IPT1.ICOLOR(NBELE1+1)=IPT1.ICOLOR(IA)
+c          -3eme sous triangle de TA
+            IPT1.NUM(1,NBELE1+2)=ITA(IA2)
+            IPT1.NUM(2,NBELE1+2)=IQQ3
+            IPT1.NUM(3,NBELE1+2)=IQQ2
+            IPT1.ICOLOR(NBELE1+2)=IPT1.ICOLOR(IA)
+c          -4eme sous triangle de TA
+            IPT1.NUM(1,NBELE1+3)=ITA(IA2)
+            IPT1.NUM(2,NBELE1+3)=ITA(IA3)
+            IPT1.NUM(3,NBELE1+3)=IQQ3
+            IPT1.ICOLOR(NBELE1+3)=IPT1.ICOLOR(IA)
+c          -5eme sous triangle de TA
+            IPT1.NUM(1,NBELE1+4)=ITA(IA3)
+            IPT1.NUM(2,NBELE1+4)=ITA(IA1)
+            IPT1.NUM(3,NBELE1+4)=IQQ3
+            IPT1.ICOLOR(NBELE1+4)=IPT1.ICOLOR(IA)
+            NBELE1  = NBELE1+4
+          ELSEIF(ICOUPA.EQ.53) THEN
+c           on decoupe TA en 5 triangles
+c          -1er sous triangle de TA
+            IPT1.NUM(1,IA)=ITA(IA1)
+            IPT1.NUM(2,IA)=IQQ2
+            IPT1.NUM(3,IA)=IQQ3
+c          -2eme sous triangle de TA
+            IPT1.NUM(1,NBELE1+1)=ITA(IA1)
+            IPT1.NUM(2,NBELE1+1)=ITA(IA2)
+            IPT1.NUM(3,NBELE1+1)=IQQ2
+            IPT1.ICOLOR(NBELE1+1)=IPT1.ICOLOR(IA)
+c          -3eme sous triangle de TA
+            IPT1.NUM(1,NBELE1+2)=ITA(IA2)
+            IPT1.NUM(2,NBELE1+2)=ITA(IA3)
+            IPT1.NUM(3,NBELE1+2)=IQQ2
+            IPT1.ICOLOR(NBELE1+2)=IPT1.ICOLOR(IA)
+c          -4eme sous triangle de TA
+            IPT1.NUM(1,NBELE1+3)=ITA(IA3)
+            IPT1.NUM(2,NBELE1+3)=IQQ3
+            IPT1.NUM(3,NBELE1+3)=IQQ2
+            IPT1.ICOLOR(NBELE1+3)=IPT1.ICOLOR(IA)
+c          -5eme sous triangle de TA
+            IPT1.NUM(1,NBELE1+4)=ITA(IA3)
+            IPT1.NUM(2,NBELE1+4)=ITA(IA1)
+            IPT1.NUM(3,NBELE1+4)=IQQ3
+            IPT1.ICOLOR(NBELE1+4)=IPT1.ICOLOR(IA)
+            NBELE1  = NBELE1+4
+          ENDIF
+
+c         CREATION DES TRIANGLES DECOUPES ISSUS DE TB
+          if(SELF) NBELE2=NBELE1
+          IF    (ICOUPB.EQ.21) THEN
+c           on decoupe TB en 2 triangles
+c          -1er sous triangle de TB
+            IPT2.NUM(1,IB)=ITB(IB1)
+            IPT2.NUM(2,IB)=ITB(IB2)
+            IPT2.NUM(3,IB)=IPP
+c          -2eme sous triangle de TB
+            IPT2.NUM(1, NBELE2+1)=IPP
+            IPT2.NUM(2, NBELE2+1)=ITB(IB3)
+            IPT2.NUM(3, NBELE2+1)=ITB(IB1)
+            IPT2.ICOLOR(NBELE2+1)=IPT2.ICOLOR(IB)
+            NBELE2  = NBELE2+1
+          ELSEIF(ICOUPB.EQ.22) THEN
+c           on decoupe TB en 2 triangles (rem: ITB(IB3)=IQ3)
+c          -1er sous triangle de TB
+            IPT2.NUM(1,IB)=ITB(IB1)
+            IPT2.NUM(2,IB)=IQ2
+            IPT2.NUM(3,IB)=ITB(IB3)
+c          -2eme sous triangle de TB
+            IPT2.NUM(1, NBELE2+1)=IQ2
+            IPT2.NUM(2, NBELE2+1)=ITB(IB2)
+            IPT2.NUM(3, NBELE2+1)=ITB(IB3)
+            IPT2.ICOLOR(NBELE2+1)=IPT2.ICOLOR(IB)
+            NBELE2  = NBELE2+1
+          ELSEIF(ICOUPB.EQ.23) THEN
+c           on decoupe TB en 2 triangles (rem: ITB(IB2)=IQ2)
+c          -1er sous triangle de TB
+            IPT2.NUM(1,IB)=ITB(IB1)
+            IPT2.NUM(2,IB)=ITB(IB2)
+            IPT2.NUM(3,IB)=IQ3
+c          -2eme sous triangle de TB
+            IPT2.NUM(1, NBELE2+1)=ITB(IB2)
+            IPT2.NUM(2, NBELE2+1)=ITB(IB3)
+            IPT2.NUM(3, NBELE2+1)=IQ3
+            IPT2.ICOLOR(NBELE2+1)=IPT2.ICOLOR(IB)
+            NBELE2  = NBELE2+1
+          ELSEIF(ICOUPB.EQ.30) THEN
+c           on decoupe TB en 3 triangles
+c          -1er sous triangle de TB
+            IPT2.NUM(1,IB)=ITB(IB1)
+            IPT2.NUM(2,IB)=IQ2
+            IPT2.NUM(3,IB)=IQ3
+c          -2eme sous triangle de TB
+            IPT2.NUM(1,NBELE2+1)=IQ2
+            IPT2.NUM(2,NBELE2+1)=ITB(IB2)
+            IPT2.NUM(3,NBELE2+1)=ITB(IB3)
+            IPT2.ICOLOR(NBELE2+1)=IPT2.ICOLOR(IB)
+c          -3eme sous triangle de TB
+            IPT2.NUM(1,NBELE2+2)=IQ2
+            IPT2.NUM(2,NBELE2+2)=ITB(IB3)
+            IPT2.NUM(3,NBELE2+2)=IQ3
+            IPT2.ICOLOR(NBELE2+2)=IPT2.ICOLOR(IB)
+            NBELE2=NBELE2+2
+          ELSEIF(ICOUPB.EQ.31) THEN
+c           on decoupe TB en 3 triangles
+c          -1er sous triangle de TB
+            IPT2.NUM(1,IB)=ITB(IB1)
+            IPT2.NUM(2,IB)=ITB(IB2)
+            IPT2.NUM(3,IB)=IPP2
+c          -2eme sous triangle de TB
+            IPT2.NUM(1, NBELE2+1)=ITB(IB1)
+            IPT2.NUM(2, NBELE2+1)=IPP2
+            IPT2.NUM(3, NBELE2+1)=IPP3
+            IPT2.ICOLOR(NBELE2+1)=IPT2.ICOLOR(IB)
+c          -3eme sous triangle de TB
+            IPT2.NUM(1, NBELE2+2)=ITB(IB1)
+            IPT2.NUM(2, NBELE2+2)=IPP3
+            IPT2.NUM(3, NBELE2+2)=ITB(IB3)
+            IPT2.ICOLOR(NBELE2+2)=IPT2.ICOLOR(IB)
+            NBELE2=NBELE2+2
+          ELSEIF(ICOUPB.EQ.39) THEN
+c           on decoupe TB en 3 triangles
+c          -1er sous triangle de TB
+            IPT2.NUM(1,IB)=ITB(IB1)
+            IPT2.NUM(2,IB)=ITB(IB2)
+            IPT2.NUM(3,IB)=IPP
+c          -2eme sous triangle de TB
+            IPT2.NUM(1, NBELE2+1)=ITB(IB2)
+            IPT2.NUM(2, NBELE2+1)=IPP
+            IPT2.NUM(3, NBELE2+1)=ITB(IB3)
+            IPT2.ICOLOR(NBELE2+1)=IPT2.ICOLOR(IB)
+c          -3eme sous triangle de TB
+            IPT2.NUM(1, NBELE2+2)=ITB(IB3)
+            IPT2.NUM(2, NBELE2+2)=IPP
+            IPT2.NUM(3, NBELE2+2)=ITB(IB1)
+            IPT2.ICOLOR(NBELE2+2)=IPT2.ICOLOR(IB)
+            NBELE2=NBELE2+2
+          ELSEIF(ICOUPB.EQ.42) THEN
+c           on decoupe TB en 4 triangles (arete 1-2 coupee)
+c          -1er sous triangle de TB
+            IPT2.NUM(1,IB)=ITB(IB1)
+            IPT2.NUM(2,IB)=IQ2
+            IPT2.NUM(3,IB)=IPP
+c          -2eme sous triangle de TB
+            IPT2.NUM(1, NBELE2+1)=IQ2
+            IPT2.NUM(2, NBELE2+1)=ITB(IB2)
+            IPT2.NUM(3, NBELE2+1)=IPP
+            IPT2.ICOLOR(NBELE2+1)=IPT2.ICOLOR(IB)
+c          -3eme sous triangle de TB
+            IPT2.NUM(1, NBELE2+2)=ITB(IB2)
+            IPT2.NUM(2, NBELE2+2)=ITB(IB3)
+            IPT2.NUM(3, NBELE2+2)=IPP
+            IPT2.ICOLOR(NBELE2+2)=IPT2.ICOLOR(IB)
+c          -4eme sous triangle de TB
+            IPT2.NUM(1, NBELE2+3)=ITB(IB3)
+            IPT2.NUM(2, NBELE2+3)=ITB(IB1)
+            IPT2.NUM(3, NBELE2+3)=IPP
+            IPT2.ICOLOR(NBELE2+3)=IPT2.ICOLOR(IB)
+            NBELE2=NBELE2+3
+          ELSEIF(ICOUPB.EQ.43) THEN
+c           on decoupe TB en 4 triangles (arete 1-3 coupee)
+c          -1er sous triangle de TB
+            IPT2.NUM(1,IB)=ITB(IB1)
+            IPT2.NUM(2,IB)=ITB(IB2)
+            IPT2.NUM(3,IB)=IPP
+c          -2eme sous triangle de TB
+            IPT2.NUM(1, NBELE2+1)=ITB(IB2)
+            IPT2.NUM(2, NBELE2+1)=ITB(IB3)
+            IPT2.NUM(3, NBELE2+1)=IPP
+            IPT2.ICOLOR(NBELE2+1)=IPT2.ICOLOR(IB)
+c          -3eme sous triangle de TB
+            IPT2.NUM(1, NBELE2+2)=ITB(IB3)
+            IPT2.NUM(2, NBELE2+2)=IQ3
+            IPT2.NUM(3, NBELE2+2)=IPP
+            IPT2.ICOLOR(NBELE2+2)=IPT2.ICOLOR(IB)
+c          -4eme sous triangle de TB
+            IPT2.NUM(1, NBELE2+3)=IQ3
+            IPT2.NUM(2, NBELE2+3)=ITB(IB1)
+            IPT2.NUM(3, NBELE2+3)=IPP
+            IPT2.ICOLOR(NBELE2+3)=IPT2.ICOLOR(IB)
+            NBELE2=NBELE2+3
+          ELSEIF(ICOUPB.EQ.52) THEN
+c           on decoupe TB en 5 triangles
+c          -1er sous triangle de TB
+            IPT2.NUM(1,IB)=ITB(IB1)
+            IPT2.NUM(2,IB)=IPP2
+            IPT2.NUM(3,IB)=IPP3
+c          -2eme sous triangle de TB
+            IPT2.NUM(1,NBELE2+1)=ITB(IB1)
+            IPT2.NUM(2,NBELE2+1)=ITB(IB2)
+            IPT2.NUM(3,NBELE2+1)=IPP2
+            IPT2.ICOLOR(NBELE2+1)=IPT2.ICOLOR(IB)
+c          -3eme sous triangle de TB
+            IPT2.NUM(1,NBELE2+2)=ITB(IB2)
+            IPT2.NUM(2,NBELE2+2)=IPP3
+            IPT2.NUM(3,NBELE2+2)=IPP2
+            IPT2.ICOLOR(NBELE2+2)=IPT2.ICOLOR(IB)
+c          -4eme sous triangle de TB
+            IPT2.NUM(1,NBELE2+3)=ITB(IB2)
+            IPT2.NUM(2,NBELE2+3)=ITB(IB3)
+            IPT2.NUM(3,NBELE2+3)=IPP3
+            IPT2.ICOLOR(NBELE2+3)=IPT2.ICOLOR(IB)
+c          -5eme sous triangle de TB
+            IPT2.NUM(1,NBELE2+4)=ITB(IB3)
+            IPT2.NUM(2,NBELE2+4)=ITB(IB1)
+            IPT2.NUM(3,NBELE2+4)=IPP3
+            IPT2.ICOLOR(NBELE2+4)=IPT2.ICOLOR(IB)
+            NBELE2=NBELE2+4
+          ELSEIF(ICOUPB.EQ.53) THEN
+c           on decoupe TB en 5 triangles
+c          -1er sous triangle de TB
+            IPT2.NUM(1,IB)=ITB(IB1)
+            IPT2.NUM(2,IB)=IPP2
+            IPT2.NUM(3,IB)=IPP3
+c          -2eme sous triangle de TB
+            IPT2.NUM(1,NBELE2+1)=ITB(IB1)
+            IPT2.NUM(2,NBELE2+1)=ITB(IB2)
+            IPT2.NUM(3,NBELE2+1)=IPP2
+            IPT2.ICOLOR(NBELE2+1)=IPT2.ICOLOR(IB)
+c          -3eme sous triangle de TB
+            IPT2.NUM(1,NBELE2+2)=ITB(IB2)
+            IPT2.NUM(2,NBELE2+2)=ITB(IB3)
+            IPT2.NUM(3,NBELE2+2)=IPP2
+            IPT2.ICOLOR(NBELE2+2)=IPT2.ICOLOR(IB)
+c          -4eme sous triangle de TB
+            IPT2.NUM(1,NBELE2+3)=ITB(IB3)
+            IPT2.NUM(2,NBELE2+3)=IPP3
+            IPT2.NUM(3,NBELE2+3)=IPP2
+            IPT2.ICOLOR(NBELE2+3)=IPT2.ICOLOR(IB)
+c          -5eme sous triangle de TB
+            IPT2.NUM(1,NBELE2+4)=ITB(IB3)
+            IPT2.NUM(2,NBELE2+4)=ITB(IB1)
+            IPT2.NUM(3,NBELE2+4)=IPP3
+            IPT2.ICOLOR(NBELE2+4)=IPT2.ICOLOR(IB)
+            NBELE2=NBELE2+4
+          ENDIF
+          if(SELF) NBELE1=NBELE2
+
+          if(iimpi.ge.10) then
+          write(ioimp,*) '------------------------------->',ICOUPA
+          write(ioimp,*) '------------------------------->',ICOUPB
+          write(ioimp,*) '-----------------------------------------'
+          endif
+
+c         Tant qu'il y a une decoupe, on reprend le traitement relatif
+c         au 1er element "fils" du triangle decoupe ...
+          IBDEB0 = IB+1
+          if(IBDEB0.le.NBELE2) GOTO 1100
+
+
+c         1900 : label ou l on arrive s il n y a pas eu de decoupe
+ 1900     CONTINUE
+          IBDEB0=0
+          if(IA.ge.NBELE1.and.IB.ge.NBELE2) goto 9000
+
+
+ 2000   CONTINUE
+C====== fin de BOUCLE SUR LES ELEMENTS B ===============================
+
+
+  900     CONTINUE
+          if(IA.ge.NBELE1) goto 9000
+
+ 1000 CONTINUE
+C==== fin de BOUCLE SUR LES ELEMENTS A =================================
+
+
+
+ 9000 CONTINUE
+C-----------------------------------------------------------------------
+C     FIN NORMALE
+
+c     on supprime les segments de travaux locaux
+      segsup,WORK1
+
+c     on ajuste IPT1
+      NBNN  =NBNN1
+      NBELEM=NBELE1
+      segadj,IPT1
+c     on ajuste IPT3
+      NBNN = 2
+      NBELEM = NBELE3
+      segadj,IPT3
+c     on desactive
+      segdes,IPT1,IPT3
+
+      IF(.not.SELF) THEN
+        segsup,WORK2
+c       on ajuste IPT2
+        NBNN  =NBNN2
+        NBELEM=NBELE2
+        segadj,IPT2
+c       on ajuste IPT4
+        NBNN = 2
+        NBELEM = NBELE4
+        segadj,IPT4
+c       on desactive
+        segdes,IPT2,IPT4
+      ENDIF
+
+
+C     ON REGENERE et on ne garde que les triangles (ITYPEL=4)
+      CALL REGENE(IPT1)
+      IPT1ok = IPT1
+      segact,IPT1
+      NBSOU1=IPT1.LISOUS(/1)
+      if(NBSOU1.gt.0) then
+      do isou1=1,NBSOU1
+        MELEME=IPT1.LISOUS(isou1)
+        segact,MELEME
+        if(ITYPEL.eq.4) then
+          IPT1ok=MELEME
+          segdes,MELEME
+          segsup,IPT1
+          goto 9010
+        else
+          segsup,MELEME
+        endif
+        segdes,MELEME
+      enddo
+      endif
+ 9010 CONTINUE
+
+      IF(SELF) GOTO 9020
+C     ON REGENERE et on ne garde que les triangles (ITYPEL=4)
+      CALL REGENE(IPT2)
+      IPT2ok = IPT2
+      segact,IPT2
+      NBSOU1=IPT2.LISOUS(/1)
+      if(NBSOU1.gt.0) then
+      do isou1=1,NBSOU1
+        MELEME=IPT2.LISOUS(isou1)
+        segact,MELEME
+        if(ITYPEL.eq.4) then
+          IPT2ok=MELEME
+          segdes,MELEME
+          segsup,IPT2
+          goto 9020
+        else
+          segsup,MELEME
+        endif
+        segdes,MELEME
+      enddo
+      endif
+ 9020 CONTINUE
+
+
+c     on renvoie
+      IOB1 = IPT1ok
+      IF(.not.SELF) IOB2 = IPT2ok
+      IOB3 = IPT3
+      IF(.not.SELF) IOB4 = IPT4
+
+
+      END
+
+
+
+
+

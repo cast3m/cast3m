@@ -1,0 +1,1468 @@
+C UO2OT2    SOURCE    CB215821  17/11/30    21:17:19     9639
+C   responsable STRUB
+      SUBROUTINE UO2OT2(MFR,IB,IGAU,DT,TETA1,TETA2,FI1,FI2,PRECIS,
+     &                  MSOUPA,XMAT,IVAL,NCOMAT,NSIMP,XCAR,ICARA,SIG0,
+     &                  NSTRS,DEPST,VAR0,NVARI,SIGF,VARF,DEFP,KERRE)
+C----------------------------------------------------------------------
+C            CE SOUS-PROGRAMME EST APPELE DANS "COML8"
+C IL PREPARE L'INTEGRATION DU MODELE UO2 COUPLANT LES MODELES
+C                 OTTOSEN ET GATT_MONERIE
+C SCHEMA EULER-CAUCHY AVEC DECOUPAGE DU SOUS PAS D INTEGRATION EN 2
+C             CONTROLE AVEC METHODE DE SIMPSON
+C----------------------------------------------------------------------
+C
+C ENTREES:
+C -------
+C MFR          = INDICE DE LA FORMULATION MECANIQUE; SEULEMENT
+C                MASSIF OU COQUES EN 3D
+C IB           = NUMERO DE L ELEMENT
+C IGAU         = NUMERO DU POINT D INTEGRATION
+C DT           = PAS D INTEGRATION
+C TETA1        = TEMPERATURE AU DEBUT DU PAS D INTEGRATION
+C TETA2        = TEMPERATURE A LA FIN DU PAS D INTEGRATION
+C FI1          = DENSITE DE FISSION AU DEBUT DU PAS D INTEGRATION
+C FI2          = DENSITE DE FISSION A LA FIN DU PAS D INTEGRATION
+C PRECIS       = PRECISION POUR LA VISCOPLASTICITE
+C MSOUPA       = NBR. MAX. DE SOUS PAS AUTORISES POUR LA VISCOPLASTICITE
+C NCOMAT       = NBR. DE CARACTERISTIQUES THERMOMECANIQUES DU MATERIAU
+C XMAT(NCOMAT) = CARACTERISTIQUES THERMOMECANIQUES DU MATERIAU
+C IVAL(NCOMAT) = INDICE DES COMPOSANTES DE MATERIAU
+C NSIMP        = POINTE SUR LA CARACTERISTIQUE FACULTATIVE 'SIMP' DE XMAT
+C ICARA        = NBR. DE CARACT. GEOMETRIQUES DES ELEMENTS FINIS
+C XCAR(ICARA)  = CARACT. GEOMETRIQUES DES ELEMENTS FINIS
+C NSTRS        = NBR. DE COMPOSANTES DES CONTR. OU DES DEFORM.
+C SIG0(NSTRS)  = CONTR. AU DEBUT DU PAS D'INTEGRATION
+C DEPST(NSTRS) = INCREMENT DES DEFORM. TOTALES
+C NVARI        = NBR. DE VARIABLES INTERNES
+C VAR0(NVARI)  = VARIABLES INTERNES AU DEBUT DU PAS D INTEGRATION
+C
+C SORTIES
+C -------
+C SIGF(NSTRS)  = CONTR. A LA FIN DU PAS D'INTEGRATION
+C VARF(NVARI)  = VARIABLES INTERNES A LA FIN DU PAS D'INTEGRATION
+C DEFP(NSTRS)  = INCREMENT DES DEFORM. INELASTIQUES A LA FIN DU PAS
+C                D'INTEGRATION (FISSURATION+VISCOPLASTICITE)
+C KERRE        = INDICE QUI REGIT LES ERREURS
+C----------------------------------------------------------------------
+C ==================================================================
+C       ICI IL FAUT PROGRAMMER EN FORTRAN PUR
+C ===================================================================
+C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+-INC CCOPTIO
+-INC CCREEL
+C
+      PARAMETER (XZER=0.D0,UNDEMI=.5D0,UN=1.D0,DEUX=2.D0,TROIS=3.D0,
+     &           DIX=10.D0,NGAT=4)
+C
+      DIMENSION XMAT(*),IVAL(*),XCAR(*)
+      DIMENSION SIG0(*),DEPST(*),VAR0(*),SIGF(*),VARF(*),DEFP(*)
+C
+      DIMENSION SIGMA0(6),DSIGMA(6),DDEF0(6),DDEFP0(6),SIGF0(6)
+      DIMENSION SIGMA(6),DDEF(6),DDEFP(6),SIGMAF(6),DDEFPT(6)
+C
+      DIMENSION WMAX(3),W(3),WMAX0(3),W0(3),
+     &    GFTR(3),GS(3),XLTR(3),XINVL(3),WRUPT(3),IRESU(20),
+     &    VF(3),XVF(3,3),VF1(3),VF2(3),VF3(3),VCA1(3),VCA2(3),VCA3(3),
+     &    BILIN(3),SBILI(3)
+C
+      DIMENSION TAIL(6),P(6)
+C
+      DIMENSION VARGA0(NGAT),VARGAF(NGAT)
+      DIMENSION EPSV0(6),EPSVF0(6),EPSV(6),EPSVF(6)
+C
+C*******************************************************************
+C
+      JEBOUC=0
+      IIMPI0=IIMPI
+C
+2020  JEBOUC=JEBOUC+1
+      KERRE=0
+C
+C===================================================================
+C           TEST DE COMPATIBILITE CALCUL/FORMULATION
+C===================================================================
+C
+C------UNIQUEMENT EN MASSIF OU EN COQUES MINCES
+C        PAS DE FORMULATION DE FOURIER-----------
+C
+      IF ((MFR.NE.1.AND.MFR.NE.3.AND.MFR.NE.9)
+     .    .OR.IFOUR.EQ.1) THEN
+         KERRE=984
+         GO TO 9999
+      ENDIF
+C
+C=================================
+C --- CONTROLE DU PAS DE TEMPS ---
+C=================================
+C
+      IF (DT.LT.0.D0) THEN
+         KERRE = 414
+         PRINT *,' UO2OT2 - PAS DE TEMPS NEGATIF'
+         GO TO 9999
+      ENDIF
+      IF (DT.EQ.0.D0) DT=1.D-20
+C
+C===================================================================
+C  INITIALISATION DES VARIABLES INTERNES ET DES CARACTERISTIQUES
+C===================================================================
+C
+C
+C###################################################################
+C===================================================================
+C           INITIALISATION DES CARACTERISTIQUES
+C===================================================================
+C###################################################################
+C
+C   Les 4 premieres valeurs de Xmat_OBLIGATOIRES sont YOUN,NU,RHO,ALPH
+C   puis R,DG,...(caract. mecaniques non lineaires obligatoires)
+C   La premiere valeur de Xmat_FACULTATIF est VISQ et la deuxieme en CP
+C   est DIM3
+C   puis GFTR,LTR,...(caract. mecaniques non lineaires facultatives)
+C
+      YOUN=XMAT(1)
+      XNU =XMAT(2)
+      G   = UNDEMI*YOUN/(UN+XNU)
+      PRECIE=1.D-10
+      PRECIZ=YOUN*PRECIE
+C
+C=====================================================================
+C----CALCUL DU COEF AA INTERVENANT DANS LA VITESSE DE DENSIFICATION---
+C=====================================================================
+C
+      CALL ADENS(XMAT,AA,KERRE)
+      IF(KERRE.NE.0) GO TO 2021
+C
+C====================================================================
+C----NOBL+i POINTE SUR LA ieme CARACTERISTIQUE DE FISSURATION FACULT.
+C====================================================================
+C
+      IF (IFOMOD.EQ.2.AND.MFR.EQ.1) THEN
+        NOBL=49
+      ELSE
+        NOBL=44
+        IF(MFR.EQ.1.AND.IFOUR.EQ.-2)  NOBL=45
+      ENDIF
+C
+C===========================================================
+C---MGAT: NOMBRE DE VAR. INT. PROPRES AU MODELE GATT_MONERIE
+C---      PARMI CES VAR. INT. IL Y A LES DEF. VISCOPLAST.
+C===========================================================
+C
+      IF (IFOUR.EQ.2.AND.(MFR.EQ.1.OR.MFR.EQ.3)) THEN
+        MGAT=10
+      ELSE
+        MGAT=8
+        IF(MFR.EQ.9)  MGAT=12
+      ENDIF
+C
+C===================================================
+C----------------TRACTION SIMPLE--------------------
+C===================================================
+C
+      XDLTR=XMAT(2+NOBL)
+      DEFOTR=1.2D-4
+      IF (IVAL(2+NOBL).EQ.0) XDLTR=YOUN*DEFOTR
+      XDGFTR=XMAT(1+NOBL)
+      IF (IVAL(1+NOBL).EQ.0) XDGFTR=XDLTR*3.9D-5
+      BTR=XMAT(4+NOBL)
+      IF (IVAL(4+NOBL).EQ.0) BTR=0.2D0
+*
+*     PETIT TEST SUR BTR
+*
+      BTR=MIN(BTR,UN)
+
+      XDWRUP=XMAT(5+NOBL)
+      XDBILI=XMAT(6+NOBL)
+C
+C__________________________________________________________
+C             en defo planes ou axis
+C   les caracteristiques dans la direction normale au plan
+C           sont traitees particulierement
+C----------------------------------------------------------
+C
+      XDEPSR=0.D0
+      IF (IFOUR.EQ.0.OR.IFOUR.EQ.-1.OR.IFOUR.EQ.-3) THEN
+         XDEPSR=XMAT(7+NOBL)
+         IF (IVAL(7+NOBL).EQ.0) XDEPSR=TROIS*XDLTR/YOUN
+      ENDIF
+C
+C===================================================
+C------------------CISAILLEMENT---------------------
+C===================================================
+C
+      XDGS=XMAT(3+NOBL)
+      IF (IVAL(3+NOBL).EQ.0) XDGS=YOUN*1.8D-4
+C
+C###################################################################
+C===================================================================
+C            INITIALISATION DES VARIABLES INTERNES
+C===================================================================
+C###################################################################
+C
+C---------------------------------------------------------------------
+C   RECUPERATION DES VARIABLES INTERNES PROPRES AU MODELE GATT_MONERIE
+C                     AUTRES QUE LES DEF. VISCOPLAST.
+C---------------------------------------------------------------------
+C
+      DO 9 IC=1,NGAT
+        VARGA0(IC)=VAR0(NVARI-NGAT+IC)
+  9   CONTINUE
+C
+C======================================
+C---------CAS TRIDIMENSIONNEL MASSIF---
+C======================================
+C
+C            NVARI=29    cf. IDVAR4
+C
+      IF (IFOUR.EQ.2.AND.MFR.EQ.1) THEN
+         DO 10 IC=1,3
+            ICN=IC+NOBL
+            WMAX(IC)=VAR0(IC+1)
+            W(IC)=VAR0(IC+4)
+            GFTR(IC)=XMAT(ICN+6)
+            IF (GFTR(IC).EQ.XZER) GFTR(IC)=XDGFTR
+            GS(IC)=XMAT(ICN+9)
+            IF (GS(IC).EQ.XZER) GS(IC)=XDGS
+            XLTR(IC)=XMAT(ICN+12)
+            IF (XLTR(IC).EQ.XZER) XLTR(IC)=XDLTR
+            VF1(IC)=VAR0(IC+7)
+            VF2(IC)=VAR0(IC+10)
+            VF3(IC)=VAR0(IC+13)
+            XINVL(IC)=VAR0(IC+16)
+            WRUPT(IC)=XMAT(ICN+15)
+            BILIN(IC)=XMAT(ICN+18)
+            IF (BILIN(IC).EQ.XZER.OR.WRUPT(IC).EQ.XZER) THEN
+               IF(XDBILI.EQ.XZER.OR.XDWRUP.EQ.XZER) THEN
+                  WRUPT(IC)=DEUX*GFTR(IC)/XLTR(IC)
+                  BILIN(IC)=XZER
+                  SBILI(IC)=XLTR(IC)
+               ELSE
+                  WRUPT(IC)=XDWRUP
+                  BILIN(IC)=XDBILI
+                  SBILI(IC)=(DEUX*GFTR(IC)-XLTR(IC)*XDBILI)/XDWRUP
+               ENDIF
+            ELSE
+               SBILI(IC)=(DEUX*GFTR(IC)-XLTR(IC)*BILIN(IC))/WRUPT(IC)
+            ENDIF
+  10     CONTINUE
+      ENDIF
+C
+C======================================
+C-----------CAS CONT PLANE-------------
+C---- OU TRIDIM COQUES MINCES ---------
+C======================================
+C
+C     NVARI=19    CONT PLANE                              cf. IDVAR4
+C     NVARI=21/23 3D COQUES MINCES SANS/AVEC CISAILLEMENT TRANSVERSE
+C
+      IF (IFOUR.EQ.-2.OR.
+     .   (IFOUR.EQ.2.AND.(MFR.EQ.3.OR.MFR.EQ.9))) THEN
+         DO 11 IC=1,2
+            ICN=IC+NOBL
+            WMAX(IC+1)=VAR0(IC+1)
+            W(IC+1)=VAR0(IC+3)
+            GFTR(IC+1)=XMAT(ICN+6)
+            IF (GFTR(IC+1).EQ.XZER) GFTR(IC+1)=XDGFTR
+            GS(IC+1)=XMAT(ICN+8)
+            IF (GS(IC+1).EQ.XZER) GS(IC+1)=XDGS
+            XLTR(IC+1)=XMAT(ICN+10)
+            IF (XLTR(IC+1).EQ.XZER) XLTR(IC+1)=XDLTR
+            VF2(IC)=VAR0(IC+5)
+            VF3(IC)=VAR0(IC+7)
+            XINVL(IC+1)=VAR0(IC+9)
+            WRUPT(IC+1)=XMAT(ICN+12)
+            BILIN(IC+1)=XMAT(ICN+14)
+            IF (BILIN(IC+1).EQ.XZER.OR.WRUPT(IC+1).EQ.XZER) THEN
+               IF(XDBILI.EQ.XZER.OR.XDWRUP.EQ.XZER) THEN
+                  WRUPT(IC+1)=DEUX*GFTR(IC+1)/XLTR(IC+1)
+                  BILIN(IC+1)=XZER
+                  SBILI(IC+1)=XLTR(IC+1)
+               ELSE
+                  WRUPT(IC+1)=XDWRUP
+                  BILIN(IC+1)=XDBILI
+                  SBILI(IC+1)=(DEUX*GFTR(IC+1)-XLTR(IC+1)*XDBILI)
+     &                         /XDWRUP
+               ENDIF
+            ELSE
+               SBILI(IC+1)=(DEUX*GFTR(IC+1)-XLTR(IC+1)*BILIN(IC+1))
+     &                      /WRUPT(IC+1)
+            ENDIF
+  11     CONTINUE
+C
+C------------------------------------------------------------
+C  La direction normale au plan est une direction principale
+C         elle est definie par VF1 et indice par 1
+C------------------------------------------------------------
+C
+            WMAX(1)=XZER
+            W(1)=XZER
+            GFTR(1)=XDGFTR
+            GS(1)=XDGS
+            XLTR(1)=XDLTR
+            VF1(1)=XZER
+            VF1(2)=XZER
+            VF1(3)=UN
+            XINVL(1)=XZER
+            VF2(3)=XZER
+            VF3(3)=XZER
+            WRUPT(1)=DEUX*GFTR(1)/XLTR(1)
+            BILIN(1)=XZER
+            SBILI(1)=XLTR(1)
+      ENDIF
+C
+C===========================================
+C-----------CAS DEFO PLANE/AXIS-------------
+C===========================================
+C
+C            NVARI=22    cf. IDVAR4
+C
+      IF (IFOUR.EQ.-1.OR.IFOUR.EQ.-3.OR.IFOUR.EQ.0) THEN
+         DO 12 IC=1,2
+            ICN=IC+NOBL
+            WMAX(IC+1)=VAR0(IC+1)
+            W(IC+1)=VAR0(IC+4)
+            GFTR(IC+1)=XMAT(ICN+7)
+            IF (GFTR(IC+1).EQ.XZER) GFTR(IC+1)=XDGFTR
+            GS(IC+1)=XMAT(ICN+10)
+            IF (GS(IC+1).EQ.XZER) GS(IC+1)=XDGS
+            XLTR(IC+1)=XMAT(ICN+13)
+            IF (XLTR(IC+1).EQ.XZER) XLTR(IC+1)=XDLTR
+            VF2(IC)=VAR0(IC+7)
+            VF3(IC)=VAR0(IC+9)
+            XINVL(IC+1)=VAR0(IC+11)
+            WRUPT(IC+1)=XMAT(ICN+16)
+            BILIN(IC+1)=XMAT(ICN+18)
+            IF (BILIN(IC+1).EQ.XZER.OR.WRUPT(IC+1).EQ.XZER) THEN
+               IF(XDBILI.EQ.XZER.OR.XDWRUP.EQ.XZER) THEN
+                  WRUPT(IC+1)=DEUX*GFTR(IC+1)/XLTR(IC+1)
+                  BILIN(IC+1)=XZER
+                  SBILI(IC+1)=XLTR(IC+1)
+               ELSE
+                  WRUPT(IC+1)=XDWRUP
+                  BILIN(IC+1)=XDBILI
+                  SBILI(IC+1)=(DEUX*GFTR(IC+1)-XLTR(IC+1)*XDBILI)
+     &                         /XDWRUP
+               ENDIF
+            ELSE
+               SBILI(IC+1)=(DEUX*GFTR(IC+1)-XLTR(IC+1)*BILIN(IC+1))
+     &                      /WRUPT(IC+1)
+            ENDIF
+  12     CONTINUE
+C
+C------------------------------------------------------------
+C  La direction normale au plan est une direction principale
+C         elle est definie par VF1 et indice par 1
+C------------------------------------------------------------
+C
+            WMAX(1)=VAR0(4)
+            W(1)=VAR0(7)
+            XLTR(1)=XMAT(NOBL+16)
+            IF (XLTR(1).EQ.XZER) XLTR(1)=XDLTR
+            EPSR=XDEPSR
+            GS(1)=XMAT(NOBL+13)
+            IF (GS(1).EQ.XZER) GS(1)=XDGS
+            XINVL(1)=VAR0(14)
+            WRUPT(1)=EPSR
+            BILIN(1)=XMAT(NOBL+21)
+            GFTR(1)=XMAT(NOBL+10)
+            IF (BILIN(1).EQ.XZER.OR.GFTR(1).EQ.XZER) THEN
+*
+*  MLR : ICI ON NE PEUT PAS FAIRE MIEUX CAR ON VEUT
+*        DES DEFORMATIONS DANS LA DIRECTION ETUDIEE
+*
+               IF (GFTR(1).EQ.XZER) GFTR(1)=UNDEMI*XLTR(1)*EPSR
+               BILIN(1)=XZER
+               SBILI(1)=XLTR(1)
+            ELSE
+               SBILI(1)=(DEUX*GFTR(1)-XLTR(1)*BILIN(1))/WRUPT(1)
+            ENDIF
+C
+            VF1(1)=XZER
+            VF1(2)=XZER
+            VF1(3)=UN
+C
+            VF2(3)=XZER
+            VF3(3)=XZER
+      ENDIF
+C
+C
+C#######################################
+C=======================================
+C---------PARAMETRES DE TAILLE----------
+C=======================================
+C#######################################
+C
+      NTAIL=36
+      IF (IFOUR.EQ.2.AND.MFR.EQ.1) THEN
+C
+C-----------TRIDIM MASSIF------------------
+C
+         DO 15 IC=1,6
+            TAIL(IC)=XMAT(IC+NTAIL)
+            P(IC)=XMAT(IC+NTAIL+6)
+  15     CONTINUE
+
+      ELSE
+C
+C------AXIS/DEF/CONT PLANES/COQUES MINCES---------
+C
+
+         TAIL(1)=XMAT(1+NTAIL)
+         TAIL(2)=XMAT(2+NTAIL)
+         TAIL(3)=XMAT(4+NTAIL)
+         TAIL(4)=XMAT(3+NTAIL)
+         TAIL(5)=XZER
+         TAIL(6)=XZER
+         P(1)=XMAT(5+NTAIL)
+         P(2)=XMAT(6+NTAIL)
+         P(3)=UN
+         P(4)=XMAT(7+NTAIL)
+         P(5)=XZER
+         P(6)=XZER
+      ENDIF
+C
+C
+C    IMPRESSION DES DONNEES MATERIAU ,TAILLE  ET VARIABLES INTERNES
+C    --------------------------------------------------------------
+C
+      IF(IIMPI.EQ.42) THEN
+        WRITE(IOIMP,77000) IB,IGAU
+77000   FORMAT(////////2X,' IB=',I4,2X,'IGAU=',I3//)
+      ENDIF
+      IF(IIMPI.EQ.42) THEN
+        WRITE(IOIMP,77001) YOUN,XNU,XDLTR,XDGFTR,BTR,XDEPSR,XDGS,
+     .                     XDWRUP,XDBILI,AA
+77001   FORMAT(///2X,' YUNG=',1PE12.5,2X,'XNU=',1PE12.5/
+     .    2X,'LTR=',1PE12.5,2X,'GF=',1PE12.5,2X,'BETA=',1PE12.5/
+     .    2X,'EPSR=',1PE12.5,2X,'GS=',1PE12.5,2X,'WRUP=',1PE12.5/
+     .    2X,'BILI=',1PE12.5,2X,'AA=',1PE12.5///)
+*
+        WRITE(IOIMP,77002) (WMAX(I),I=1,3)
+77002   FORMAT('0  WMAX '/3(1X,1PE12.5)/)
+*
+        WRITE(IOIMP,77003) (W(I),I=1,3),(GFTR(I),I=1,3)
+77003   FORMAT('0  W    '/3(1X,1PE12.5)/
+     .         2X,'GFTR'/3(1X,1PE12.5)/)
+*
+        WRITE(IOIMP,77004) (GS(I),I=1,3),(XLTR(I),I=1,3)
+77004   FORMAT('0  GS   '/3(1X,1PE12.5)/
+     .         2X,'XLTR'/3(1X,1PE12.5)/)
+*
+        WRITE(IOIMP,77005) (VF1(I),I=1,3),(VF2(I),I=1,3)
+77005   FORMAT('0  VF1  '/3(1X,1PE12.5)/
+     .         2X,'VF2  '/3(1X,1PE12.5)/)
+*
+        WRITE(IOIMP,77006) (VF3(I),I=1,3),(XINVL(I),I=1,3)
+77006   FORMAT('0  VF3  '/3(1X,1PE12.5)/
+     .         2X,'XINVL'/3(1X,1PE12.5)/)
+*
+        WRITE(IOIMP,77007) (WRUPT(I),I=1,3),(BILIN(I),I=1,3)
+77007   FORMAT('0  WRUPT'/3(1X,1PE12.5)/
+     .         2X,'BILIN'/3(1X,1PE12.5)/)
+*
+        WRITE(IOIMP,77008) (SBILI(I),I=1,3)
+77008   FORMAT('0  SBILI'/3(1X,1PE12.5)/)
+*
+        WRITE(IOIMP,77009) (TAIL(I),I=1,6),(P(I),I=1,6)
+77009   FORMAT('0  TAIL '/6(1X,1PE12.5)/
+     .         2X,'P    '/6(1X,1PE12.5)/)
+*
+        WRITE(IOIMP,77090) (VARGA0(I),I=1,NGAT)
+77090   FORMAT('0  VARGA0 EN ENTREE'/4(1X,1PE12.5)/)
+*
+        WRITE(IOIMP,17009) (SIG0(I),I=1,NSTRS)
+17009   FORMAT('0  SIG0 EN ENTREE '/8(1X,1PE12.5)/)
+*
+        WRITE(IOIMP,18009) (DEPST(I),I=1,NSTRS)
+18009   FORMAT('0  DEPST EN ENTREE '/8(1X,1PE12.5)/)
+*
+        WRITE(IOIMP,18010) FI1,FI2
+18010   FORMAT('0  FI1 FI2 '/2(1X,1PE12.5)/)
+*
+        WRITE(IOIMP,18011) DT,TETA1,TETA2
+18011   FORMAT('0  DT TETA1 TETA2 '/3(1X,1PE12.5)/)
+      ENDIF
+C
+C
+C=======================================================================
+C       ADAPTATION DE L'OPTION DE CALCUL VERS LE 3D MASSIF
+C                     DE SIG0 A SIGMA0
+C
+C***********************************************************************
+C                        A T T E N T I O N
+C
+C       DANS LA SUITE ON TRAVAILLE SUR EPSXY AU LIEU DE GAMXY  !!!!
+C
+C***********************************************************************
+C
+C=======================================================================
+C
+        CALL ZDANUL(SIGMA0,6)
+        CALL ZDANUL(DSIGMA,6)
+        CALL ZDANUL(EPSV0,6)
+C
+        IF (MFR.EQ.1) THEN
+C
+C-----------------------MASSIF 3D/2D----NSTRS=6/4---------------
+C
+          DO 20 IC=1,NSTRS
+            SIGMA0(IC)=SIG0(IC)
+            IF(IC.LE.3) THEN
+              DSIGMA(IC)=DEPST(IC)
+              EPSV0(IC) =VAR0(NVARI-MGAT+IC)
+            ELSE
+              DSIGMA(IC)=DEPST(IC)*UNDEMI
+              EPSV0(IC) =VAR0(NVARI-MGAT+IC)*UNDEMI
+            ENDIF
+  20      CONTINUE
+C
+        ELSEIF (IFOUR.EQ.2.AND.(MFR.EQ.3.OR.MFR.EQ.9)) THEN
+C
+C-----3D COQUES MINCES SANS/AVEC CISAIL. TRANS.-----NSTRS=6/8--------
+C              ON NE PREND QUE LA PARTIE MEMBRANE !!
+C
+          EPAI=XCAR(1)
+          SIGMA0(1)=SIG0(1)/EPAI
+          SIGMA0(2)=SIG0(2)/EPAI
+          SIGMA0(4)=SIG0(3)/EPAI
+          DSIGMA(1)=DEPST(1)
+          DSIGMA(2)=DEPST(2)
+          DSIGMA(4)=DEPST(3)*UNDEMI
+          EPSV0(1) =VAR0(NVARI-MGAT+1)
+          EPSV0(2) =VAR0(NVARI-MGAT+2)
+          EPSV0(4) =VAR0(NVARI-MGAT+3)*UNDEMI
+        ENDIF
+C
+C#######################################################################
+C=======================================================================
+C     CALCUL DES PARAMETRES POUR UN MATERIAU PRE-FISSURE
+C=======================================================================
+C#######################################################################
+C
+      XNF1=VF1(1)*VF1(1)+VF1(2)*VF1(2)+VF1(3)*VF1(3)
+      XNF2=VF2(1)*VF2(1)+VF2(2)*VF2(2)+VF2(3)*VF2(3)
+      XNF3=VF3(1)*VF3(1)+VF3(2)*VF3(2)+VF3(3)*VF3(3)
+C
+C=======================================================================
+C    CALCUL DES PARAMETRES DE TAILLE POUR UN MATERIAU PRE-FISSURE
+C=======================================================================
+C
+C---on calcule la parametre de taille si la fissure est ouverte--
+C---------------et le parametre de taille nul--------------------
+C
+      IF (XNF1.NE.XZER.AND.W(1).NE.XZER.AND.XINVL(1).EQ.XZER) THEN
+C
+C------------FISSURE 1 OUVERTE---------------
+C
+         XL1=TAIL(1)*VF1(1)*VF1(1)+TAIL(2)*VF1(2)*VF1(2)
+         XL1=XL1+TAIL(3)*VF1(3)*VF1(3)+DEUX*TAIL(4)*VF1(2)*VF1(1)
+         XL1=XL1+DEUX*TAIL(5)*VF1(1)*VF1(3)
+         XL1=XL1+DEUX*TAIL(6)*VF1(2)*VF1(3)
+         P1=P(1)*VF1(1)*VF1(1)+P(2)*VF1(2)*VF1(2)+P(3)*VF1(3)*VF1(3)
+         P1=P1+DEUX*P(4)*VF1(2)*VF1(1)+DEUX*P(5)*VF1(1)*VF1(3)
+         P1=P1+DEUX*P(6)*VF1(2)*VF1(3)
+         WMAX(1)=W(1)
+         IF (XL1.NE.XZER) THEN
+            XINVL(1)=ABS(P1/XL1)
+         ELSE
+            XINVL(1)=UN
+         ENDIF
+      ENDIF
+C
+C---------FISSURE 2 OUVERTE-----------
+C
+      IF (XNF2.NE.XZER.AND.W(2).NE.XZER.AND.XINVL(2).EQ.XZER) THEN
+         XL2=TAIL(1)*VF2(1)*VF2(1)+TAIL(2)*VF2(2)*VF2(2)
+         XL2=XL2+TAIL(3)*VF2(3)*VF2(3)+DEUX*TAIL(4)*VF2(2)*VF2(1)
+         XL2=XL2+DEUX*TAIL(5)*VF2(1)*VF2(3)
+         XL2=XL2+DEUX*TAIL(6)*VF2(2)*VF2(3)
+         P2=P(1)*VF2(1)*VF2(1)+P(2)*VF2(2)*VF2(2)+P(3)*VF2(3)*VF2(3)
+         P2=P2+DEUX*P(4)*VF2(2)*VF2(1)+DEUX*P(5)*VF2(1)*VF2(3)
+         P2=P2+DEUX*P(6)*VF2(2)*VF2(3)
+         WMAX(2)=W(2)
+         IF (XL2.NE.XZER) THEN
+            XINVL(2)=ABS(P2/XL2)
+         ELSE
+            XINVL(2)=UN
+         ENDIF
+      ENDIF
+C
+C---------FISSURE 3 OUVERTE-----------
+C
+      IF (XNF3.NE.XZER.AND.W(3).NE.XZER.AND.XINVL(3).EQ.XZER) THEN
+         XL3=TAIL(1)*VF3(1)*VF3(1)+TAIL(2)*VF3(2)*VF3(2)
+         XL3=XL3+TAIL(3)*VF3(3)*VF3(3)+DEUX*TAIL(4)*VF3(2)*VF3(1)
+         XL3=XL3+DEUX*TAIL(5)*VF3(1)*VF3(3)
+         XL3=XL3+DEUX*TAIL(6)*VF3(2)*VF3(3)
+         P3=P(1)*VF3(1)*VF3(1)+P(2)*VF3(2)*VF3(2)+P(3)*VF3(3)*VF3(3)
+         P3=P3+DEUX*P(4)*VF3(2)*VF3(1)+DEUX*P(5)*VF3(1)*VF3(3)
+         P3=P3+DEUX*P(6)*VF3(2)*VF3(3)
+         WMAX(3)=W(3)
+         IF (XL3.NE.XZER) THEN
+            XINVL(3)=ABS(P3/XL3)
+         ELSE
+            XINVL(3)=UN
+         ENDIF
+      ENDIF
+C
+C======================================================================
+C                 CALCUL DU NOMBRE DE FISSURE
+C======================================================================
+C
+      NFISSU=0
+      IF (XINVL(1).NE.XZER) NFISSU=NFISSU+1
+      IF (XINVL(2).NE.XZER) NFISSU=NFISSU+1
+      IF (XINVL(3).NE.XZER) NFISSU=NFISSU+1
+C
+C================================================================
+C             CALCUL DU NOMBRE DE DIRECTION IMPOSEE
+C         qui ne sont pas des directions de fissuration
+C================================================================
+C
+      NVF=0
+      IF (XNF1.NE.XZER.AND.XINVL(1).EQ.XZER) NVF=NVF+1
+      IF (XNF2.NE.XZER.AND.XINVL(2).EQ.XZER) NVF=NVF+1
+      IF (XNF3.NE.XZER.AND.XINVL(3).EQ.XZER) NVF=NVF+1
+C
+C--remarque : en 2D NVF la direction (0 0 1) est toujours imposee--
+C
+C=======================================================================
+C-------------test la consistance des vecteurs VF1 VF2 VF3--------------
+C          VF1 VF2 et VF3 sont dans l ordre d apparition 1 2 3
+C=======================================================================
+C
+      IF (XNF1.EQ.XZER.AND.(XNF2+XNF3).NE.XZER) THEN
+         KERRE=985
+         GO TO 2021
+      ENDIF
+C
+      IF (XNF2.EQ.XZER.AND.XNF3.NE.XZER) THEN
+         KERRE=985
+         GO TO 2021
+      ENDIF
+C
+      PRDT=VF1(1)*VF2(1)+VF1(2)*VF2(2)+VF1(3)*VF2(3)
+      PRDT=PRDT+VF1(1)*VF3(1)+VF1(2)*VF3(2)+VF1(3)*VF3(3)
+      PRDT=PRDT+VF2(1)*VF3(1)+VF2(2)*VF3(2)+VF2(3)*VF3(3)
+      PRDT=ABS(PRDT)
+C
+      IF (PRDT.GE.1D-3) THEN
+         KERRE=985
+         GO TO 2021
+      ENDIF
+C
+C#######################################################################
+C=======================================================================
+C          INCREMENT DE DEFORMATION
+C=======================================================================
+C#######################################################################
+C
+        DO  34 I=1,6
+           DDEF0(I)=DSIGMA(I)
+ 34     CONTINUE
+C
+C
+C    IMPRESSION DES INCREMENTS DE DEFORMATION ET ETAT INITIAL
+C    --------------------------------------------------------
+C
+      IF(IIMPI.EQ.42) THEN
+        WRITE(IOIMP,77010) (SIGMA0(I),I=1,6)
+77010   FORMAT('0  SIGMA0 EN REPERE GENERAL '/6(1X,1PE12.5)/)
+*
+        WRITE(IOIMP,77011) (DDEF0(I),I=1,6)
+77011   FORMAT('0  DDEF0 EN REPERE GENERAL '/6(1X,1PE12.5)/)
+*
+        WRITE(IOIMP,77013) (EPSV0(I),I=1,6)
+77013   FORMAT('0  EPSV0 EN REPERE GENERAL '/6(1X,1PE12.5)/)
+*
+        WRITE(IOIMP,77012) NFISSU,NVF,(XINVL(I),I=1,3)
+77012   FORMAT('0  NFISSU=',I3,2X,'NVF=',I3/
+     .         '0  XINVL '/3(1X,1PE12.5)/)
+      ENDIF
+C
+C
+C#######################################################################
+C=======================================================================
+C
+C          LES CHOSES SERIEUSES COMMENCENT : ITERATIONS INTERNES
+C
+C=======================================================================
+C#######################################################################
+C
+C=======================================================================
+C      INITIALISATION DES VARIABLES GLOBALES AUX ITERATIONS INTERNES
+C=======================================================================
+C
+        PSOM=0.D0
+        DO  334 I=1,6
+           PSOM=PSOM+ABS(DDEF0(I))
+334     CONTINUE
+        PSOM=PSOM/(3.D0*DEFOTR)
+*  MLR  22/11/96
+        PSOM=MIN(PSOM,1.D6)
+*
+*  AM 30/04/96   ON MODULE LA PRECISION SELON LA VALEUR DE PSOM
+*
+*      PRECIS = MIN (1.D-4,1.D-4/PSOM)
+*      EPSILO = MIN (1.D-2,1.D-2/PSOM)
+      EPSIL2 = MIN (1.D-4,1.D-4/PSOM)
+      TAURES=UN
+      ITER=0
+C
+      CALL ZDANUL(DDEFPT,6)
+C
+C --- LES VITESSES DE TEMPERATURE ET DE DENSITE DE FISSION SONT CTES ---
+C
+      TPOINT=(TETA2-TETA1)/DT
+      FPOINT=(FI2-FI1)/DT
+C
+      DTREST=DT
+      TEMPE1=TETA1
+      DFISS1=FI1
+C
+C=======================================================================
+C              LABEL DE DEBUT DES ITERATIONS INTERNES
+C=======================================================================
+C
+  31  CONTINUE
+C
+      ITER=ITER+1
+C
+          IF(IIMPI.EQ.42) THEN
+            WRITE(IOIMP,77015) ITER,TAURES
+77015       FORMAT(//////2X,'  >>>>>>>>> ITERATION INTERNE ',
+     &             I3,2X,'TAURES=',1PE12.5/)
+          ENDIF
+C
+      IF (ITER.GE.25) THEN
+C------non convergence des iterations internes------
+         KERRE=986
+         GO TO 2021
+      ENDIF
+C
+C
+C=======================================================================
+C     INITIALISATION DES VARIABLES POUR GESTION DES SOUS ITERATIONS
+C=======================================================================
+C---prise en compte de la totalite du reste de l increment de def tot---
+C----en sortie de UO2CA2 IRESU contient la nouvelle non linearite de ---
+C-------fissuration rencontree lors des sous iterations internes--------
+C
+C
+      TAU=UN
+C
+      DO IC=1,3
+         W0(IC)=W(IC)
+         WMAX0(IC)=WMAX(IC)
+      ENDDO
+C
+      IF(IIMPI.EQ.42) THEN
+        WRITE(IOIMP,73032) (W0(I),I=1,3),(WMAX0(I),I=1,3)
+73032   FORMAT('   W0 '/3(1X,1PE12.5)/' WMAX0 '/3(1X,1PE12.5)/)
+*
+        WRITE(IOIMP,73034) (WRUPT(I),I=1,3),(XINVL(I),I=1,3)
+73034   FORMAT('  WRUPT'/3(1X,1PE12.5)/'  XINVL'/3(1X,1PE12.5)/)
+        WRITE(IOIMP,73934) XNF1, XNF2,XNF3
+73934   FORMAT(/// 2X, 'XNF1 XNF2 XNF3 = ',3(1X,1PE12.5)/)
+      ENDIF
+C
+C
+C=======================================================================
+C                        REPERE DE CALCUL
+C=======================================================================
+C
+C
+      IF (XNF1.NE.XZER) THEN
+C
+C------------DIRECTION 1 IMPOSEE---------------
+C
+         VCA1(1)=VF1(1)
+         VCA1(2)=VF1(2)
+         VCA1(3)=VF1(3)
+         IF (XNF3.NE.XZER) THEN
+C
+C---------DIRECTION 1 2 3 IMPOSEES-----------
+C
+            VCA2(1)=VF2(1)
+            VCA2(2)=VF2(2)
+            VCA2(3)=VF2(3)
+            VCA3(1)=VF3(1)
+            VCA3(2)=VF3(2)
+            VCA3(3)=VF3(3)
+         ELSEIF (XNF2.NE.XZER) THEN
+C
+C----------DIRECTION 1 ET 2 IMPOSEES------------
+C
+             VCA2(1)=VF2(1)
+             VCA2(2)=VF2(2)
+             VCA2(3)=VF2(3)
+             VCA3(1)=VF1(2)*VF2(3)-VF1(3)*VF2(2)
+             VCA3(2)=VF1(3)*VF2(1)-VF1(1)*VF2(3)
+             VCA3(3)=VF1(1)*VF2(2)-VF1(2)*VF2(1)
+         ELSE
+C
+C-------------UNIQUEMENT LA DIRECTION 1 IMPOSEE--------------
+C
+             IF (VCA1(2).NE.XZER.OR.VCA1(3).NE.XZER) THEN
+               VCA2(1)=XZER
+               VCA2(2)=-VCA1(3)
+               VCA2(3)=VCA1(2)
+               XVCA=SQRT(VCA2(1)*VCA2(1)+VCA2(2)*VCA2(2)
+     .                  +VCA2(3)*VCA2(3))
+               VCA2(1)=VCA2(1)/XVCA
+               VCA2(2)=VCA2(2)/XVCA
+               VCA2(3)=VCA2(3)/XVCA
+             ELSE
+               VCA2(1)=XZER
+               VCA2(2)=UN
+               VCA2(3)=XZER
+             ENDIF
+             VCA3(1)=VF1(2)*VCA2(3)-VF1(3)*VCA2(2)
+             VCA3(2)=VF1(3)*VCA2(1)-VF1(1)*VCA2(3)
+             VCA3(3)=VF1(1)*VCA2(2)-VF1(2)*VCA2(1)
+         ENDIF
+      ELSE
+C
+C------------PAS DE DIRECTION IMPOSEE----------
+C
+        VCA1(1)=UN
+        VCA1(2)=XZER
+        VCA1(3)=XZER
+        VCA2(1)=XZER
+        VCA2(2)=UN
+        VCA2(3)=XZER
+        VCA3(1)=XZER
+        VCA3(2)=XZER
+        VCA3(3)=UN
+      ENDIF
+C
+C=======================================================================
+C CALCUL DE DDEF0 (VIT. DEF. TOT.) ET SIGMA0 ET EPSV0 (DEF. VISCOPLAST.)
+C                  DANS LE REPERE DE CALCUL
+C            RESULTAT NOTE : DDEF ET SIGMA ET EPSV
+C=======================================================================
+C
+      LECAS=1
+      CALL UO2ROT(SIGMA0,SIGMA,VCA1,VCA2,VCA3,LECAS)
+      CALL UO2ROT(DDEF0,DDEF,VCA1,VCA2,VCA3,LECAS)
+      CALL UO2ROT(EPSV0,EPSV,VCA1,VCA2,VCA3,LECAS)
+C
+        IF(IIMPI.EQ.42) THEN
+          WRITE(IOIMP,70016) (VCA1(I),I=1,3),(VCA2(I),I=1,3),
+     &                       (VCA3(I),I=1,3)
+70016     FORMAT(2X,'VECTEUR VCA1 ',3(1X,1PE12.5)/
+     &           2X,'VECTEUR VCA2 ',3(1X,1PE12.5)/
+     &           2X,'VECTEUR VCA3 ',3(1X,1PE12.5)//)
+*
+          WRITE(IOIMP,77016) (SIGMA(I),I=1,6)
+77016     FORMAT(2X,'SIGMA0 EN REPERE CALCUL '/6(1X,1PE12.5)/)
+*
+          WRITE(IOIMP,77017) (DDEF(I),I=1,6)
+77017     FORMAT(2X,'DDEF0 EN REPERE CALCUL '/6(1X,1PE12.5)/)
+*
+          WRITE(IOIMP,77018) (EPSV(I),I=1,6)
+77018     FORMAT(2X,'EPSV0 EN REPERE CALCUL '/6(1X,1PE12.5)/)
+*
+          WRITE(IOIMP,73017) PRECIZ
+73017     FORMAT(2X,'PRECIZ = ',1PE12.5/)
+        ENDIF
+C
+C-----------------------------------------------------------------------
+C
+C           VERIFICATIONS SUR L'ETAT INITIAL
+C ZZZZ  A COMPLETER
+C-----------------------------------------------------------------------
+C
+            ICAZ=1
+            CALL UO2TE2(XINVL,W0,WMAX0,SIGMA,XLTR,PRECIZ,
+     &                  IB,IGAU,ICAZ,KERRE)
+            IF(KERRE.EQ.70) GO TO 2021
+C
+C
+C=======================================================================
+C             SOUS ITERATIONS INTERNES GEREES PAR UO2CA2
+C
+C   CES SOUS-ITERATIONS REDUISENT L INCREMENT DE DEF. TOT. DE MANIERE
+C     A ANNULER TOUTES LES NON LINEARITES EVENTUELLES (FISSURATION)
+C=======================================================================
+C
+      CALL IANUL(IRESU,20)
+C
+      DO IC=1,3
+         W(IC)=W0(IC)
+         WMAX(IC)=WMAX0(IC)
+      ENDDO
+C
+C=======================================================================
+C
+C---------------------------ECOULEMENT----------------------------------
+C
+C=======================================================================
+C
+      CALL UO2CA2(DTREST,MSOUPA,PRECIE,PRECIZ,SIGMA,DDEF,EPSV,VARGA0,
+     &           NGAT,W,WMAX,XLTR,
+     &           XINVL,GS,XMAT,NCOMAT,NSIMP,AA,
+     &           TEMPE1,TPOINT,DFISS1,FPOINT,PRECIS,IB,IGAU,
+     &           NFISSU,NVF,XVF,DTCALC,IRESU,NRESU,
+     &           SIGMAF,DDEFP,EPSVF,VARGAF,KERRE)
+      IF (KERRE.NE.0)  THEN
+         PRINT *,'IB=',IB,'  IGAU=',IGAU
+         GO TO 2021
+      ENDIF
+C
+C
+        IF(IIMPI.EQ.42) THEN
+          WRITE(IOIMP,77031)
+77031     FORMAT('   SORTIE D UO2CA2  ' /)
+*
+          WRITE(IOIMP,77032) (W(I),I=1,3),(WMAX(I),I=1,3)
+77032     FORMAT('   W '/3(1X,1PE12.5)/' WMAX  '/3(1X,1PE12.5)/)
+*
+          WRITE(IOIMP,75631) NFISSU,NVF,NRESU
+75631     FORMAT('  NFISSU = ',I3,2X,'NVF = ',I3,2X,'NRESU=',I3/)
+          WRITE(IOIMP,75632) (IRESU(I),I=1,NRESU)
+75632     FORMAT('  IRESU  = ',10I4/)
+          WRITE(IOIMP,75633) ((XVF(I,J),I=1,3),J=1,3)
+75633     FORMAT('  TABLEAU XVF '/(3(1X,1PE12.5)/))
+        ENDIF
+C
+C
+C=======================================================================
+C            CALCUL DU RESTE DE L'INCREMENT DE DEFORMATION
+C            ET MISE A JOUR DES VARIABLES INTERNES
+C=======================================================================
+C
+C
+        TAU=DTCALC/DTREST
+        DTREST=(UN-TAU)*DTREST
+        TEMPE1=TEMPE1+(TPOINT*DTCALC)
+        DFISS1=DFISS1+(FPOINT*DTCALC)
+C
+        TAURES=(UN-TAU)*TAURES
+C
+        IF(IIMPI.EQ.42) THEN
+           WRITE(IOIMP,77039) TAU,TAURES
+77039      FORMAT(//2X,'VALEUR DE L INCREMENT ECOULEE  ' /
+     &           /2X,' TAU = ',1PE12.5,2X,'TAURES=',1PE12.5/)
+        ENDIF
+C
+CZZZZZZZZZZZZZZZZ
+C  EVENTUELLEMENT TESTER L'EGALITE DE TAU A 0. AUSSI
+CZZZZZZZZZZZZZZZZ
+
+        IF(TAU.LT.0.D0) THEN
+           WRITE(IOIMP,70069)
+70069      FORMAT(////2X,'#########  UO2OT2: TAU NEGATIF #########'////)
+           KERRE=414
+           GO TO 2021
+        ENDIF
+C
+C---------------------------------------------------------------------
+C       TEST SUR IRESU
+C---------------------------------------------------------------------
+C
+        IF(NRESU.GT.1) THEN
+          DO 43 IR=1,NRESU
+             JRESU=IRESU(IR)
+             DO 44 KR=1,NRESU
+                KRESU=IRESU(KR)
+                IF(KR.NE.IR.AND.JRESU.EQ.KRESU) THEN
+                   WRITE(IOIMP,20069)
+20069              FORMAT(////2X,
+     &     '###########  UO2OT2: 2 IRESU IDENTIQUES  ###########'////)
+                   KERRE=987
+                   GO TO 2021
+                ENDIF
+ 44         CONTINUE
+ 43       CONTINUE
+        ENDIF
+
+C
+C
+C=======================================================================
+C
+C-------------PRISE EN COMPTE DE LA NOUVELLE NON LINEARITE--------------
+C
+C=======================================================================
+C
+C
+        DO 55 IR=1,NRESU
+           JRESU=IRESU(IR)
+C
+           IF(IIMPI.EQ.42) THEN
+              WRITE(IOIMP,74401) JRESU
+74401         FORMAT(/2X,'MISE A JOUR POUR JRESU = ',I4/)
+           ENDIF
+
+C
+C-----------------FISSURATION---------------
+C
+        IF (JRESU.GE.1.AND.JRESU.LE.3) THEN
+C
+           NFISSU=NFISSU+1
+C
+C----------CALCUL DE VF , XINVL  DANS LE REPERE GLOBAL-------------
+C
+           XVFN=XVF(1,JRESU)**2 + XVF(2,JRESU)**2
+     &        + XVF(3,JRESU)**2
+           IF(XVFN.EQ.XZER) THEN
+               WRITE(IOIMP,77027)    JRESU
+77027          FORMAT(2X,' ***  UO2OT2: PB AVEC UN VECTEUR XVF !!!!  ' /
+     &         2X,' DIRECTION = ',I3//)
+               KERRE=987
+               GO TO 2021
+           ENDIF
+C
+C
+           VF(1)=VCA1(1)*XVF(1,JRESU)+VCA2(1)*XVF(2,JRESU)
+     &          +VCA3(1)*XVF(3,JRESU)
+           VF(2)=VCA1(2)*XVF(1,JRESU)+VCA2(2)*XVF(2,JRESU)
+     &          +VCA3(2)*XVF(3,JRESU)
+           VF(3)=VCA1(3)*XVF(1,JRESU)+VCA2(3)*XVF(2,JRESU)
+     &          +VCA3(3)*XVF(3,JRESU)
+           XNF=VF(1)*VF(1)+VF(2)*VF(2)+VF(3)*VF(3)
+           XL=TAIL(1)*VF(1)*VF(1)+TAIL(2)*VF(2)*VF(2)
+           XL=XL+TAIL(3)*VF(3)*VF(3)+DEUX*TAIL(4)*VF(2)*VF(1)
+           XL=XL+DEUX*TAIL(5)*VF(1)*VF(3)
+           XL=XL+DEUX*TAIL(6)*VF(2)*VF(3)
+           PASS=P(1)*VF(1)*VF(1)+P(2)*VF(2)*VF(2)+P(3)*VF(3)*VF(3)
+           PASS=PASS+DEUX*P(4)*VF(2)*VF(1)+DEUX*P(5)*VF(1)*VF(3)
+           PASS=PASS+DEUX*P(6)*VF(2)*VF(3)
+           IF (XL.NE.XZER) THEN
+              XTAILLE=ABS(PASS/XL)
+           ELSE
+              XTAILLE=UN
+           ENDIF
+C
+           XINVL(JRESU)=XTAILLE
+C
+C
+C    MISE A JOUR DES DIRECTIONS DE FISSURE DANS LES VARIABLES INTERNES
+C
+C ------------------------------------------
+C         MATERIAU NON FISSURE PREALABLEMENT
+C ------------------------------------------
+C
+           IF (NFISSU.EQ.1) THEN
+              IF (NVF.EQ.0) THEN
+                 VF1(1)=VF(1)
+                 VF1(2)=VF(2)
+                 VF1(3)=VF(3)
+                 XNF1=XNF
+                 GOTO 55
+              ENDIF
+              IF (NVF.EQ.1.AND.JRESU.EQ.1) THEN
+                 NVF=NVF-1
+                 GOTO 55
+              ENDIF
+              IF (NVF.EQ.1.AND.JRESU.NE.1) THEN
+                 VF2(1)=VF(1)
+                 VF2(2)=VF(2)
+                 VF2(3)=VF(3)
+                 XNF2=XNF
+                 GOTO 55
+              ENDIF
+              IF (NVF.EQ.2.AND.JRESU.EQ.3) THEN
+                 VF3(1)=VF(1)
+                 VF3(2)=VF(2)
+                 VF3(3)=VF(3)
+                 XNF3=XNF
+                 GOTO 55
+              ENDIF
+              IF (NVF.EQ.2.AND.JRESU.NE.3) THEN
+                 NVF=NVF-1
+                 GOTO 55
+              ENDIF
+              IF (NVF.EQ.3) THEN
+                 NVF=NVF-1
+                 GOTO 55
+              ENDIF
+           ENDIF
+C
+C------------------------------------------
+C      UNE FISSURE AU PREALABLE
+C------------------------------------------
+C
+           IF (NFISSU.EQ.2) THEN
+              IF (NVF.EQ.0) THEN
+                 VF2(1)=VF(1)
+                 VF2(2)=VF(2)
+                 VF2(3)=VF(3)
+                 XNF2=XNF
+                 GOTO 55
+              ENDIF
+              IF (NVF.EQ.1.AND.JRESU.EQ.3) THEN
+                 VF3(1)=VF(1)
+                 VF3(2)=VF(2)
+                 VF3(3)=VF(3)
+                 XNF3=XNF
+                 GOTO 55
+              ENDIF
+              IF (NVF.EQ.1.AND.JRESU.NE.3) THEN
+                 NVF=NVF-1
+                 GOTO 55
+              ENDIF
+              IF (NVF.EQ.2) THEN
+                 NVF=NVF-1
+                 GOTO 55
+              ENDIF
+           ENDIF
+C
+C------------------------------------------
+C   DEUX FISSURES PRE EXISTANTES
+C------------------------------------------
+C
+           IF (NFISSU.EQ.3) THEN
+              IF (NVF.EQ.1) THEN
+                 NVF=0
+                 GOTO 55
+              ENDIF
+              IF (JRESU.EQ.1) THEN
+                 VF1(1)=VF(1)
+                 VF1(2)=VF(2)
+                 VF1(3)=VF(3)
+                 XNF1=XNF
+                 GOTO 55
+              ENDIF
+              IF (JRESU.EQ.2) THEN
+                 VF2(1)=VF(1)
+                 VF2(2)=VF(2)
+                 VF2(3)=VF(3)
+                 XNF2=XNF
+                 GOTO 55
+              ENDIF
+              IF (JRESU.EQ.3) THEN
+                 VF3(1)=VF(1)
+                 VF3(2)=VF(2)
+                 VF3(3)=VF(3)
+                 XNF3=XNF
+                 GOTO 55
+              ENDIF
+           ENDIF
+        ENDIF
+C
+C
+  55  CONTINUE
+
+C
+C   QUELQUES TESTS SUPPLEMENTAIRES
+C
+C
+*        DO I=1,3
+*            IF(ABS(WMAX(I)-WRUPT(I)).LT.WRUPT(I)*PRECIE) THEN
+*                WMAX(I)=WRUPT(I)
+*            ENDIF
+*        ENDDO
+C
+        ICAZ=2
+        CALL UO2TE2(XINVL,W,WMAX,SIGMAF,XLTR,PRECIZ,
+     &              IB,IGAU,ICAZ,KERRE)
+        IF(KERRE.EQ.70) GO TO 2021
+C
+      DO 202 I=1,3
+        IF(DDEFP(I).GT.0.D0) THEN
+           IF(ABS(SIGMAF(I)).LT.PRECIZ) SIGMAF(I)=0.D0
+        ENDIF
+202   CONTINUE
+C
+C
+C=======================================================================
+C        CALCUL DE SIGMAF ET DDEFP ET EPSVF DANS LE REPERE GLOBAL
+C                RESULTAT NOTE : SIGF0 ET DDEFP0 ET EPSVF0
+C=======================================================================
+C
+      LECAS=2
+      CALL UO2ROT(SIGMAF,SIGF0,VCA1,VCA2,VCA3,LECAS)
+      CALL UO2ROT(DDEFP,DDEFP0,VCA1,VCA2,VCA3,LECAS)
+      CALL UO2ROT(EPSVF,EPSVF0,VCA1,VCA2,VCA3,LECAS)
+C
+        IF(IIMPI.EQ.42) THEN
+          WRITE(IOIMP,77040) (SIGF0(I),I=1,6)
+77040     FORMAT('0  SIGF EN REPERE GLOBAL '/6(1X,1PE12.5)/)
+*
+          WRITE(IOIMP,77041) (DDEFP0(I),I=1,6)
+77041     FORMAT('0  DDEFP EN REPERE GLOBAL '/6(1X,1PE12.5)/)
+*
+          WRITE(IOIMP,77042) (EPSVF0(I),I=1,6)
+77042     FORMAT('0  EPSVF EN REPERE GLOBAL '/6(1X,1PE12.5)/)
+        ENDIF
+C
+C
+C=======================================================================
+C   MISE A JOUR DE L ETAT DU MATERIAU POUR UN NOUVEL INCREMENT INTERNE
+C=======================================================================
+C
+      DO 54 IC=1,6
+         SIGMA0(IC)=SIGF0(IC)
+         EPSV0(IC)=EPSVF0(IC)
+         DDEF0(IC)=(UN-TAU)*DDEF0(IC)
+         DDEFPT(IC)=DDEFPT(IC)+DDEFP0(IC)
+  54  CONTINUE
+      DO I=1,NGAT
+         VARGA0(I)=VARGAF(I)
+      ENDDO
+C
+C
+C=======================================================================
+C --- CONTROLE DE L AMPLITUDE DE L INCREMENT INITIAL DE DEFORM. SI FISS.
+C=======================================================================
+      TOLEPS=1E12
+      TOL=TOLEPS
+      EPSMAX=XZER
+      DO 56 I=1,3
+        IF (ABS(DEPST(I)).GT.EPSMAX) EPSMAX=ABS(DEPST(I))
+        IF (XINVL(I).NE.XZER) THEN
+          TOL=(XINVL(I)*WRUPT(I)) - (XLTR(I)/YOUN)
+          TOL=ABS(TOL)
+          IF (TOL.LT.TOLEPS) TOLEPS=TOL
+        ENDIF
+ 56   CONTINUE
+      IF (EPSMAX.GT.TOLEPS) THEN
+        FACTEU=DIX*EPSMAX/TOLEPS
+        IFAC=INT(FACTEU)
+*        WRITE(IOIMP,77894) IFAC
+*77894   FORMAT(/,'UO2OT2 - PAS DE TEMPS TROP GRAND D UN FACTEUR ',I4,/)
+*        KERRE=268
+*        RETURN
+      ENDIF
+C
+C
+C=======================================================================
+C            TEST L ADMISSIBILITE DU DERNIER ECOULEMENT
+C=======================================================================
+C
+C    AM  30/04/96  REMPLACEMENT DE EPSILO PAR EPSIL2
+C
+      IF (TAURES.GT.EPSIL2) GOTO 31
+C
+C#######################################################################
+C=======================================================================
+C
+C  C EST FINI
+C  LES CONTRAINTES FINALES SONT DONNEES PAR                    : SIGMA0
+C  LES INC. DE DEF INELAS (FISS.+VISCOPLAST.) SONT DONNES PAR  : DDEFPT
+C  LES DEF VISCOPLAST. SONT DONNEES PAR                        : EPSV0
+C
+C=======================================================================
+C#######################################################################
+C
+C
+C#######################################################################
+C=======================================================================
+C                 MISE A JOUR DES VARIABLES INTERNES
+C=======================================================================
+C#######################################################################
+C
+C============================================
+C-------CAS TRIDIMENSIONNEL MASSIF-----------
+C============================================
+C
+C            NVARI=29    cf. IDVAR4
+C
+      IF (IFOUR.EQ.2.AND.MFR.EQ.1) THEN
+         DO 60 IC=1,3
+            VARF(IC+1) =WMAX(IC)
+            VARF(IC+4) =W(IC)
+            VARF(IC+7) =VF1(IC)
+            VARF(IC+10)=VF2(IC)
+            VARF(IC+13)=VF3(IC)
+            VARF(IC+16)=XINVL(IC)
+ 60      CONTINUE
+      ENDIF
+C
+C============================================
+C-------------CAS CONT PLANE-----------------
+C---------OU TRIDIM COQUES MINCES -----------
+C============================================
+C
+C NVARI=19/21/23 (CP/3D COQUES SANS/AVEC CIS.) cf. IDVAR4
+C
+      IF (IFOUR.EQ.-2.OR.
+     .    (IFOUR.EQ.2.AND.(MFR.EQ.3.OR.MFR.EQ.9)))THEN
+         DO 62 IC=1,2
+            VARF(IC+1) =WMAX(IC+1)
+            VARF(IC+3) =W(IC+1)
+            VARF(IC+5) =VF2(IC)
+            VARF(IC+7) =VF3(IC)
+            VARF(IC+9) =XINVL(IC+1)
+ 62      CONTINUE
+      ENDIF
+C
+C============================================
+C-----------CAS DEFO PLANE/AXIS--------------
+C============================================
+C
+C            NVARI=22    cf. IDVAR4
+C
+      IF (IFOUR.EQ.0.OR.IFOUR.EQ.-1.OR.IFOUR.EQ.-3) THEN
+         DO 64 IC=1,2
+            VARF(IC+1) =WMAX(IC+1)
+            VARF(IC+4) =W(IC+1)
+            VARF(IC+7) =VF2(IC)
+            VARF(IC+9) =VF3(IC)
+            VARF(IC+11)=XINVL(IC+1)
+ 64      CONTINUE
+         VARF(4) =WMAX(1)
+         VARF(7) =W(1)
+         VARF(14)=XINVL(1)
+      ENDIF
+C
+C   VARIABLE INTERNE DE NOM 'EPSE'
+C   ------------------------------
+      VARF(1)=W(1)+W(2)+W(3)
+C
+C------------------------------------------------------------------
+C   RANGEMENT DES VARIABLES INTERNES PROPRES AU MODELE GATT_MONERIE
+C                 AUTRES QUE LES DEF. VISCOPLAST.
+C------------------------------------------------------------------
+      DO 66 IC=1,NGAT
+        VARF(NVARI-NGAT+IC)=VARGAF(IC)
+  66  CONTINUE
+C
+C-----------------------------------------------------
+C   RANGEMENT DES VARIABLES INTERNES / DEF. VISCOPLAST.
+C------------------------------------------------------
+      KGAT=MGAT-NGAT
+C
+      IF (MFR.EQ.1) THEN
+C
+C-----------------------MASSIF 3D/2D----KGAT=6/4---------------
+C
+         DO 68 IC=1,KGAT
+           IF(IC.LE.3) THEN
+             VARF(NVARI-MGAT+IC)=EPSV0(IC)
+           ELSE
+             VARF(NVARI-MGAT+IC)=EPSV0(IC)*DEUX
+           ENDIF
+  68     CONTINUE
+C
+      ELSEIF (IFOUR.EQ.2.AND.(MFR.EQ.3.OR.MFR.EQ.9)) THEN
+C
+C-----3D COQUES MINCES SANS/AVEC CISAIL. TRANS.-----KGAT=6/8--------
+C              ON NE PREND QUE LA PARTIE MEMBRANE !!
+C
+         VARF(NVARI-MGAT+1)=EPSV0(1)
+         VARF(NVARI-MGAT+2)=EPSV0(2)
+         VARF(NVARI-MGAT+3)=EPSV0(4)*DEUX
+         VARF(NVARI-MGAT+4)=XZER
+         VARF(NVARI-MGAT+5)=XZER
+         VARF(NVARI-MGAT+6)=XZER
+         IF(MFR.EQ.9) THEN
+           VARF(NVARI-MGAT+7)=XZER
+           VARF(NVARI-MGAT+8)=XZER
+         ENDIF
+      ENDIF
+C
+C========================================================================
+C---------PASSAGE A L'OPTION DE CALCUL POUR LES CONTRAINTES--------------
+C========================================================================
+C
+      IF (IFOUR.EQ.2.AND.MFR.EQ.1) THEN
+C
+C----------MASSIF 3D----------------
+C
+        DO 70 I=1,6
+          SIGF(I)=SIGMA0(I)
+          IF(I.LE.3) THEN
+            DEFP(I)=DDEFPT(I)
+          ELSE
+            DEFP(I)=DDEFPT(I)*DEUX
+          ENDIF
+ 70     CONTINUE
+      ELSE IF (IFOUR.NE.2.AND.MFR.EQ.1) THEN
+C
+C---AXISYMETRIQUE/DEF/CONT PLANES----
+C
+        DO 80 I=1,4
+          SIGF(I)=SIGMA0(I)
+          IF(I.LE.3) THEN
+            DEFP(I)=DDEFPT(I)
+          ELSE
+            DEFP(I)=DDEFPT(I)*DEUX
+          ENDIF
+ 80     CONTINUE
+        IF (ABS(SIGMA0(5)).GT.(YOUN*1.D-15).OR.
+     &      ABS(SIGMA0(6)).GT.(YOUN*1.D-15)) THEN
+C
+C             SMRT OU SMTZ NON NULLES APRES ECOULEMENT
+C
+           KERRE=988
+           GO TO 2021
+        ENDIF
+C
+        ELSEIF (IFOUR.EQ.2.AND.(MFR.EQ.3.OR.MFR.EQ.9)) THEN
+C
+C-----CALCUL TRIDIM COQUES MINCES -------
+C
+C     ON MET A JOUR DE FACON NON LINEAIRE LA PARTIE MEMBRANE
+C     ET DE FACON LINEAIRE, LES PARTIES FLEXION ET EFFORTS
+C     TRANCHANTS LE CAS ECHEANT
+C
+          FAC=(EPAI**3)/12.D0
+          AUX =FAC*YOUN/(UN-XNU*XNU)
+          AUX1=FAC*YOUN*UNDEMI/(UN+XNU)
+          SIGF(1)=SIGMA0(1)*EPAI
+          SIGF(2)=SIGMA0(2)*EPAI
+          SIGF(3)=SIGMA0(4)*EPAI
+          SIGF(4)=SIG0(4)+AUX*(DEPST(4)+XNU*DEPST(5))
+          SIGF(5)=SIG0(5)+AUX*(DEPST(5)+XNU*DEPST(4))
+          SIGF(6)=SIG0(6)+AUX1*DEPST(6)
+          DEFP(1)=DDEFPT(1)
+          DEFP(2)=DDEFPT(2)
+          DEFP(3)=DDEFPT(4)*DEUX
+          DEFP(4)=0.D0
+          DEFP(5)=0.D0
+          DEFP(6)=0.D0
+          IF(MFR.EQ.9) THEN
+            XK=1.2D0
+            AUX2=EPAI*YOUN*UNDEMI/(UN+XNU)/XK
+            SIGF(7)=SIG0(7)+AUX2*DEPST(7)
+            SIGF(8)=SIG0(8)+AUX2*DEPST(8)
+            DEFP(7)=0.D0
+            DEFP(8)=0.D0
+          ENDIF
+      ENDIF
+C
+        IF(IIMPI.EQ.42) THEN
+          WRITE(IOIMP,77051) (SIGF(I),I=1,NSTRS)
+77051     FORMAT('0  SIGF  '/8(1X,1PE12.5)/)
+*
+          WRITE(IOIMP,77052) (DEFP(I),I=1,NSTRS)
+77052     FORMAT('0  DEFP  '/8(1X,1PE12.5)/)
+        ENDIF
+C
+ 2021 CONTINUE
+C
+      IF(KERRE.EQ.0) GO TO 9999
+C
+      IF(JEBOUC.EQ.1.AND.IIMPI.EQ.1042) THEN
+        IIMPI=42
+        WRITE(IOIMP,70901) IB,IGAU
+70901   FORMAT(2X,'>>>>>>>>   UO2OT2  IB=',I7,2X,'IGAU=',I3/)
+        GO TO 2020
+      ENDIF
+C
+9999  CONTINUE
+      IIMPI=IIMPI0
+
+      IF(KERRE.NE.0.AND.IIMPI.EQ.42) THEN
+          WRITE(IOIMP,70902) IB,IGAU
+70902     FORMAT(2X,'SORTIE UO2 '////)
+      ENDIF
+C
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+

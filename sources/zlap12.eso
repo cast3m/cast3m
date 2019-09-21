@@ -1,0 +1,431 @@
+C ZLAP12    SOURCE    CHAT      05/01/13    04:23:33     5004
+      SUBROUTINE ZLAP12(PROPHY,IROC,ITEMC,
+     &     ITIMP,IRIMP,
+     &     MELEMC,MELEMF,MELEFL,ISURF,INORM,IDIAM,
+     &     ICHFLU,DT)
+C***********************************************************************
+C NOM         : ZLAP12
+C DESCRIPTION : Calcul des flux diffusifs Navier-Stokes2D multi-espèces.
+C
+C
+C LANGAGE     : ESOPE
+C AUTEUR      : Stéphane GOUNAND (CEA/DEN/DM2S/SFME/LTMF)
+C               mél : gounand@semt2.smts.cea.fr
+C***********************************************************************
+C APPELES (UTIL)   : KRIPAD : MELEME -> (num. globale->locale)
+C                    LICHT  : Lecture des pointeurs (maillages, valeurs)
+C                             d'un objet de type MCHPOI.
+C                    ERREUR : Gestion des erreurs par GIBI.
+C APPELE PAR       : ZLAP11 : Chapeau de l'opérateur Gibiane 'LAPN'
+C                             option 'VF'.
+C***********************************************************************
+C ENTREES            : PROPHY (type PROPHY) : propriétés des espèces
+C                      PROPH2 (type PROPH2) : précond. de PROPHY
+C                      IROC   (type MCHPOI) : masse volumique par
+C                                             élément.
+C                      ITEMC  (type MCHPOI) : température par
+C                                             élément.
+C                      ITIMP  (type MCHPOI) : CL de
+C                        Dirichlet sur la température.
+C                      IRIMP  (type MCHPOI) : CL de
+C                        Dirichlet sur la densité.
+C                      MELEMC (type MELEME) : maillage des centres des
+C                                             éléments.
+C                      MELEMF (type MELEME) : maillage des faces des
+C                                             éléments.
+C                      MELEFL (type MELEME) : connectivités face-(centre
+C                                             gauche, centre droit).
+C                      ISURF (type MCHPOI) : surface des faces.
+C                      INORM (type MCHPOI) : normale aux faces.
+C                      IDIAM (type MCHPOI) : diamètre des éléments.
+C ENTREES/SORTIES    : -
+C SORTIES            : ICHFLU (type MCHPOI) : flux diffusif aux
+C                                             interfaces.
+C                      DT     (type REAL*8) : pas de temps de stabilité
+C                                             (Fourier)
+C CODE RETOUR (IRET) : = 0 si tout s'est bien passé
+C***********************************************************************
+C VERSION    : v1, 25/02/2002, version initiale
+C HISTORIQUE : v1, 25/02/2002, création
+C HISTORIQUE :
+C HISTORIQUE :
+C***********************************************************************
+C Prière de PRENDRE LE TEMPS de compléter les commentaires
+C en cas de modification de ce sous-programme afin de faciliter
+C la maintenance !
+C***********************************************************************
+      IMPLICIT INTEGER(I-N)
+-INC CCOPTIO
+-INC CCREEL
+-INC SMCHPOI
+-INC SMELEME
+-INC SMCOORD
+-INC SMLENTI
+-INC SMLMOTS
+C
+      POINTEUR IROC.MCHPOI,ITEMC.MCHPOI,ICDIFF.MCHPOI,IGRYKF.MCHPOI
+      POINTEUR MPROC.MPOVAL,MPTEMC.MPOVAL,
+     &     MPTIMP.MPOVAL,MPRIMP.MPOVAL,MPCDIF.MPOVAL,MPGRYK.MPOVAL,
+     &     MPSURF.MPOVAL, MPNORM.MPOVAL, MPDIAM.MPOVAL,
+     &     MPFLUX.MPOVAL,MPCDIN.MPOVAL
+C
+      POINTEUR MELEMC.MELEME,MELEMF.MELEME,MELEFL.MELEME
+      POINTEUR MLCENT.MLENTI,MLETIM.MLENTI,MLERIM.MLENTI
+C
+      INTEGER NESP
+      SEGMENT PROPHY
+         CHARACTER*4 NOMESP(NESP+1)
+         REAL*8 CV(NESP+1)
+         REAL*8 R(NESP+1)
+         REAL*8 H0K(NESP+1)
+         POINTEUR CDIFF(NESP+1).MCHPOI
+         POINTEUR YK(NESP+1).MCHPOI
+         POINTEUR GRADYK(NESP+1).MCHPOI
+         POINTEUR CGRYK(NESP+1).MCHELM
+         POINTEUR CLYK(NESP+1).MCHPOI
+      ENDSEGMENT
+      SEGMENT LIPOVA
+      POINTEUR MPGRAD(0).MPOVAL
+      ENDSEGMENT
+      SEGMENT LIPOV2
+      POINTEUR MPDIFF(0).MPOVAL
+      ENDSEGMENT
+C
+      INTEGER ITIMP,IRIMP
+     &       ,ISURF,INORM,IDIAM,ICHFLU
+     &       ,NFAC, NLCF, NGCF, NGCF1, NGCEG, NGCED
+     &       ,NLCEG,NLCED,NLFTI,NLFRI
+     &       , ICOORX, IGEOM
+
+      REAL*8 DT, UNSDT
+     &       ,XG,YG,XFMXG,YFMYG,DRG
+     &       ,XD,YD,XFMXD,YFMYD,DRD,ALPHA,UMALPH
+     &       ,XF,YF
+     &       ,CNX, CNY, ORIENT, DIAM, DIAM2, CELL, SURF
+      INTEGER IESP
+      REAL*8 CPK,DK,DYKDX,DYKDY,HKF,CPN,DN,HNF
+      REAL*8 RHOD,RHOF,RHOG
+      REAL*8 TEMD,TEMF,TEMG
+C
+      CHARACTER*8 TYPE
+C
+C**** Initialisation de 1/DT
+C
+      UNSDT = 0.0D0
+C
+C**** KRIPAD pour la correspondance global/local de centre
+C
+      CALL KRIPAD(MELEMC,MLCENT)
+C
+C     EN KRIPAD
+C     SEGACT MELEMC
+C     SEGACT MLCENT
+C
+      CALL LICHT(IROC,MPROC,TYPE,IGEOM)
+      CALL LICHT(ITEMC,MPTEMC,TYPE,IGEOM)
+      CALL LICHT(ISURF,MPSURF,TYPE,IGEOM)
+      CALL LICHT(INORM,MPNORM,TYPE,IGEOM)
+      CALL LICHT(IDIAM,MPDIAM,TYPE,IGEOM)
+      CALL LICHT(ICHFLU,MPFLUX,TYPE,IGEOM)
+C
+C     EN LICHT
+C     SEGACT*MOD MPROC
+C     SEGACT*MOD MPTEMC
+C     SEGACT*MOD MPSURF
+C     SEGACT*MOD MPNORM
+C     SEGACT*MOD MPDIAM
+C     SEGACT*MOD MPFLUX
+C
+      SEGINI LIPOVA
+      SEGINI LIPOV2
+      SEGACT PROPHY
+      NESP=PROPHY.CV(/1)-1
+      DO IESP=1,NESP+1
+         ICDIFF=PROPHY.CDIFF(IESP)
+* In licht SEGACT LIPOV2.MPDIFF(*)
+         CALL LICHT(ICDIFF,MPCDIF,TYPE,IGEOM)
+         LIPOV2.MPDIFF(**)=MPCDIF
+         IGRYKF=PROPHY.GRADYK(IESP)
+* In licht SEGACT LIPOVA.MPGRAD(*)
+         CALL LICHT(IGRYKF,MPGRYK,TYPE,IGEOM)
+         LIPOVA.MPGRAD(**)=MPGRYK
+      ENDDO
+
+      IF(ITIMP .NE. 0)THEN
+         CALL LICHT(ITIMP,MPTIMP,TYPE,IGEOM)
+C        SEGACT*MOD MPVIMP
+         CALL KRIPAD(IGEOM,MLETIM)
+C        SEGACT IGEOM
+C        SEGACT MLETIM
+         MELEME = IGEOM
+         SEGDES MELEME
+      ENDIF
+      IF(IRIMP .NE. 0)THEN
+         CALL LICHT(IRIMP,MPRIMP,TYPE,IGEOM)
+C        SEGACT*MOD MPVIMP
+         CALL KRIPAD(IGEOM,MLERIM)
+C        SEGACT IGEOM
+C        SEGACT MLERIM
+         MELEME = IGEOM
+         SEGDES MELEME
+      ENDIF
+
+C
+      SEGACT MELEFL
+      SEGACT MELEMF
+      NFAC = MELEMF.NUM(/2)
+C
+C**** Boucle sur les faces
+C
+      DO NLCF = 1, NFAC, 1
+C
+C******* NLCF  = numero local du centre de facel
+C        NGCF  = numero global du centre de facel
+C        NLCF1 = numero local du centre de face
+C        NGCEG = numero global du centre ELT "gauche"
+C        NLCEG = numero local du centre ELT "gauche"
+C        NGCED = numero global du centre ELT "droite"
+C        NLCED = numero local du centre ELT "droite"
+C
+         NGCF = MELEMF.NUM(1,NLCF)
+         NGCF1 = MELEFL.NUM(2,NLCF)
+         IF(NGCF .NE. NGCF1)THEN
+            MOTERR(1:40)= 'FACEL et FACE = ?                       '
+            CALL ERREUR(5)
+            GOTO 9999
+         ENDIF
+C
+         NGCEG = MELEFL.NUM(1,NLCF)
+         NGCED = MELEFL.NUM(3,NLCF)
+         NLCEG = MLCENT.LECT(NGCEG)
+         NLCED = MLCENT.LECT(NGCED)
+C
+C******* On controlle si sur NGCF on impose de CL
+C
+C        NLFTI  = numero local du centre de face sul le maillage des
+C                 "températures" "imposées"
+C
+         IF(ITIMP .NE. 0)THEN
+            NLFTI = MLETIM.LECT(NGCF)
+         ELSE
+            NLFTI = 0
+         ENDIF
+C
+         IF(IRIMP .NE. 0)THEN
+            NLFRI = MLERIM.LECT(NGCF)
+         ELSE
+            NLFRI = 0
+         ENDIF
+C
+         IF(NGCEG .NE. NGCED)THEN
+C
+C********** Parametres geometriques
+C
+            ICOORX = ((IDIM + 1) * (NGCF - 1))+1
+            XF = MCOORD.XCOOR(ICOORX)
+            YF = MCOORD.XCOOR(ICOORX+1)
+C
+            ICOORX = ((IDIM + 1) * (NGCEG - 1))+1
+            XG = MCOORD.XCOOR(ICOORX)
+            YG = MCOORD.XCOOR(ICOORX+1)
+            XFMXG = XF - XG
+            YFMYG = YF - YG
+            DRG=SQRT((XFMXG*XFMXG)+(YFMYG*YFMYG))
+C
+            ICOORX = ((IDIM + 1) * (NGCED - 1))+1
+            XD = MCOORD.XCOOR(ICOORX)
+            YD = MCOORD.XCOOR(ICOORX+1)
+            XFMXD = XF - XD
+            YFMYD = YF - YD
+            DRD=SQRT((XFMXD*XFMXD)+(YFMYD*YFMYD))
+C
+C********** F=G -> DRG = 0 -> ALPHA = 0
+C
+            ALPHA=DRG/(DRG+DRD)
+            UMALPH= 1.0D0 - ALPHA
+C
+C********** Les valeurs à l'interface
+C
+C           DRG=0 -> F=G
+C
+C
+C********** Température
+C
+            IF( NLFTI .GT. 0) THEN
+               TEMF = MPTIMP.VPOCHA(NLFTI,1)
+            ELSE
+C************* Gauche
+               TEMG = MPTEMC.VPOCHA(NLCEG,1)
+C************* Droite
+               TEMD = MPTEMC.VPOCHA(NLCED,1)
+C************* Face
+               TEMF = UMALPH * TEMG + ALPHA * TEMD
+            ENDIF
+C
+C********** Rho
+C
+            IF( NLFRI .GT. 0) THEN
+               RHOF = MPRIMP.VPOCHA(NLFRI,1)
+            ELSE
+C************* Gauche
+               RHOG = MPROC.VPOCHA(NLCEG,1)
+C************* Droite
+               RHOD = MPROC.VPOCHA(NLCED,1)
+C************* Face
+               RHOF = UMALPH * RHOG + ALPHA * RHOD
+            ENDIF
+         ELSE
+C
+C********** MURS
+C
+C           Etat a gauche = Etat droite
+C
+            ALPHA=0.0D0
+            UMALPH=1.0D0
+C
+C********** Parametres geometriques
+C
+            ICOORX = ((IDIM + 1) * (NGCF - 1))+1
+            XF = MCOORD.XCOOR(ICOORX)
+            YF = MCOORD.XCOOR(ICOORX+1)
+C
+            ICOORX = ((IDIM + 1) * (NGCEG - 1))+1
+            XG = MCOORD.XCOOR(ICOORX)
+            YG = MCOORD.XCOOR(ICOORX+1)
+            XFMXG = XF - XG
+            YFMYG = YF - YG
+C
+C********** Température
+C
+            IF( NLFTI .GT. 0) THEN
+               TEMF = MPTIMP.VPOCHA(NLFTI,1)
+            ELSE
+               TEMF = MPTEMC.VPOCHA(NLCEG,1)
+            ENDIF
+C
+C********** Rho
+C
+            IF( NLFRI .GT. 0) THEN
+               RHOF = MPRIMP.VPOCHA(NLFRI,1)
+            ELSE
+               RHOF = MPROC.VPOCHA(NLCEG,1)
+            ENDIF
+         ENDIF
+C
+C******* On calcule le sign du pruduit scalare
+C        (Normales de Castem) * (vecteur "gauche" -> "centre")
+C
+         CNX = MPNORM.VPOCHA(NLCF,1)
+         CNY = MPNORM.VPOCHA(NLCF,2)
+         ORIENT = CNX * XFMXG + CNY * YFMYG
+         ORIENT = SIGN(1.0D0,ORIENT)
+         IF(ORIENT .NE. 1.0D0)THEN
+            MOTERR(1:40)=
+     &           'LAPN , subroutine zlap12.eso.           '
+            WRITE(IOIMP,*) MOTERR(1:40)
+            CALL ERREUR(5)
+            GOTO 9999
+         ENDIF
+C
+C******* Les flux aux interfaces
+C
+         SURF = MPSURF.VPOCHA(NLCF,1)
+         DIAM = UMALPH*MPDIAM.VPOCHA(NLCEG,1) +
+     &        ALPHA*MPDIAM.VPOCHA(NLCED,1)
+         DIAM2=DIAM*DIAM
+         MPCDIN=LIPOV2.MPDIFF(NESP+1)
+         CPN=PROPHY.CV(NESP+1)+PROPHY.R(NESP+1)
+         HNF=(CPN*TEMF)+PROPHY.H0K(NESP+1)
+         DO IESP=1,NESP
+            MPCDIF=LIPOV2.MPDIFF(IESP)
+            DK=UMALPH*MPCDIF.VPOCHA(NLCEG,1) +
+     $           ALPHA*MPCDIF.VPOCHA(NLCED,1)
+            DN=UMALPH*MPCDIN.VPOCHA(NLCEG,1) +
+     $           ALPHA*MPCDIN.VPOCHA(NLCED,1)
+            MPGRYK=LIPOVA.MPGRAD(IESP)
+            DYKDX=MPGRYK.VPOCHA(NLCF,1)
+            DYKDY=MPGRYK.VPOCHA(NLCF,2)
+            CPK=PROPHY.CV(IESP)+PROPHY.R(IESP)
+            HKF=(CPK*TEMF)+PROPHY.H0K(IESP)
+* Contribution pour l'espèce IESP
+            MPFLUX.VPOCHA(NLCF,IDIM+1+IESP)=
+     $           RHOF*DK*((DYKDX*CNX)+(DYKDY*CNY))*SURF*(-1.D0)
+* Contribution pour l'énergie totale
+            MPFLUX.VPOCHA(NLCF,IDIM+1)=
+     $           MPFLUX.VPOCHA(NLCF,IDIM+1)+
+     $           (RHOF*((HKF*DK)-(HNF*DN))
+     $           *((DYKDX*CNX)+(DYKDY*CNY))*SURF*(-1.D0))
+* Le pas de temps
+            CELL=(4.0D0*DK)/DIAM2
+            IF(CELL .GT. UNSDT)THEN
+               UNSDT=CELL
+            ENDIF
+         ENDDO
+C         DO IESP=1,NESP+1
+C            MPCDIF=LIPOV2.MPDIFF(IESP)
+C            DK=UMALPH*MPCDIF.VPOCHA(NLCEG,1) +
+C     $           ALPHA*MPCDIF.VPOCHA(NLCED,1)
+C            MPGRYK=LIPOVA.MPGRAD(IESP)
+C            DYKDX=MPGRYK.VPOCHA(NLCF,1)
+C            DYKDY=MPGRYK.VPOCHA(NLCF,2)
+C            CPK=PROPHY.CV(IESP)+PROPHY.R(IESP)
+C            HKF=(CPK*TEMF)+PROPHY.H0K(IESP)
+C* Contribution pour l'espèce IESP
+C            IF ((IESP.GE.1).AND.(IESP.LE.NESP)) THEN
+C               MPFLUX.VPOCHA(NLCF,IDIM+1+IESP)=
+C     $              RHOF*DK*((DYKDX*CNX)+(DYKDY*CNY))*SURF*(-1.D0)
+C            ENDIF
+C* Contribution pour l'énergie totale
+C            MPFLUX.VPOCHA(NLCF,IDIM+1)=
+C     $           MPFLUX.VPOCHA(NLCF,IDIM+1)+
+C     $           (RHOF*HKF*DK*((DYKDX*CNX)+(DYKDY*CNY))*SURF*(-1.D0))
+C* Le pas de temps
+C            CELL=(4.0D0*DK)/DIAM2
+C            IF(CELL .GT. UNSDT)THEN
+C               UNSDT=CELL
+C            ENDIF
+C         ENDDO
+C
+      ENDDO
+C
+C
+      DT = 1.0D0 / (UNSDT + XPETIT)
+C
+      SEGDES MELEFL
+      SEGDES MELEMF
+      SEGDES MELEMC
+      SEGDES MPSURF
+      SEGDES MPNORM
+      SEGDES MPDIAM
+      SEGSUP MLCENT
+C
+      SEGDES MPROC
+      SEGDES MPTEMC
+      SEGDES PROPHY
+      SEGDES LIPOVA.MPGRAD(*)
+      SEGSUP LIPOVA
+      SEGDES LIPOV2.MPDIFF(*)
+      SEGSUP LIPOV2
+      SEGDES MPFLUX
+C
+      IF(ITIMP .NE. 0) THEN
+         SEGDES MPTIMP
+         SEGSUP MLETIM
+      ENDIF
+C
+      IF(IRIMP .NE. 0) THEN
+         SEGDES MPRIMP
+         SEGSUP MLERIM
+      ENDIF
+C
+ 9999 CONTINUE
+      RETURN
+      END
+
+
+
+
+
+
+
+

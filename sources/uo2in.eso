@@ -1,0 +1,362 @@
+C UO2IN     SOURCE    STRU      07/05/31    21:15:42     5744
+      SUBROUTINE UO2IN(ISING,IFERM,IBRUP,LEBIL,PENTE,PENTE2,NCA,NN,MC,
+     &              MM,SIGG0,GS,FC,XINVL,XLTR,WMAX0,WRUPT,PRECIZ,T0,
+     &              TPOINT,FI0,FPOINT,PRECIS,XMAT,NCOMAT,NSIMP,AAD,BTR,
+     &              EPSPT,EPSV0,VAR0,W0,DX0,NGAT,TAU,KERRE)
+C----------------------------------------------------------------------
+C            ECOULEMENT MODELE UO2 (OTTOSEN ET GATT_MONERIE)
+C        DETERMINATION DU CHEMIN A SUIVRE EN CAS DE BIFURCATION
+C----------------------------------------------------------------------
+C
+C  ENTREES
+C  -------
+C ISING(NC)    = SINGULARITES CORRESPONDANT A UNE BIFURCATION
+C IFERM(NC)    = FISSURES FERMEES
+C IBRUP(NC)    = FISSURES ROMPUES
+C LEBIL(NC)    = COMPRESSION/TRACTION
+C PENTE(NC)    = PREMIERE PENTE DE FISSURATION CORRESPONDANT A FC
+C PENTE2(NC)   = DEUXIEME PENTE DE FISSURATION
+C NCA          = NBR. DE DIRECTIONS DE FISS. OU UN CRITERE EST ATTEINT
+C NN(NC)       = NUMEROS DES DIRECTIONS DE FISS. OU UN CRIT. EST ATTEINT
+C MC           = NBR. DE CRITERES DE FISS. SUSCEPTIBLES D ETRE ATTEINTS
+C MM(20)       = TYPES DES CRIT. DE FISS. SUSCEPTIBLES D ETRE ATTEINTS
+C SIGG0(6)     = CONTRAINTES INITIALES
+C GS(3)        = RESISTANCES AU CISAILLEMENT
+C FC(NC)       = CRITERE DE FISSURATION
+C XINVL(3)     = PARAMETRES DE TAILLE
+C XLTR(3)      = LIMITES EN TRACTION POUR LA FISSURATION
+C WMAX0(3)     = OUVERTURES MAXIMALES DES FISSURES AU DEB. DU SOUS PAS
+C WRUPT(3)     = OUVERTURES CONDITIONNANT LA RUPTURE
+C PRECIZ       = PRECISION POUR TESTS SUR CONTRAINTES
+C T0           = TEMPERATURE AU DEBUT DU SOUS PAS D INTEGRATION
+C TPOINT       = VITESSE DE TEMPERATURE SUR LE PAS D INTEGRATION
+C FI0          = DENSITE DE FISSION AU DEBUT DU SOUS PAS D INTEGRATION
+C FPOINT       = VITESSE DE DENSITE DE FISSION SUR LE PAS D INTEGRATION
+C PRECIS       = PRECISION POUR LA VISCOPLASTICITE
+C XMAT(NCOMAT) = CARACTERISTIQUES THERMOMECANIQUES DU MATERIAU
+C NSIMP        = POINTE SUR LA CARACTERISTIQUE FACULTATIVE 'SIMP' DE XMAT
+C AAD          = COEFFICIENT INTERVENANT DANS LE CALCUL DE L INCREMENT
+C                DE LA DEFORMATION DE DENSIFICATION
+C BTR          = PARAMETRE DE FERMETURE
+C EPSPT(6)     = VITESSE DES DEFORM. TOTALES SUR LE PAS D INTEGRATION
+C EPSV0(6)     = DEFORM. VISCOPLAST. AU DEBUT DU SOUS PAS D'INTEGRATION
+C VAR0(NGAT)   = VAR. INT. SCAL. DE GATT_MONERIE AU DEB. DU SS PAS
+C W0(3)        = OUVERTURES DE FISS. AU DEB. DU SS PAS D'INTEGRATION
+C DX0(NC)      = DEF. DE FISSURATION (OUV.) AU DEB. DU SS PAS
+C TAU          = (DT) PAS D INTEGRATION
+C
+C  SORTIES
+C  -------
+C NCA          = NBR. DE DIR. DE FISS. OU UN CRIT. EST ATTEINT CPTE TENU
+C                DU CHEMIN A SUIVRE (DECHARGE ELASTIQUE POSSIBLE)
+C NN(NC)       = NUMEROS DES DIRECTIONS DE FISS. OU UN CRIT. EST ATTEINT
+C                CPTE TENU DU CHEMIN A SUIVRE
+C MC           = NOUVEAU NBR. DE CRIT. DE FISS. SUSCEPT. D ETRE ATTEINTS
+C MM(20)       = NOUV. TYPES DES CRIT. DE FISS. SUSCEPT. D ETRE ATTEINTS
+C PENTE(NC)    = PENTE DE FISSURATION DU CHEMIN A SUIVRE
+C-----------------------------------------------------------------------
+C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+-INC CCOPTIO
+C
+      PARAMETER (NC=3,NGATT=4)
+C
+      DIMENSION ISING(*),IFERM(*),IBRUP(*),LEBIL(*)
+      DIMENSION XINVL(*),XLTR(*),WRUPT(*),WMAX0(*)
+      DIMENSION FC(*),PENTE(*),PENTE2(*)
+      DIMENSION NN(*),MM(*)
+      DIMENSION SIGG0(*),EPSPT(*),EPSV0(*),VAR0(*),W0(*),DX0(*)
+      DIMENSION GS(*),XMAT(*)
+      DIMENSION DDE(18)
+      DIMENSION SIGGF(6),EPSVVF(6),VARF(NGATT),WF(3),DSIG(6)
+      DIMENSION WMAXF(3),WREOU0(3),WREOUF(3)
+      DIMENSION DXF(NC),DDX(NC)
+      DIMENSION NSITUA(NC+1),JESEC(NC),LASIT(NC)
+      DIMENSION PENT(NC),NN2(NC)
+C
+C
+      IF(IIMPI.EQ.42) THEN
+         WRITE(IOIMP,74411) (ISING(IC),IC=1,NC),
+     &                      (IFERM(IC),IC=1,NC),
+     &                      (IBRUP(IC),IC=1,NC)
+74411    FORMAT(5X,' ENTREE DANS UO2IN - ISING = ',3I3,
+     &         2X,'IFERM = ',3I3/2X,'IBRUP = ',3I3/)
+      ENDIF
+C
+C
+C   INITIALISATIONS
+C
+      NC1=NC+1
+      KERRE=0
+      CALL SHIFTD(PENTE,PENT,NC)
+      PRECIE=1.D-10
+      IFLAG1=1
+      DO I=1,3
+         WREOU0(I) = BTR*MIN(WMAX0(I),WRUPT(I))
+      ENDDO
+C
+C
+      DO IC=1,NC
+         NSITUA(IC)=1 + ISING(IC) + IFERM(IC) + IBRUP(IC)
+         IF(NSITUA(IC).GT.2) THEN
+            WRITE(IOIMP,74412) IC,ISING(IC),IFERM(IC),IBRUP(IC)
+74412       FORMAT(2X,'#######  CAS IMPOSSIBLE IC=',I3,2X,
+     &             'ISING(IC)=',I3,2X,'IFERM(IC)=',I3,2X,
+     &             'IBRUP(IC)=',I3/)
+            KERRE=7
+            RETURN
+         ENDIF
+      ENDDO
+C
+C
+      DO 21 I1=1,NSITUA(1)
+        LASIT(1)=I1
+C
+        DO 22 I2=1,NSITUA(2)
+          LASIT(2)=I2
+C
+          DO 23 I3=1,NSITUA(3)
+            LASIT(3)=I3
+C
+C           TYPES 1  (ISING)  ( IC=1 A 3 )
+C                 1  : PENTE2  (SECANTE)
+C                 2  : PENTE
+C
+C           TYPES 2  (IFERM)  ( IC=1 A 3 )
+C                 1  : ELASTIQUE
+C                 2  : PENTE SECANTE
+C
+C           TYPES 3  (IBRUP)  ( IC=1 A 3 )
+C                 1  : ELASTIQUE
+C                 2  : PENTE
+C
+               DO IC=1,3
+                  IF(LASIT(IC).EQ.2) THEN
+                     PENT(IC)=PENTE(IC)
+                  ELSE IF(LASIT(IC).EQ.1.AND.ISING(IC).EQ.1) THEN
+                     PENT(IC)=PENTE2(IC)
+                  ENDIF
+               ENDDO
+C
+C
+            CALL IANUL(JESEC,NC)
+            NCA2=0
+            DO IJ=1,NCA
+               JJ=NN(IJ)
+               IF(LASIT(JJ).EQ.1) THEN
+                  IF(IFERM(JJ).NE.1.AND.IBRUP(JJ).NE.1) THEN
+                     NCA2=NCA2+1
+                     NN2(NCA2)=JJ
+                  ENDIF
+               ELSE IF(LASIT(JJ).EQ.2) THEN
+                  NCA2=NCA2+1
+                  NN2(NCA2)=JJ
+                  IF(IFERM(JJ).EQ.1.AND.JJ.LE.3) THEN
+                     JESEC(JJ)=1
+                  ENDIF
+               ENDIF
+            ENDDO
+C
+            IF(IIMPI.EQ.42) THEN
+               WRITE(IOIMP,60080) I1,I2,I3,NCA,NCA2
+60080          FORMAT(//2X,' ********  SITUATION : I1 I2 I3 ',
+     &                  3I3/2X,'NCA=',I3,2X,'NCA2=',I3/)
+            ENDIF
+C
+            IF(NCA2.EQ.0) THEN
+               GO TO 55
+            ENDIF
+C
+C
+C --- determination d un etat converge pour TAU inferieur ou egal a DT
+C
+      NDIM=NCA2
+      IF(IFOUR.EQ.-2) NDIM=NCA2+1
+C
+      TAUESS=TAU
+C
+      CALL UO2DCN(IFLAG1,T0,TPOINT,FI0,FPOINT,PRECIS,PRECIZ,
+     &            XMAT,NCOMAT,NSIMP,AAD,BTR,GS,WRUPT,LEBIL,XINVL,PENT,
+     &            EPSPT,SIGG0,EPSV0,VAR0,W0,WMAX0,WREOU0,DX0,
+     &            NGAT,NC1,NCA2,NDIM,NN2,TAUESS,TAUNEX,SIGGF,EPSVVF,
+     &            VARF,WF,DXF,WMAXF,WREOUF,TF,FIF,KERRE)
+      IF (KERRE.NE.0) THEN
+        RETURN
+      ENDIF
+C
+C
+      IF(IIMPI.EQ.42) THEN
+         WRITE(IOIMP,60081) (SIGG0(I),I=1,6)
+60081    FORMAT(2X,' SIGG0   '/(6(1X,1PE12.5))/)
+      ENDIF
+C
+      IF(IIMPI.EQ.42) THEN
+         WRITE(IOIMP,77010) NCA2,NDIM
+77010    FORMAT(5X,'NCA2=',I3,2X,'NDIM =',I3/)
+         WRITE(IOIMP,77018) (NN2(IJ),IJ=1,NCA2)
+77018    FORMAT(5X,'NN2 ',5(1X,I3))
+      ENDIF
+C
+C
+       DO IJ=1,NCA2
+          JJ=NN2(IJ)
+          DDX(JJ)=DXF(JJ)-DX0(JJ)
+C
+          IF(IIMPI.EQ.42) THEN
+             WRITE(IOIMP,77013) JJ,DDX(JJ)
+77013        FORMAT(5X,' UO2IN - DIRECTION',(1X,I3),
+     &       'DDX CALCULE'/(1X,1PE12.5))
+          ENDIF
+C
+       ENDDO
+C
+C
+        DO I=1,6
+           DSIG(I)=SIGGF(I)-SIGG0(I)
+        ENDDO
+C
+        IF(IIMPI.EQ.42) THEN
+           WRITE(IOIMP,79013) (DSIG(I),I=1,6)
+79013      FORMAT(5X,' UO2IN - DSIG  CALCULE  '/(6(1X,1PE12.5)))
+        ENDIF
+C
+C
+        IFLAG=0
+        DO IJ=1,NCA2
+           JJ=NN2(IJ)
+           IF(ISING(JJ).EQ.1) THEN
+             IF(DSIG(JJ).GT.PRECIZ) IFLAG=1
+             IF(PENT(JJ).EQ.PENTE(JJ).AND.DDX(JJ).LT.0.D0) IFLAG=1
+             IF(PENT(JJ).EQ.PENTE2(JJ).AND.DDX(JJ).GT.0.D0) IFLAG=1
+           ENDIF
+C
+           IF(IFERM(JJ).EQ.1) THEN
+             IF(DDX(JJ).LT.0.D0.OR.DSIG(JJ).LT.-PRECIZ) IFLAG=1
+           ENDIF
+        ENDDO
+C
+        DO I=1,3
+           IF(IFERM(I).EQ.1.AND.LASIT(I).EQ.1) THEN
+              IF(DSIG(I).GT.PRECIZ) IFLAG=1
+           ENDIF
+        ENDDO
+C
+        DO I=1,3
+           IF(IBRUP(I).EQ.1.AND.LASIT(I).EQ.1) THEN
+              IF(DSIG(I).GT.PRECIZ) IFLAG=1
+           ENDIF
+        ENDDO
+C
+C
+       IF(IFLAG.EQ.0) THEN
+          DO IJ=1,NCA2
+             JJ=NN2(IJ)
+             IF(ISING(JJ).EQ.1) THEN
+               IF(PENT(JJ).EQ.PENTE(JJ)) THEN
+                  ISING(JJ)=2
+                  LEBIL(JJ)=0
+               ENDIF
+               IF(PENT(JJ).EQ.PENTE2(JJ)) THEN
+                  ISING(JJ)=3
+                  LEBIL(JJ)=1
+               ENDIF
+             ENDIF
+          ENDDO
+          GO TO 99
+       ENDIF
+C
+C
+  55         CONTINUE
+C
+  23      CONTINUE
+C
+  22    CONTINUE
+C
+  21  CONTINUE
+C
+C
+C     EN CAS DE PROBLEME :
+C
+      KERRE=7
+C   VALEUR DE KERRE A AMELIORER
+C
+             WRITE(IOIMP,73312)
+73312    FORMAT(2X,'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ' /
+     &          4X,'ATTENTION - UO2IN - PAS DE SOLUTION      ' /
+     &          2X,'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ'/)
+       RETURN
+C
+C
+C
+  99  CONTINUE
+C
+      CALL SHIFTD(PENT,PENTE,NC)
+C
+      IF(IIMPI.EQ.42) THEN
+         WRITE(IOIMP,70801) (PENTE(I),I=1,NC)
+70801    FORMAT(///2X,'UO2IN  SORTIE - PENTE '/(4(1X,1PE12.5)/))
+         WRITE(IOIMP,76802) (LEBIL(I),I=1,NC)
+76802    FORMAT(/2X,'UO2IN  SORTIE - LEBIL '/(4I5/))
+         WRITE(IOIMP,76803) (ISING(I),I=1,NC)
+76803    FORMAT(/2X,'UO2IN  SORTIE - ISING '/(4I5/))
+       ENDIF
+C
+C
+C     RETRAITEMENT
+C
+      NCA=NCA2
+      IF (NCA.EQ.0) GOTO 1000
+      DO I=1,NCA
+         NN(I)=NN2(I)
+      ENDDO
+C
+      MC2=0
+      DO I=1,MC
+C
+C        TYPES 1
+C
+         IF(MM(I).GE.7.AND.MM(I).LE.9) THEN
+            IC=MM(I)-6
+            IF(ISING(IC).EQ.3) GO TO 101
+         ENDIF
+
+         IF(MM(I).GE.13.AND.MM(I).LE.15) THEN
+            IC=MM(I)-12
+            IF(ISING(IC).EQ.2) GO TO 101
+         ENDIF
+C
+C        TYPES 2
+C
+         IF(MM(I).GE.4.AND.MM(I).LE.6) THEN
+            IC=MM(I)-3
+            IF(IFERM(IC).EQ.1.AND.JESEC(IC).EQ.0) GO TO 101
+         ENDIF
+C
+         MC2=MC2+1
+         MM(MC2)=MM(I)
+101      CONTINUE
+      ENDDO
+      MC=MC2
+
+      IF(IIMPI.EQ.42) THEN
+         WRITE(IOIMP,44102) NCA
+44102    FORMAT(2X,'UO2IN - NOUVELLE VALEUR NCA =',I3/)
+         WRITE(IOIMP,44103) (NN(IC),IC=1,NCA)
+44103    FORMAT(2X,'UO2IN - NOUVELLE LISTE NN '/16(1X,I3)/)
+         WRITE(IOIMP,49102) MC
+49102    FORMAT(2X,'UO2IN - NOUVELLE VALEUR MC =',I3/)
+         WRITE(IOIMP,49103) (MM(IC),IC=1,MC)
+49103    FORMAT(2X,'UO2IN - NOUVELLE LISTE MM '/16(1X,I3)/)
+      ENDIF
+C
+1000   CONTINUE
+C
+       RETURN
+       END
+
+
+
+
+
+

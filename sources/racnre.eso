@@ -1,0 +1,292 @@
+C RACNRE    SOURCE    BECC      09/12/07    21:15:59     6579
+      subroutine racnre(nordpo, Tmaxcv,
+     &     Rgas_l, acv_l, Rgas_r, acv_r,
+     &     r_l, p_l, u_l, T_l, gam_l,
+     &     r_r, p_r, u_r, T_r, gam_r,
+     &     d_l, d_r,
+     &     r_b, p_b, u_b, T_b, d_b,
+     &     r_a, p_a, u_a, T_a, d_a,
+     &     logan, lognc)
+C
+c************************************************************************
+c
+c project           :
+c
+c name              :  racnre
+c
+c description       :  computation of the shock-shock field-by-field
+c                      decomposition of the non-reactive Riemann problem
+C                      for thermally perfect gases.
+C
+C                      We have to distinguish between 4 different states
+C
+C                      l    = left state
+C                                         |
+C                                         | Left GNL wave
+C                                         |
+C                      b    = left star state;
+C                             connected to l by a GNL wave
+C                                         |
+C                                         | Contact discontinuity
+C                                         |
+C                      a    = right star state;
+C                             connected to r by a GNL wave
+C                                         |
+C                                         | Right GNL wave
+C                                         |
+C                      r    = right state;
+C                             unburnt state
+c
+c language          :  fortran 77
+c
+c author            :  a. beccantini den/dm2s/sfme/ltmf
+c
+c************************************************************************
+c
+c called by         :  ...
+c
+c called program    :  ...
+c
+c************************************************************************
+c
+c
+c**** input
+c
+c             nordpo    = polynomials degree of cv(t)
+c             tmaxcv    = threshold temperature for cv(t)
+c             rgas_l    = gas constant (J/kg/K)in l (and in ls)
+c             acv_l     = cv_l = \sum_{i=0,nordpo} (acv_l{i} T^i)
+c             rgas_r    = gas constant r (and in rs)
+c             acv_r     = cv_r = \sum_{i=0,nordpo} (acv_r{i} T^i)
+c
+C             r_l       = density in l
+C             p_l       = pressure in
+c             u_l       = velocity in l
+C             T_l       = temperature in l (redundant with r_l and
+c                         p_l)
+c             gam_l     = specific heat ratio in l (redundant
+c                         with r_l and p_l)
+c
+C             r_r       = density in r
+C             p_r       = pressure in r
+c             u_r       = velocity in r
+C             T_r       = temperature in r (redundant with r_r and
+c                         p_r)
+c             gam_r     = specific heat ratio in r (redundant
+c                         with r_r and p_r)
+c
+c**** output
+C
+C             d_r, d_l  = speed of states l and r
+c
+c
+C             r_b       = density in b
+C             p_b       = pressure in b
+c             u_b       = velocity in b
+c             T_b       = temperature in b
+c             d_b       = shock speed of the left shock l->b
+c
+C             r_a       = density in a
+C             p_a       = pressure in a
+c             u_a       = velocity in a
+c             T_a       = temperature in a
+c             d_a       = shock speed of the
+C                         right shock a->r
+c
+c             logan     = an anomaly is detected
+c             lognc     = the approach has some problems
+C
+c
+c************************************************************************
+c
+c     07/12/2009      Created.
+c
+c      implicit none
+      integer nordpo
+      integer nmax
+      parameter (nmax = 20)
+      integer iter, icon
+      real*8 eps
+      parameter(eps = 1.0D-6)
+      real*8  Tmaxcv, Rgas_l, Rgas_r
+     &     , acv_l(0:nordpo), acv_r(0:nordpo)
+     &     , r_l, p_l, u_l, T_l, gam_l
+     &     , r_r, p_r, u_r, T_r, gam_r
+     &     , d_l, d_r
+     &     , r_b, p_b, u_b, T_b, d_b
+     &     , r_a, p_a, u_a, T_a, d_a
+C
+      real*8 Tref, pref, Dtmin, coefder
+      real*8 T_ag, T_bg
+      real*8 P_ag, r_ag, u_ag, d_ag
+      real*8 T_agp, P_agp, r_agp, u_agp, d_agp
+      real*8 dpdua
+      real*8 P_bg, r_bg, u_bg, d_bg
+      real*8 T_bgp, P_bgp, r_bgp, u_bgp, d_bgp
+      real*8 dpdub
+      real*8 a, b
+      real*8 erro
+      logical lognc, logan, logdeb
+      parameter(logdeb = .false.)
+CC
+CC**** We write the inputs
+CC
+      if( logdeb ) then
+         write(*,*) '  '
+         write(*,*) 'RP'
+         write(*,*) 'Left state'
+         write(*,*) 'R, cv'
+         write(*,'(6E12.4)') rgas_l, (acv_l(icon), icon=0,nordpo)
+         write(*,*) 'rho, p, u, T, gamma'
+         write(*,'(6E12.4)') r_l, p_l, u_l, T_l, gam_l
+         write(*,*) 'Right state'
+         write(*,*) 'R, cv'
+         write(*,'(6E12.4)') rgas_r, (acv_r(icon), icon=0,nordpo)
+         write(*,*) 'rho, p, u, T, gamma'
+         write(*,'(6E12.4)') r_r, p_r, u_r, T_r, gam_r
+      endif
+C      stop
+C
+C**** Reference scales for a compressible solver.
+C     For a low Mach number solver, the cut off speed is better than
+C     the sound speed
+C
+      Tref = 0.5d0 * ((T_l + T_r) + abs (T_l - T_r))
+      Dtmin = 1.0D-3 * Tref
+      coefder = 1.001D0
+      pref = 0.5d0 * ((p_l + p_r) + abs (p_l - p_r))
+C
+C     Initialisation of temperatures in a, b, c, d
+C
+      T_a = T_r
+      T_b = T_l
+C
+      do iter = 1, nmax
+C
+C        Guess temperatures at this iteration
+C
+         T_ag = T_a
+         T_bg = T_b
+C
+C******* Right state
+C
+         call funsho( nordpo, Tmaxcv, acv_r, Rgas_r,
+     &        P_r, T_r, u_r, .true.,
+     &        T_ag, P_ag, r_ag, u_ag, d_ag)
+C
+         T_agp =  max((T_ag + Dtmin), (T_ag * coefder))
+         call funsho( nordpo, Tmaxcv, acv_r, Rgas_r,
+     &        P_r, T_r, u_r, .true.,
+     &        T_agp, P_agp, r_agp, u_agp, d_agp)
+C
+         dpdua = (P_agp - P_ag) / (u_agp - u_ag)
+         if (dpdua .lt. 0.0d0) then
+            write(*,*) 'dpdua > 0 , ', dpdua
+            logan = .true.
+            write(*,*) 'subroutine racnre.f'
+            write(*,*) 'an error has been detected'
+            goto 9999
+         endif
+C
+C******* Left state
+C
+         call funsho( nordpo, Tmaxcv, acv_l, Rgas_l,
+     &        P_l, T_l, u_l, .false.,
+     &        T_bg, P_bg, r_bg, u_bg, d_bg)
+C
+         T_bgp =  max((T_bg + Dtmin), (T_bg * coefder))
+         call funsho( nordpo, Tmaxcv, acv_l, Rgas_l,
+     &        P_l, T_l, u_l, .false.,
+     &        T_bgp, P_bgp, r_bgp, u_bgp, d_bgp)
+C
+         dpdub = (P_bgp - P_bg) / (u_bgp - u_bg)
+         if (dpdub .gt. 0.0d0) then
+            write(*,*) 'dpdub > 0 , ', dpdub
+            logan = .true.
+            write(*,*) 'subroutine racnre.f'
+            write(*,*) 'an error has been detected'
+            goto 9999
+         endif
+C
+C******* Intersection
+C
+         a = dpdua - dpdub
+         b = ((dpdua * u_ag) - (dpdub * u_bg)) + (p_bg - p_ag)
+         u_b =  b / a
+         p_b = p_bg + (dpdub * (u_b - u_bg))
+         p_a = p_ag + (dpdua * (u_b - u_ag))
+         if ( abs (p_a - p_b) .gt. (eps * pref)) then
+            write(*,*) 'pa - pb too big, ', (p_a - p_b)
+            logan = .true.
+            write(*,*) 'subroutine racnre.f'
+            write(*,*) 'an error has been detected'
+            goto 9999
+         endif
+C        p_a, p_b should be positive
+         p_a = max (p_a, (eps * p_ag))
+         p_b = max (p_b, (eps * p_bg))
+C
+C******* Computation of temperature T_b, T_a
+C
+         T_b = T_bg + ((p_b - p_bg) * (T_bgp - T_bg) / (p_bgp - p_bg))
+         T_b = max (T_b, (eps * T_bg))
+C
+         T_a = T_ag + ((p_a - p_ag) * (T_agp - T_ag) / (p_agp - p_ag))
+         T_a = max (T_a, (eps * T_ag))
+C
+C******* TEST
+C
+         erro = abs (T_a - T_ag) + abs (T_b - T_bg)
+         erro = erro / Tref
+         if (logdeb) then
+            write(*,*) 'Intersection'
+            write(*,*) 'T_ag, T_bg = ', T_ag, T_bg
+            write(*,*) 'dpdua, dpdub = ', dpdua, dpdub
+            write(*,*) 'p_a, p_b = ', p_a, p_b
+            write(*,*) 'T_a, T_b = ', T_a, T_b
+            WRITE(*,*) 'erro =', erro
+         endif
+         if (erro .le. 1.0D-14) then
+            lognc = .false.
+            goto 9998
+         endif
+      enddo
+      if (logdeb ) then
+         write(*,*) 'Warning. Convergence non-reached'
+         write(*,*) 'erro = ', erro
+      endif
+      lognc = .true.
+ 9998 continue
+      call funsho( nordpo, Tmaxcv, acv_r, Rgas_r,
+     &     P_r, T_r, u_r, .true.,
+     &     T_a, P_a, r_a, u_a, d_a)
+      call funsho( nordpo, Tmaxcv, acv_l, Rgas_l,
+     &     P_l, T_l, u_l, .false.,
+     &     T_b, P_b, r_b, u_b, d_b)
+      d_l = gam_l * P_l / r_l
+      d_l = u_l - sqrt(d_l)
+      d_l = min(d_l, d_b)
+      d_r = gam_r * P_r / r_r
+      d_r = u_r + sqrt(d_r)
+      d_r = max(d_r, d_a)
+C
+      if (logdeb) then
+         write(*,*) 'Final result'
+         write(*,*) 'iter = ', iter
+         write(*,*) 'r. rho, p, u, T, d'
+         write(*,*) r_r, p_r, u_r, T_r, d_r
+         write(*,*) 'a. rho, p, u, T, d'
+         write(*,*) r_a, p_a, u_a, T_a, d_a
+         write(*,*) 'b. rho, p, u, T, d'
+         write(*,*) r_b, p_b, u_b, T_b, d_b
+         write(*,*) 'l. rho, p, u, T, d'
+         write(*,*) r_l, p_l, u_l, T_l, d_l
+C         write(*,*) 'acv'
+C         do iter = 0, nordpo, 1
+C            write(*,*) acv_b(iter), acv_l(iter)
+C         enddo
+      endif
+ 9999 continue
+      return
+      end
+

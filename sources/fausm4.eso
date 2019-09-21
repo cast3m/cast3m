@@ -1,0 +1,380 @@
+C FAUSM4    SOURCE    CHAT      05/01/12    23:56:50     5004
+C FAUSM3    SOURCE    BECC      01/07/27    21:16:20     4170
+      SUBROUTINE FAUSM4(NESP,
+     &                  GAMG,ROG,PG,UNG,UTG,UVG,
+     &                  GAMD,ROD,PD,UND,UTD,UVD,
+     &                  YG,YD,V_INF,F,
+     &                  CELLT)
+C************************************************************************
+C
+C PROJET            :  CASTEM 2000
+C
+C NOM               :  FAUSM4
+C
+C DESCRIPTION       :  Voir KONJA2
+C
+C LANGAGE           :  FORTRAN 77 + ESOPE 2000 (avec estensions CISI)
+C
+C AUTEUR            :  S. KUDRIAKOV, DM2S/SFME/LTMF
+C
+C************************************************************************
+C
+c----------------------------------------------------------------------
+c GENERAL DESCRIPTION:
+c   This subroutine provides the numerical flux function
+c   defined at the cell interface; this flux is given in
+c   the NORMAL DIRECTION (nvect)
+c   The low-mach number corrections are made for the flux functions
+c
+c EQUATIONS: 3D Euler equations of gas dynamics
+c
+c
+c REFERENCE: 1) JCP, 129, 364-382 (1996)
+c             " A Sequel to AUSM: AUSM+ ";
+c                M.S.Liou
+c            2) AIAA Journal, Sept. 1998
+c          "Low-Diffusion Flux-Splitting Methods for Flows at All Speeds"
+c             J.R.Edwards and M.S.Liou
+c----------------------------------------------------------------------
+c INPUT:
+c
+c      NESP    -- number of species in the multispecies gas
+c
+c      alpha   -- parameter of the AUSM+ scheme in the Pressure function;
+c                 ( -3/4 <= alpha <= 3/16 ) (imposed as a parameter)
+c
+c      beta    -- parameter of the AUSM+ scheme in the Mach function;
+c                 ( -1/16 <= beta <= 1/2 )  (imposed as a parameter)
+c
+c      (gamg,rhog,pg,ung,utg,uvg)  -- vector of the primitive variables
+c                                     at the left cell;
+c
+c      (gamd,rhod,pd,und,utd,uvd)  -- vector of the primitive variables
+c                                     at the right cell;
+c
+c       yg     -- vector of the mass fractionc of the species
+c                 at the left cell;
+c
+c       yd     -- vector of the mass fractions of the species
+c                 at the right cell;
+c
+c       v_inf  -- parameter for choosing the reference velocity
+c                 when the magnitude of the physical velocity
+c                 is close to zero
+c----------------------------------------------------------------------
+c
+c OUTPUT:
+c         f    -- numerical flux-function in the NORMAL DIRECTION
+c----------------------------------------------------------------------
+c Variable 'cans' (set after the descriptions of all the variables)
+c  can be used for switching off the low-Mach number additions
+c  by simply assigning 'cans=0.0d0'
+c----------------------------------------------------------------------
+      IMPLICIT INTEGER(I-N)
+       integer nesp,i
+       real*8 gamg,rog,pg,ung,utg,uvg
+       real*8 gamd,rod,pd,und,utd,uvd
+       real*8 alpha,beta,upr_l,upr_r
+       real*8 gm1l,gm1r,f(*)
+       real*8 un_l, un_r, ut_l, ut_r
+       real*8 uv_l, uv_r
+       real*8 ml,mr,Mplus,Mmin,mmid
+       real*8 mpl_m, mmin_m,am
+       real*8 rold_l,pold_l,eold_l
+       real*8 rold_r,pold_r,eold_r
+       real*8 Pplus,Pmin,pmid
+       real*8 hr_l,hr_r,top,bot
+       real*8 br1,br2
+       real*8 aleft, arigh
+       real*8 epsil,qq,amw,Mmin1,Mplus1
+       real*8 fmid,mlw,mrw,termp
+       real*8 ur_r,ur_l,urm,mhalf,mhalfr
+       real*8 canc,cellt,v_inf,rum
+       real*8 yg(*),yd(*)
+       parameter(alpha = 0.1875D0, beta = 0.125D0)
+       parameter(epsil = 1.0d0)
+       canc=1.0d0
+       upr_l=0.0d0
+       upr_r=0.0d0
+c-------------------------------------------------------------
+       gm1l=gamg-1.0d0
+       gm1r=gamd-1.0d0
+c----------------------------
+       rold_l=rog
+       pold_l=pg
+c----------------------------
+       rold_r=rod
+       pold_r=pd
+c------------------------------------------------------------------
+c Computation of the specific total energy on the left and right.
+c------------------------------------------------------------------
+       eold_l=(ung*ung+utg*utg+uvg*uvg)/2.0d0
+       eold_l=eold_l+pold_l/(gm1l*rold_l)
+       eold_r=(und*und+utd*utd+uvd*uvd)/2.0d0
+       eold_r=eold_r+pold_r/(gm1r*rold_r)
+c------------------------------------------------------------------
+c   Computing reference velocity and its derivatives
+c   see Eq.(2) of the Ref.2).
+c------------------------------------------------------------------
+       aleft=sqrt(gamg*pold_l/rold_l)
+       arigh=sqrt(gamd*pold_r/rold_r)
+       qq=sqrt(ung*ung+utg*utg+uvg*uvg)
+       if(qq .lt. (epsil*v_inf)) then
+          ur_l = epsil*v_inf
+       else
+          ur_l=qq
+       endif
+c-------------------------------------------------------------------
+       if(ur_l .ge. aleft) then
+          ur_l=aleft
+       endif
+c-------------------------------------------------------------------
+       if(ur_l .lt. upr_l) ur_l=upr_l
+c-------------------------------------------------------------------
+       qq=sqrt(und*und+utd*utd+uvd*uvd)
+       if(qq .lt. (epsil*v_inf)) then
+          ur_r = epsil*v_inf
+       else
+          ur_r=qq
+       endif
+c------------------------------------------------------------------
+       if(ur_r .ge. arigh) then
+          ur_r=arigh
+       endif
+c------------------------------------------------------------------
+       if(ur_r .lt. upr_r) ur_r=upr_r
+c-------------------------------------------------------------------
+c  Reference velocity at the interface is taken as an average
+c  of the reference velocities of the neighbouring cells
+c-------------------------------------------------------------------
+       urm=0.5d0*(ur_l+ur_r)
+c-------------------------------------------------------------------
+c Computation of the speed of sound;
+c numerical speed of sound at the interface is taken as an average
+c of the speeds of sounds of the neighbouring cells
+c-------------------------------------------------------------------
+       am=0.5d0*(aleft+arigh)
+c-------------------------------------------------------------------
+c Computing numerical Mach number; see p.370, under (A1).
+c-------------------------------------------------------------------
+       un_l=ung
+       un_r=und
+c--------------
+       ut_l=utg
+       ut_r=utd
+c--------------
+       uv_l=uvg
+       uv_r=uvd
+c-------------------------------------------------------------------
+       ml=un_l/am
+       mr=un_r/am
+       mhalf=0.5d0*(un_l+un_r)/am
+c-------------------------------
+       mhalfr=urm/am
+c-------------------------------------------------------------------
+c Scaling function for the speed of sound;see Eq.(32) of the Ref. 2)
+c-------------------------------------------------------------------
+       top=(1.0d0-mhalfr*mhalfr)*(1.0d0-mhalfr*mhalfr)
+       top=top*mhalf*mhalf+4.0d0*mhalfr*mhalfr
+       bot=1.0d0+mhalfr*mhalfr
+       if(abs(canc-0.0d0).lt.0.000001d0) then
+         fmid=1.0d0
+       else
+         fmid=sqrt(top)/bot
+       endif
+c------------------------------------------------------------------
+c 'New' speed of sound 'amw' defined as a product of the scaling
+c  function 'fmid' and the 'Old' speed of sound 'am'; see (31) of Ref.2)
+c------------------------------------------------------------------
+       amw=fmid*am
+       mlw=un_l/amw
+       mrw=un_r/amw
+c--------------------------
+       am=amw
+c-------------------------------------------------------------------
+c  Redefinition of the numerical mach numbers
+c  See Eqs.(33) and (34) of the Ref. 2)
+c-------------------------------------------------------------------
+       if(abs(canc-0.0d0).lt.0.000001d0) then
+         top=2.0d0
+         bot=0.0d0
+       else
+         top=1.0d0+mhalfr*mhalfr
+         bot=1.0d0-mhalfr*mhalfr
+       endif
+       ml=0.5d0*(top*mlw+bot*mrw)
+       mr=0.5d0*(top*mrw+bot*mlw)
+c-------------------------------------------------------------------
+c  Mplus and Mmin are calligraphic lettes M+ and M- from the paper,
+c  see (19a) and (19b), p.367. of the Ref.1)
+c-------------------------------------------------------------------
+       if(abs(ml) .ge. 1.0d0) then
+         Mplus=(ml+abs(ml))/2.0d0
+       else
+         Mplus=(ml+1.0d0)*(ml+1.0d0)/4.0d0
+         Mplus=Mplus+beta*(ml*ml-1.0d0)*(ml*ml-1.0d0)
+       endif
+       Mplus1=(ml+abs(ml))/2.0d0
+c-------------------------------------------------------------------
+       if(abs(mr) .ge. 1.0d0) then
+         Mmin=(mr-abs(mr))/2.0d0
+       else
+         Mmin=-(mr-1.0d0)*(mr-1.0d0)/4.0d0
+         Mmin=Mmin-beta*(mr*mr-1.0d0)*(mr*mr-1.0d0)
+       endif
+       Mmin1=(mr-abs(mr))/2.0d0
+c-----------------------------------------------------------
+c mmid is m_{1/2} (notation as in the paper),
+c see Eq.(13), p.366 of the Ref.1)
+c-----------------------------------------------------------
+       mmid=Mplus+Mmin
+c----------------------------------------------------------------
+c computing the main convective variables
+c mpl_m is m^{+}_{1/2} (paper's notation) and
+c mmin_m  is m^{-}_{1/2} (paper's notation),
+c see Eq. (A2) on p.370 of the Ref.1)
+c----------------------------------------------------------------
+       termp=(Mmin1-Mmin+Mplus-Mplus1)*(1.0d0/(mhalfr*mhalfr)-1.0d0)
+       termp=termp*(pold_l-pold_r)/(pold_l/rold_l+pold_r/rold_r)
+c-------------------------------------------------------------
+       if(mmid .ge. 0.0d0) then
+         mpl_m = mmid
+       else
+         mpl_m = 0.0d0
+       endif
+c------------------------------------------------------------------
+       if(mmid .le. 0.0d0) then
+         mmin_m = mmid
+       else
+         mmin_m = 0.0d0
+       endif
+c---------------------------------------------------------------
+c Computing the calligraphic P+ and P- with their derivatives,
+c see (21a) & (21b) on p.368 of the Ref.1)
+c---------------------------------------------------------------
+       if(ml .ge. 1.0d0) then
+         Pplus = 1.0d0
+       else
+         if((ml .gt. -1.0d0) .and. (ml .lt. 1.0d0)) then
+           Pplus=(ml+1.0d0)*(ml+1.0d0)*(2.0d0-ml)/4.0d0
+           Pplus=Pplus+alpha*ml*(ml*ml-1.0d0)*(ml*ml-1.0d0)
+         else
+           Pplus = 0.0d0
+       endif
+       endif
+c---------------------------------------------------------------
+       if(mr .ge. 1.0d0) then
+         Pmin = 0.0d0
+       else
+         if((mr .gt. -1.0d0) .and. (mr .lt. 1.0d0)) then
+           Pmin=(mr-1.0d0)*(mr-1.0d0)*(2.0d0+mr)/4.0d0
+           Pmin=Pmin-alpha*mr*(mr*mr-1.0d0)*(mr*mr-1.0d0)
+         else
+           Pmin = 1.0d0
+         endif
+       endif
+c-------------------------------------------------------------------
+c computing pmid - p_{1/2}, see Eq.(20b), p.367 of the Ref.1)
+c-------------------------------------------------------------------
+       pmid=Pplus*pold_l + Pmin*pold_r
+c-------------------------------------------------------------------
+       rum=am*(mpl_m*rold_l+mmin_m*rold_r)+canc*am*termp
+c-------------------------------------------------------------------
+c Computing numerical fluxes
+c-------------------------------------------------------------------
+       f(1)=rum
+c-------------------------------------------------------------------
+       if(rum .ge. 0.0d0) then
+         br1=rum*un_l
+       else
+         br1=rum*un_r
+       endif
+       f(2)=br1+pmid
+c-------------------------------------------------------------
+       if(rum .ge. 0.0d0) then
+         br2=rum*ut_l
+       else
+         br2=rum*ut_r
+       endif
+       f(3)=br2
+c-------------------------------------------------------------
+       if(rum .ge. 0.0d0) then
+         br2=rum*uv_l
+       else
+         br2=rum*uv_r
+       endif
+       f(4)=br2
+c-------------------------------------------------------------
+       hr_l=(ung*ung+utg*utg+uvg*uvg)/2.0d0+gamg*pold_l/gm1l/rold_l
+       hr_r=(und*und+utd*utd+uvd*uvd)/2.0d0+gamd*pold_r/gm1r/rold_r
+       if(rum .ge. 0.0d0) then
+         f(5)=rum*hr_l
+       else
+         f(5)=rum*hr_r
+       endif
+c---------------------------------------------------------------------
+       do 777 i=1,nesp
+        if(rum .ge. 0.0d0) then
+          br1=rum*yg(i)
+        else
+          br1=rum*yd(i)
+        endif
+        f(5+i)=br1
+ 777   continue
+c----------------------------------------------------------------------
+       cellt=1.0d0/(0.5d0*abs(un_l+un_r)+am)
+c----------------------------------------------------------------------
+       return
+       end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

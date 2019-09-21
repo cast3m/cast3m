@@ -1,0 +1,579 @@
+C SIMUL3    SOURCE    PV        17/12/20    21:15:40     9674
+      SUBROUTINE SIMUL3 (IPKW2M,IPMASS,IPVALP,IPHI,IPERM,NMOD,nbonve,
+     $                   Nramax,IPSOLU,LIMAGE)
+c      $                   nbonZ,nrate,IPSOLU,LIMAGE)
+***********************************************************************
+*
+*                             S I M U L 3
+*                             -----------
+*
+* FONCTION:
+* ---------
+*
+*     APPELE PAR LE SOUS-PROGRAMME "SIMUL1".
+*     CALCUL DES VECTEURS PROPRES.
+*     (VIBRATIONS - OPTION SIMULTANE)
+*
+*
+* PARAMETRES:   (E)=ENTREE   (S)=SORTIE
+* -----------
+*
+*     IPKW2M  (E)  POINTEUR DE L'OBJET 'RIGIDITE' K-w^2*M
+*     IPMASS  (E)  POINTEUR DE L'OBJET 'RIGIDITE' M
+*     IPVALP  (E)  POINTEUR DE L'OBJET 'LISTREEL' CONTENANT LA SUITE
+*                  DE VALEURS PROPRES DU PETIT PROBLEME AUX VALEURS
+*                  PROPRES.
+*     IPHI    (E)  POINTEUR DE L'OBJET MATRIX des coef des vect propres
+*     IPERM   (E)  LISTENTIER pour ordonner les vect p comme les val p
+*     NMOD    (E)  NOMBRE DE MODES PROPRES DEMANDE.
+*     nbonve  (E)  NOMBRE DE MODES ESTIMES CONVERGES PAR SIMU21
+*     IPSOLU  (S)  POINTEUR DE L'OBJET 'SOLUTION' CONTENANT LA SUITE
+*                  DE MODES PROPRES SOLUTIONS.
+*     LIMAGE  (E)  LOGICAL =vrai si valeurs propres negatives
+*                  (matrice K non definie positive par ex.)
+*
+*     + PARAMETRES PASSES PAR LE COMMON "CSIMUL".
+*
+* DESCRIPTION DES VARIABLES : cf. commentaires au cours du programme
+* --------------------------
+*
+* MODE DE FONCTIONNEMENT:
+* -----------------------
+*     -DEDUCTION DES FREQUENCES PROPRES DU PROBLEME PHYSIQUE,
+*     -RECOMBINAISON DES VECTEURS PROPRES Z=X*PHI,
+*     -CALCUL DU RESIDU,
+*      si(cvgce): ORTHOGONALISATION % MODES DEJA CONVERGES
+*      sinon:     2 ITERATIONS INVERSES + ORTHOGONALISATION
+*     -CREATION OU COMPLETION DE L'OBJET "SOLUTION" IPSOLU via SIMUL6
+*
+* LANGAGE : ESOPE (FORTRAN77)
+*
+************************************************************************
+*
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+-INC CCREEL
+-INC CCOPTIO
+-INC SMLREEL
+-INC SMLENTI
+-INC SMVECTD
+-INC SMRIGID
+*
+*     REGOUPEMENT DE RENSEIGNEMENTS POUR "LANCZO" et "SIMUL.":
+      COMMON/CSIMUL/ W2SHIF,XPREC21,mvecri,IPVECX,IPVECZ,IPMZ,IPFREZ
+      REAL*8 W2SHIF,ZTMZ,XPREC21,XORTHO
+      REAL*8 DEUXPI
+      PARAMETER (DEUXPI = (2.D0*XPI))
+
+      SEGMENT MATRIX
+       REAL*8 A(N,N)
+      ENDSEGMENT
+      POINTEUR IPHI.MATRIX
+      pointeur mlent5.mlenti,mlent6.mlenti,mlent7.mlenti
+      pointeur mvect5.MVECTD,mvect6.MVECTD,mvect7.MVECTD
+      pointeur mvect4.MVECTD
+
+      PARAMETER (LPROPR = 5)
+      LOGICAL CONVRG
+      REAL*8 PROPRE(LPROPR)
+*
+*
+      REAL*8 VALPP,FREP,W2,W2CALC
+*
+
+*
+***********************************************************************
+*
+      LOGICAL LIMAGE
+*
+*---------------------------------------------------------------------*
+*     -- INITIALISATIONS --
+*---------------------------------------------------------------------*
+*
+c inutile car fait par simul1 lorsqu on shifte:     IPSOLU = 0
+*
+      MLREEL=IPVALP
+      SEGACT,MLREEL
+      NMODMAX= PROG(/1)
+      MLENTI=IPERM
+      SEGACT,MLENTI
+      SEGACT,IPHI
+      N=IPHI.A(/1)
+*     recup des vecteurs de Lanczos de ce cycle
+      mlent3 = IPVECX
+      NVEC3  = mlent3.lect(/1)
+      mvect3 = mlent3.lect(1)
+      inc = mvect3.VECTBB(/1)
+
+*     recup des modes deja convergés aux précédents cycles (=IPVECZ)
+      if (IPVECZ.ne.0) then
+        mlent5 = IPVECZ
+        mlent6 = IPMZ
+        mlree1 = IPFREZ
+        segact,mlent5*mod
+        JG0 = mlent5.LECT(/1)
+c         JG = JG0 + nbonve
+        JG = JG0 + NMODMAX
+        segadj,mlent5
+        segadj,mlent6
+        segadj,mlree1
+        segact,mlent5*mod
+        segact,mlent6*mod
+        segact,mlree1*mod
+*     creation des modes convergés (=IPVECZ)
+      else
+        JG0 = 0
+c         JG = nbonve
+        JG = NMODMAX
+        segini,mlent5
+        IPVECZ = mlent5
+        segini,mlent6
+        IPMZ = mlent6
+        segini,mlree1
+        IPFREZ = mlree1
+      endif
+
+c     on considere qu il faut reorthognaliser si le produit scalaire
+c     est > XORTHO (avec **1.6 XORTHO=3E-13 si xprec21=1.5E-8)
+      XORTHO = XPREC21**1.6
+c c     on ne fait meme pas d iterations inverses si residu trop grand
+c       XRMAX = sqrt(XPREC21)
+c => mauvaise idée pour dyne_devo_10.dgibi
+c     limite pour detecter la presence dans la solution
+c       RLIM = 1.D-5
+      RLIM = sqrt(XPREC21)
+
+      IF (IIMPI .ge. 6) THEN
+      WRITE(IOIMP,*) '------------------- simul3 ---------------------'
+      WRITE(IOIMP,*) 'candidat| mode    |    freq    |  residu relatif'
+      ENDIF
+
+c       -recup de icholi pour le passage vecteur <-> chpoint
+         mrigid = IPKW2M
+         segact,mrigid
+         icholi = ichole
+         segdes,mrigid
+c       call gibtem(xkt30)
+c       WRITE(IOIMP,*) '=> simul3        xkt30=',xkt30
+
+c     shift utilise pour ce cycle
+      FRSHIF = (sqrt(abs(W2SHIF))) / DEUXPI
+*
+*---------------------------------------------------------------------*
+*     -- Boucle sur les candidats a devenir des modes --
+*---------------------------------------------------------------------*
+*
+c     Au min, On teste les NMOD demandés ou nbonve supposé convergés
+      NMODIN = MAX(nbonve,NMOD)
+c     Au max, On teste tous les candidats (tant que ca converge)
+c       N105 = MIN(nbonve,NMODMAX)
+      N105 = NMODMAX
+c     Nombre de modes ratés, convergés
+c       NRATE = 0
+      IEME = 0
+
+      DO 105 IB105 = 1, N105
+*
+         IEME = IEME + 1
+*
+*------- RETOUR AU PROBLEME PHYSIQUE INITIAL -------------------------*
+*
+*       -IEME FREQUENCE PROPRE:
+         VALPP = PROG(IB105)
+         W2CALC = VALPP
+         CALL W2FREQ(W2CALC,W2SHIF, W2,FREP,LIMAGE)
+         IF(IERR .NE. 0) RETURN
+*
+*       -IEME VECTEUR PROPRE:
+         segini,mvect1
+         IEME2 = LECT(IB105)
+         DO jvec=1,N
+            XPHI = IPHI.A(jvec,IEME2)
+            mvect3 = mlent3.lect(jvec)
+            do i=1,inc
+               mvect1.VECTBB(i) = mvect1.VECTBB(i)
+     $                   + ((mvect3.VECTBB(i)) * XPHI)
+            enddo
+         ENDDO
+
+*       -creation du chpoint
+         call crech2(IPVECP,mvect1,mvecri,1)
+         segact,mvect1*mod
+c       call gibtem(xkt30z)
+c       WRITE(IOIMP,*) '=> simul3  z=x*p xkt30=',xkt30z
+
+         IF (IIMPI .EQ. 369) THEN
+            WRITE (IOIMP,*) 'simul3: VECTEUR PROPRE PHYSIQUE_',IEME
+            CALL ECCHPO (IPVECP,0)
+         ENDIF
+
+*        on suppose qu on a convergé
+         CONVRG = .true.
+
+*
+*------- CALCUL DU RESIDU --------------------------------------------*
+*
+*lorsqu on n est pas sur de la convergence on teste directement le residu
+
+*parfois, il est necessaire d iterer un peu pour "purger" la solution
+         N101 = 30
+c          N101 = 2
+         I101 = 0
+  101    CONTINUE
+         I101 = I101 + 1
+*
+c       -calcul de [K-w^2M]*Z
+         call MUCPRI(IPVECP,IPKW2M,IPKV1)
+         call chv2(icholi,IPKV1,mvect4,1)
+         call dtchpo(IPKV1)
+c       -calcul de MZ
+         call MUCPRI(IPVECP,IPMASS,IPMV1)
+         call chv2(icholi,IPMV1,mvect2,1)
+
+*       -calcul de (Z^T.M.Z)
+         ZTMZ = 0.D0
+         do i=1,inc
+            ZTMZ = ZTMZ + (mvect2.vectbb(i)*mvect1.vectbb(i))
+         enddo
+
+c       -calcul du coef de Rayleigh ZRAY1 = Z^T K Z / Z^T M Z
+c       (est notamment utile lorsqu'on a fait appel a itinv)
+         IF (.NOT.CONVRG) THEN
+           ZNUM1 = 0.D0
+           ZDEN1 = ZTMZ
+c            ZDEN1 = 0.D0
+           do i=1,inc
+              ZNUM1 = ZNUM1 + (mvect1.VECTBB(i)*mvect4.VECTBB(i))
+c               ZDEN1 = ZDEN1 + (mvect1.VECTBB(i)*mvect2.VECTBB(i))
+           enddo
+           ZRAY1 = ZNUM1 / ZDEN1
+           VALPP = ZRAY1
+           W2CALC = VALPP
+           CALL W2FREQ(W2CALC,W2SHIF, W2,FREP,LIMAGE)
+         ENDIF
+
+c        calcul du residu = Kz - lambda*Mz et de sa norme au carré
+         VALPM = -1.D0*VALPP
+         XNUM1 = 0.D0
+         do i=1,inc
+            XRES1 = mvect4.VECTBB(i) + (VALPM * mvect2.VECTBB(i))
+            XNUM1 = XNUM1 + (XRES1*XRES1)
+         enddo
+
+c        calcul d une ref |K*z|_2^2 ou |M*z|_2^2
+         XDEN1=0.D0
+         XDEN2=0.D0
+         do i=1,inc
+            XDEN1 = XDEN1 + (mvect4.VECTBB(i)*mvect4.VECTBB(i))
+            XDEN2 = XDEN2 + (mvect2.VECTBB(i)*mvect2.VECTBB(i))
+         enddo
+         segsup,mvect4
+c          XRES1 = XNUM1 / XDEN1
+c          if(XRES1.gt.1.D-5)
+         XDEN1m=max(XDEN1,XDEN2)
+         XRES1 = XNUM1 / XDEN1m
+
+         IF (IIMPI.ge.6) then
+          WRITE(IOIMP,109) IB105,IEME,frep,XRES1,XNUM1,XDEN1,XDEN2
+ 109      FORMAT(1X,I5,3X,I5,3X,F12.3,5X,E10.5,
+     &            5X,E10.5,1X,E10.5,1X,E10.5)
+         endif
+*
+*------- DIFFERENT CAS DE FIGURES ------------------------------------*
+*
+
+*------- a. on a convergé: le residu relatif < tolerance -------------*
+cbp13.01.2010     if (XRES1.le.1.D-4) then -> pas assez contraignant ?
+cbp25.01.2010     if (XRES1.le.1.D-6) then -> pas suffisant pour K-orthog
+c          if (XRES1.le.1.D-8)  then
+         if (XRES1.le.XPREC21)  then
+
+                CONVRG = .true.
+c       call gibtem(xkt31)
+c       WRITE(IOIMP,*) '=> simul3 CONVRG xkt31=',xkt31
+
+
+*------- b. le residu relatif > tolerance  ---------------------------*
+*           et on avait convergé en lambda
+c           =>  on essaie de converger en residu = "Purge"
+c          elseif((IEME.le.nbonve).and.(I101.le.N101)) then
+         elseif(I101.le.N101) then
+c          elseif((I101.le.N101).and.(XRES1.le.XRMAX)) then
+
+*            -puisque X et MX vont changer ...
+              segsup,mvect1,mvect2
+
+*            -iterations inverses avec z en vecteur initial
+              CALL ITINV (IPKW2M,IPMASS,IPVECP,PROPRE,CONVRG,1,100
+     &                    ,1.D-5,1.D0,IPMV1)
+* bp: avec des petites matrices (3x3 par ex), ITINV ne peut rien si on
+* ne shifte pas => il est urgent d'améliorer l'estimation des vp faite
+* par sespa3 dans simu21 (utilisation du QR par ex.)
+c               if(IIMPI.ge.6)
+c      &           WRITE(IOIMP,*) ' simul3: Residu=',XRES1,
+c      &          ' appel',I101,'a itinv cvg?',CONVRG,' vers',(PROPRE(1))
+              if(IERR .NE. 0) RETURN
+
+              call chv3(icholi,IPVECP,mvect1,1)
+              call dtchpo(IPVECP)
+
+*            -M-orthogonalisation % ...
+              I08 = 0
+   08         continue
+              I08 = I08 + 1
+              xtrum = 0.D0
+
+c *             ... aux modes des cycles précedents convergés...
+c               if (JG0.gt.1)  then
+c                  if(IIMPI.ge.7)
+c      &           WRITE(IOIMP,*) ' simul3: M-orthog % cycles precedents'
+c                  do 09 jpo=1,JG0
+c                    FRjpo = mlree1.prog(jpo)
+c                    FRDIST = 1.001D0*(FREP-FRSHIF)
+c                    FRDISj = (FRjpo-FRSHIF)
+c                    FRSIGN = FRDIST*FRDISj
+c *                  ...proches du modes testés!
+c                    if((FRSIGN.lt.0.D0).or.(FRDIST.lt.FRDISj)) goto 09
+c *                  on recupere  z^j  et  r^j = M*z^j / (z^j*M*z^j)
+c                    mvect6= mlent5.lect(jpo)
+c                    mvect7= mlent6.lect(jpo)
+c                    segact mvect6,mvect7
+c *                  on calcule xtru = y^i * r^j
+c                    xtru = 0.D0
+c                    do iou=1,inc
+c                       xtru=xtru+(mvect1.vectbb(iou)*mvect7.vectbb(iou))
+c                    enddo
+c                    xtrum = xtrum + abs(xtru)
+c                    if (abs(xtru).ge.XORTHO) then
+c *                    y^i = y^i - xtru * z^{j}
+c                      do iou=1,inc
+c                        mvect1.vectbb(iou) = mvect1.vectbb(iou)
+c      $                              - (xtru*mvect6.vectbb(iou))
+c                      enddo
+c                    endif
+c                    segdes mvect6,mvect7
+c    09            continue
+c               endif
+
+*             ... aux modes de ce cycle convergés
+              if (IEME.gt.1)  then
+                 if(IIMPI.ge.7)
+     &           WRITE(IOIMP,*) ' simul3: M-orthog % modes de ce cycle'
+     &                   ,(JG0+1),' a ',(JG0+IEME-1)
+                 do jpo=(JG0+1),(JG0+IEME-1)
+*                  on recupere  z^j  et  r^j = M*z^j / (z^j*M*z^j)
+                   mvect6= mlent5.lect(jpo)
+                   mvect7= mlent6.lect(jpo)
+cbp inutile car jpo>JG0    segact mvect6,mvect7
+*                  on calcule xtru = y^i * r^j
+                   xtru = 0.D0
+                   do iou=1,inc
+                      xtru=xtru+(mvect1.vectbb(iou)*mvect7.vectbb(iou))
+                   enddo
+                   xtrum = xtrum + abs(xtru)
+                   if (abs(xtru).ge.XORTHO) then
+*                    y^i = y^i - xtru * z^{j}
+                     do iou=1,inc
+                       mvect1.vectbb(iou) = mvect1.vectbb(iou)
+     $                              - (xtru*mvect6.vectbb(iou))
+                     enddo
+                   endif
+cbp inutile car jpo>JG0    segdes mvect6,mvect7
+                 enddo
+              endif
+
+*             a t on besoin de re-orthogonaliser ?
+              if (xtrum.ge.0.707D0)  then
+*               2 re-orthogonalisation c'est suffisant !
+                if (I08.ge.2) then
+                   call crech2(IPVECP,mvect1,mvecri,1)
+                   segact,mvect1*mod
+                   CONVRG = .false.
+                   goto 101
+                endif
+                goto 08
+              endif
+*            -fin de la M-orthogonalisation
+
+              call crech2(IPVECP,mvect1,mvecri,1)
+              segact,mvect1*mod
+
+              CONVRG = .false.
+c              call DTCHPO(IPMV1)
+              goto 101
+
+*------- c. le residu relatif > tolerance  ---------------------------*
+*           et on N'avait PAS convergé en lambda
+c           =>  on S'ARRETE LA
+         else
+
+               CONVRG = .false.
+
+         endif
+
+*------- Non convergence on fait le menage et on retourne ------------*
+         IF (.NOT.CONVRG) THEN
+               IEME = IEME - 1
+*             -On detruit vecteurs, chpoints
+               segsup,mvect1,mvect2
+               call DTCHPO(IPVECP)
+               call DTCHPO(IPMV1)
+               goto 905
+c c *              si on a testé plus de NMODIN candidats, on sort
+c c                if(IB105.ge.NMODIN) goto 905
+c c c *              si on teste un candidat appartenant aux NMOD 1ers modes,
+c c c *              on le compte si on l a raté
+c c c                if((nbonZ+IB105).le.NMOD) NRATE=NRATE+1
+c c                goto 105
+c *              si on a testé plus de NMODIN candidats, on sort
+c                if(IB105.ge.NMODIN) goto 905
+c                NRATE=NRATE+1
+c *              si on a raté trop de modes, on sors aussi
+c                if(NRATE.gt.Nramax) goto 905
+c                goto 105
+         ENDIF
+
+*------- Convergence : on fait aussi le menage  ----------*
+         call DTCHPO(IPMV1)
+*
+*       -CE MODE A T IL DEJA ETE CALCULE ?
+         modif205 = 0
+   09    continue
+         xtrum = 0.D0
+         FRREF = max(FRSHIF,abs(FREP))
+         FRREF = max(FRREF,1.D0)
+         NB205 = JG0 + IEME - 1
+         do 205 jb205=1,NB205
+            FR205 = mlree1.prog(jb205)
+            ECARFR = abs(FREP-FR205)
+            ECAREL = ECARFR / FRREF
+*           on a trouvé un autre mode a la meme freq => on orthogonalise
+c bp 10/12/2010 : quand les shifts de 2 cycles sont tres differents,
+c                 on peut avoir de plus gros ecart que prévu....
+            if ((ECAREL.lt.1.D-2).or.(ECARFR.lt.1.D0))  then
+*              on recupere  z^j  et  r^j = M*z^j / (z^j*M*z^j)
+               mvect6= mlent5.lect(jb205)
+               mvect7= mlent6.lect(jb205)
+               if(jb205.le.JG0)  segact,mvect6,mvect7
+*              on calcule xtru = y^i * r^j
+               xtru = 0.D0
+               do iou=1,inc
+                  xtru=xtru+(mvect1.vectbb(iou)*mvect7.vectbb(iou))
+               enddo
+               xtrum = xtrum + abs(xtru)
+               if (abs(xtru).ge.XORTHO) then
+                 modif205 = modif205 + 1
+                 if(IIMPI.ge.6) WRITE(IOIMP,*)
+     &           'ORTHOGONALISATION PAR RAPPORT AU MODE',jb205
+*                y^i = y^i - xtru * z^{j}
+                 do iou=1,inc
+                   mvect1.vectbb(iou) = mvect1.vectbb(iou)
+     $                          - (xtru*mvect6.vectbb(iou))
+                 enddo
+               endif
+               if(jb205.le.JG0)  segdes,mvect6,mvect7
+            endif
+  205    continue
+*        si grosse modif, on reorthogonalise en 2 passes
+*         if(xtrum.ge.0.707) goto 09   aucun sens car z non-normalisé
+c       call gibtem(xkt32)
+c       WRITE(IOIMP,*) '=> simul3 orthog xkt32=',xkt32,modif205
+
+*       -si on a modifie le candidat on verifie qu il en reste qq chose
+         if (modif205.gt.0) then
+           segsup,mvect2
+*          calcul de M.Z
+           call DTCHPO(IPVECP)
+           call crech2(IPVECP,mvect1,mvecri,1)
+           call MUCPRI(IPVECP,IPMASS,IPMV1)
+           call chv2(icholi,IPMV1,mvect2,1)
+           call dtchpo(IPMV1)
+           segact,mvect1,mvect2*mod
+*          calcul de Z^T.M.Z
+           ZTMZ2 = 0.D0
+           do i=1,inc
+              ZTMZ2 = ZTMZ2 + (mvect2.vectbb(i)*mvect1.vectbb(i))
+           enddo
+         else
+           ZTMZ2 = ZTMZ
+         endif
+
+         RNM = abs(ZTMZ2 / ZTMZ)
+         if (RNM.lt.RLIM) then
+*           le mode candidat est deja présent dans la solution
+*           (il en reste moins de 1/10000ieme pour xprec21=1E-8)
+*           => on l oublie et on passe au suivant
+            if(IIMPI.GE.6)
+     &      WRITE(IOIMP,*) 'MODE DEJA PRESENT DANS LA SOLUTION',RNM
+            IEME = IEME - 1
+            goto 105
+         endif
+
+*       -le mode candidat a survecu aux differents tests
+*        => on l'ajoute a la solution
+
+*       -ON STOCKE  Z  et  M.Z/(Z^T.M.Z)  POUR L ORTHOGONALISATION
+         coe2 = 1.D0 / ZTMZ2
+         do i=1,inc
+           mvect2.vectbb(i) = coe2 * (mvect2.vectbb(i))
+         enddo
+*       -ON STOCKE  FREP,  Z  et  M.Z/(Z^T.M.Z)  POUR L ORTHOGONALISATION
+         mlree1.prog(JG0+IEME) = FREP
+         mlent5.lect(JG0+IEME) = mvect1
+         mlent6.lect(JG0+IEME) = mvect2
+
+*
+*------- CREATION OU COMPLETION DE L'OBJET "SOLUTION" ----------------*
+* solution du cycle seulement! le reste est dans idist (cf strate.eso)
+         CALL SIMUL6 (FREP,IPVECP,IPSOLU)
+         IF (IERR .NE. 0) RETURN
+
+*
+  105 CONTINUE
+*     fin de la boucle sur les modes
+
+  905 CONTINUE
+*
+*---- finalement on trouvé nbonve modes de residu < XPREC21 ----------*
+      nbonve = IEME
+      JG = JG0 + nbonve
+      segadj,mlent5
+      segadj,mlent6
+      segadj,mlree1
+      IF (IIMPI.EQ.7) then
+        WRITE(IOIMP,*) 'simul3: finalement '
+        WRITE(IOIMP,*) ' Modes OK pour ce cycle, au total',nbonve,JG
+      ENDIF
+
+c     on desactive les vecteurs de ce cycle
+      if (IEME.ge.1) then
+      do j=(JG0+1),JG
+         mvect1=mlent5.lect(j)
+         mvect2=mlent6.lect(j)
+         segdes,mvect1,mvect2
+      enddo
+      endif
+
+      segdes,mlent5,mlent6
+      segdes,mlree1
+
+*
+*----- MENAGE  --------------------------------------*
+*
+      SEGSUP,MLREEL,MLENTI,IPHI
+*
+*
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,338 @@
+C PROGCS    SOURCE    CHAT      05/01/13    02:31:16     5004
+      SUBROUTINE PROGCS
+C************************************************************************
+C
+C        CE SOUS PROGRAMME RANGE DANS LES TABLES MATAP, MATAP.METHODE ET
+C        MATAP.MATRIS LES POINTEURS SUR LES LISTENTI D'ADRESSAGE.
+C
+C        KTYPI= 2,3,4   METHODE DE GRADIENT CONJUGUE AVEC CALCUL
+C                       EXPLICITE DE LA MATRICE DE PRESSION. DANS CE CAS
+C                       PROGCS CONSTRUIT LES TABLEAUX D'INDEXAGE EN
+C                       FONCTION DU MODE DE STOCKAGE DEMANDE : MORSE OU
+C                       COMPRESSE.
+C
+C        SYNTAXE : MTABM = PROGCS MTABP <IMPR> IMPR
+C
+C************************************************************************
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+      CHARACTER*8 TYPE
+
+C***
+
+-INC CCOPTIO
+C*************************************************************************
+C
+C    REPERAGE ET STOKAGE DES MATRICES ELEMENTAIRES  puis assemblees
+C
+
+* LGEOC SPG de la pression et/ou des multiplicateurs de Lagrange
+* (points CENTRE ) pour chaque operateur de contrainte
+* KGEOC SPG pour la totalite des points CENTRE.
+* KGEOS SPG pour la totalite des points SOMMET (Diagonale vitesse)
+* KLEMC Connectivites de l'ensemble des contraintes
+* LIZAFM(NBSOUS) contient les pointeurs IZAFM des sous-zones
+
+      SEGMENT MATRAK
+      INTEGER LGEOC(NBOP),IDEBS(NBOP),IFINS(NBOP)
+      INTEGER LIZAFM(NBSOUS)
+      INTEGER IKAM0 (NBSOUS)
+      INTEGER IMEM  (NBELC)
+      INTEGER KLEMC,KGEOS,KGEOC,KDIAG,KCAC,KIZCL,KIZGC
+      ENDSEGMENT
+
+      SEGMENT IZAFM
+      REAL*8  AM(NNELP,NP,IESP),RPGI(NELAX)
+      ENDSEGMENT
+
+      POINTEUR IPMJ.IZAFM,IPMK.IZAFM
+
+C*******************************************************************
+-INC SMCOORD
+-INC SMTABLE
+      POINTEUR MTABP.MTABLE
+      POINTEUR MTABM.MTABLE
+-INC SMLENTI
+      POINTEUR IZIPAD.MLENTI
+      POINTEUR KA.MLENTI
+      POINTEUR IA.MLENTI
+      POINTEUR ITAB.MLENTI
+-INC SMELEME
+      POINTEUR IZK.MELEME
+
+C
+C IVK = Tableau de travail
+      PARAMETER (MAXIVK=100)
+      INTEGER IVK(MAXIVK)
+C
+C MTABP : TABLE MATAP
+C MTABM : SOUS-TABLE MATRICE
+C MTAB2 : SOUS-TABLE METHODE
+C
+      CHARACTER*4 LMOT(1)
+
+      PARAMETER (NTB=1)
+      CHARACTER*8 LTAB(NTB)
+      DIMENSION KTAB(NTB)
+      DATA LTAB/'EQPR    '/
+      DATA LMOT/'IMPR'/
+C***
+
+      NTO=1
+      CALL LITABS(LTAB,KTAB,NTB,NTO,IRET)
+      IF(IRET.EQ.0)THEN
+      WRITE(6,*)' On attend une table soustype EQPR'
+      RETURN
+      ENDIF
+
+      IMPR=0
+      CALL LIRMOT(LMOT,1,IP,0)
+      IF(IP.NE.0)THEN
+      CALL LIRENT(IMPR,1,IRET)
+      IF(IRET.EQ.0)RETURN
+      ENDIF
+
+      MTABP=KTAB(1)
+      SEGACT MTABP
+
+      TYPE=' '
+      CALL ACMO(MTABP,'MATC',TYPE,MATRAK)
+      IF(TYPE.NE.'MATRAK')THEN
+      WRITE(6,*)' Il n''y a pas d''entree MATRAK dans la table'
+      RETURN
+      ENDIF
+
+      SEGACT MATRAK
+      KGEO=KGEOC
+      CALL KNBEL(KGEO,NBELC)
+      MELEME=KLEMC
+
+C--- CALNOE renvoie dans IZTKB un tableau contenant pour chaque noeud
+C    du domaine la liste des {l{ments poss{dant ce noeud. Les noeuds
+C    sont rep{r{s dans la num{rotation locale(domaniale), les {l{ments
+C    sont pris dans l'ordre fourni par la num{rotation naturelle.
+C    Il est possible, partant de ce tableau, de construire pour chaque
+C    {l{ment la liste des {l{ments voisins. Ceci est tr}s utile pour
+C    le calcul de la matrice de pression ou Akl.ne.0 si k et l sont
+C    deux {l{ments voisins.
+C
+C    Cette technique n'est pas (encore) utilis{e si KTYPI = 1 ou 5.
+C    Les maillages trait{s dans ce cas {tant "petits", ce n'est pas
+C    trop grave. Par contre lorsque KTYPI=2,3,4, c'est @ dire pour les
+C    tr}s gros maillages, son emploi est obligatoire.
+C
+C    Cet appel ne doit etre fait que si on stocke la matrice de
+C    pression (KTPI.LE.5).
+C
+      CALL KALNO0(MELEME,IZK,MLENTI,IZIPAD,IRET)
+      IF(IRET.EQ.0)GO TO 90
+C
+C Creation de la table MATRIS
+C
+      CALL CRTABL(MTABM)
+      CALL ECMM(MTABM,'SOUSTYPE','MATRIS')
+
+C---  Activation de tous les MELEMEs du domaine
+
+      SEGACT MELEME,IZK,MLENTI
+      NBSOUS=LISOUS(/1)
+      IF(NBSOUS.EQ.0)NBSOUS=1
+      DO 400 NS=1,NBSOUS
+      IF(NBSOUS.EQ.1)IPT1=MELEME
+      IF(NBSOUS.NE.1)IPT1=LISOUS(NS)
+      SEGACT IPT1
+ 400  CONTINUE
+
+* METHODE
+      TYPE=' '
+      CALL ACMO(MTABP,'METHODE',TYPE,MTAB2)
+      SEGACT MTAB2
+* KTYPI
+      CALL ACME(MTAB2,'KTYPI',KTPI)
+* KSTOCK
+      CALL ACME(MTAB2,'KSTOCK',KSTOCK)
+C
+C---- CALCUL DES TABLEAUX DE VOISINAGE
+C
+      IF(KSTOCK.EQ.0) THEN
+        JG=NBELC+1
+        SEGINI IA
+      ENDIF
+C
+C---- Le premier travail consiste a fabriquer la liste des voisins de
+C     chaque element a partir du travail effectue par CALNOE.
+C     On a la liste des elements auquel appartient chaque noeud. Il faut
+C     consolider ces informations pour tous les noeuds. Si un noeud
+C     appartient a l'element k et a l'element l, k et l sont voisins.
+C     On remplit une table IVK par element. Les tableaux IVK sont
+C     reunis dans un segment de travail ITAB.
+C
+
+      IF(IDIM.EQ.2) MAJOR=20
+      IF(IDIM.EQ.3) MAJOR=40
+      JG=MAJOR*NBELC
+      SEGINI ITAB
+
+      MAXVOI=0
+      LA=0
+      K=0
+      IF(KSTOCK.EQ.0) IA.LECT(1)=1
+      DO 401 NS=1,NBSOUS
+      IF(NBSOUS.EQ.1)IPT1=MELEME
+      IF(NBSOUS.NE.1)IPT1=LISOUS(NS)
+      NP=IPT1.NUM(/1)
+      NEL=IPT1.NUM(/2)
+      DO 1000 KK=1,NEL
+         K=K+1
+         IVK(1)=1
+         IVK(2)=K
+         DO 101 I=1,NP
+            IU=IZIPAD.LECT(IPT1.NUM(I,KK))
+            NELV=LECT(IU)
+            DO 102 KAP=1,NELV
+               KN=IZK.NUM(KAP,IU)
+C
+C KN appartient il deja a la liste ? Si oui sauter au KN suivant
+C                                    Si non l'ajouter
+               DO 103 J=1,IVK(1)
+                  IF(IVK(J+1).EQ.KN) GOTO 102
+ 103           CONTINUE
+               IVK(1)=IVK(1)+1
+               IVK(IVK(1)+1)=KN
+ 102        CONTINUE
+ 101     CONTINUE
+
+C---  LA contient le nombre d'elements de la matrice en morse
+C---  MAXVOI est le nombre maxi d'elements voisins d'un element donne
+C---  On les remet e jour.
+
+         IF(IVK(1).GT.MAJOR) THEN
+            PRINT *,'PROGCS : L''element ',KK,' du sous objet ',NS
+            PRINT *,'               i.e. ',K ,' dans la num. naturelle'
+            PRINT *,'a un nombre de voisins',ivk(1),
+     &              'superieur au maxi prevu'
+            PRINT *,'Est-ce bien raisonnable ?'
+            PRINT *,'Revoyez votre maillage  |'
+            STOP
+         END IF
+         IF(IVK(1).GT.MAXVOI) MAXVOI=IVK(1)
+         LA=LA+IVK(1)
+
+C---  Le tableau IVK contient les connectivites. Il faut le reordonner
+C     en fonction du mode de stockage demande et stocker dans IA et
+C     ITAB pour le morse et ITAB seulement pour le mode compresse.
+C     Pour le morse, comme pour le mode compresse on met en premier l'elt
+C     lui-meme, puis on range dans l'ordre croissant On complete la table
+C     jusqu'a MAJOR avec le numero de l'element dans le cas compresse.
+
+         IF(KSTOCK.EQ.0) THEN
+C---     Cas du stockage morse
+            IA.LECT(K+1)=IA.LECT(K)+IVK(1)
+C           CALL ITRI(IVK(3),IVK(1)-1)
+            CALL ORDOTA(IVK(3),IVK(1)-1)
+C---        On positionne dans ITAB le tableau IVK
+C           CALL MOVMEM(IVK(2),IVK(1),ITAB.LECT(IA.LECT(K)))
+            CALL RSETI(ITAB.LECT(IA.LECT(K)),IVK(2),IVK(1))
+
+         ELSEIF(KSTOCK.EQ.1) THEN
+C---  Cas du stockage compresse
+C---        On place en premier dans IVK le terme diagonal
+            DO 121 I=1,IVK(1)
+               IF(IVK(I+1).EQ.K) THEN
+                  ID=I+1
+                  GOTO 122
+               ENDIF
+ 121        CONTINUE
+ 122        CONTINUE
+C---        On echange
+            CALL ISWAP(IVK,2,ID,IVK(1)+1)
+C---        On r{ordonne le reste du tableau IVK
+C           CALL ITRI(IVK(3),IVK(1)-1)
+            CALL ORDOTA(IVK(3),IVK(1)-1)
+C---        On comble jusqu'a MAJOR avec le premier numero
+            IF(IVK(1).LT.MAJOR) THEN
+               DO 124 I=IVK(1)+1,MAJOR
+                  IVK(I+1)=IVK(2)
+ 124           CONTINUE
+            ENDIF
+C---        On positionne IVK dans le tableau ITAB (Indexage). ITAB
+C           est stocke comme s'il etait declare ITAB(NBELC,MAJOR)
+            DO 125 I=1,MAJOR
+               IOFF=K+(I-1)*NBELC
+               ITAB.LECT(IOFF)=IVK(I+1)
+ 125        CONTINUE
+         ENDIF
+
+ 1000 CONTINUE
+      SEGDES IPT1
+  401 CONTINUE
+      SEGDES MELEME
+
+C---  Nous pouvons proceder a l'ajustement de la longueur du segment
+C     ITAB : LA pour le morse, NEL*MAXVOI pour le mode compresse.
+
+      IF(KSTOCK.EQ.0) JG=LA
+      IF(KSTOCK.EQ.1) JG=NBELC*MAXVOI
+      SEGADJ ITAB
+
+      IF(KSTOCK.EQ.0) JA=ITAB
+      IF(KSTOCK.EQ.1) KA=ITAB
+
+C!
+C Impression de controle
+C
+      IF(IMPR.GE.2) THEN
+      IF(KSTOCK.EQ.0) THEN
+      WRITE(6,555) (IA.LECT(K),K=1,NBELC+1)
+      DO 2345 K=1,NBELC
+         WRITE(6,555) (ITAB.LECT(I),I=IA.LECT(K),IA.LECT(K+1)-1)
+ 2345 CONTINUE
+      ELSE
+      DO 1234 K=1,NBELC
+         WRITE(6,555) (ITAB.LECT(K+(I-1)*NBELC),I=1,MAXVOI)
+ 555     FORMAT(1X,12(1X,i4))
+ 1234 CONTINUE
+      ENDIF
+      ENDIF
+C!
+      SEGDES ITAB
+      IF(KSTOCK.EQ.0) SEGDES IA
+      IF(KSTOCK.EQ.0) LONG=LA
+      IF(KSTOCK.EQ.1) LONG=NBELC*MAXVOI
+      IF(IMPR.GE.1) WRITE(6,200)LONG
+C
+      CALL ECME(MTABM,'NL',NBELC)
+      CALL ECME(MTAB2,'NL',NBELC)
+      CALL ECME(MTAB2,'NPTC',NPTC)
+      TYPE=' '
+
+      IF(KSTOCK.EQ.0) THEN
+        CALL ECMO(MTABM,'IA','LISTENTI',IA)
+        CALL ECMO(MTABM,'JA','LISTENTI',JA)
+        CALL ECME(MTABM,'LA',LA)
+        CALL ECME(MTABM,'ILG',LA)
+      ELSE
+        SEGACT KA
+        NNZ=KA.LECT(/1)/NBELC
+        CALL ECMO(MTABM,'KA','LISTENTI',KA)
+        CALL ECME(MTABM,'NNZ',NNZ)
+        CALL ECME(MTABM,'ILG',NNZ)
+        SEGDES KA
+      ENDIF
+
+      SEGSUP IZK,IZIPAD,MLENTI
+
+      CALL ECROBJ('TABLE',MTABM)
+
+      RETURN
+ 90   CONTINUE
+      WRITE(6,*)' Retour anormal de PROGCS'
+      RETURN
+ 200  FORMAT(10X,1H*,9X,'.... TAILLE DE LA MATRICE DE PRESSION ',I7,
+     *' MOTS',13X,1H*)
+      END
+
+
+
+
+

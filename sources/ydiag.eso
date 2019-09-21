@@ -1,0 +1,754 @@
+C YDIAG     SOURCE    PV        16/11/17    22:02:06     9180
+      SUBROUTINE YDIAG
+C======================================================================
+C L'opérateur MDIA calcul une matrice de couplage entre deux inconnues.
+C----------------------------------------------------------------------
+C La discrétisation est de type 0D ou multiD. Le sous type de la table
+C d'entrée permet d'identifier la discrétisation utilisée.
+C----------------------------------------------------------------------
+C
+C-------------------------
+C Phrase d'appel GIBIANE :
+C-------------------------
+C
+C 'MDIA' TAB1 ;
+C
+C TAB1 : Table de sous-type 'OPER_0D' ou 'KIZX' selon la discrétisation
+C
+C--------------------------------
+C Construction de KIZX via EQEX :
+C--------------------------------
+C
+C 'ZONE' TAB2 'OPER' 'MDIA' OBJ1 'INCO' MOT1 (MOT2)
+C
+C TAB2  : TABLE DOMAINE associée à la zone d'action de l'opérateur.
+C OBJ1  : Coefficient multiplicateur h (CHPO, ENTIER, FLOTTANT,
+C         POINT ou MOT).
+C MOT1  : Nom de l'inconnue primale (MOT).
+C MOT2  : Nom de l'inconnue duale (facultatif si égal à MOT1 - MOT).
+C
+C-----------
+C Résultat :
+C-----------
+C
+C On crée une matrice diagonale : en multiD, stockée dans un MATRIK et
+C rangée à l'indice 'MATELM' de la table de sous-type 'KIZX' ; en 0D,
+C dans un objet 'RIGIDITE' à l'indice 'LHS' de la table de sous-type
+C 'OPER_0D'.
+C
+C------------------------------------
+C Dimensions et supports des données :
+C------------------------------------
+C
+C Les cas considérés sont les suivants :
+C
+C                 +--------------------------------+
+C                 |      D i m e n s i o n         |
+C   --------------+--------------------------------+
+C   cas considéré | duale V | primale T | coeff. a |
+C   --------------+--------------------------------+
+C   a T dans V      1         1           1
+C   ->->
+C   a T dans V      1         IDIM        IDIM
+C   ->       ->
+C   a T dans V      IDIM      1           IDIM
+C     ->     ->
+C   a T dans V      IDIM      IDIM        1
+C   --------------+--------------------------------+
+C
+C
+C Pour chaque champ, on désigne par S, C et F les spg SOMMET, CENTRE
+C et FACE. Les cas considérés sont :
+C
+C   --------------+-------------+
+C   cas considéré | 1 2 3 4 5 6 |
+C   --------------+-------------+
+C   primale         S C F S S C
+C   duale           S C F C C S
+C   coeff           S C F S C C
+C   --------------+-------------+
+C   IKAS            1 1 1         si primale et duale meme nom
+C                   2 2 2 3 3 4   si nom primal <> nom dual
+C   --------------+-------------+
+C
+C Le croisement de ces deux tableaux donnent les différents cas.
+C
+C
+C-----------------------
+C Variables importante :
+C-----------------------
+C
+C IK1   = Type du coefficient (0:CHPOINT, 1:ENTIERouFLOTTANT, 2:POINT)
+C IKOU  = 0 si la matrice de couplage est sur la diagonale, 1 sinon
+C KFORM = Discrétisation spatiale (0:SI, 1:EF, 2:VF)
+C KIMPL = Discrétisation temporelle (0:EXPL, 1:IMPL, 2:CN)
+C KK    = Rang d'un élément dans la numérotation globale
+C KPOIN = Support du CHAMPOIN (0:SOMMET, 1:FACE, 2:CENTRE)
+C NC    = Rang de la composante du champ multiplicateur à considérer
+C
+C----------------------------------------------------------------------
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+C
+-INC CCOPTIO
+-INC CCGEOME
+-INC SMCOORD
+-INC SMLENTI
+-INC SMELEME
+      POINTEUR MELEMP.MELEME
+-INC SMCHPOI
+-INC SMCHAML
+-INC SMMATRIK
+-INC SMTABLE
+-INC SMLMOTS
+C
+      CHARACTER*8 TYPE,TYPC,NOM,NOMP,NOMD,CHAI,MTYP
+      PARAMETER (NTB=2)
+      CHARACTER*8 LTAB(NTB)
+      DIMENSION KTAB(NTB),IXV(4)
+
+C******************************************************************
+CMDIA
+C     write(6,*)' Debut MDIA '
+
+C Nouvelle directive EQUA de EQEX
+      MTYP=' '
+      CALL QUETYP(MTYP,0,IRET)
+      IF(IRET.EQ.0)THEN
+C% On attend un des objets : %m1:8 %m9:16 %m17:24 %m25:32 %m33:40
+      MOTERR( 1: 8) = 'CHAI    '
+      MOTERR( 9:16) = 'MMODEL  '
+      MOTERR(17:24) = 'TABLE   '
+      CALL ERREUR(472)
+      RETURN
+      ENDIF
+
+      IF(MTYP.EQ.'MMODEL')THEN
+        CALL YTCLSF('   M    ','MDIA    ')
+        RETURN
+      ELSEIF(MTYP.EQ.'MOT     ')THEN
+        CALL LIRCHA(CHAI,1,IRET)
+        CALL YTCLSF(CHAI,'MDIA    ')
+        RETURN
+      ENDIF
+C Fin Nouvelle directive EQUA de EQEX
+
+C
+C- LECTURE de la table TAB1 contenant les données et bifurcation si 0D.
+C- (repérage de la discrétisation 2D/3D ou 0D par le sous-type de TAB1
+C- [respectivement, KIZX ou OPER_0D]).
+C
+      LTAB(1) = 'KIZX    '
+      LTAB(2) = 'OPER_0D '
+      KTAB(1) = 0
+      KTAB(2) = 0
+      CALL LITABS(LTAB,KTAB,NTB,0,IRET)
+      IF (IERR.NE.0) RETURN
+      IF (KTAB(1).NE.0) THEN
+         MTABX = KTAB(1)
+      ELSEIF (KTAB(2).NE.0) THEN
+         IPTAB1 = KTAB(2)
+         CALL TDIAG (IPTAB1)
+         RETURN
+      ELSE
+C        Le sous-type de la table est incorrect
+         CALL ERREUR(648)
+         RETURN
+      ENDIF
+C
+C- Récupération de la table des options KOPT
+C
+      CALL LEKTAB(MTABX,'KOPT',KOPTI)
+      IF (KOPTI.EQ.0) THEN
+C        Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  KOPT  '
+         MOTERR( 9:16) = '  KOPT  '
+         MOTERR(17:24) = '  KIZX  '
+         CALL ERREUR(786)
+         RETURN
+      ELSE
+         CALL ACME(KOPTI,'KIMPL',KIMPL)
+         IF (IERR.NE.0) RETURN
+         CALL ACME(KOPTI,'KFORM',KFORM)
+         IF (IERR.NE.0) RETURN
+      ENDIF
+      IF (KIMPL.NE.1) THEN
+C        Tentative d'utilisation d'une option non implémentée
+         CALL ERREUR(251)
+         RETURN
+      ENDIF
+C
+C- Récupération des tables : EQEX, INCO, DOMAINE
+C
+      CALL LEKTAB(MTABX,'EQEX',MTAB1)
+      IF (MTAB1.EQ.0) THEN
+C        Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  EQEX  '
+         MOTERR( 9:16) = '  EQEX  '
+         MOTERR(17:24) = '  KIZX  '
+         CALL ERREUR(786)
+         RETURN
+      ENDIF
+      CALL ACME(MTAB1,'NAVISTOK',NASTOK)
+      CALL LEKTAB(MTAB1,'INCO',KINC)
+      IF (KINC.EQ.0) THEN
+C        Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  INCO  '
+         MOTERR( 9:16) = '  INCO  '
+         MOTERR(17:24) = '  EQEX  '
+         CALL ERREUR(786)
+         RETURN
+      ENDIF
+      CALL LEKTAB(MTABX,'DOMZ',MTABZ)
+      IF (MTABZ.EQ.0) THEN
+C        Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  DOMZ  '
+         MOTERR( 9:16) = '  DOMZ  '
+         MOTERR(17:24) = '  EQEX  '
+         CALL ERREUR(786)
+         RETURN
+      ENDIF
+C
+C- Récupération des indices MAILLAGE, CENTRE, FACE
+C- et SOMMET du DOMAINE local
+C
+      TYPE = 'MAILLAGE'
+      CALL ACMO(MTABZ,'CENTRE',TYPE,MELEMC)
+      IF (IERR.NE.0) RETURN
+      CALL ACMO(MTABZ,'FACE',TYPE,MELEMF)
+      IF (IERR.NE.0) RETURN
+      CALL ACMO(MTABZ,'SOMMET',TYPE,MELEMS)
+      IF (IERR.NE.0) RETURN
+      CALL ACMO(MTABZ,'MAILLAGE',TYPE,MELEME)
+      IF (IERR.NE.0) RETURN
+C
+C- Récupération du nom des inconnues primale et duale
+C
+      TYPE = 'LISTMOTS'
+      CALL ACMO(MTABX,'LISTINCO',TYPE,MLMOTS)
+      SEGACT MLMOTS
+      NBINC = MOTS(/2)
+      IF (NBINC.LE.0.OR.NBINC.GE.3) THEN
+C        Indice %m1:8 : contient plus de %i1 %m9:16
+         MOTERR( 1:8) = 'LISTINCO'
+         INTERR(1) = 2
+         MOTERR(9:16) = ' MOTS   '
+         CALL ERREUR(799)
+         RETURN
+      ENDIF
+      NOMP = MOTS(1)//'    '
+      IF (NBINC.EQ.1) THEN
+         NOMD = NOMP
+         IKOU = 0
+      ELSE
+         NOMD = MOTS(2)//'    '
+         IF (NOMP.EQ.NOMD) THEN
+            IKOU = 0
+         ELSE
+            IKOU = 1
+         ENDIF
+      ENDIF
+      SEGDES MLMOTS
+C
+C- Récupération de l'inconnue primale et de son spg
+C
+      TYPE = ' '
+      CALL ACMO(KINC,NOMP,TYPE,MCHPOI)
+      IF (TYPE.NE.'CHPOINT ') THEN
+C        Indice %m1:8 : ne contient pas un objet de type %m9:16
+         MOTERR( 1: 8) = 'INCO'//NOMP(1:4)
+         MOTERR( 9:16) = 'CHPOINT '
+         CALL ERREUR(800)
+         RETURN
+      ELSE
+         CALL LICHT(MCHPOI,MPOVAL,TYPC,MELEMP)
+         NINKOP = VPOCHA(/2)
+         SEGDES MPOVAL
+         IF (NINKOP.NE.1.AND.NINKOP.NE.IDIM) THEN
+C        Indice %m1:8 : Le %m9:16 n'a pas le bon nombre de composantes
+            MOTERR( 1: 8) = 'INCO'//NOMP(1:4)
+            MOTERR( 9:16) = 'CHPOINT '
+            CALL ERREUR(784)
+            RETURN
+         ENDIF
+      ENDIF
+C
+C- Récupération de l'inconnue duale et de son spg
+C
+      IF (IKOU.EQ.0) THEN
+         MELEMD = MELEMP
+         NINKOD = NINKOP
+      ELSE
+         TYPE = ' '
+         CALL ACMO(KINC,NOMD,TYPE,MCHPOI)
+         IF (TYPE.NE.'CHPOINT ') THEN
+C           Indice %m1:8 : ne contient pas un objet de type %m9:16
+            MOTERR( 1: 8) = 'INCO'//NOMD(1:4)
+            MOTERR( 9:16) = 'CHPOINT '
+            CALL ERREUR(800)
+            RETURN
+         ELSE
+            CALL LICHT(MCHPOI,MPOVAL,TYPC,MELEMD)
+            NINKOD = VPOCHA(/2)
+            SEGDES MPOVAL
+            IF (NINKOD.NE.1.AND.NINKOD.NE.IDIM) THEN
+C           Indice %m1:8 : Le %m9:16 n'a pas le bon nombre de comp...
+               MOTERR( 1: 8) = 'INCO'//NOMD(1:4)
+               MOTERR( 9:16) = 'CHPOINT '
+               CALL ERREUR(784)
+               RETURN
+            ENDIF
+         ENDIF
+      ENDIF
+C
+C- Identification du spg de l'inconnue primale
+C  Cas 1D (IRET1=1)         : face et sommet sont confondus
+C  Elt de degré 2 (IRET1=0) : face et centre inclus dans sommet
+C
+      CALL KRIPAD(MELEMP,MLENT1)
+      CALL VERPAD(MLENT1,MELEMS,IRETS)
+      CALL VERPAD(MLENT1,MELEMF,IRETF)
+      CALL VERPAD(MLENT1,MELEMC,IRETC)
+      SEGSUP MLENT1
+      IRET1 = IRETS + IRETC + IRETF
+      IF (IRET1.EQ.0) THEN
+         IRETF = 1
+         IRETC = 1
+         IRET1 = 2
+      ENDIF
+      IF (IRET1.EQ.1.AND.IRETF.EQ.1) THEN
+         IRETS = 1
+         IRET1 = 2
+      ENDIF
+      IF (IRET1.EQ.1.AND.IRETC.EQ.1) THEN
+         IRETF = 1
+         IRET1 = 2
+      ENDIF
+      IF (IRET1.EQ.2) THEN
+         IF (IRETS.EQ.0) THEN
+            KPOINP = 0
+            MELEMP = MELEMS
+         ELSEIF (IRETF.EQ.0) THEN
+            KPOINP = 1
+            MELEMP = MELEMF
+         ELSEIF (IRETC.EQ.0) THEN
+            KPOINP = 2
+            MELEMP = MELEMC
+         ENDIF
+      ELSE
+C     Indice %m1:8 : L'objet %m9:16 n'a pas le bon support géométrique
+         MOTERR(1: 8) = 'INCO'//NOMP(1:4)
+         MOTERR(9:16) = 'CHPOINT '
+         CALL ERREUR(788)
+         RETURN
+      ENDIF
+C
+C- Identification du spg de l'inconnue duale
+C
+      IF (IKOU.EQ.0) THEN
+         KPOIND = KPOINP
+         MELEMD = MELEMP
+      ELSE
+         CALL KRIPAD(MELEMD,MLENT2)
+         CALL VERPAD(MLENT2,MELEMS,IRETS)
+         CALL VERPAD(MLENT2,MELEMF,IRETF)
+         CALL VERPAD(MLENT2,MELEMC,IRETC)
+         SEGSUP MLENT2
+         IRET1 = IRETS + IRETC + IRETF
+         IF (IRET1.EQ.0) THEN
+            IRETF = 1
+            IRETC = 1
+            IRET1 = 2
+         ENDIF
+         IF (IRET1.EQ.1.AND.IRETF.EQ.1) THEN
+            IRETS = 1
+            IRET1 = 2
+         ENDIF
+         IF (IRET1.EQ.1.AND.IRETC.EQ.1) THEN
+            IRETF = 1
+            IRET1 = 2
+         ENDIF
+         IF (IRET1.EQ.2) THEN
+            IF (IRETS.EQ.0) THEN
+               KPOIND = 0
+               MELEMD = MELEMS
+            ELSEIF (IRETF.EQ.0) THEN
+               KPOIND = 1
+               MELEMD = MELEMF
+            ELSEIF (IRETC.EQ.0) THEN
+               KPOIND = 2
+               MELEMD = MELEMC
+            ENDIF
+         ELSE
+C           Indice %m1:8 : L'objet %m9:16 n'a pas le bon spg
+            MOTERR(1: 8) = 'INCO'//NOMD(1:4)
+            MOTERR(9:16) = 'CHPOINT '
+            CALL ERREUR(788)
+            RETURN
+         ENDIF
+      ENDIF
+C
+C- Compatibilité du spg de la duale avec les options
+C
+      IF (KPOIND.NE.2.AND.KFORM.EQ.2) THEN
+C        Option %m1:8 incompatible avec les données
+         MOTERR( 1: 8) = '  VF    '
+         CALL ERREUR(803)
+         RETURN
+      ENDIF
+C
+C- Identification du cas à traiter
+C
+      IF (KPOINP.EQ.KPOIND) THEN
+         IF (IKOU.EQ.0) THEN
+            IKAS = 1
+         ELSE
+            IKAS = 2
+         ENDIF
+      ELSEIF (KPOINP.EQ.0.AND.KPOIND.EQ.2) THEN
+         IKAS = 3
+      ELSEIF (KPOINP.EQ.2.AND.KPOIND.EQ.0)THEN
+         IKAS = 4
+      ELSE
+C        Option indisponible
+         CALL ERREUR(19)
+         RETURN
+      ENDIF
+C
+C- Récupération suivant IKAS des "matrices masses" élémentaires
+C
+      IF (IKAS.EQ.1.OR.IKAS.EQ.2) THEN
+         IF (KPOINP.EQ.0) THEN
+            CALL LEKTAB(MTABZ,'XXDIAGSI',MCHPOI)
+         ELSEIF (KPOINP.EQ.1) THEN
+            CALL LEKTAB(MTABZ,'XXDIAGFA',MCHPOI)
+         ELSEIF (KPOINP.EQ.2) THEN
+            CALL LEKTAB(MTABZ,'XXVOLUM ',MCHPOI)
+         ENDIF
+         IF (IERR.NE.0) RETURN
+      ELSE
+         CALL LEKTAB(MTABZ,'XXPSOML',MCHELM)
+         IF (IERR.NE.0) RETURN
+      ENDIF
+C
+C- Lecture du coefficient multiplicateur :
+C- 1) son support est celui de la primale ou CENTRE si primale<>FACE
+C- 2) sa dimension dépend de primale et duale (cf cas prévu en tete)
+C
+      CALL ACME(MTABX,'IARG',IARG)
+      IF (IERR.NE.0) RETURN
+      IF (IARG.NE.1)THEN
+C        Indice %m1:8 : nombre d'argument incorrect
+         MOTERR(1:8) = 'IARG    '
+         CALL ERREUR(804)
+         RETURN
+      ENDIF
+      IF (NINKOP.EQ.NINKOD) THEN
+         IXV(1) = MELEMP
+         IXV(2) = 1
+         IXV(3) = 0
+         IF (IKAS.NE.3) THEN
+            IRET = 0
+         ELSE
+            IRET   = 4
+            IXV(4) = MELEMC
+         ENDIF
+      ELSE
+         IXV(1) = - MELEMP
+         IXV(2) = 1
+         IXV(3) = 1
+         IF (IKAS.NE.3) THEN
+            IRET = 0
+         ELSE
+            IRET   = 4
+            IXV(4) = - MELEMC
+         ENDIF
+      ENDIF
+      CALL LEKCOF('Opérateur MDIA : ',
+     &           MTABX,KINC,1,IXV,MCHPO1,MPOVA1,NPT1,NCOF,IK1,IRET)
+      IF (IRET.EQ.0) RETURN
+C
+C------------------------------------------------------------
+C- Spg des inconnues primale et duale identique (IKAS=1 ou 2)
+C------------------------------------------------------------
+C
+      IF (IKAS.EQ.1.OR.IKAS.EQ.2) THEN
+         NBSOUS = 1
+         NRIGE  = 7
+         NKID   = 9
+         NKMT   = 7
+         NMATRI = 1
+         SEGINI MATRIK
+         IRIGEL(1,1) = MELEMP
+         IRIGEL(2,1) = MELEMD
+         IF (IKOU.EQ.0) THEN
+            IRIGEL(7,1) = 5
+         ELSE
+            IRIGEL(7,1) = 2
+         ENDIF
+         IF (NINKOD*NINKOP.EQ.1) THEN
+            NBME = 1
+         ELSE
+            NBME = IDIM
+         ENDIF
+         SEGINI IMATRI
+         IRIGEL(4,1) = IMATRI
+         KSPGP       = MELEMP
+         KSPGD       = MELEMD
+         SEGACT MELEMP
+         NP   = 1
+         MP   = 1
+         NBEL = MELEMP.NUM(/2)
+         SEGDES MELEMP
+         CALL LICHT(MCHPOI,MPOVAL,TYPC,IGEOM)
+         DO 130 N=1,NBME
+            NC = MIN(N,NCOF)
+C
+C- Initialisation du nom des composantes primale et duale
+C- associées au Nième bloc de matrices élémentaires
+C
+            IF (NINKOP.EQ.1) THEN
+               NOM = NOMP
+            ELSE
+               WRITE(NOM,FMT='(I1,A7)') N,NOMP(1:7)
+            ENDIF
+            LISPRI(N)=NOM(1:4)//'    '
+            IF (NINKOD.EQ.1) THEN
+               NOM = NOMD
+            ELSE
+               WRITE(NOM,FMT='(I1,A7)') N,NOMD(1:7)
+            ENDIF
+            LISDUA(N)=NOM(1:4)//'    '
+C
+C- Calcul des matrices élémentaires associées au Nième bloc
+C
+            SEGINI IZAFM
+            LIZAFM(1,N) = IZAFM
+            IF (IK1.EQ.1) THEN
+               DO 100 K=1,NBEL
+                  AM(K,1,1) = VPOCHA(K,1) * MPOVA1.VPOCHA(1,1)
+ 100           CONTINUE
+            ELSEIF(IK1.EQ.2)THEN
+               DO 110 K=1,NBEL
+                  AM(K,1,1) = VPOCHA(K,1) * MPOVA1.VPOCHA(1,N)
+ 110           CONTINUE
+            ELSEIF(IK1.EQ.0)THEN
+               DO 120 K=1,NBEL
+                  AM(K,1,1) = VPOCHA(K,1) * MPOVA1.VPOCHA(K,NC)
+ 120           CONTINUE
+            ENDIF
+            SEGDES IZAFM
+ 130     CONTINUE
+         SEGDES MPOVAL
+         SEGDES IMATRI,MATRIK
+C
+C-------------------------------------
+C Primale au CENTRE et Duale au SOMMET
+C-------------------------------------
+C
+      ELSEIF (IKAS.EQ.3) THEN
+         IF (IK1.EQ.0) THEN
+            ITEST = ABS(IXV(1))
+            CALL KRIPAD(ITEST,MLENT3)
+         ENDIF
+         SEGACT MCHELM
+         NBSOUS = IMACHE(/1)
+         NRIGE  = 7
+         NKID   = 9
+         NKMT   = 7
+         NMATRI = 1
+         SEGINI MATRIK
+         IRIGEL(1,1) = MELEME
+         IRIGEL(2,1) = MELEMC
+         IRIGEL(7,1) = 3
+         IF (NINKOD*NINKOP.EQ.1) THEN
+            NBME = 1
+         ELSE
+            NBME = IDIM
+         ENDIF
+         SEGINI IMATRI
+         IRIGEL(4,1) = IMATRI
+         KSPGP       = MELEMS
+         KSPGD       = MELEMC
+         DO 350 N=1,NBME
+            NC = MIN(N,NCOF)
+C
+C- Initialisation du nom des composantes primale et duale
+C- associées au Nième bloc de matrices élémentaires
+C
+            IF (NINKOP.EQ.1) THEN
+               NOM = NOMP
+            ELSE
+               WRITE(NOM,FMT='(I1,A7)') N,NOMP(1:7)
+            ENDIF
+            LISPRI(N)=NOM(1:4)//'    '
+            IF (NINKOD.EQ.1) THEN
+               NOM = NOMD
+            ELSE
+               WRITE(NOM,FMT='(I1,A7)') N,NOMD(1:7)
+            ENDIF
+            LISDUA(N)=NOM(1:4)//'    '
+C
+C- Calcul des matrices élémentaires associées au Nième bloc
+C
+            KK = 0
+            DO 340 L=1,NBSOUS
+               MCHAML = ICHAML(L)
+               SEGACT MCHAML
+               MELVAL = IELVAL(1)
+               SEGACT MELVAL
+               IPT1   = IMACHE(L)
+               SEGACT IPT1
+               MP     = 1
+               NP     = IPT1.NUM(/1)
+               NBEL   = IPT1.NUM(/2)
+               SEGINI IZAFM
+               LIZAFM(L,N) = IZAFM
+               IF (IK1.EQ.1) THEN
+                  DO 300 K=1,NBEL
+                     DO 300 II=1,NP
+                      AM(K,II,1) = VELCHE(II,K) * MPOVA1.VPOCHA(1,1)
+ 300              CONTINUE
+               ELSEIF (IK1.EQ.2) THEN
+                  DO 310 K=1,NBEL
+                     DO 310 II=1,NP
+                      AM(K,II,1) = VELCHE(II,K) * MPOVA1.VPOCHA(1,N)
+ 310              CONTINUE
+               ELSEIF (IK1.EQ.4) THEN
+                  DO 320 K=1,NBEL
+                     KK = KK + 1
+                     DO 320 II=1,NP
+                      AM(K,II,1)=VELCHE(II,K)*MPOVA1.VPOCHA(KK,NC)
+ 320              CONTINUE
+               ELSEIF (IK1.EQ.0) THEN
+                  DO 330 K=1,NBEL
+                     DO 330 II=1,NP
+                      KD         = MLENT3.LECT(IPT1.NUM(II,K))
+                      AM(K,II,1) = VELCHE(II,K) * MPOVA1.VPOCHA(KD,NC)
+ 330              CONTINUE
+               ENDIF
+               SEGDES IZAFM
+               SEGDES IPT1,MELVAL,MCHAML
+ 340        CONTINUE
+ 350     CONTINUE
+         SEGDES IMATRI,MATRIK
+         SEGDES MCHELM
+         IF (IK1.EQ.0) SEGSUP MLENT3
+C
+C-------------------------------------
+C Primale au CENTRE et Duale au SOMMET
+C-------------------------------------
+C
+      ELSEIF (IKAS.EQ.4) THEN
+         SEGACT MCHELM
+         NBSOUS = IMACHE(/1)
+         NRIGE  = 7
+         NKID   = 9
+         NKMT   = 7
+         NMATRI = 1
+         SEGINI MATRIK
+         IRIGEL(1,1) = MELEMC
+         IRIGEL(2,1) = MELEME
+         IRIGEL(7,1) = 3
+         IF (NINKOD*NINKOP.EQ.1) THEN
+            NBME = 1
+         ELSE
+            NBME = IDIM
+         ENDIF
+         SEGINI IMATRI
+         IRIGEL(4,1) = IMATRI
+         KSPGP       = MELEMC
+         KSPGD       = MELEMS
+         DO 440 N=1,NBME
+            NC = MIN(N,NCOF)
+C
+C- Initialisation du nom des composantes primale et duale
+C- associées au Nième bloc de matrices élémentaires
+C
+            IF (NINKOP.EQ.1) THEN
+               NOM = NOMP
+            ELSE
+               WRITE(NOM,FMT='(I1,A7)') N,NOMP(1:7)
+            ENDIF
+            LISPRI(N)=NOM(1:4)//'    '
+            IF (NINKOD.EQ.1) THEN
+               NOM = NOMD
+            ELSE
+               WRITE(NOM,FMT='(I1,A7)') N,NOMD(1:7)
+            ENDIF
+            LISDUA(N)=NOM(1:4)//'    '
+C
+C- Calcul des matrices élémentaires associées au Nième bloc
+C
+            KK = 0
+            DO 430 L=1,NBSOUS
+               MCHAML = ICHAML(L)
+               SEGACT MCHAML
+               MELVAL = IELVAL(1)
+               SEGACT MELVAL
+               IPT1   = IMACHE(L)
+               SEGACT IPT1
+               MP     = IPT1.NUM(/1)
+               NP     = 1
+               NBEL   = IPT1.NUM(/2)
+               SEGINI IZAFM
+               LIZAFM(L,N) = IZAFM
+               IF (IK1.EQ.1) THEN
+                  DO 400 K=1,NBEL
+                     DO 400 II=1,MP
+                      AM(K,1,II) = VELCHE(II,K) * MPOVA1.VPOCHA(1,1)
+ 400                 CONTINUE
+               ELSEIF (IK1.EQ.2) THEN
+                  DO 410 K=1,NBEL
+                     DO 410 II=1,MP
+                      AM(K,1,II) = VELCHE(II,K) * MPOVA1.VPOCHA(1,N)
+ 410                 CONTINUE
+               ELSEIF (IK1.EQ.0) THEN
+                  DO 420 K=1,NBEL
+                     KK = KK + 1
+                     DO 420 II=1,MP
+                      AM(K,1,II) = VELCHE(II,K) * MPOVA1.VPOCHA(KK,NC)
+ 420              CONTINUE
+               ENDIF
+               SEGDES IZAFM
+               SEGDES IPT1,MELVAL,MCHAML
+ 430        CONTINUE
+ 440     CONTINUE
+         SEGDES IMATRI,MATRIK
+         SEGDES MCHELM
+      ENDIF
+      SEGDES MPOVA1
+C
+      IF(NASTOK.EQ.0)THEN
+C
+C- Ecriture du résultat à l'indice 'MATELM' de la table 'KIZX'
+C
+      CALL ECMO(MTABX,'MATELM','MATRIK',MATRIK)
+      ELSE
+C
+C- Ecriture des résultats dans la pile des objets
+C
+            NAT=2
+            NSOUPO=0
+            SEGINI MCHPO1
+            MCHPO1.JATTRI(1)=2
+        CALL ECROBJ('MATRIK',MATRIK)
+        CALL ECROBJ('CHPOINT',MCHPO1)
+      ENDIF
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

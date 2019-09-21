@@ -1,0 +1,797 @@
+C PART7     SOURCE    CB215821  19/05/21    21:15:14     10221
+************************************************************************
+* NOM         : PART7
+* DESCRIPTION : Sous-programme dedie a la separation en composantes
+*               connexes d'un maillage + regles supplementaires de
+*               separation en differentes zones
+************************************************************************
+* APPELE PAR : part.eso ; ccon.eso (obsolete)
+************************************************************************
+* ENTREES :: MEL1  = pointeur sur le maillage a partitionner
+*            KLI   > 0 si option 'LIGN'
+*            KFA   > 0 si option 'FACE'
+*            KMA   > 0 si option 'MAIL'
+*            MEL2  = pointeur sur le maillage separateur (option 'MAIL')
+*            KAN   > 0 si option 'ANGL'
+*            ANG   = valeur seuil pour l'angle (option 'ANGL')
+*            ITQ   > 0 si mot-cle 'TELQ' present (option 'ANGL')
+*            KESCL > 0 si besoin des indices SOUSTYPE et CREATEUR
+* SORTIES :: ITAB  = pointeur vers la table de partitionnement
+************************************************************************
+      SUBROUTINE PART7(MEL1,KLI,KFA,KMA,MEL2,KAN,ANG,ITQ,ITAB,KESCL)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCGEOME
+-INC SMCOORD
+-INC SMELEME
+-INC SMTABLE
+-INC SMCHAML
+-INC SMMODEL
+
+      SEGMENT JMEM(NODES+1)
+C     JMEM CONTIENT LE NOMBRE D'ELEMENTS AUQUEL APPARTIENT CHAQUE NOEUD
+C     PUIS LA POSITION DU PREMIER ELEMENT DANS IMEMO ET LMEMO
+
+      SEGMENT ICPR(XCOOR(/1)/(IDIM+1))
+C     ICPR(I) DONNE LE NUMERO LOCAL (DANS LES TABLEAUX DE LA PRESENTE
+C     SUBROUTINE) DU I-EME NOEUD GLOBAL (DANS LA TABLE MCOORD)
+
+      SEGMENT IMEMO(NBV),LMEMO(NBV)
+C     CONTIENT LA LISTE DES ELEMENTS APPARTENANT AU NOEUD 1, 2, 3...
+C     (IMEMO => NUMERO DE L'ELEMENT ET LMEMO => NUMERO DU LISOUS)
+
+      SEGMENT LISIND(NBS)
+C     POINTE VERS LES SEGMENTS INDIC ASSOCIES A CHAQUE SOUS-MAILLAGE
+
+      SEGMENT JMEM2(NODES2+1),ICPR2(XCOOR(/1)/(IDIM+1)),IMEMO2(NBV2),
+     &        LMEMO2(NBV2)
+C     IDEM, MAIS POUR LE MAILLAGE SEPARATEUR
+
+      SEGMENT INDIC(NBEL)
+C     INDICATEUR DU NUMERO DE ZONE
+
+      SEGMENT LISCO1(NELTOT),LISCO2(NELTOT)
+C     LISTES DES ELEMENTS VOISINS
+
+      SEGMENT LISIN(NNOMAX)
+C     LISTE DES NOEUDS A L'INTERFACE ENTRE DEUX ELEMENTS VOISINS
+
+      SEGMENT MIELVA
+         INTEGER IELVAX(N1)
+         INTEGER IELVAY(N1)
+         INTEGER IELVAZ(N1)
+      ENDSEGMENT
+C     POINTEURS VERS LES SEGMENTS MELVAL (OPTION 'ANGL')
+
+      LOGICAL KDIM1,KDIM2,KDIM3
+      INTEGER NNOMAX
+
+
+
+
+*     +---------------------------------------------------------------+
+*     |                                                               |
+*     |                 I N I T I A L I S A T I O N S                 |
+*     |                                                               |
+*     +---------------------------------------------------------------+
+
+
+
+*     VERIFICATION QUE LE MAILLAGE EST COMPATIBLE AVEC LES OPTIONS
+*     FOURNIES
+*     ************************************************************
+      NNOMAX=0
+      MELEME=MEL1
+      SEGACT,MELEME
+      IPT1=MELEME
+
+      IDIM1=0
+      IDIM2=0
+      IDIM3=0
+      DO ISO=1,MAX(1,LISOUS(/1))
+         IF (LISOUS(/1).GT.1) THEN
+            IPT1=LISOUS(ISO)
+            SEGACT,IPT1
+         ENDIF
+
+         ITY=IPT1.ITYPEL
+         NNOMAX=MAX(NNOMAX,NBNNE(ITY))
+
+*         KDIM1=(LDLR(ITY).EQ.1.AND.ITY.NE.12.AND.ITY.NE.13)
+*         KDIM2=(ITY.EQ.KSURF(ITY))
+*         KDIM3=(LDLR(ITY).EQ.3.AND.ITY.NE.30.AND.ITY.NE.31)
+         KDIM1=(LDLR(ITY).EQ.1)
+         KDIM2=(LDLR(ITY).EQ.2)
+         KDIM3=(LDLR(ITY).EQ.3)
+
+*        Element special type 'MULT' ou 'SUPE'
+         IF (.NOT.(KDIM1.OR.KDIM2.OR.KDIM3)) THEN
+            CALL ERREUR(16)
+            RETURN
+         ENDIF
+
+         IF (KDIM1) IDIM1=IDIM1+1
+         IF (KDIM2) IDIM2=IDIM2+1
+         IF (KDIM3) IDIM3=IDIM3+1
+      ENDDO
+
+      IF ((KFA.GT.0.AND.(IDIM1.GT.0.OR.IDIM3.GT.0)).OR.
+     &    (KLI.GT.0.AND.(IDIM2.GT.0.OR.IDIM3.GT.0)).OR.
+     &    (KAN.GT.0.AND.IDIM3.GT.0)) THEN
+         CALL ERREUR(16)
+         RETURN
+      ENDIF
+
+
+*     OPTION 'ANGL' => CREATION DES TABLEAUX DONNANT LE VECTEUR
+*     NORMAL/TANGENT A CHAQUE ELEMENT
+*     *********************************************************
+
+      IF (KAN.GT.0) THEN
+
+*        Transformation en un maillage lineaire
+         CALL ECROBJ('MAILLAGE',MELEME) ;
+         CALL CHANLI
+         IF (IERR.NE.0) RETURN
+         CALL LIROBJ('MAILLAGE',MELEME,1,IRET) ;
+         IF (IERR.NE.0) RETURN
+
+*        Creation d'un objet MMODEL temporaire (le type est sans
+*        importance)
+         CALL ECRCHA('POUT') ;
+         CALL ECRCHA('COQ4') ;
+         CALL ECRCHA('COQ3') ;
+         CALL ECRCHA('ELASTIQUE') ;
+         CALL ECRCHA('MECANIQUE') ;
+         CALL ECROBJ('MAILLAGE',MELEME) ;
+         CALL MODELI ;
+         IF (IERR.NE.0) RETURN
+         CALL LIROBJ('MMODEL',IPMODL,1,IRET)
+         IF (IERR.NE.0) RETURN
+
+*        Calcul des vecteurs directeurs
+         CALL JACONO(IPMODL,1,IPCHE5,IRET)
+         IF (IERR.NE.0) RETURN
+
+*        On ne garde qu'une seule valeur par element (=> type GRAVITE)
+         CALL CHASUP(IPMODL,IPCHE5,IPCHE2,IRET,2)
+         CALL ZPCHEL(IPCHE5,1)
+         CALL ZPCHEL(IPCHE2,1)
+         IF (IERR.NE.0) RETURN
+         IF (IRET.NE.0) THEN
+            CALL ERREUR(IRET)
+            RETURN
+         ENDIF
+
+*        On recupere le MELEME pour etre sur d'avoir le bon ordre de
+*        description des elements
+         CALL ECRCHA('MAIL') ;
+         CALL ECROBJ('MCHAML',IPCHE2) ;
+         CALL EXTRAI ;
+         IF (IERR.NE.0) RETURN
+         CALL LIROBJ('MAILLAGE',MELEME,1,IRET) ;
+         IF (IERR.NE.0) RETURN
+
+*        Suppression de l'objet MMODEL
+         MMODEL=IPMODL
+         SEGACT,MMODEL
+         DO K=1,KMODEL(/1)
+            IMODEL=KMODEL(K)
+            SEGSUP,IMODEL
+         ENDDO
+         SEGSUP,MMODEL
+
+*        Remplissage du segment MIELVA (pointeurs vers les MELVAL)
+         MCHELM=IPCHE2
+         SEGACT,MCHELM
+         N1=ICHAML(/1)
+         SEGINI,MIELVA
+         DO I=1,N1
+            MCHAML=ICHAML(I)
+            SEGACT,MCHAML
+
+            IELVAX(I)=IELVAL(1)
+            MELVAL=IELVAX(I)
+            SEGACT,MELVAL
+
+            IELVAY(I)=IELVAL(2)
+            MELVAL=IELVAY(I)
+            SEGACT,MELVAL
+
+            IF (IDIM.EQ.3) THEN
+               IELVAZ(I)=IELVAL(3)
+               MELVAL=IELVAZ(I)
+               SEGACT,MELVAL
+            ENDIF
+
+            SEGSUP,MCHAML
+         ENDDO
+         SEGSUP,MCHELM
+
+      ENDIF
+
+
+*     CORRESPONDANCE ENTRE LES NUMEROTATIONS LOCALE/GLOBALE
+*     *****************************************************
+
+      SEGACT,MCOORD
+      SEGINI,ICPR
+
+      SEGACT,MELEME
+      NBSOUS=LISOUS(/1)
+      NBS=MAX(1,NBSOUS)
+      IPT1=MELEME
+
+*     Boucle sur les eventuels sous-maillages
+      IKOU=0
+      DO 100 IO=1,NBS
+         IF (NBSOUS.GT.0) THEN
+            IPT1=LISOUS(IO)
+            SEGACT,IPT1
+         ENDIF
+
+*        Remplissage du tableau de correspondance ICPR
+         DO 150 J=1,IPT1.NUM(/2)
+         DO 150 I=1,IPT1.NUM(/1)
+            IJ=IPT1.NUM(I,J)
+            IF (ICPR(IJ).EQ.0) THEN
+              IKOU=IKOU+1
+              ICPR(IJ)=IKOU
+            ENDIF
+150      CONTINUE
+
+100   CONTINUE
+
+*     Nombre de noeuds distincts dans le maillage
+      NODES=IKOU
+
+*     MAILLAGE vide => on sort des maintenant
+      IF (NODES.EQ.0) THEN
+         M=0
+         SEGINI,MTABLE
+         ITAB=MTABLE
+         MLOTAB=0
+         GOTO 9999
+      ENDIF
+
+*
+*     IDENTIFICATION DES ELEMENTS OU APPARAISSENT TOUS LES NOEUDS
+*          =>  IMEMO = NUMERO DE ELEMENT
+*          =>  LMEMO = NUMERO DU SOUS-MAILLGE
+*     JMEM(I)+1 IDENTIFIE LA POSITION DANS IMEMO/LMEMO DU PREMIER
+*     ELEMENT ASSOCIE AU NOEUD I
+*     ***************************************************************
+
+      SEGINI,JMEM
+
+*     On compte combien de fois chaque noeud apparait dans le maillage
+      DO 200 IO=1,NBS
+         IF (NBSOUS.GT.0) IPT1=LISOUS(IO)
+         DO 250 J=1,IPT1.NUM(/2)
+         DO 250 I=1,IPT1.NUM(/1)
+            IJ=ICPR(IPT1.NUM(I,J))
+            JMEM(IJ)=JMEM(IJ)+1
+250      CONTINUE
+200   CONTINUE
+*
+*     On en deduit par cumul la position de depart dans IMEMO/LMEMO
+      DO 290 I=1+1,NODES+1
+         JMEM(I)=JMEM(I)+JMEM(I-1)
+290   CONTINUE
+      NBV=JMEM(NODES)
+*
+*     Remplissage de IMEMO et LMEMO
+      SEGINI,IMEMO,LMEMO
+      DO 300 IO=1,NBS
+         IF (NBSOUS.GT.0) IPT1=LISOUS(IO)
+         DO 350 J=1,IPT1.NUM(/2)
+         DO 350 I=1,IPT1.NUM(/1)
+             IJ=ICPR(IPT1.NUM(I,J))
+             IMEMO(JMEM(IJ))=J
+             LMEMO(JMEM(IJ))=IO
+             JMEM(IJ)=JMEM(IJ)-1
+350      CONTINUE
+300   CONTINUE
+
+
+*     OPTION 'MAIL' => ON REMPLIT DE LA MEME MANIERE ICPR2, JMEM2,
+*     IMEMO2 ET LMEMO2
+*     ************************************************************
+
+      IF (KMA.GT.0) THEN
+
+*        Tableau ICPR2
+         SEGINI,ICPR2
+         IPT2=MEL2
+         SEGACT,IPT2
+         NBSOU2=IPT2.LISOUS(/1)
+         NBS2=MAX(1,NBSOU2)
+         IPT5=IPT2
+         IKOU=0
+         DO 400 IO=1,NBS2
+            IF (NBSOU2.GT.0) THEN
+               IPT5=IPT2.LISOUS(IO)
+               SEGACT,IPT5
+            ENDIF
+            DO 401 J=1,IPT5.NUM(/2)
+            DO 401 I=1,IPT5.NUM(/1)
+               IJ=IPT5.NUM(I,J)
+               IF (ICPR2(IJ).EQ.0) THEN
+                 IKOU=IKOU+1
+                 ICPR2(IJ)=IKOU
+               ENDIF
+401         CONTINUE
+400      CONTINUE
+         NODES2=IKOU
+
+*        MAILLAGE vide => l'option 'MAIL' est desactivee
+         IF (NODES2.EQ.0) THEN
+            DO 410 IO=1,NBS2
+               IF (NBSOU2.GT.0) IPT5=IPT2.LISOUS(IO)
+               SEGDES,IPT5
+410         CONTINUE
+            SEGSUP,ICPR2
+            KMA=0
+            GOTO 499
+         ENDIF
+
+*        Tableaux JMEM2, IMEMO2 et LMEMO2
+         SEGINI,JMEM2
+         DO 420 IO=1,NBS2
+            IF (NBSOU2.GT.0) IPT5=IPT2.LISOUS(IO)
+            DO 421 J=1,IPT5.NUM(/2)
+            DO 421 I=1,IPT5.NUM(/1)
+               IJ=ICPR2(IPT5.NUM(I,J))
+               JMEM2(IJ)=JMEM2(IJ)+1
+421         CONTINUE
+420      CONTINUE
+         DO 430 I=1+1,NODES2+1
+            JMEM2(I)=JMEM2(I)+JMEM2(I-1)
+430      CONTINUE
+         NBV2=JMEM2(NODES2)
+         SEGINI,IMEMO2,LMEMO2
+         DO 440 IO=1,NBS2
+            IF (NBSOU2.GT.0) IPT5=IPT2.LISOUS(IO)
+            DO 441 J=1,IPT5.NUM(/2)
+            DO 441 I=1,IPT5.NUM(/1)
+                IJ=ICPR2(IPT5.NUM(I,J))
+                IMEMO2(JMEM2(IJ))=J
+                LMEMO2(JMEM2(IJ))=IO
+                JMEM2(IJ)=JMEM2(IJ)-1
+441         CONTINUE
+440      CONTINUE
+
+*        On cree aussi le segment LISIN qui servira plus bas
+         SEGINI,LISIN
+
+      ENDIF
+499   CONTINUE
+
+
+*     CREATION D'UN SEGMENT INDIC POUR CHAQUE LISOUS
+*     **********************************************
+
+      SEGINI,LISIND
+      NELTOT=0
+      DO 500 IO=1,NBS
+         IF (NBSOUS.NE.0) IPT1=LISOUS(IO)
+         NBEL=IPT1.NUM(/2)
+         NELTOT=NELTOT+NBEL
+         SEGINI,INDIC
+         LISIND(IO)=INDIC
+ 500  CONTINUE
+      SEGINI LISCO1,LISCO2
+
+
+
+*     +---------------------------------------------------------------+
+*     |                                                               |
+*     |          C O N S T R U C T I O N   D E S   Z O N E S          |
+*     |                                                               |
+*     +---------------------------------------------------------------+
+
+      NBCOMP=0
+      IOC=1
+      IELC=0
+
+*     LABEL 1000 : PARCOURS DES SEGMENTS INDIC A LA RECHERCHE D'UN
+*                  ELEMENT ENCORE NON ATTRIBUE
+*     ************************************************************
+1000  CONTINUE
+
+      NBCOMP=NBCOMP+1
+      IELC=IELC+1
+      DO 1010 IO=IOC,NBS
+         IF (NBSOUS.NE.0) IPT1=LISOUS(IO)
+         INDIC=LISIND(IO)
+         DO 1020 IEL=IELC,IPT1.NUM(/2)
+            IF (INDIC(IEL).EQ.0) GOTO 1030
+1020     CONTINUE
+         IELC=1
+1010  CONTINUE
+
+C     TOUS LES ELEMENTS ONT ETE CLASSES => ON A FINI
+      GOTO 1500
+
+*     ON A TROUVE UN ELEMENT DE DEPART D'UNE NOUVELLE ZONE
+*     => ON VA ETENDRE AUX ELEMENTS VOISINS
+*     ****************************************************
+1030  CONTINUE
+      IOC=IO
+      IELC=IEL
+
+*     On attribue une zone a l'element trouve
+      INDIC(IEL)=NBCOMP
+
+*     ILRMP = Nombre d'elements ajoutes a LISCO1/LISCO2
+*     ILEXT = Nombre d'elements parcourus dans LISCO1/LISCO2
+      ILRMP=1
+      ILEXT=1
+
+*     On reinitialise LISCO1/LISCO2 avec seulement cet element
+      LISCO1(ILRMP)=IO
+      LISCO2(ILRMP)=IEL
+
+*     BOUCLE DE REMPLISSAGE DE LISCO1/LISCO2, DE VOISIN EN VOISIN
+*     ***********************************************************
+
+*     Label 1120 => element suivant dans les listes LISCO1/LISCO2
+1120  CONTINUE
+      IF (ILEXT.GT.ILRMP) GOTO 1130
+
+      ION=LISCO1(ILEXT)
+      IEL=LISCO2(ILEXT)
+      IF (NBSOUS.NE.0) IPT1=LISOUS(ION)
+      IF (KAN.GT.0) THEN
+*        Vecteur directeur de l'element 1 (option 'ANGL')
+         MELVAL=IELVAX(ION)
+         IELMIN=MIN(IEL,MELVAL.VELCHE(/2))
+         X1=VELCHE(1,IELMIN)
+         MELVAL=IELVAY(ION)
+         IELMIN=MIN(IEL,MELVAL.VELCHE(/2))
+         Y1=VELCHE(1,IELMIN)
+         IF (IDIM.EQ.3) THEN
+            MELVAL=IELVAZ(ION)
+            IELMIN=MIN(IEL,MELVAL.VELCHE(/2))
+            Z1=VELCHE(1,IELMIN)
+         ENDIF
+      ENDIF
+
+*     Label 1100 => noeud IP suivant de l'element courant
+      DO 1100 IN=1,IPT1.NUM(/1)
+         IP=ICPR(IPT1.NUM(IN,IEL))
+
+*        Label 1110 => voisin suivant via le noeud IP
+         DO 1110 KK=JMEM(IP)+1,JMEM(IP+1)
+            JON=LMEMO(KK)
+            JEL=IMEMO(KK)
+            INDIC=LISIND(JON)
+
+
+*           TESTS SUR L'ELEMENT VOISIN (JON;JEL) : SI L'UN DES TESTS
+*           ECHOUE, ALORS CET ELEMENT N'APPARTIENT PAS A CETTE ZONE
+*           ********************************************************
+
+*           1) CONDITION SINE QUA NONE : IL N'A PAS DEJA ETE ATTRIBUE
+*              A UNE AUTRE ZONE
+*              ======================================================
+            IF (INDIC(JEL).NE.0) GOTO 1110
+
+*           2) OPTION 'FACE' (UNIQUEMENT POUR LES MAILLAGES DE SURFACES)
+*              =========================================================
+            IF (KFA.GT.0) THEN
+               IF (NBSOUS.NE.0) THEN
+                  IPT3=LISOUS(JON)
+               ELSE
+                  IPT3=MELEME
+               ENDIF
+
+*              a) Verification que les elements ont au moins 1 autre
+*                 noeud que IP en commun (attention : on ne verifie
+*                 pas qu'ils appartiennent a une meme arete)
+               DO 1150 I1=1,IPT1.NUM(/1)
+                  IP1=ICPR(IPT1.NUM(I1,IEL))
+                  IF (IP1.EQ.IP) GOTO 1150
+                  DO 1160 I2=1,IPT3.NUM(/1)
+                     IP2=ICPR(IPT3.NUM(I2,JEL))
+                     IF (IP1.EQ.IP2) GOTO 1170
+1160              CONTINUE
+1150           CONTINUE
+               GOTO 1110
+
+*              b) Verification qu'il n'y a que 2 elements qui
+*                 contiennent les noeuds IP et IP1
+1170           CONTINUE
+               NL=0
+               DO 1180 K1=JMEM(IP)+1,JMEM(IP+1)
+                  IF (K1.EQ.KK) GOTO 1180
+                  I1=LMEMO(K1)
+                  J1=IMEMO(K1)
+                  DO 1190 K2=JMEM(IP1)+1,JMEM(IP1+1)
+                     I2=LMEMO(K2)
+                     J2=IMEMO(K2)
+                     IF (I1.EQ.I2.AND.J1.EQ.J2) NL=NL+1
+1190              CONTINUE
+1180           CONTINUE
+               IF (NL.NE.1) GOTO 1110
+            ENDIF
+
+*           3) OPTION 'LIGN' (UNIQUEMENT POUR LES MAILLAGES DE LIGNES)
+*              VERIFICATION QU'IL N'Y A QUE 2 ELEMENTS QUI CONTIENNENT
+*              LE NOEUD IP
+*              =======================================================
+            IF (KLI.GT.0) THEN
+               IF (JMEM(IP+1)-JMEM(IP).NE.2) GOTO 1110
+            ENDIF
+
+*           4) OPTION 'ANGL' (POUR LES MAILLAGES DE LIGNES ET/OU DE
+*              SURFACE) : VERIFICATION QUE L'ANGLE ENTRE 2 ELEMENTS
+*              VOISINS EST INFERIEUR A UNE VALEUR SEUIL
+*              ====================================================
+            IF (KAN.GT.0) THEN
+
+*              Vecteur directeur de l'element 2
+*              (vecteur directeur de l'element 1 sorti de la boucle)
+               MELVAL=IELVAX(JON)
+               JELMIN=MIN(JEL,MELVAL.VELCHE(/2))
+               X2=VELCHE(1,JELMIN)
+               MELVAL=IELVAY(JON)
+               JELMIN=MIN(JEL,MELVAL.VELCHE(/2))
+               Y2=VELCHE(1,JELMIN)
+
+*              Produit scalaire et norme
+               XN1=X1*X1+Y1*Y1
+               XN2=X2*X2+Y2*Y2
+               CA=X1*X2+Y1*Y2
+
+*              Prise en compte 3eme direction le cas echeant
+               IF (IDIM.EQ.3) THEN
+                  MELVAL=IELVAZ(JON)
+                  JELMIN=MIN(JEL,MELVAL.VELCHE(/2))
+                  Z2=VELCHE(1,JELMIN)
+
+                  XN1=XN1+Z1*Z1
+                  XN2=XN2+Z2*Z2
+                  CA=CA+Z1*Z2
+               ENDIF
+
+*              Determination de l'angle en degres entre les 2 vecteurs
+               CA=CA/((XN1*XN2)**0.5)
+               IF (CA.GT.1.D0) CA=1.D0
+               IF (CA.LT.-1.D0) CA=-1.D0
+
+               IF ((ITQ.GT.0.OR.(ITQ.LE.0.AND.CA.NE.-1.D0)).AND.
+     &             (CA.LT.ANG)) GOTO 1110
+            ENDIF
+
+*           5) OPTION 'MAIL' : VERIFICATION QUE L'INTERFACE COMMUNE
+*              ENTRE 2 ELEMENTS VOISINS N'APPARTIENT PAS A MEL2
+*              ====================================================
+            IF (KMA.GT.0) THEN
+
+*              Test rapide grace au noeud commun deja connu (IP et IPP
+*              sont les numeros locaux du meme noeud dans MEL1 et MEL2)
+               IPP=ICPR2(IPT1.NUM(IN,IEL))
+               IF (IPP.EQ.0) GOTO 999
+
+*              Nb. de noeuds a l'interface entre ION/IEL et JON/JEL
+*              (IMPOSSIBLE A SAVOIR A PRIORI => EXEMPLE : CUB8/PY5)
+               IF (NBSOUS.NE.0) THEN
+                  IPT3=LISOUS(JON)
+               ELSE
+                  IPT3=MELEME
+               ENDIF
+               NBNIN=0
+               DO 1200 I1=1,IPT1.NUM(/1)
+                  IP1=ICPR(IPT1.NUM(I1,IEL))
+                  IF (IP1.EQ.IP) GOTO 1200
+                  DO I2=1,IPT3.NUM(/1)
+                     IP2=ICPR(IPT3.NUM(I2,JEL))
+                     IF (IP1.EQ.IP2) THEN
+*                       On a trouve un noeud de l'interface, mais s'il
+*                       n'est pas dans MEL2 => inutile d'aller plus loin
+                        IF (ICPR2(IPT3.NUM(I2,JEL)).EQ.0) GOTO 999
+*                       Sinon on le memorise et on en cherche d'autres
+                        NBNIN=NBNIN+1
+                        LISIN(NBNIN)=IPT3.NUM(I2,JEL)
+                        GOTO 1200
+                     ENDIF
+                  ENDDO
+1200           CONTINUE
+
+*              A ce stade, on connait tous les noeuds a l'interface
+*              entre les 2 elements voisins, et on sait qu'ils sont
+*              tous dans MEL2 => IL RESTE A VERIFIER QU'ILS SONT DANS
+*              UN MEME ELEMENT DE MEL2 (la liste des possibilites
+*              est reduite grace aux tableaux JMEM2/IMEMO2/LMEMO2)
+               DO 1210 K2=JMEM2(IPP)+1,JMEM2(IPP+1)
+                  KON=LMEMO2(K2)
+                  KEL=IMEMO2(K2)
+                  IF (NBSOU2.NE.0) THEN
+                     IPT5=IPT2.LISOUS(KON)
+                  ELSE
+                     IPT5=IPT2
+                  ENDIF
+
+*                 Inutile de tester cet element de MEL2 s'il n'a pas
+*                 assez de noeuds...
+                  IF (NBNNE(IPT5.ITYPEL).LT.NBNIN+1) GOTO 1210
+
+*                 Test de tous les noeuds de l'interface
+                  DO 1220 K1=1,NBNIN
+                     INO=LISIN(K1)
+                     IF (ICPR2(INO).EQ.IPP) GOTO 1220
+                     DO K3=1,IPT5.NUM(/1)
+                        IF (INO.EQ.IPT5.NUM(K3,KEL)) GOTO 1220
+                     ENDDO
+                     GOTO 1210
+1220              CONTINUE
+
+*                 => L'INTERFACE ENTRE LES DEUX VOISINS EST INCLUSE
+*                    DANS UN ELEMENT DE MEL2
+                  GOTO 1110
+
+1210           CONTINUE
+
+            ENDIF
+
+*           => TOUS LES TESTS SONT PASSES : ON AJOUTE L'ELEMENT AUX
+*              LISTES LISCO1/LISCO2 ET ON LUI ATTRIBUE LA ZONE COURANTE
+999         CONTINUE
+            INDIC(JEL)=NBCOMP
+            ILRMP=ILRMP+1
+            LISCO1(ILRMP)=JON
+            LISCO2(ILRMP)=JEL
+
+1110     CONTINUE
+1100  CONTINUE
+
+*     Tous les voisins de l'element courant ont ete testes : on va
+*     regarder s'il reste des elements dans LISCO1/LISCO2
+      ILEXT=ILEXT+1
+      GOTO 1120
+
+*     ON A FINI, ON ENCHAINE SUR LA ZONE SUIVANTE
+1130  CONTINUE
+      GOTO 1000
+
+
+*     +---------------------------------------------------------------+
+*     |                                                               |
+*     |   C R E A T I O N   D E   L ' O B J E T   D E   S O R T I E   |
+*     |                                                               |
+*     +---------------------------------------------------------------+
+
+1500  CONTINUE
+      NBCOMP=NBCOMP-1
+
+*     CREATION DE L'OBJET TABLE DE SORTIE
+*     ***********************************
+      M=NBCOMP
+      IF (KESCL.GT.0) M=M+2
+      SEGINI,MTABLE
+      ITAB=MTABLE
+      IF (KESCL.GT.0) THEN
+         CALL ECCTAB(ITAB,'MOT',0,0.D0,'SOUSTYPE',.TRUE.,
+     &                     0,'MOT',0,0.D0,'ESCLAVE',.TRUE.,0)
+         CALL ECCTAB(ITAB,'MOT',0,0.D0,'CREATEUR',.TRUE.,
+     &                     0,'MOT',0,0.D0,'PART',.TRUE.,0)
+      ENDIF
+
+
+*     CREATION DES MAILLAGES DES DIFFERENTES ZONES TROUVEES
+*     *****************************************************
+      DO 2000 ICOMP=1,NBCOMP
+         ISS=0
+
+         NBNN=0
+         NBELEM=0
+         NBSOUS=0
+         NBREF=0
+         SEGINI,IPT7
+
+*        Boucle sur les LISOUS du maillage initial
+         DO 2010 IS=1,NBS
+            IF (LISOUS(/1).NE.0) IPT1=LISOUS(IS)
+            INDIC=LISIND(IS)
+
+*           Decompte du nombre d'elements du LISOUS initial appartenant
+*           a la composante courante
+            IELEM=0
+            DO 2001 I=1,INDIC(/1)
+               IF (INDIC(I).EQ.ICOMP) IELEM=IELEM+1
+2001        CONTINUE
+
+*           Si besoin, on cree et on remplit le LISOUS correspondant
+*           dans IPT7
+            IF (IELEM.NE.0) THEN
+               ISS=ISS+1
+               NBNN=IPT1.NUM(/1)
+               NBELEM=IELEM
+               NBSOUS=0
+               NBREF=0
+               SEGINI,IPT3
+               IPT3.ITYPEL=IPT1.ITYPEL
+               IELEM=0
+               DO 2005 I=1,INDIC(/1)
+                  IF (INDIC(I).NE.ICOMP) GOTO 2005
+                  IELEM=IELEM+1
+                  DO 2006 J=1,IPT1.NUM(/1)
+                     IPT3.NUM(J,IELEM)=IPT1.NUM(J,I)
+2006              CONTINUE
+                  IPT3.ICOLOR(IELEM)=IPT1.ICOLOR(I)
+2005           CONTINUE
+               NBNN=0
+               NBELEM=0
+               NBSOUS=IPT7.LISOUS(/1)+1
+               NBREF=0
+               SEGADJ,IPT7
+               IPT7.LISOUS(NBSOUS)=IPT3
+               SEGDES,IPT3
+            ENDIF
+2010     CONTINUE
+*
+*        S'il n'y a qu'un seul LISOUS, on modifie la structure de IPT7
+         IF (IPT7.LISOUS(/1).EQ.1) THEN
+            IPT=IPT7.LISOUS(1)
+            SEGSUP,IPT7
+            IPT7=IPT
+         ENDIF
+         SEGDES,IPT7
+
+*        Ajout de IPT7 a l'indice ICOMP de MTABLE
+         CALL ECCTAB(MTABLE,'ENTIER  ',ICOMP,CC,' ',.TRUE.,I,
+     &                      'MAILLAGE',I,XX,' ',.TRUE.,IPT7)
+2000  CONTINUE
+
+*     FIN DE LA SUBROUTINE : UN PEU DE MENAGE...
+*     ******************************************
+      SEGSUP,JMEM,LMEMO,IMEMO,LISCO1,LISCO2
+      DO I=1,LISIND(/1)
+         INDIC=LISIND(I)
+         SEGSUP,INDIC
+      ENDDO
+      SEGSUP,LISIND
+      IF (KMA.NE.0) THEN
+         SEGSUP,ICPR2,JMEM2,LMEMO2,IMEMO2,LISIN
+         IF (NBSOU2.GT.0) THEN
+            DO I=1,IPT2.LISOUS(/1)
+               IPT5=IPT2.LISOUS(I)
+               SEGDES,IPT5
+            ENDDO
+         ENDIF
+         SEGDES,IPT2
+      ENDIF
+9999  CONTINUE
+      SEGSUP,ICPR
+      NBSOUS=LISOUS(/1)
+      IF (NBSOUS.GT.0) THEN
+         DO I=1,NBSOUS
+            IPT1=LISOUS(I)
+            SEGDES,IPT1
+         ENDDO
+      ENDIF
+      SEGDES,MELEME
+      IF (KAN.GT.0) THEN
+         DO K=1,N1
+            MELVAL=IELVAX(K)
+            SEGSUP,MELVAL
+            MELVAL=IELVAY(K)
+            SEGSUP,MELVAL
+            IF (IDIM.EQ.3) THEN
+               MELVAL=IELVAZ(K)
+               SEGSUP,MELVAL
+            ENDIF
+         ENDDO
+         SEGSUP,MIELVA
+      ENDIF
+
+      END
+
+
+
+
+

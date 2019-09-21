@@ -1,0 +1,1199 @@
+C ZLAP11    SOURCE    PV        16/11/17    22:02:51     9180
+      SUBROUTINE ZLAP11()
+C************************************************************************
+C
+C PROJET            :  CASTEM 2000
+C
+C NOM               :  ZLAP11
+C
+C DESCRIPTION       :  Voir YLAPL1
+C
+C
+C LANGAGE           :  FORTRAN 77 + ESOPE 2000 (avec estensions CISI)
+C
+C AUTEURS           :  A. BECCANTINI, DRN/DMT/SEMT/LTMF
+C                      Stéphane GOUNAND (CEA/DEN/DM2S/SFME/LTMF)
+C                      mél : gounand@semt2.smts.cea.frC
+C************************************************************************
+C
+C
+C APPELES (E/S)     :  LIRMOT, ERREUR
+C
+C
+C APPELES           :
+C
+C************************************************************************
+C*** ENTREE / SORTIE (voir Phrase d'appel GIBIANE)
+C***********************************************************************
+C HISTORIQUE (Anomalies et modifications éventuelles)
+C HISTORIQUE : 3.12.03 - added option for discretisation of
+C                        the diffusive terms in k-\eps equations
+C                       (explicit)
+C              12.1.04 -  deliberatly put all the formation enthalpies
+C                         to 0.0D0; these contributions will be
+C                         positioned in the source term
+C************************************************************************
+C
+      IMPLICIT INTEGER(I-N)
+-INC CCOPTIO
+-INC SMMATRIK
+      INTEGER NKID,NKMT,NMATRI,NRIGE
+-INC SMCHPOI
+      POINTEUR MU.MCHPOI, MUT.MCHPOI, MUN.MCHPOI
+      POINTEUR KAPPA.MCHPOI
+      POINTEUR CVTOT.MCHPOI
+-INC SMLREEL
+-INC SMLMOTS
+      POINTEUR MLMOEU.MLMOTS
+      POINTEUR MLMNOM.MLMOTS
+      POINTEUR MLDEFO.MLMOTS
+      INTEGER JGM,JGN
+-INC SMCHAML
+      POINTEUR ICOGRV.MCHELM
+      POINTEUR ICOGRT.MCHELM
+-INC SMTABLE
+      POINTEUR IPGAZ.MTABLE
+C
+C**** Variables pour ACCTAB
+C
+      INTEGER IVALI, IRETI,IVALR, IRETR
+      REAL*8 XVALI, XVALR
+      LOGICAL LOGII, LOGIR
+      CHARACTER*(8) MTYPI, MTYPR, CHARR
+C
+C**** Segment des caractéristiques du gaz
+C
+      SEGMENT PROPHY
+         CHARACTER*4 NOMESP(NESP+1)
+         REAL*8 CV(NESP+1)
+         REAL*8 R(NESP+1)
+         REAL*8 H0K(NESP+1)
+         POINTEUR CDIFF(NESP+1).MCHPOI
+         POINTEUR YK(NESP+1).MCHPOI
+         POINTEUR GRADYK(NESP+1).MCHPOI
+         POINTEUR CGRYK(NESP+1).MCHELM
+         POINTEUR CLYK(NESP+1).MCHPOI
+      ENDSEGMENT
+      INTEGER NESP
+C
+C**** Variables du programme
+C
+      INTEGER IESP
+      INTEGER ICELL, IRET, INDIC, NBCOMP
+     &      , IDOMA, MELEMC, MELEMF, MELEFL, ICHPSU, ICHPDI, ICHPVO
+     &      , INORM, IGRKEP
+     &      , IRN, IVN, ITN, IGRVN, IGRTN
+     &      , IVNIMP, ITAUIM, ITIMP,IQIMP,IRIMP
+     &      , ILIINC, NC, INEFMD, ICOND
+     &      , IJACO, ICHRES, NSOUPO,I1,NORD,NORDP1,IKEPS
+      INTEGER ICHFLU,ICHFL2,ICHFL3,ICHTM1,ICHTMP
+      REAL*8 DELTAT,DELTA2,DELTA3,TSIGK,TSIGE
+      CHARACTER*(40) MESERR
+      CHARACTER*4 NOMMOT, MOT, LFLUX(2), LIMPL(2)
+      CHARACTER*8 TYPE
+      LOGICAL LOGRES,LOGIMP,LOGAN
+C
+      DATA LFLUX/'FLUX','RESI'/
+      DATA LIMPL/'EXPL','IMPL'/
+C
+C**** Initialisation des variables pour la gestion des erreurs.
+C
+      MESERR  = '                                        '
+      LOGAN = .FALSE.
+      IKEPS = 0
+C
+C******* Flux ou residu?
+C
+      CALL LIRMOT(LFLUX,2,ICELL,1)
+      IF(IERR .NE. 0)GOTO 9999
+      IF(ICELL .EQ. 1)THEN
+         LOGRES = .FALSE.
+      ELSEIF(ICELL .EQ. 2)THEN
+         LOGRES = .TRUE.
+      ELSE
+C
+C******** Message d'erreur standard
+C         251 2
+C         Tentative d'utilisation d'une option non implémentée
+C
+         CALL ERREUR(251)
+      ENDIF
+C
+C
+      CALL LIRMOT(LIMPL,2,ICELL,1)
+      IF(IERR .NE. 0)GOTO 9999
+      IF(ICELL .EQ. 1)THEN
+         LOGIMP=.FALSE.
+      ELSEIF(ICELL .EQ. 2)THEN
+         LOGIMP=.TRUE.
+      ELSE
+         WRITE(IOIMP,*) 'Erreur de programmation'
+         CALL ERREUR(5)
+         GOTO 9999
+      ENDIF
+C
+C**********************************
+C**** Lecture de l'objet MODELE ***
+C**********************************
+C
+      ICOND = 1
+      CALL QUETYP(TYPE,ICOND,IRET)
+
+      IF(IRET.EQ.0.AND.TYPE.NE.'MMODEL')THEN
+        WRITE(6,*)' On attend un objet MMODEL'
+        RETURN
+      ENDIF
+      CALL LIROBJ('MMODEL',MMODEL,ICOND,IRET)
+      IF(IERR.NE.0)GOTO 9999
+      CALL LEKMOD(MMODEL,IDOMA,INEFMD)
+      IF(IERR.NE.0)GOTO 9999
+C
+C**** Centre, FACE et FACEL
+C
+      CALL LEKTAB(IDOMA,'CENTRE',MELEMC)
+      IF(IERR .NE. 0) GOTO 9999
+C
+      CALL LEKTAB(IDOMA,'FACE',MELEMF)
+      IF(IERR .NE. 0) GOTO 9999
+C
+      CALL LEKTAB(IDOMA,'FACEL',MELEFL)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Lecture du CHPOINT contenant les surfaces des faces.
+C
+      CALL LEKTAB(IDOMA,'XXSURFAC',ICHPSU)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Lecture du CHPOINT contenant les diametres minimums.
+C
+      CALL LEKTAB(IDOMA,'XXDIEMIN',ICHPDI)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Lecture du CHPOINT contenant les volumes
+C
+      CALL LEKTAB(IDOMA,'XXVOLUM',ICHPVO)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C********** Les normales aux faces
+C
+      CALL LEKTAB(IDOMA,'XXNORMAF',INORM)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C********************************
+C**** Fin table domaine *********
+C********************************
+C********************************
+C****   La table IPGAZ    *******
+C********************************
+C
+C
+C**** Lecture de la table qui contient le proprieté du gaz
+C     Cette table est controlle par l'operateur PRIM
+C
+      CALL LIROBJ('TABLE',IPGAZ,1,IRET)
+      IF(IERR .NE. 0)GOTO 9999
+C
+C**** NORD: degree des polynoms cv(T)
+C
+      MTYPI = 'MOT     '
+      MTYPR = '        '
+      CALL ACCTAB(IPGAZ,MTYPI,IVALI,XVALI,'NORD',LOGII,IRETI,
+     &     MTYPR,NORD,XVALR,CHARR,LOGIR,IRETR)
+      IF(MTYPR .NE. 'ENTIER  ')THEN
+C
+C**** Message d'erreur standard
+C     -301 0 %m1:40
+C
+         MOTERR(1:40) = 'ARG1 . NORD = ???                       '
+         WRITE(IOIMP,*) MOTERR
+C
+C**** Message d'erreur standard
+C     21 2
+C     Données incompatibles
+C
+         CALL ERREUR(21)
+         GOTO 9999
+      ENDIF
+      NORDP1 = NORD + 1
+      IF (NORDP1.NE.1) THEN
+C
+C**** Message d'erreur standard
+C     -301 0 %m1:40
+C
+         MOTERR(1:40) = 'ARG1 . NORD .NE. 0                      '
+         WRITE(IOIMP,*) MOTERR
+C
+C**** Message d'erreur standard
+C     21 2
+C     Données incompatibles
+C
+         CALL ERREUR(21)
+         GOTO 9999
+      ENDIF
+C
+C**** Nom de l'espece qui n'est pas dans les equations de Navier-Stokes
+C
+      MTYPI = 'MOT     '
+      MTYPR = '        '
+      CALL ACCTAB(IPGAZ,MTYPI,IVALI,XVALI,'ESPNEULE',LOGII,IRETI,
+     &     MTYPR,IVALR,XVALR,CHARR,LOGIR,IRETR)
+      IF(MTYPR .NE. 'MOT     ')THEN
+C
+C**** Message d'erreur standard
+C     -301 0 %m1:40
+C
+         MOTERR(1:40) = 'ARG1 . ESPNEULE = ???                   '
+         WRITE(IOIMP,*) MOTERR
+C
+C******* Message d'erreur standard
+C        21 2
+C        Données incompatibles
+C
+         CALL ERREUR(21)
+         GOTO 9999
+      ENDIF
+C
+C**** Les especes qui sont dans les Equations de Navier-Stokes
+C
+      MTYPR = '        '
+      CALL ACMO(IPGAZ,'ESPEULE',MTYPR,MLMOEU)
+      IF(MTYPR .NE. 'LISTMOTS')THEN
+C
+C**** Message d'erreur standard
+C     -301 0 %m1:40
+C
+         MOTERR(1:40) = 'ARG1 . ESPEULE = ???                    '
+         WRITE(IOIMP,*) MOTERR
+C
+C**** Message d'erreur standard
+C     21 2
+C     Données incompatibles
+C
+         CALL ERREUR(21)
+         GOTO 9999
+      ELSE
+         SEGACT MLMOEU
+         NESP = MLMOEU.MOTS(/2)
+         SEGINI PROPHY
+         DO 1 I1 = 1, NESP
+            PROPHY.NOMESP(I1) = MLMOEU.MOTS(I1)
+ 1       CONTINUE
+         PROPHY.NOMESP(NESP+1)=CHARR(1:4)
+         SEGDES MLMOEU
+      ENDIF
+C
+C**** On remplit le segment PROPHY
+C     Ordre: IPGAZ . 'ESPEULE' + IPGAZ . 'ESPNEULE'
+C     On controle aussi la compatibilite des
+C     donnees de la table
+C
+      DO 3 I1 = 1, NESP+1
+         NOMMOT = PROPHY.NOMESP(I1)
+C
+C******* CALL ACMF(...)  ne marche pas parce que on a
+C        des espaces dans nos noms de composantes
+C
+         MTYPI = 'MOT     '
+         MTYPR = '        '
+         CALL ACCTAB(IPGAZ,MTYPI,IVALI,XVALI,NOMMOT, LOGII,IRETI,
+     &        MTYPR,IVALR,XVALR,CHARR,LOGIR,IESP)
+C
+C******* En IESP il y a la table IPGAZ.NOMMOT
+C
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'TABLE   ')) THEN
+
+C
+C********** Message d'erreur standard
+C           -301 0 %m1:40
+C
+            MOTERR = '                                        '
+            MOTERR(1:7) = 'ARG1 . '
+            MOTERR(8:11) = NOMMOT
+            MOTERR(13:17) = '= ???'
+            WRITE(IOIMP,*) MOTERR
+C
+C********** Message d'erreur standard
+C           21 2
+C           Données incompatibles
+C
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+C
+C******* R
+C
+         MTYPI = 'MOT     '
+         MTYPR = '        '
+         CALL ACCTAB(IESP,MTYPI,IVALI,XVALI, 'R' , LOGII,IRETI,
+     &        MTYPR,IVALR, XVALR ,CHARR,LOGIR,IRETR)
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'FLOTTANT')) THEN
+
+C
+C********** Message d'erreur standard
+C           -301 0 %m1:40
+C
+            MOTERR = '                                        '
+            MOTERR(1:7) = 'ARG1 . '
+            MOTERR(8:11) = NOMMOT
+            MOTERR(13:23) = ' . R = ??? '
+            WRITE(IOIMP,*) MOTERR
+C
+C********** Message d'erreur standard
+C           21 2
+C           Données incompatibles
+C
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+         PROPHY.R(I1)=XVALR
+C
+C******* H0K
+C
+         MTYPI = 'MOT     '
+         MTYPR = '        '
+         CALL ACCTAB(IESP,MTYPI,IVALI,XVALI, 'H0K' , LOGII,IRETI,
+     &        MTYPR,IVALR, XVALR ,CHARR,LOGIR,IRETR)
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'FLOTTANT')) THEN
+
+C
+C********** Message d'erreur standard
+C           -301 0 %m1:40
+C
+            MOTERR = '                                        '
+            MOTERR(1:7) = 'ARG1 . '
+            MOTERR(8:11) = NOMMOT
+            MOTERR(13:25) = ' . H0K = ??? '
+            WRITE(IOIMP,*) MOTERR
+C
+C********** Message d'erreur standard
+C           21 2
+C           Données incompatibles
+C
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+C-------------------------------------
+C Attention! we put all h_k^0 to 0.0D0
+C all chemistry goes to the source term
+C-------------------------------------
+c         PROPHY.H0K(I1)=XVALR
+         PROPHY.H0K(I1)=0.0D0
+C
+C******* CDIFF
+C
+         MTYPI = 'MOT     '
+         MTYPR = '        '
+         CALL ACCTAB(IESP,MTYPI,IVALI,XVALI, 'CDIFF' , LOGII,IRETI,
+     &        MTYPR,IVALR, XVALR ,CHARR,LOGIR,IRETR)
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'CHPOINT ')) THEN
+
+C
+C********** Message d'erreur standard
+C           -301 0 %m1:40
+C
+            MOTERR = '                                        '
+            MOTERR(1:7) = 'ARG1 . '
+            MOTERR(8:11) = NOMMOT
+            MOTERR(13:25) = ' . CDIFF = ??'
+            WRITE(IOIMP,*) MOTERR
+C
+C********** Message d'erreur standard
+C           21 2
+C           Données incompatibles
+C
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+         PROPHY.CDIFF(I1)=IRETR
+C
+C******* A
+C
+         MTYPI = 'MOT     '
+         MTYPR = '        '
+         CALL ACCTAB(IESP,MTYPI,IVALI,XVALI, 'A' , LOGII,IRETI,
+     &        MTYPR,IVALR, XVALR ,CHARR,LOGIR,IRETR)
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'LISTREEL')) THEN
+
+C
+C********** Message d'erreur standard
+C           -301 0 %m1:40
+C
+            MOTERR = '                                        '
+            MOTERR(1:7) = 'ARG1 . '
+            MOTERR(8:11) = NOMMOT
+            MOTERR(13:23) = ' . A = ??? '
+            WRITE(IOIMP,*) MOTERR
+C
+C********** Message d'erreur standard
+C           21 2
+C           Données incompatibles
+C
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+         MLREEL = IRETR
+         SEGACT MLREEL
+         PROPHY.CV(I1)=MLREEL.PROG(1)
+         SEGDES MLREEL
+C
+C******* YK
+C
+         MTYPI = 'MOT     '
+         MTYPR = '        '
+         CALL ACCTAB(IESP,MTYPI,IVALI,XVALI, 'YK' , LOGII,IRETI,
+     &        MTYPR,IVALR, XVALR ,CHARR,LOGIR,IRETR)
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'CHPOINT ')) THEN
+
+C
+C********** Message d'erreur standard
+C           -301 0 %m1:40
+C
+            MOTERR = '                                        '
+            MOTERR(1:7) = 'ARG1 . '
+            MOTERR(8:11) = NOMMOT
+            MOTERR(13:28) = ' . YK = ??? '
+            WRITE(IOIMP,*) MOTERR
+C
+C********** Message d'erreur standard
+C           21 2
+C           Données incompatibles
+C
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+         PROPHY.YK(I1)=IRETR
+C
+C******* GRADYK
+C
+         MTYPI = 'MOT     '
+         MTYPR = '        '
+         CALL ACCTAB(IESP,MTYPI,IVALI,XVALI, 'GRADYK' , LOGII,IRETI,
+     &        MTYPR,IVALR, XVALR ,CHARR,LOGIR,IRETR)
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'CHPOINT ')) THEN
+
+C
+C********** Message d'erreur standard
+C           -301 0 %m1:40
+C
+            MOTERR = '                                        '
+            MOTERR(1:7) = 'ARG1 . '
+            MOTERR(8:11) = NOMMOT
+            MOTERR(13:28) = ' . GRADYK = ??? '
+            WRITE(IOIMP,*) MOTERR
+C
+C********** Message d'erreur standard
+C           21 2
+C           Données incompatibles
+C
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+         PROPHY.GRADYK(I1)=IRETR
+C
+C******* CGRYK
+C
+         MTYPI = 'MOT     '
+         MTYPR = '        '
+         CALL ACCTAB(IESP,MTYPI,IVALI,XVALI, 'CGRYK' , LOGII,IRETI,
+     &        MTYPR,IVALR, XVALR ,CHARR,LOGIR,IRETR)
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'MCHAML  ')) THEN
+
+C
+C********** Message d'erreur standard
+C           -301 0 %m1:40
+C
+            MOTERR = '                                        '
+            MOTERR(1:7) = 'ARG1 . '
+            MOTERR(8:11) = NOMMOT
+            MOTERR(13:28) = ' . CGRYK = ??? '
+            WRITE(IOIMP,*) MOTERR
+C
+C********** Message d'erreur standard
+C           21 2
+C           Données incompatibles
+C
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+         PROPHY.CGRYK(I1)=IRETR
+C
+C******* CLYK
+C
+         MTYPI = 'MOT     '
+         MTYPR = '        '
+         CALL ACCTAB(IESP,MTYPI,IVALI,XVALI, 'CLYK' , LOGII,IRETI,
+     &        MTYPR,IVALR, XVALR ,CHARR,LOGIR,IRETR)
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'CHPOINT ')) THEN
+
+            IF (MTYPR .NE. '        ') THEN
+C
+C********** Message d'erreur standard
+C           -301 0 %m1:40
+C
+               MOTERR = '                                        '
+               MOTERR(1:7) = 'ARG1 . '
+               MOTERR(8:11) = NOMMOT
+               MOTERR(13:28) = ' . CLYK = ??? '
+               WRITE(IOIMP,*) MOTERR
+C
+C********** Message d'erreur standard
+C           21 2
+C           Données incompatibles
+C
+               CALL ERREUR(21)
+               GOTO 9999
+            ENDIF
+            IRETR = 0
+         ELSE
+            MCHPOI = IRETR
+            SEGACT MCHPOI
+            NSOUPO = MCHPOI.IPCHP(/1)
+            SEGDES MCHPOI
+            IF(NSOUPO .GT.0)THEN
+               JGN = 4
+               JGM = 1
+               SEGINI MLMNOM
+               MLMNOM.MOTS(1) = 'SCAL'
+               CALL QUEPO1(IRETR, 0, MLMNOM)
+               IF(IERR .NE. 0) GOTO 9999
+               SEGSUP MLMNOM
+            ELSE
+               IRETR=0
+            ENDIF
+         ENDIF
+         PROPHY.CLYK(I1)=IRETR
+ 3    CONTINUE
+      SEGDES PROPHY
+C
+C**** La table IPGAZ donc a ete controllee et PROPHY est rempli
+C
+C
+C**** Viscosité dynamique (kg/m/sec)
+C
+      TYPE = 'CHPOINT '
+      CALL LIROBJ(TYPE,MU,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+      INDIC = 1
+      NBCOMP = 1
+      MOT = 'SCAL'
+      CALL QUEPOI(MU, MELEMC, INDIC, NBCOMP, MOT)
+C
+C**** Conductivité thermique (J/sec/m/K)
+C
+      TYPE = 'CHPOINT '
+      CALL LIROBJ(TYPE,KAPPA,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+      INDIC = 1
+      NBCOMP = 1
+      MOT = 'SCAL'
+      CALL QUEPOI(KAPPA, MELEMC, INDIC, NBCOMP, MOT)
+C
+C**** Chaleur specifique (J/kg/K)
+C
+      TYPE = 'CHPOINT '
+      CALL LIROBJ(TYPE,CVTOT,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+      INDIC = 1
+      NBCOMP = 1
+      MOT = 'SCAL'
+      CALL QUEPOI(CVTOT, MELEMC, INDIC, NBCOMP, MOT)
+C
+C**** Densité
+C
+      TYPE = 'CHPOINT '
+      CALL LIROBJ(TYPE,IRN,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+      INDIC = 1
+      NBCOMP = 1
+      MOT = 'SCAL'
+      CALL QUEPOI(IRN, MELEMC, INDIC, NBCOMP, MOT)
+C
+C**** Vitesse
+C
+      TYPE='CHPOINT '
+      CALL LIROBJ(TYPE,IVN,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+      JGN = 4
+      JGM = IDIM
+      SEGINI MLMNOM
+      MLMNOM.MOTS(1) = 'UX  '
+      MLMNOM.MOTS(2) = 'UY  '
+      IF(IDIM.EQ.3) MLMNOM.MOTS(3) = 'UZ  '
+      CALL QUEPO1(IVN, MELEMC, MLMNOM)
+      IF(IERR .NE. 0) GOTO 9999
+      SEGSUP MLMNOM
+C
+C**** Température
+C
+      TYPE='CHPOINT '
+      CALL LIROBJ(TYPE,ITN,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+      JGN = 4
+      JGM = 1
+      SEGINI MLMNOM
+      MLMNOM.MOTS(1) = 'SCAL'
+      CALL QUEPO1(ITN, MELEMC, MLMNOM)
+      IF(IERR .NE. 0) GOTO 9999
+      SEGSUP MLMNOM
+C
+C**** Gradient de la vitesse
+C
+      TYPE='CHPOINT '
+      CALL LIROBJ(TYPE,IGRVN,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+      JGN = 4
+      JGM =IDIM*IDIM
+      SEGINI MLMNOM
+      IF(IDIM.EQ.2)THEN
+         MLMNOM.MOTS(1) = 'P1DX'
+         MLMNOM.MOTS(2) = 'P1DY'
+         MLMNOM.MOTS(3) = 'P2DX'
+         MLMNOM.MOTS(4) = 'P2DY'
+      ELSE
+         MLMNOM.MOTS(1) = 'P1DX'
+         MLMNOM.MOTS(2) = 'P1DY'
+         MLMNOM.MOTS(3) = 'P1DZ'
+         MLMNOM.MOTS(4) = 'P2DX'
+         MLMNOM.MOTS(5) = 'P2DY'
+         MLMNOM.MOTS(6) = 'P2DZ'
+         MLMNOM.MOTS(7) = 'P3DX'
+         MLMNOM.MOTS(8) = 'P3DY'
+         MLMNOM.MOTS(9) = 'P3DZ'
+      ENDIF
+      CALL QUEPO1(IGRVN, MELEMF, MLMNOM)
+      IF(IERR .NE. 0) GOTO 9999
+      SEGSUP MLMNOM
+C
+C**** Gradient de la temperature
+C
+      TYPE='CHPOINT '
+      CALL LIROBJ(TYPE,IGRTN,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+      JGN = 4
+      JGM=IDIM
+      SEGINI MLMNOM
+      MLMNOM.MOTS(1) = 'P1DX'
+      MLMNOM.MOTS(2) = 'P1DY'
+      IF(IDIM.EQ.3) MLMNOM.MOTS(3) = 'P1DZ  '
+      CALL QUEPO1(IGRTN, MELEMF, MLMNOM)
+      IF(IERR .NE. 0) GOTO 9999
+      SEGSUP MLMNOM
+C
+C
+      IF (LOGIMP) THEN
+         CALL LIROBJ('MCHAML  ',ICOGRV,1,IRET)
+         IF(IERR .NE. 0) GOTO 9999
+      ENDIF
+C
+C
+      IF (LOGIMP) THEN
+         CALL LIROBJ('MCHAML  ',ICOGRT,1,IRET)
+         IF(IERR .NE. 0) GOTO 9999
+      ENDIF
+C--------------------------------------------------
+C**** Conditions limites
+C--------------------------------------------------
+C     Vitesse imposée à la paroi
+C
+      CALL LIRCHA(MOT,0,IRET)
+      IF(IRET .NE. 0)THEN
+         IF(MOT .EQ. 'VIMP')THEN
+            TYPE='CHPOINT '
+            CALL LIROBJ(TYPE,IVNIMP,1,IRET)
+            IF(IERR .NE. 0) GOTO 9999
+            MCHPOI = IVNIMP
+            SEGACT MCHPOI
+            NSOUPO = MCHPOI.IPCHP(/1)
+            SEGDES MCHPOI
+            IF(NSOUPO .GT. 0)THEN
+               JGN = 4
+               JGM = IDIM
+               SEGINI MLMNOM
+               MLMNOM.MOTS(1) = 'UX  '
+               MLMNOM.MOTS(2) = 'UY  '
+               IF(IDIM.EQ.3) MLMNOM.MOTS(3) = 'UZ  '
+               CALL QUEPO1(IVNIMP, 0, MLMNOM)
+               IF(IERR .NE. 0) GOTO 9999
+               SEGSUP MLMNOM
+            ELSE
+               IVNIMP=0
+            ENDIF
+         ELSE
+            IVNIMP=0
+C
+C********** Je m'excuse et je le remets dans la pile
+C
+            CALL REFUS
+         ENDIF
+      ELSE
+         IVNIMP=0
+      ENDIF
+C
+C     Tenseur des contraintes visqueux
+C
+      CALL LIRCHA(MOT,0,IRET)
+      IF(IRET .NE. 0)THEN
+         IF(MOT .EQ. 'TAUI')THEN
+            TYPE='CHPOINT '
+            CALL LIROBJ(TYPE,ITAUIM,1,IRET)
+            IF(IERR .NE. 0) GOTO 9999
+            MCHPOI = ITAUIM
+            SEGACT MCHPOI
+            NSOUPO = MCHPOI.IPCHP(/1)
+            SEGDES MCHPOI
+            IF(NSOUPO .GT. 0)THEN
+               JGN = 4
+C           2D only
+               JGM = 3*(IDIM-1)
+               SEGINI MLMNOM
+               IF(IDIM .EQ.2)THEN
+                  MLMNOM.MOTS(1) = 'TXX'
+                  MLMNOM.MOTS(2) = 'TYY'
+                  MLMNOM.MOTS(3) = 'TXY'
+               ELSE
+                  MLMNOM.MOTS(1) = 'TXX'
+                  MLMNOM.MOTS(2) = 'TYY'
+                  MLMNOM.MOTS(3) = 'TZZ'
+                  MLMNOM.MOTS(4) = 'TXY'
+                  MLMNOM.MOTS(5) = 'TXZ'
+                  MLMNOM.MOTS(6) = 'TYZ'
+               ENDIF
+               CALL QUEPO1(ITAUIM, 0, MLMNOM)
+               IF(IERR .NE. 0) GOTO 9999
+               SEGSUP MLMNOM
+            ELSE
+               ITAUIM=0
+            ENDIF
+         ELSE
+            ITAUIM=0
+C
+C********** Je m'excuse et je le remets dans la pile
+C
+            CALL REFUS
+         ENDIF
+      ELSE
+         ITAUIM=0
+      ENDIF
+C
+C     Flux thermique
+C
+      CALL LIRCHA(MOT,0,IRET)
+      IF(IRET .NE. 0)THEN
+         IF(MOT .EQ. 'QIMP')THEN
+            TYPE='CHPOINT '
+            CALL LIROBJ(TYPE,IQIMP,1,IRET)
+            IF(IERR .NE. 0) GOTO 9999
+            MCHPOI = IQIMP
+            SEGACT MCHPOI
+            NSOUPO = MCHPOI.IPCHP(/1)
+            SEGDES MCHPOI
+            IF(NSOUPO .GT.0)THEN
+               JGN = 4
+               JGM = IDIM
+               SEGINI MLMNOM
+               MLMNOM.MOTS(1) = 'UX  '
+               MLMNOM.MOTS(2) = 'UY  '
+               IF(IDIM .EQ. 3) MLMNOM.MOTS(3) = 'UZ  '
+               CALL QUEPO1(IQIMP, 0, MLMNOM)
+               IF(IERR .NE. 0) GOTO 9999
+               SEGSUP MLMNOM
+            ELSE
+               IQIMP=0
+            ENDIF
+         ELSE
+            IQIMP=0
+C
+C********** Je m'excuse et je le remets dans la pile
+C
+            CALL REFUS
+         ENDIF
+      ELSE
+         IQIMP=0
+      ENDIF
+C
+C     Température imposée
+C
+      CALL LIRCHA(MOT,0,IRET)
+      IF(IRET .NE. 0)THEN
+         IF(MOT .EQ. 'TIMP')THEN
+            TYPE='CHPOINT '
+            CALL LIROBJ(TYPE,ITIMP,1,IRET)
+            IF(IERR .NE. 0) GOTO 9999
+            MCHPOI = ITIMP
+            SEGACT MCHPOI
+            NSOUPO = MCHPOI.IPCHP(/1)
+            SEGDES MCHPOI
+            IF(NSOUPO .GT.0)THEN
+               JGN = 4
+               JGM = 1
+               SEGINI MLMNOM
+               MLMNOM.MOTS(1) = 'SCAL'
+               CALL QUEPO1(ITIMP, 0, MLMNOM)
+               IF(IERR .NE. 0) GOTO 9999
+               SEGSUP MLMNOM
+            ELSE
+               ITIMP=0
+            ENDIF
+         ELSE
+            ITIMP=0
+C
+C********** Je m'excuse et je le remets dans la pile
+C
+            CALL REFUS
+         ENDIF
+      ELSE
+         ITIMP=0
+      ENDIF
+C
+C     Densité imposée
+C
+      CALL LIRCHA(MOT,0,IRET)
+      IF(IRET .NE. 0)THEN
+         IF(MOT .EQ. 'RIMP')THEN
+            TYPE='CHPOINT '
+            CALL LIROBJ(TYPE,IRIMP,1,IRET)
+            IF(IERR .NE. 0) GOTO 9999
+            MCHPOI = IRIMP
+            SEGACT MCHPOI
+            NSOUPO = MCHPOI.IPCHP(/1)
+            SEGDES MCHPOI
+            IF(NSOUPO .GT.0)THEN
+               JGN = 4
+               JGM = 1
+               SEGINI MLMNOM
+               MLMNOM.MOTS(1) = 'SCAL'
+               CALL QUEPO1(IRIMP, 0, MLMNOM)
+               IF(IERR .NE. 0) GOTO 9999
+               SEGSUP MLMNOM
+            ELSE
+               IRIMP=0
+            ENDIF
+         ELSE
+            IRIMP=0
+C
+C********** Je m'excuse et je le remets dans la pile
+C
+            CALL REFUS
+         ENDIF
+      ELSE
+         IRIMP=0
+      ENDIF
+C
+C**** Les noms des inconnues
+C
+      TYPE='LISTMOTS'
+      CALL LIROBJ(TYPE,ILIINC,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+      MLMOTS = ILIINC
+      SEGACT MLMOTS
+      NC = MLMOTS.MOTS(/2)
+      SEGDES MLMOTS
+      IF(NC .EQ. (IDIM+4+NESP)) IKEPS = 1
+      IF(IKEPS .EQ. 0) THEN
+         IF((NC .NE. (IDIM+2+NESP)))THEN
+            MESERR='LMOT1 = ???                         '
+            WRITE(IOIMP,*) MESERR
+C
+C********** Message d'erreur standard
+C           21 2
+C           Données incompatibles
+C
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+      ENDIF
+*!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+      IF(IKEPS .GT. 0) THEN
+C************************************************************
+C     The turbulent kinetic energy and rate of dissipation
+C------------------------------------------------------------
+        MTYPI = 'MOT     '
+        MTYPR = '        '
+        CALL ACCTAB(IPGAZ,MTYPI,IVALI,XVALI,'MUTURB',LOGII,IRETI,
+     &               MTYPR,IVALR,XVALR,CHARR,LOGIR,IRETR)
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'CHPOINT ')) THEN
+C------------------------------
+C Message d'erreur standard
+C -301 0 %m1:40
+C------------------------------
+            MOTERR = 'TAB1 . MUTURB = ???      '
+            WRITE(IOIMP,*) MOTERR(1:40)
+C------------------------------
+C Message d'erreur standard
+C 21 2
+C Données incompatibles
+C------------------------------
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+         MUT = IRETR
+         INDIC = 1
+         NBCOMP = 1
+         MOT = 'SCAL'
+         CALL QUEPOI(MUT, MELEMC, INDIC, NBCOMP, MOT)
+C--------- \sigma_ka
+        CALL ACMF(IPGAZ,'SIGK',XVALR)
+        TSIGK = XVALR
+C--------- \sigma_eps
+        CALL ACMF(IPGAZ,'SIGE',XVALR)
+        TSIGE = XVALR
+C--------------------------------------------
+C  Creating the "new" turbulence for momentum
+C  equations \mu_n = \mu + \mu_t
+C--------------------------------------------
+        CALL ADCHPO(MU,MUT,MUN,1.D0,1.D0)
+C*************************************************************
+C The gradient at the faces of the turb. kin. en. and epsilon
+C-------------------------------------------------------------
+       TYPE='CHPOINT '
+       CALL LIROBJ(TYPE,IGRKEP,1,IRET)
+       IF(IERR .NE. 0) GOTO 9999
+       JGN = 4
+       IF(IDIM.EQ.2) THEN
+         JGM = 4
+       ELSE
+         JGM = 6
+       ENDIF
+       SEGINI MLMNOM
+       IF(IDIM.EQ.2)THEN
+         MLMNOM.MOTS(1) = 'P1DX'
+         MLMNOM.MOTS(2) = 'P1DY'
+         MLMNOM.MOTS(3) = 'P2DX'
+         MLMNOM.MOTS(4) = 'P2DY'
+       ELSE
+         MLMNOM.MOTS(1) = 'P1DX'
+         MLMNOM.MOTS(2) = 'P1DY'
+         MLMNOM.MOTS(3) = 'P1DZ'
+         MLMNOM.MOTS(4) = 'P2DX'
+         MLMNOM.MOTS(5) = 'P2DY'
+         MLMNOM.MOTS(6) = 'P2DZ'
+       ENDIF
+       CALL QUEPO1(IGRKEP, MELEMF, MLMNOM)
+       IF(IERR .NE. 0) GOTO 9999
+       SEGSUP MLMNOM
+C-------------------------------------------
+C End of reading of the additional information
+C needed for the turbulent terms
+C-------------------------------------------
+      ENDIF
+C--------------------------------
+C Fin de la lecture des données
+C--------------------------------
+C
+C Création de la matrice jacobienne du résidu du laplacien VF
+C
+      IF (LOGIMP) THEN
+         IF (IDIM.EQ.2) THEN
+            CALL XLAP1A(MU,KAPPA,CVTOT,IRN,IVN,ITN,
+     $           IGRVN,ICOGRV,ICOGRT,
+     $           IVNIMP,ITAUIM,ITIMP,IQIMP,
+     $           MELEMC,MELEMF,MELEFL,ICHPSU,INORM,ICHPVO,MLMOTS,
+     $           IJACO)
+            CALL ZLAP1A(PROPHY,IRN,ITN,
+     $           ITIMP,IRIMP,
+     $           MELEMC,MELEMF,MELEFL,ICHPSU,INORM,ICHPVO,MLMOTS,
+     $           IJACO)
+          ELSEIF (IDIM.EQ.3) THEN
+            CALL XLAP2A(MU,KAPPA,CVTOT,IRN,IVN,ITN,
+     $           IGRVN,ICOGRV,ICOGRT,
+     $           IVNIMP,ITAUIM,ITIMP,IQIMP,
+     $           MELEMC,MELEMF,MELEFL,ICHPSU,INORM,ICHPVO,MLMOTS,
+     $           IJACO)
+            CALL ZLAP2A(PROPHY,IRN,ITN,
+     $           ITIMP,IRIMP,
+     $           MELEMC,MELEMF,MELEFL,ICHPSU,INORM,ICHPVO,MLMOTS,
+     $           IJACO)
+          ELSE
+             WRITE(IOIMP,*) 'IDIM=',IDIM,' ILLICITE.'
+             CALL ERREUR(5)
+             GOTO 9999
+          ENDIF
+       ELSE
+C
+C******* Objet MATRIK vide en explicite
+C
+         NRIGE=7
+         NMATRI=0
+         NKID =9
+         NKMT =7
+         SEGINI MATRIK
+         SEGDES MATRIK
+         IJACO = MATRIK
+       ENDIF
+C
+C**** Creation des flux aux interfaces
+C
+      JGN=4
+      JGM=IDIM+NESP+1
+      IF(IKEPS .GT. 0) JGM=IDIM+NESP+3
+      SEGINI MLDEFO
+      SEGACT MLMOTS
+      DO ICELL=1,JGM,1
+         MLDEFO.MOTS(ICELL)=MLMOTS.MOTS(ICELL+1)
+      ENDDO
+      SEGDES MLMOTS
+      TYPE = 'CHPOINT '
+      CALL KRCHP1(TYPE, MELEMF, ICHFLU, MLDEFO)
+      CALL KRCHP1(TYPE, MELEMF, ICHFL2, MLDEFO)
+      IF(IKEPS .GT. 0) THEN
+        CALL KRCHP1(TYPE, MELEMF, ICHFL3, MLDEFO)
+      ENDIF
+C
+C**** Calcul des flux et du pas du temps.
+C
+      IF(IDIM.EQ.2)THEN
+       IF(IKEPS .GT. 0) THEN
+         CALL XLAP12(MUN,KAPPA,CVTOT,IRN,IVN,IGRVN,IGRTN,
+     &        IVNIMP,ITAUIM,IQIMP,
+     &        MELEMC,MELEMF,MELEFL,ICHPSU,INORM,ICHPDI,ICHFLU,DELTAT)
+       ELSE
+         CALL XLAP12(MU,KAPPA,CVTOT,IRN,IVN,IGRVN,IGRTN,
+     &        IVNIMP,ITAUIM,IQIMP,
+     &        MELEMC,MELEMF,MELEFL,ICHPSU,INORM,ICHPDI,ICHFLU,DELTAT)
+       ENDIF
+         CALL ZLAP12(PROPHY,IRN,ITN,
+     &        ITIMP,IRIMP,
+     &        MELEMC,MELEMF,MELEFL,ICHPSU,INORM,ICHPDI,ICHFL2,DELTA2)
+         IF(IKEPS .GT. 0) THEN
+           CALL TLAP12(NESP,MU,MUT,TSIGK,TSIGE,IGRKEP,
+     &        MELEMC,MELEMF,MELEFL,ICHPSU,INORM,ICHPDI,ICHFL3,DELTA3)
+         ENDIF
+C------------------------------------------
+C ET sur les chpoints
+C------------------------------------------
+         CALL ADCHPO(ICHFLU,ICHFL2,ICHTM1,1.D0,1.D0)
+         IF (ICHTM1.EQ.0) THEN
+            WRITE(IOIMP,*) 'Pas pu faire le ET des chpoints...'
+            GOTO 9999
+         ENDIF
+         IF(IKEPS .GT. 0) THEN
+           CALL ADCHPO(ICHTM1,ICHFL3,ICHTMP,1.D0,1.D0)
+           IF (ICHTMP.EQ.0) THEN
+            WRITE(IOIMP,*) 'Pas pu faire le ET des chpoints...'
+            GOTO 9999
+           ENDIF
+         ENDIF
+         CALL DTCHPO(ICHFLU)
+         CALL DTCHPO(ICHFL2)
+         IF(IKEPS .GT. 0) THEN
+           CALL DTCHPO(ICHFL3)
+           CALL DTCHPO(ICHTM1)
+           ICHFLU=ICHTMP
+           DELTAT=MIN(DELTAT,DELTA2)
+         ELSE
+           ICHFLU=ICHTM1
+           DELTAT=MIN(DELTAT,DELTA2)
+         ENDIF
+      ELSE
+c----------------------------------------
+        IF(IKEPS .GT. 0) THEN
+         CALL XLAP13(MUN,KAPPA,CVTOT,IRN,IVN,IGRVN,IGRTN,
+     &        IVNIMP,ITAUIM,IQIMP,
+     &        MELEMC,MELEMF,MELEFL,ICHPSU,INORM,ICHPDI,ICHFLU,DELTAT)
+        ELSE
+         CALL XLAP13(MU,KAPPA,CVTOT,IRN,IVN,IGRVN,IGRTN,
+     &        IVNIMP,ITAUIM,IQIMP,
+     &        MELEMC,MELEMF,MELEFL,ICHPSU,INORM,ICHPDI,ICHFLU,DELTAT)
+        ENDIF
+c----------------------------------------
+         CALL ZLAP13(PROPHY,IRN,ITN,
+     &        ITIMP,IRIMP,
+     &        MELEMC,MELEMF,MELEFL,ICHPSU,INORM,ICHPDI,ICHFL2,DELTA2)
+         IF(IKEPS .GT. 0) THEN
+           CALL TLAP13(NESP,MU,MUT,TSIGK,TSIGE,IGRKEP,
+     &        MELEMC,MELEMF,MELEFL,ICHPSU,INORM,ICHPDI,ICHFL3,DELTA3)
+         ENDIF
+C---------------------------------------------------------
+C ET sur les chpoints
+C---------------------------------------------------------
+         CALL ADCHPO(ICHFLU,ICHFL2,ICHTM1,1.D0,1.D0)
+         IF (ICHTM1.EQ.0) THEN
+            WRITE(IOIMP,*) 'Pas pu faire le ET des chpoints...'
+            GOTO 9999
+         ENDIF
+         IF(IKEPS .GT. 0) THEN
+           CALL ADCHPO(ICHTM1,ICHFL3,ICHTMP,1.D0,1.D0)
+           IF (ICHTMP.EQ.0) THEN
+             WRITE(IOIMP,*) 'Pas pu faire le ET des chpoints...'
+             GOTO 9999
+           ENDIF
+         ENDIF
+         CALL DTCHPO(ICHFLU)
+         CALL DTCHPO(ICHFL2)
+         IF(IKEPS .GT. 0) THEN
+           CALL DTCHPO(ICHFL3)
+           CALL DTCHPO(ICHTM1)
+           ICHFLU=ICHTMP
+           DELTAT=MIN(DELTAT,DELTA2)
+         ELSE
+           ICHFLU=ICHTM1
+           DELTAT=MIN(DELTAT,DELTA2)
+         ENDIF
+      ENDIF
+      IF(IERR .NE. 0)GOTO 9999
+C
+C**** Calcul de residu (si LOGRES = .TRUE.)
+C
+      IF(LOGRES)THEN
+         TYPE = 'CHPOINT '
+         CALL KRCHP1(TYPE, MELEMC, ICHRES, MLDEFO)
+         IF(IERR.NE.0) GOTO 9999
+C
+         CALL KONRE1(MELEMC,MELEMF,MELEFL,ICHPVO,
+     &        ICHFLU, ICHRES,
+     &        LOGAN,MESERR)
+         IF(LOGAN)THEN
+C
+C******* Anomalie detectée
+C
+C
+C******* Message d'erreur standard
+C        -301 0
+C        %m1:40
+C
+            MOTERR(1:40) =  MESERR(1:40)
+            WRITE(IOIMP,*) MOTERR(1:40)
+C
+C******* Message d'erreur standard
+C        5 3
+C        Erreur anormale.contactez votre support
+C
+            CALL ERREUR(5)
+            GOTO 9999
+         ENDIF
+      ELSE
+         SEGSUP MLDEFO
+         ICHRES = 0
+      ENDIF
+C
+C**** Sortie
+C
+      CALL ECRREE(DELTAT)
+      TYPE = 'CHPOINT '
+*      IF(ICHRES .NE. 0) CALL ECROBJ(TYPE,ICHRES)
+*      IF(ICHFLU .NE. 0) CALL ECROBJ(TYPE,ICHFLU)
+      CALL ECROBJ(TYPE,ICHRES)
+      TYPE='MATRIK '
+      CALL ECROBJ(TYPE,IJACO)
+C
+ 9999 RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

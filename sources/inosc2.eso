@@ -1,0 +1,359 @@
+C INOSC2    SOURCE    PV        15/04/13    21:15:11     8474
+CREAD  INOSC1   SOURCE   A1 GIBI   06/12/89 12:32:19
+C INOSC1    SOURCE    CHAT      89/06/01    22:06:52
+      SUBROUTINE INOSC2(IPT,IPG,DFREQ,XSI,RMAX,TMAX,
+     1               DIMALI,DUCTIL,
+     2        ALFA,BETA,GAMA,TETA,imod,idema,epse)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+C
+C     =====================================================
+C                                                         =
+C     CALCUL DU MAXIMUM DE LA REPONSE A  UN SIGNAL  D'UN  =
+C     OSCILLATEUR NON LINEAIRE AVEC CONDITIONS INITIALES  =
+C     EN VITESSE ET EN DEPLACEMENT NULLES.                =
+C                                                         =
+C     CREATION : 15/06/90                                 =
+C     PROGRAMMEUR : A.PINTO AND P.PEGON [ISPRA(I)]        =
+C     INSPIREE SUR LA SUBROUTINE 'INOSC1' DE 03/06/87     =
+c
+c     I.P 05/98 ajout du modele bilineaire, iterations sur
+c               la ductilite, changement du modèle Takeda
+C                                                         =
+c    imod = 1 : modele takeda
+c           2          elastoplastique ecrouissage isotrope
+c           3          elastoplastique ecrouissage cinematique
+c           4          elastique nl
+C     =====================================================
+C
+-INC CCOPTIO
+-INC SMLREEL
+-INC CCREEL
+
+* quelques tableaux pour les variables internes du modèle Takeda
+      REAL*8 VAR0(21),VARF(21)
+* qques tableaux mour utiliser le meme s_p que DYNE (dychec)
+      REAL*8 XABSCI(1,4),XORDON(1,4)
+
+
+
+      MLREE1=IPT
+      SEGACT MLREE1
+      MLREE2=IPG
+      SEGACT MLREE2
+      NN=MLREE1.PROG(/1)
+
+C
+C     DIFFERENCE ENTRE LES 2 PREMIERS TEMPS SUCCESSIFS : DLTF
+C              (PAS DE TEMP CONSTANT)
+C
+      DLTF=MLREE1.PROG(2)-MLREE1.PROG(1)
+**    precision
+      epsi = .05d0
+      prec = 1d-3
+      iprec = 0
+      nitmax = 30
+
+C
+C     CALCUL DE CONSTANTES UTILES
+C
+      W=2*XPI*DFREQ
+      W2=W*W
+
+C
+C        CALCULO DOS COEFICIENTES DE IWAN
+C        ================================
+        DW=XSI*W
+        D2=XSI*XSI
+        A0=EXP(-DW*DLTF)
+        A1=W*SQRT(1.0d0-D2)
+        AD1=A1*DLTF
+        A2=SIN(AD1)
+        A3=COS(AD1)
+        A4=(2.0d0*D2-1.0d0)/W2
+        A5=XSI/W
+        A6=2.0d0*A5/W2
+        A7=1.0d0/W2
+        A8=(A1*A3-DW*A2)*A0
+        A9=-(A1*A2+DW*A3)*A0
+        A10=A8/A1
+        A30=A0/A1
+        A12=A30*A2
+        A13=A0*A3
+        A14=A10*A4
+        A15=A12*A4
+        A16=A6*A13
+        A17=A9*A6
+        A11=A0*(DW*A2/A1+A3)
+        A21=A10*DW+A9
+        A22=A10
+        B11=(-A15-A16+A6)/DLTF-A12*A5-A7*A13
+        B12=(A15+A16-A6)/DLTF+A7
+        B21=(-A14-A17-A7)/DLTF-A10*A5-A9*A7
+        B22=(A14+A17+A7)/DLTF
+
+        ELAS0=W2
+        ELAS=ELAS0
+        ELAS1=ELAS0
+        if (imod.eq.1 .and. teta.le.0d0) teta = .0001d0
+        ELAS2=ELAS1*TETA
+
+* qques initialisations pour etre compatible avec dychec
+        xabsci(1,1) = 0.d0
+        xordon(1,1) = 0.d0
+        xjeu = 0d0
+        iperm = imod
+        if (imod.eq.4) iperm = -2
+        nl = 1
+        xamo = 0d0
+        iannul = 0
+        xvit = 0d0
+        nip = 4
+
+400     continue
+
+        iterm = 0
+        iterm2 = 0
+        ibisec = 0
+200     continue
+        iterm = iterm + 1
+        iterm2 = iterm2 + 1
+C
+C        INICIALIZACAO DE VARIAVEIS
+C        ==========================
+        F00=0.D0
+        F11=0.D0
+        D0=0.D0
+        V0=0.D0
+        FNMDV1=0.D0
+        FNMDV=0.D0
+        DES0=0.D0
+        FORC0=0.D0
+        RMAX=0.D0
+        epse= 0.d0
+        DY=DIMALI/DUCTIL
+        fy = dy*elas0
+        ITER=0
+* qques parametres de Takeda
+        dyn = -dy
+        fyn = -fy
+        fc = .999d0*fy
+        fcn = .999d0*fyn
+        pinp = beta*fy
+        pinn = beta*fyn
+        bp = gama/fy
+* qques parametres encore pour dychec
+      if (imod.ne.1) then
+        xabsci(1,2) = dy
+        xordon(1,2) = fy
+       if (elas2.ge.0d0) then
+         xabsci(1,3) = dy + dy
+         xordon(1,3)  = fy + elas2*dy
+         xabsci(1,4) = 3d0*dy
+         xordon(1,4) = fy + elas2*dy*2d0
+        else
+*        si raideur negative on considere un plateau a .01fy
+          xabsci(1,3) = -.9d0*fy/elas2 + dy
+          xordon(1,3) = .1d0*fy
+          xabsci(1,4) = 2d0*xabsci(1,3)
+          xordon(1,4) = .01d0*fy
+        endif
+        xdplas = 0d0
+        xdplac = 0d0
+       endif
+C
+C     CREATION DE LA BOUCLE
+C
+      DO 100 I=1,NN
+C
+C        INICIO DAS INTEGRACOES
+C        ======================
+*  force exterieure a la fin du pas precedent et courant
+         F00=F11
+         F11=-MLREE2.PROG(I)
+C         INICIO DA CONVERGENCIA
+C         ======================
+999         ITER=ITER+1
+*  on ajoute les forces nl au 2nd membre
+         F0=F00-FNMDV
+         F1=F11-FNMDV1
+         D1=A11*D0+A12*V0+B11*F0+B12*F1
+         V1=A21*D0+A22*V0+B21*F0+B22*F1
+
+C
+C         CALCULO DOS TERMOS NAO-LINEARES NO PASSO
+C         ========================================
+      DELTAD = D1 - D0
+      deltad=max(xpetit,deltad)
+
+      if (imod.ne.1) then
+
+        call DYCHEC(d1,XDPLAS,XDPLAC,XJEU,IPERM,XABSCI,
+     &           XORDON,nl,xfla,nl,NIP,XVIT,XAMO,iannul)
+        forca = -xfla
+
+       else
+* modele Takeda
+** quelques initialisations
+       forca = forc0
+      if (iter.eq.1) then
+       if (i.eq.1) then
+        do 1 ii = 1,21
+          var0(ii) = 0.d0
+1       continue
+       else
+        do 2 m = 1,21
+          var0(m) = VARF(m)
+2       continue
+       endif
+      endif
+
+      DO 3 k=1,21
+        VARF(k)=VAR0(k)
+3     CONTINUE
+      IFR1=INT(VARF(1))
+
+      IF(IFR1.EQ.0) THEN
+        IFR1 = 1
+        VARF(2)=elas0
+      ENDIF
+      DP1 = DELTAD * VARF(2)
+
+      CALL DDNSTH(IFR1,IFC1,DP1,FORCA,VARF(21),
+     * VARF(2),elas0,elas2,elas2,fc,fcn,fy,fyn,
+     * dy,dyn,alfa,alfa,pinp,pinn,bp,bp,
+     * VARF(3),VARF(4),VARF(5),
+     * VARF(6),VARF(7),VARF(8),VARF(9),
+     * VARF(10),VARF(11),VARF(12),VARF(13),
+     * VARF(14),VARF(15),VARF(16),VARF(17),
+     * VARF(18),VARF(19),VARF(20))
+
+      VARF(1)=DBLE(IFR1)
+
+      endif
+
+C         ANALISE DA CONVERGENCIA EM FORCA
+C         ================================
+* forces non lineaires à la fin de l'iteration courante
+         FICT=-D1*ELAS0+FORCA
+         ERRO=ABS((d1-des0)/deltad)
+         FNMDV1=FICT
+         DES0=D1
+
+C
+C        ANALISE DE CONVERGENCIA GLOBAL
+C        ==============================
+        IF(ERRO.gt.prec .and. ITER.lt.200) goto 999
+
+* valeurs  a la fin du pas
+        ITER=0
+        depse = abs(deltad - (forca - forc0)/elas0)
+        epse = epse + depse
+        FNMDV=FNMDV1
+        D0=D1
+        V0=V1
+        forc0 = forca
+
+         IF(ABS(D1).GT.RMAX)THEN
+                RMAX=ABS(D1)
+                TMAX=MLREE1.PROG(I)
+         ENDIF
+
+              IF(ITER.GT.200)THEN
+      print*,'SPON: temps :',MLREE1.PROG(I),'nb d iterations > 200'
+              ENDIF
+C
+100   CONTINUE
+
+      if (idema.eq.0) goto 300
+
+      duct2 = rmax/dy
+*
+**  petite correction de la limite elastique si elle est trop petite
+** (ca arrive pour des frequences elevees)
+**  pour une frequence tres grande ca revient a commencer les iterations
+**  avec une ductilite de 1./.9
+
+c      if (iterm2.eq.1) print*,'dfreq',dfreq
+c      print*,'duct2=',duct2,'iterm=',iterm,'iterm2=',iterm2,
+c     &           'freq=',dfreq
+
+c       print*,dimali,duct2
+
+
+      if (duct2.gt. (5d0*ductil).and.iterm.eq.1
+     &                .and. (abs(teta)).lt.1d0) then
+       if (iterm2.eq.1 .or.
+     &            (duct2.gt. (6d0*ductil).and.iterm2.le.3)) then
+        iterm = iterm - 1
+        dimali = dimali*(.9d0*ductil -
+     &           ((.9d0*ductil - 1)* exp(-.02*(duct2-5d0*ductil))))
+        goto 200
+       endif
+      endif
+
+        diaux1 = dimali
+
+      if ((abs(duct2 - ductil)).gt.
+     &            (epsi*ductil).and.iterm2.le.nitmax) then
+       if (iterm.eq.1) dimali = rmax
+       if (iterm.ge.2) then
+         aa = (duct2 - ductil)*(duct1-ductil)
+         if (aa.gt.0.d0. and. ibisec.eq.0) then
+            dimali = rmax
+         else if (ibisec.eq.0) then
+* premiere dichotomie
+          ibisec = 1
+          dimali = (dimali + dimal1)/2d0
+          ducaux = duct1
+          diaux2 = dimal1
+         else
+* dichotomies suivantes
+           aa2 = (duct2 - ductil)*(duct3-ductil)
+             if (aa.lt.0.d0) then
+               dimali = (dimali + dimal1)/2d0
+               ducaux = duct1
+               diaux2 = dimal1
+             else if (aa2.lt.0.d0) then
+               dimali = (dimali + dimal3)/2d0
+               ducaux = duct3
+               diaux2 = dimal3
+             else
+*  dans le cas ou la dichotomie ne marche pas
+              dimali = rmax
+             endif
+         endif
+       endif
+           duct1 = duct2
+           dimal1 = diaux1
+        if (ibisec.eq.1) then
+          duct3 = ducaux
+          dimal3 = diaux2
+        endif
+            goto200
+      else if  (iterm2.gt.nitmax) then
+* on essaie 2 fois encore avec un critere plus petit
+         if (iprec.le.1) then
+           prec = prec/10d0
+           iprec = iprec + 1
+           goto 400
+         endif
+           REAERR(1)=dfreq
+           REAERR(2)=duct2
+           CALL ERREUR(-326)
+      endif
+      rmax = dy
+
+300   continue
+      SEGDES MLREE1
+      SEGDES MLREE2
+
+
+      RETURN
+      END
+
+
+
+
+
+

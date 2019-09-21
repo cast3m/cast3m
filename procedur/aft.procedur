@@ -1,0 +1,631 @@
+$$$$ AFT
+* AFT       PROCEDUR  BP208322  16/09/01    21:15:01     9010
+*
+************************************************************************
+*
+* OBJET    : Calculer la force non-lineaire FNL et la derivee
+*            KNL = -dFNL/dX en basculant entre domaine temporel et
+*            frequentiel
+*            TFR : transformee de fourier rapide d'un listreel/listchpo
+*
+* ENTREE   :
+*   TABAFT = TABLE
+*    . 'WTABLE' . 'DEPLACEMENTS' = deplacement frequentiel actuel
+*    . 'N_HARMONIQUE'            = nombre d'harmonique
+*    . 'COEFF_FNL'               = coefficient de la force nl
+*    . 'HARM_FORCE'              = comp force par harmonique
+*    . 'HARM_COMP_DEP'           = comp dep par composante
+*    . 'HARM_COMP_FOR'           = comp force par composante
+*    . 'POINT_FNL'               = point ou applique la force nl
+*    . 'COMP_FNL'                = composante de la force nl
+*   LMOT1  = LISTMOTS de mots-clés définissant les actions a effectuer
+*            a choisir parmi { RESI, DRES }
+*
+* PROCEDURE APPELE:  CHARMECA
+*
+* SORTIE   :
+*    TNL1 = TABLE
+*   . 'ADDI_SECOND'             = force non-lineaire frequentiel
+*   . 'ADDI_MATRICE'            = derivee de la force nl frequentiel
+*
+* CREATION : L. Xie, 2014
+* MODIFS   : BP, 2016
+*
+* TODO (BP, 2016) : a terme, cette procedure devra etre transformee en
+*                   un operateur
+*
+************************************************************************
+DEBPROC AFT TABAFT*'TABLE' time*'FLOTTANT' LMOTAFT/'LISTMOTS' ;
+
+
+************************************************************************
+*         VERIFICATION DES DONNEES D'ENTREE + PREPARATIFS              *
+************************************************************************
+
+*coefficient de la force nl
+*
+* mess (chai 'AVANT AFT temps passé              : ' (temp 'NOEC'));
+IFCHPO = TABAFT . 'CALC_CHPO';
+SI (EXIS TABAFT . 'POINT_FNL');
+  Pnl = TABAFT . 'POINT_FNL';
+SINON;
+  MESS 'AFT: IL MANQUE LA GEOMETRIE NL DANS POINT_FNL'; ERRE 21;
+FINSI;
+ttype  = TYPE Pnl;
+SI (EGA ttype 'POINT');
+  nPnl = 1;
+FINSI;
+SI (EGA ttype 'MAILLAGE');
+  ltype  = ELEM Pnl 'TYPE';
+  si ( ((dime ltype) neg 1) OU (neg (extr ltype 1) 'POI1') );
+    mess 'AFT: POINT_FNL doit etre un POINT ou un MAILLAGE de POI1';
+    ERRE 21;
+  finsi;
+  nPnl = NBEL Pnl;
+FINSI;
+
+SI (EXIS TABAFT . 'COMP_FNL');
+  COMP_FNL = TABAFT . 'COMP_FNL';
+  n_CNL = DIME COMP_FNL;
+SINON;
+  MESS 'AFT: IL MANQUE LA COMPOSANTE NL dans COMP_FNL'; ERRE 21;
+FINSI;
+
+SI (EXIS TABAFT 'WTABLE');
+  WTAB = TABAFT . 'WTABLE';
+SINON;
+  MESS 'IL MANQUE LA WTABLE'; ERRE 21;
+FINSI;
+
+*DEPLACEMENTS FREQUENTIELS
+DEPTOT  = WTAB . 'DEPLACEMENTS';
+* mess 'aft: t='time ' et DEPTOT='; list DEPTOT;
+*
+SI (EXIS TABAFT 'N_HARMONIQUE');
+  nhbm = TABAFT . 'N_HARMONIQUE';
+SINON;
+  MESS 'IL MANQUE LE NOMBRE D HARMONIQUE'; ERRE 21;
+FINSI;
+*
+SI (EXIS TABAFT . 'COMPOSANTES' 'DEPLACEMENT');
+  NOMCOM = TABAFT . 'COMPOSANTES' . 'DEPLACEMENT';
+  ncom = DIME NOMCOM ;
+SINON;
+  MESS 'IL MANQUE LES NOMS DE COMPOSANTES'; ERRE 21;
+FINSI;
+
+SI (EXIS LMOTAFT);
+*   IFFNL = EXIS LMOTAFT 'RESI';
+*   IFKNL = EXIS LMOTAFT 'DRES';
+  IFFNL = (EXIS LMOTAFT 'RESI') ou (EXIS LMOTAFT 'DRES');
+  IFKNL = EXIS LMOTAFT 'RIGI';
+SINON;
+  IFFNL = VRAI;
+  IFKNL = FAUX;
+FINSI;
+
+* faut-il calculer les vitesses ?
+FLVITE = TAB1 . 'CALC_VITE';
+
+* pour la vitesse, on a besoin de la frequence w
+IFREQ = WTAB . 'FREQ_INCONNUE';
+si IFREQ;  wrads = WTAB . 'FREQ';
+sinon;     wrads = IPOL TAB1 . 'FREQUENCE' time;
+finsi;
+* wHz = IPOL TAB1 . 'FREQUENCE' time;
+* wrads = 2.*pi * wHz;
+
+*liste mots par harmonique
+NHBMU = TABAFT . 'COMPOSANTES' . 'HARM_DEPLACEMENT';
+NOMU0 = NHBMU . 0;
+NHBMF = TABAFT . 'COMPOSANTES'. 'HARM_FORCE';
+NOMF0 = NHBMF . 0;
+COMPU = TABAFT . 'COMPOSANTES'. 'HARM_COMP_DEP';
+COMPF = TABAFT . 'COMPOSANTES'. 'HARM_COMP_FOR';
+
+
+************************************************************************
+*               PARAMETRES TEMPORELS / FREQUENTIELS                    *
+************************************************************************
+
+* timew = time * 2. * pi;
+*bp tdegs = 360. * time ;
+tdegs = 360.  ;
+
+*nombre de point pendant une periode pour faire TFR
+OTFR = TABAFT . 'N_PT_TFR';
+NPTFR = 2**OTFR;
+*bp TDT = 1. / time ;
+TDT = 1.;
+dtDT = TDT / NPTFR ;
+
+* LISTES DES FONCTIONS TRIGONOMETRIQUES :
+*
+* LISTDT = listreel{ 0.    (1./2**OTFR) ...   1. }
+* LISDEG = listreel{ 0.  (360./2**OTFR) ... 360. }
+* pour u(t) :
+* LISCOS   . k = listreel{ ... cos(k*t_i) ... }
+* LISSIN   . k = listreel{ ... sin(k*t_i) ... }
+* TGAMMA   . i = listreel{ 1 ... cos(k*t_i) sin(k*t_i) ... }
+* pour v(t)=du(t)/dt :
+* LISCOS2  . k = listreel{ ... -k*sin(k*t_i) ... }
+* LISSIN2  . k = listreel{ ...  k*cos(k*t_i) ... }
+* TGAMMA_V . i = listreel{ 0 ... -k*sin(k*t_i) k*cos(k*t_i) ... }
+
+* on recupere si les listreels existent deja
+SI (EXIS WTAB 'LISTDT');
+    LISTDT = WTAB . 'LISTDT';
+    LISDEG = WTAB . 'LISDEG';
+    LISCOS = WTAB . 'LISCOS';
+    LISSIN = WTAB . 'LISSIN';
+    TGAMMA = WTAB . 'TGAMMA';
+    SI FLVITE;
+      LISCOS2 = WTAB . 'LISCOS_V';
+      LISSIN2 = WTAB . 'LISSIN_V';
+      TGAMMA_V = WTAB . 'TGAMMA_V';
+    FINSI;
+
+* on cree les listreels la premiere fois
+SINON;
+    LISTDT = PROG 0. pas dtDT (TDT) ;
+    LISDEG = tdegs * LISTDT;
+*   ---cas LISTREEL et cas calcul de la jacobienne KNL
+    LISCOS = TABLE;
+    LISSIN = TABLE;
+    LISCOS . 0 = COS (0 * LISDEG);
+    REPE BCOS nhbm; ik = &BCOS;
+      LISCOS . ik = COS (ik * LISDEG);
+      LISSIN . ik = SIN (ik * LISDEG);
+    FIN BCOS;
+    WTAB . 'LISCOS' = LISCOS;
+    WTAB . 'LISSIN' = LISSIN;
+*   et cas calcul de la jacobienne CNL
+    SI FLVITE;
+      LISCOS2 = TABLE;
+      LISSIN2 = TABLE;
+      LISCOS2 . 0 = SIN (0. * LISDEG);
+      LISSIN2 . 0 = LISCOS2 . 0;
+      REPE BCOS nhbm; ik = &BCOS;
+        LISCOS2 . ik = (-1.* ik) * (LISSIN . ik);
+        LISSIN2 . ik = (     ik) * (LISCOS . ik);
+      FIN BCOS;
+      WTAB . 'LISCOS_V' = LISCOS2;
+      WTAB . 'LISSIN_V' = LISSIN2;
+    FINSI;
+*   --- cas LISTCHPO
+    TGAMMA = TABLE;
+*   it = temps; ik = harmonique;
+    it = 0;
+*  -BOUCLE SUR LE TEMPS------------------------------
+    REPE btemps (dime LISTDT); it = it + 1;
+      xdeg = extr LISDEG it;
+*     harmonique 0
+      xt   = prog 1.;
+      ik = 0;
+*  ---BOUCLE SUR LES HARMONIQUES-----------------------
+      REPE bouhbm nhbm; ik = ik + 1 ;
+        xt   = xt et (cos (ik*xdeg)) et (sin (ik*xdeg));
+      FIN bouhbm;
+      TGAMMA . it = xt;
+    FIN  btemps;
+    WTAB . 'LISTDT' = LISTDT;
+    WTAB . 'LISDEG' = LISDEG;
+    WTAB . 'TGAMMA' = TGAMMA;
+*   idem pour la VITESSE
+    SI FLVITE;
+      TGAMMA_V = TABLE;
+      it = 0;
+      REPE btemps (dime LISTDT); it = it + 1;
+        xdeg = extr LISDEG it;
+        xt   = prog 0.;
+        ik = 0;
+        REPE bouhbm nhbm; ik = ik + 1 ;
+          xt   = xt et (-1.*ik*(sin (ik*xdeg))) et (ik*(cos (ik*xdeg)));
+        FIN bouhbm;
+        TGAMMA_V . it = xt;
+      FIN  btemps;
+      WTAB . 'TGAMMA_V' = TGAMMA_V;
+    FINSI;
+
+FINSI;
+
+
+
+************************************************************************
+*               CALCUL DES DEPLACEMENTS NL TEMPORELLES                 *
+*               A PARTIR DES DEPLACEMENTS FREQUENTIELS                 *
+************************************************************************
+
+* calcul via l'appel a AFT1
+  DEPnl VITnl = AFT1 DEPTOT;
+
+
+************************************************************************
+*             CALCUL DE LA FORCE NL DANS LE DOMAINE TEMPOREL           *
+*               (APPEL A LA FONCTION UTILISATEUR CHARMECA)             *
+************************************************************************
+
+* DONNEES D'ENTREE
+  TABAFT . 'DEP_NL' = DEPnl;
+  TABAFT . 'VIT_NL' = VITnl;
+  TABAFT . 'TIME' = TIME;
+
+* APPEL A CHARMECA
+  CHARMECA TABAFT;
+
+* DONNEES DE SORTIE
+
+* fnl(t) (domaine temporel)
+  FNLTEMP = TABAFT . 'FNL_T';
+  typFNL = type FNLTEMP;
+  IFCHPO2 = ega typFNL 'LISTCHPO';
+  si (non IFCHPO2);
+  si (neg typFNL 'TABLE');
+    mess 'AFT: FNL_T devrait etre de type LISTCHPO ou TABLE!'; erre 21;
+  finsi;
+  finsi;
+
+* Knl=dfnl/du(t) (domaine temporel)
+  KNLT   = TABAFT . 'KNL_T';
+  SI FLVITE;   CNLT   = TABAFT . 'CNL_T';  FINSI;
+* c'est toujours une table pour l'instant
+
+
+
+************************************************************************
+*           CALCUL DE LA FORCE NON-LINEAIRE ET DE SA DERIVEE           *
+*                     DANS LE DOMAINE FREQUENTIEL                      *
+************************************************************************
+
+* calcul via l'appel a AFT2
+  FNLFRE = AFT2 FNLTEMP;
+
+
+*=== CALCUL DE KNL et CNL =============================================
+*
+* TODO (BP) : Il faudrait remplacer les lignes ci-dessous par une
+*             nouvelle options de TFR ?
+*
+SI IFKNL;
+
+*=== via la TFR de knl et cnl exprimes en temporel ====================
+*
+*=== CALCUL DE KNL PAR LES LISTREELs ==================================
+*
+si (neg (dime KNLT) 0);
+
+* preparation des objets resultats
+*   KNLFRE = VIDE 'RIGIDITE';
+  LISTR1  = prog;
+
+*-----------------------  boucle sur les lignes de la Jacobienne Knl=-dfnl/du
+*                         (= boucle sur les ddl temporels)
+  REPE Bligne (DIME KNLT); iligne = &Bligne;
+
+    KNLT_i  = KNLT . iligne;
+    nKNLT_i = DIME KNLT_i;
+
+*   harmonique 0 : TFR(Knl=-dfnl/du)
+    KNLFR = TABLE; KNLFI = TABLE;
+*   boucle sur les colonnes de la Jacobienne temporelle : dfnl_iligne/du_icnl
+    REPE Bcnl1 nKNLT_i; icnl = &Bcnl1;
+      EVKNLT = EVOL MANU LISTDT KNLT_i . icnl;
+      EVKNLF = TFR OTFR EVKNLT 'REIM' ;
+      KNLFR . icnl = EXTR EVKNLF 'ORDO' 1;
+      KNLFI . icnl = EXTR EVKNLF 'ORDO' 2;
+    FIN Bcnl1;
+
+*   harmonique ik :
+*   TFR(Knl * cos(ik wt)) = KNLCR.ik + i KNLCI.ik
+*   TFR(Knl * sin(ik wt)) = KNLSR.ik + i KNLSI.ik
+*   tables de listreels
+    KNLCR = TABLE;   KNLCI = TABLE;
+    KNLSR = TABLE;   KNLSI = TABLE;
+    ik = 0;
+    REPE Bdtfr nhbm; ik = ik + 1;
+      DFFCR = TABLE; DFFCI = TABLE;
+      DFFSR = TABLE; DFFSI = TABLE;
+*     boucle sur les colonnes de la Jacobienne temporelle : -dfnl_iligne/du_icnl
+      REPE Bcnl2 nKNLT_i; icnl = &Bcnl2;
+        KNLTCik = KNLT_i . icnl * LISCOS . ik;
+        KNLTSik = KNLT_i . icnl * LISSIN . ik;
+        EVDFTC  = EVOL MANU LISTDT KNLTCik;
+        EVDFTS  = EVOL MANU LISTDT KNLTSik;
+        EVDFFC  = TFR OTFR EVDFTC  'REIM';
+        EVDFFS  = TFR OTFR EVDFTS  'REIM';
+        DFFCR . icnl = EXTR EVDFFC  'ORDO' 1;
+        DFFCI . icnl = EXTR EVDFFC  'ORDO' 2;
+        DFFSR . icnl = EXTR EVDFFS  'ORDO' 1;
+        DFFSI . icnl = EXTR EVDFFS  'ORDO' 2;
+      FIN Bcnl2;
+      KNLCR . ik = DFFCR; KNLCI . ik = DFFCI;
+      KNLSR . ik = DFFSR; KNLSI . ik = DFFSI;
+    FIN Bdtfr;
+
+*   on range les valeurs dans LISTR1
+*  -les n*(2H+1) premieres valeurs
+*   --> ligne 1 : dF_0/dU = [ dF_0/dU_0 .. dF_0/dU_ik dF_0/dV_ik .. ]
+    ik = 0;
+    REPE BML1 nKNLT_i; icnl = &BML1;
+      LISTR1 = LISTR1 ET ((EXTR KNLFR . icnl 1)  );
+      REPE BMLk nhbm; ik = &BMLk;
+        LISTR1 = LISTR1 ET ((EXTR KNLCR . ik . icnl 1)  );
+        LISTR1 = LISTR1 ET ((EXTR KNLSR . ik . icnl 1)  );
+      FIN BMLk;
+    FIN BML1;
+*
+*  -lignes (2,3) , (4,5) ... (cos,sin) ... : dF_ih/dU
+    REPE BMKk nhbm; ih = &BMKk;
+*     ligne cos : dF_ih/dU = [ dF_ih/dU_0 .. dF_ih/dU_ik dF_ih/dV_ik .. ]
+      REPE BMKC1 nKNLT_i; icnl = &BMKC1;
+        LISTR1 = LISTR1 ET ((EXTR KNLFR . icnl (ih + 1)) * 2  );
+        REPE BMKCK nhbm; ik = &BMKCK;
+          LISTR1 = LISTR1 ET
+               ((EXTR KNLCR . ik . icnl (ih + 1)) * 2  );
+          LISTR1 = LISTR1 ET
+               ((EXTR KNLSR . ik . icnl (ih + 1)) * 2  );
+        FIN BMKCK;
+      FIN BMKC1;
+*     ligne sin : dG_ih/dU = [ dG_ih/dU_0 .. dG_ih/dU_ik dG_ih/dV_ik .. ]
+      REPE BMKS1 nKNLT_i; icnl = &BMKS1;
+        LISTR1 = LISTR1 ET ((EXTR KNLFI . icnl (ih + 1)) * -2  );
+        REPE BMKSK nhbm; ik = &BMKSK;
+          LISTR1 = LISTR1 ET
+               ((EXTR KNLCI . ik . icnl (ih + 1)) * -2  );
+          LISTR1 = LISTR1 ET
+               ((EXTR KNLSI . ik . icnl (ih + 1)) * -2  );
+        FIN BMKSK;
+      FIN BMKS1;
+    FIN BMKk;
+
+
+  FIN Bligne;
+*-----------------------------------------  fin de boucle sur les lignes
+
+  RIDEP = MOTS;
+*   RIFOR = MOTS;
+  inl = 0;
+  REPE Bcfnl1 (nKNLT_i / nPnl); inl = inl + 1;
+    iCOMNL = EXTR COMP_FNL inl;
+    RIDEP = RIDEP ET COMPU . iCOMNL ;
+*     iCOMFNL = CHAI 'F' (EXTR iCOMNL 2);
+*     RIFOR = RIFOR ET COMPF . iCOMFNL ;
+  FIN Bcfnl1;
+
+* pour le cas ou l'on a plusieurs noeuds
+* !!! hyp : Pnl de type POI1 !!!
+  si (nPnl ega 1); geo1 = pnl;
+  sinon;           geo1 = manu 'SUPER' pnl;
+  finsi;
+  KNLFRE = MANU 'RIGIDITE' geo1  RIDEP  LISTR1 'QUEL';
+
+sinon;
+  KNLFRE = VIDE 'RIGIDITE';
+
+finsi;
+
+
+*
+*=== CALCUL DE CNL PAR LES LISTREELs ==================================
+*
+*   cas ou il existe Cnl = -dfnl/d\dot x :
+si (FLVITE et (neg (dime CNLT) 0));
+
+* preparation des objets resultats
+  LISTR2  = prog;
+  ntfr = (2**(OTFR-1)) + 1;
+
+*-----------------------  boucle sur les lignes de la Jacobienne CNL=-dfnl/dv
+*                         (= boucle sur les ddl temporels)
+  REPE Bligne (DIME CNLT); iligne = &Bligne;
+
+    CNLT_i  = CNLT . iligne;
+    nCNLT_i = DIME CNLT_i;
+
+*   harmonique 0 : TFR(CNL=-dfnl/dv * 0) = 0  ==> CNLFR . * = 0
+    CNLFR = TABLE; CNLFI = TABLE;
+*   boucle sur les colonnes de la Jacobienne temporelle : dfnl_iligne/dv_icnl
+    REPE Bcnl1 nCNLT_i; icnl = &Bcnl1;
+      CNLFR . icnl = prog ntfr*0.;
+      CNLFI . icnl = prog ntfr*0.;
+    FIN Bcnl1;
+
+*   harmonique ik :
+*   TFR(CNL * -kw sin(ik wt)) = w * (CNLCR.ik + i CNLCI.ik)
+*   TFR(CNL *  kw cos(ik wt)) = w * (CNLSR.ik + i CNLSI.ik)
+*   tables de listreels
+    CNLCR = TABLE;   CNLCI = TABLE;
+    CNLSR = TABLE;   CNLSI = TABLE;
+    ik = 0;
+    REPE Bdtfr nhbm; ik = ik + 1;
+      DFFCR = TABLE; DFFCI = TABLE;
+      DFFSR = TABLE; DFFSI = TABLE;
+*     boucle sur les colonnes de la Jacobienne temporelle : -dfnl_iligne/dv_icnl
+      REPE Bcnl2 nCNLT_i; icnl = &Bcnl2;
+        CNLTCik = (CNLT_i . icnl)  *  ( LISCOS2 . ik);
+        CNLTSik = (CNLT_i . icnl)  *  ( LISSIN2 . ik);
+        EVDFTC  = EVOL MANU LISTDT CNLTCik;
+        EVDFTS  = EVOL MANU LISTDT CNLTSik;
+        EVDFFC  = TFR OTFR EVDFTC  'REIM';
+        EVDFFS  = TFR OTFR EVDFTS  'REIM';
+        DFFCR . icnl = EXTR EVDFFC  'ORDO' 1;
+        DFFCI . icnl = EXTR EVDFFC  'ORDO' 2;
+        DFFSR . icnl = EXTR EVDFFS  'ORDO' 1;
+        DFFSI . icnl = EXTR EVDFFS  'ORDO' 2;
+      FIN Bcnl2;
+      CNLCR . ik = DFFCR; CNLCI . ik = DFFCI;
+      CNLSR . ik = DFFSR; CNLSI . ik = DFFSI;
+    FIN Bdtfr;
+
+*   on range les valeurs dans LISTR2
+*  -les n*(2H+1) premieres valeurs
+*   --> ligne 1 : dF_0/dU = [ dF_0/dU_0 .. dF_0/dU_ik dF_0/dV_ik .. ]
+    ik = 0;
+    REPE BML1 nCNLT_i; icnl = &BML1;
+      LISTR2 = LISTR2 ET ((EXTR CNLFR . icnl 1)  );
+      REPE BMLk nhbm; ik = &BMLk;
+        LISTR2 = LISTR2 ET ((EXTR CNLCR . ik . icnl 1)  );
+        LISTR2 = LISTR2 ET ((EXTR CNLSR . ik . icnl 1)  );
+      FIN BMLk;
+*       LISTR2 = LISTR2 ET ((EXTR CNLFR . icnl 1) * -1);
+*       REPE BMLk nhbm; ik = &BMLk;
+*         LISTR2 = LISTR2 ET ((EXTR CNLCR . ik . icnl 1) * -1);
+*         LISTR2 = LISTR2 ET ((EXTR CNLSR . ik . icnl 1) * -1);
+*       FIN BMLk;
+    FIN BML1;
+*
+*  -lignes (2,3) , (4,5) ... (cos,sin) ... : dF_ih/dU
+    REPE BMKk nhbm; ih = &BMKk;
+*     ligne cos : dF_ih/dU = [ dF_ih/dU_0 .. dF_ih/dU_ik dF_ih/dV_ik .. ]
+      REPE BMKC1 nCNLT_i; icnl = &BMKC1;
+        LISTR2 = LISTR2 ET ((EXTR CNLFR . icnl (ih + 1)) * 2  );
+        REPE BMKCK nhbm; ik = &BMKCK;
+          LISTR2 = LISTR2 ET
+               ((EXTR CNLCR . ik . icnl (ih + 1)) * 2  );
+          LISTR2 = LISTR2 ET
+               ((EXTR CNLSR . ik . icnl (ih + 1)) * 2  );
+        FIN BMKCK;
+*         LISTR2 = LISTR2 ET ((EXTR CNLFR . icnl (ih + 1)) * -2  );
+*         REPE BMKCK nhbm; ik = &BMKCK;
+*           LISTR2 = LISTR2 ET
+*                ((EXTR CNLCR . ik . icnl (ih + 1)) * -2  );
+*           LISTR2 = LISTR2 ET
+*                ((EXTR CNLSR . ik . icnl (ih + 1)) * -2  );
+*         FIN BMKCK;
+      FIN BMKC1;
+*     ligne sin : dG_ih/dU = [ dG_ih/dU_0 .. dG_ih/dU_ik dG_ih/dV_ik .. ]
+      REPE BMKS1 nCNLT_i; icnl = &BMKS1;
+        LISTR2 = LISTR2 ET ((EXTR CNLFI . icnl (ih + 1)) * -2  );
+        REPE BMKSK nhbm; ik = &BMKSK;
+          LISTR2 = LISTR2 ET
+               ((EXTR CNLCI . ik . icnl (ih + 1)) * -2  );
+          LISTR2 = LISTR2 ET
+               ((EXTR CNLSI . ik . icnl (ih + 1)) * -2  );
+        FIN BMKSK;
+*         LISTR2 = LISTR2 ET ((EXTR CNLFI . icnl (ih + 1)) * 2  );
+*         REPE BMKSK nhbm; ik = &BMKSK;
+*           LISTR2 = LISTR2 ET
+*                ((EXTR CNLCI . ik . icnl (ih + 1)) * 2  );
+*           LISTR2 = LISTR2 ET
+*                ((EXTR CNLSI . ik . icnl (ih + 1)) * 2  );
+*         FIN BMKSK;
+      FIN BMKS1;
+    FIN BMKk;
+
+
+  FIN Bligne;
+*-----------------------------------------  fin de boucle sur les lignes
+
+  si (non (exis RIDEP));
+    RIDEP = MOTS;
+    inl = 0;
+    REPE Bcfnl1 (nCNLT_i / nPnl); inl = inl + 1;
+      iCOMNL = EXTR COMP_FNL inl;
+      RIDEP = RIDEP ET COMPU . iCOMNL ;
+    FIN Bcfnl1;
+*   pour le cas ou l'on a plusieurs noeuds
+*   !!! hyp : Pnl de type POI1 !!!
+    si (nPnl ega 1); geo1 = pnl;
+    sinon;           geo1 = manu 'SUPER' pnl;
+    finsi;
+  finsi;
+  CNLFRE = MANU 'RIGIDITE' geo1  RIDEP  (wrads * LISTR2) 'QUEL';
+*   CNLFRE = MANU 'RIGIDITE' geo1  RIDEP  (LISTR2) 'QUEL';
+
+sinon;
+  CNLFRE = VIDE 'RIGIDITE';
+
+finsi;
+
+
+*=== par differentiation numerique ====================================
+
+si IDIFF;
+
+* on met localement a faux pour alleger l appel a charmeca
+  IFKNL = FAUX;
+* petite valeur
+  xpetit = 1.E-6 * (maxi DEPTOT 'ABS');
+  si(xpetit < 1.E-10); xpetit=1.E-10; finsi;
+  xm1    = 1. / xpetit;
+* rigidite de sortie
+  KNLF1 = VIDE 'RIGIDITE';
+
+*--------- boucle sur les ddls frequentiels =
+  ncomp = dime RIDEP;
+* + boucle sur les noeuds
+  repe bnoeud nPnl;
+    si (ega (type pnl) 'POINT');
+      pnl1 = pnl;
+    sinon;
+      pnl1 = poin pnl &bnoeud;
+    finsi;
+* + boucle sur les composantes
+  repe bcomp ncomp;
+    comp1 = extr RIDEP &bcomp;
+
+*   perturbation du vecteur U
+*     mess 'perturbe noeud #' (noeu pnl1) ' selon ' comp1 'de' xpetit;
+    DUPP1 = MANU 'CHPO' pnl1 1 comp1 xpetit;
+    DEPP1 = DEPTOT + DUPP1;
+
+*   passage temporel
+    DEPTP1 VITTP1 = AFT1 DEPP1;
+
+*   fnl(u(t),v(t)) = ?
+    TABAFT . 'DEP_NL' = DEPTP1;
+    TABAFT . 'VIT_NL' = VITTP1;
+    CHARMECA TABAFT;
+    FNLTP1 = TABAFT . 'FNL_T';
+
+*   perturbation associee de FNL dans le domaine frequentiel
+    FNLF1 = AFT2 FNLTP1;
+    KNLF1 = KNLF1 et (-1.*xm1 *
+      (MANU 'RIGI' (FNLF1 - FNLFRE) 'COLO' 'QUEL' pnl1 comp1) );
+
+* *   compariason des 2 approches :
+*     mess '>>> differentiation:'; list (-1.*xm1 *FNLF1);
+*     FNLF0 = (KNLFRE et CNLFRE) * DUPP1 * xm1;
+*     mess '>>> TFR:'; list FNLF0;
+
+
+  fin bcomp;
+  fin bnoeud;
+*--------- fin de boucle sur les ddls frequentiels
+
+  IFKNL = VRAI;
+
+finsi;
+
+
+FINSI;
+*=== FIN DU CALCUL DE KNL et CNL =======================================
+
+
+
+************************************************************************
+*         STOCKAGE DE LA FORCE NON-LINEAIRE ET SA DERIVEE              *
+************************************************************************
+
+  TNL1 = TABL ;
+  TNL1 . 'ADDI_SECOND'  = FNLFRE;
+SI IFKNL;
+  si IDIFF;
+    TNL1 . 'ADDI_MATRICE' = KNLF1;
+  sinon;
+    TNL1 . 'ADDI_MATRICE' = KNLFRE et CNLFRE;
+  finsi;
+FINSI;
+
+*   mess '--------------------------------------';
+*   mess 'Fnl='; list FNLFRE;
+* * SI IFKNL;
+*   mess '--------------------------------------';
+*   mess 'KNL='; list KNLFRE;
+*   mess '--------------------------------------';
+* * FINSI;
+*   si (IFKNL et ((maxi FNLFRE abs) > 1.E-16)); erre 21; finsi;
+
+FINPROC TNL1;
+
+

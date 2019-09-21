@@ -1,0 +1,575 @@
+* fichier :  poiseuille2D.dgibi
+************************************************************************
+* NOM         : poiseuille2D.dgibi
+* ___
+*
+* DESCRIPTION : Ecoulement de poiseuille 2D classique
+* ___________   (écoulement parallèle en conduit bidimensionnel infini)
+*
+*               GEOMETRIE (problème dimensionnel) :
+*               -----------------------------------
+*
+*               y
+*                 ^     vitesse=0
+*   --------------|---------------------- y = b ------------
+*      Pression=P0|                     |
+*                 |                     |  Pression = 0
+*                 |                     |
+*                 -----------------------------> x
+*                O|x = 0                |x = a
+*                 |                     |
+*                 |                     |
+*   ------------------------------------- y = -b -----------
+*                       vitesse=0
+*
+*
+*               EQUATIONS ADIMENSIONNEES :
+*               --------------------------
+*
+*               - Echelles :
+*
+*                 longueur (suivant x) : a
+*                 longueur (suivant y) : b
+*                 pression             : p0
+*                 vitesse              : ((b*b) / (2*mu)) * (p0 / a)
+*                       (mu : viscosité dynamique)
+*
+*               - Equations : Navier-Stokes se réduit à
+*
+*
+*                   (1/2) * (d²u/dy²) = dp/dx  avec  : u=u(y) et p=p(x)
+*
+*               - Conditions aux limites :
+*
+*
+*                  u(b) = u(-b) = 0 (non-glissement)
+*
+*               - Solution exacte :
+*
+*       On déduit des équations :  dp/dx = (1/2) * (d²u/dy²) = constante
+*       On impose donc le gradient de pression et on trouve (avec
+*       l'adimensionnement ci-dessus, constante=-1) :
+*
+*                 u = 1 - y²
+*
+*
+* DISCRETISATION : On aimerait les tester toutes mais on rencontre les
+* ______________   problèmes suivants (au 01/03/1999):
+*
+*                  - TOIMP fonctionne mal : on ne peut pas tourner le
+*                    maillage et on doit imposer une contrainte pipo
+*                    sur le bord gauche : (0 p0) au lieu de (0 -p0).
+*
+*                  - Les éléments MACRO triangulaires ne fonctionnent
+*                    pas.
+*
+*                  Pour l'instant, on se cantonne à la discrétisation
+*                  suivante :
+*                  - éléments quadratiques (triangle Crouzeix-Raviart
+*                    et quadrangle Bercovier-Pironneau)
+*                  - discrétisation centrée des termes de convection
+*                    (qui sont analytiquement nulles à convergence
+*                                                    -------------
+*                     sur les itérations pour résoudre la non-linéarité)
+*
+*       Le maillage est construit avec l'opérateur SURF, il est perturbé
+*       par un bruit blanc gaussien. Il est ensuite translaté d'un
+*       vecteur arbitraire et tourné
+*       d'un angle arbitraire.
+*
+*
+* Opérateurs utilisés : KBBT, NS, TOIMP
+*             options : EF, IMPL, CENTREE
+*
+* RESOLUTION : - Solveur direct Crout
+* __________   - Solveurs itératifs pour matrice non-symétrique :
+*                * Bi-CGSTAB
+*                * GMRES(50)
+*   NB : - Pour les méthodes itératives, on garde le premier
+*          préconditionneur (Choleski incomplet) calculé pour la boucle
+*          sur les non-linéarités.
+*
+*
+* TESTS EFFECTUES : - On vérifie en gros si l'ordre de convergence est
+* _______________     respecté (car le maillage reste grossier donc
+*                     l'ordre est approché)
+*                   - On compare l'écart en norme L2 à la solution
+*                     analytique pour le maillage le plus fin.
+*
+*
+*
+* LANGAGE     : GIBIANE-CASTEM 2000
+* AUTEUR      : Stéphane GOUNAND (CEA/DRN/DMT/SEMT/TTMF)
+*               mél : gounand@semt2.smts.cea.fr
+************************************************************************
+* VERSION    : v1, 09/02/99, version initiale
+* HISTORIQUE : v1, 09/02/99, création
+* HISTORIQUE :     14/06/99, modif : TOIMP fonctionne comme
+*                            le dit la notice (sauf pour le signe).
+* HISTORIQUE :
+************************************************************************
+* Prière de PRENDRE LE TEMPS de compléter les commentaires
+* en cas de modification de ce sous-programme afin de faciliter
+* la maintenance !
+************************************************************************
+*
+interact= FAUX ;
+complet = FAUX ;
+graph   = FAUX ;
+*
+'OPTION' 'DIME' 2 'ELEM' QUA4 'MODE' 'PLAN' ;
+'OPTION' 'ECHO' 0 ;
+'OPTION' 'ISOV' 'SULI' ;
+nbisov = 15 ;
+'SI' ('NON' interact) ;
+  'OPTION' 'TRAC' 'PS' ;
+  'OPTION' 'ISOV' 'LIGNE' ;
+'FINSI' ;
+*
+** Erreur Linfini entre deux Champoints.
+*
+DEBPROC CALCERR vitp1*'CHPOINT' vit*'CHPOINT' ;
+  err = MAXI (vitp1 - vit) 'ABS' ;
+FINPROC err ;
+*
+** Erreur Pseudo L2 entre deux Champoints.
+*
+DEBPROC CALCERR2 vitp1*'CHPOINT' vit*'CHPOINT' ;
+  er0 = 'KOPS' vitp1 '-' vit ;
+  er2 = 'KOPS' er0 '*' er0 ;
+  err = 0.D0 ;
+  suppv  = 'EXTRAIRE' er2 'MAIL' ;
+  compv  = 'EXTRAIRE' er2 'COMP' ;
+  nbcomp = 'DIME' compv ;
+  nptd   = 'NBNO' suppv ;
+  'REPETER' numcomp nbcomp ;
+  lacomp = 'EXTRAIRE' compv &numcomp ;
+    'REPETER' numpo nptd ;
+      lepoi = suppv 'POIN' &numpo ;
+      err = err '+' ('EXTRAIRE' er2 lacomp lepoi) ;
+    'FIN' numpo ;
+  'FIN' numcomp ;
+  err = err '/' nptd ;
+  err = err ** 0.5D0 ;
+FINPROC err ;
+*
+* Procédure paramétrée (raffinement, type de discrétisation)
+* renvoyant l'échelle de longueur locale, les erreurs en
+* norme L2 sur la vitesse et la pression.
+* L'écoulement calculé est un écoulement de Poiseuille 2D.
+*
+'DEBPROC' CALCUL ktypi*'ENTIER' nraff*'ENTIER' typdis*'MOT     ' ;
+*
+ttypi = 'TABLE' ;
+ttypi . 1 = 'CHAINE' 'Crout' ;
+ttypi . 3 = 'CHAINE' 'BiCGSTAB' ;
+ttypi . 5 = 'CHAINE' 'GMRES(50)' ;
+*
+* titre global pour les dessins
+*
+titglob = 'CHAINE' ' ; nraff=' nraff ' typdis=' typdis ' typinv='
+                   (ttypi . ktypi);
+'MESSAGE' '----------------------------------------------' ;
+'MESSAGE' ('CHAINE' 'Cas' titglob) ;
+*
+* Paramètres physiques
+*
+mu = 1 ;
+*
+* Les échelles du problème adimensionné
+*
+*  Echelle de longueur suivant x et y
+a = 1.D0 ;
+b = 1.D0 ;
+*  Echelle de pression + contrainte en entrée et en sortie
+*    du tube
+p0 = 1.D0 ;
+*!
+*! Si TOIMP était conforme à la notice, on devrait avoir
+*! qqch comme cgau = (0. -1.*p0)
+*!
+cgau = (0 p0) ;
+cdro = (0.D0 0.D0) ;
+*  Echelle de vitesse
+u0 = ((b * b) '/' (2 * mu)) * (p0 '/' a) ;
+*
+*  Géométrie
+*
+pA = 0.  -1. ;
+pB = 1.  -1. ;
+pC = 1.   1. ;
+pD = 0.   1. ;
+*
+* Paramètres de la discrétisation de base
+*
+'SI' complet ;
+  nAB = 4 ;
+  nBC = 5 ;
+  nCD = 6 ;
+  nDA = 7 ;
+'SINON' ;
+  nAB = 1 ;
+  nBC = 2 ;
+  nCD = 3 ;
+  nDA = 4 ;
+'FINSI' ;
+*
+* Rotation et translation aditionnelle + bruit blanc
+* + raffinement
+*
+vtran = ((** 2 0.5) (* -1 (** 3 0.5))) ;
+orig  = (0.D0 0.D0) ;
+arot  = 11.3D0 ;
+lesdens = 'PROG' (1. '/' nAB) (1. '/' nCD) (1. '/' nBC) (1. '/' nDA) ;
+ampbruit = (0.1 * ('MINIMUM' lesdens)) ;
+*
+* Géométrie discrétisée
+*
+bas    = 'DROIT' nAB pA pB ;
+droite = 'DROIT' nBC pB pC ;
+haut   = 'DROIT' nCD pC pD ;
+gauche = 'DROIT' nDA pD pA ;
+pourtour = bas 'ET' droite 'ET' haut 'ET' gauche ;
+mt = 'SURFACE' pourtour 'PLAN' ;
+'TASSER' mt ;
+mt = 'ORIENTER' mt ;
+*
+* On rajoute le bruit
+*
+pmt = 'CHANGER' mt 'POI1' ;
+pcnt= 'CHANGER' pourtour 'POI1' ;
+inmt= 'DIFF' pmt pcnt;
+brbl1 = 'BRUIT' 'BLAN' 'GAUS' 0.D0 ampbruit inmt ;
+brbl2 = 'BRUIT' 'BLAN' 'GAUS' 0.D0 ampbruit inmt ;
+brbl = 'ET' ('NOMC' 'UX' brbl1) ('NOMC' 'UY' brbl2) ;
+mt = 'PLUS' mt brbl;
+*
+* On raffine nraff fois
+*
+'SI' (nraff > 0) ;
+  'REPETER' bcl nraff ;
+    mt  = 'CHANGER' mt 'QUADRATIQUE' ;
+    $mt = 'DOMA' mt 'MACRO' ;
+    mt  = ($mt . 'MAILLAGE') ;
+    bas  = 'CHANGER' bas 'QUADRATIQUE' ;
+    $bas = 'DOMA' bas 'MACRO' ;
+    bas  = ($bas . 'MAILLAGE') ;
+    droite  = 'CHANGER' droite 'QUADRATIQUE' ;
+    $droite = 'DOMA' droite 'MACRO' ;
+    droite  = ($droite . 'MAILLAGE') ;
+    haut  = 'CHANGER' haut 'QUADRATIQUE' ;
+    $haut = 'DOMA' haut 'MACRO' ;
+    haut  = ($haut . 'MAILLAGE') ;
+    gauche  = 'CHANGER' gauche 'QUADRATIQUE' ;
+    $gauche = 'DOMA' gauche 'MACRO' ;
+    gauche  = ($gauche . 'MAILLAGE') ;
+    'MENAGE' ;
+  'FIN' bcl ;
+'FINSI' ;
+*
+* Eventuellement, on trace le résultat
+*
+'SI' graph ;
+   titgeo = 'CHAINE' 'mt ' 'NBPO=' ('NBNO' mt)
+                      ' NBELEM=' ('NBEL' mt) titglob ;
+   'TRACER' mt 'NOEUD' 'TITRE' titgeo ;
+'FINSI' ;
+*
+* Modèle
+*
+_mt     = 'CHANGER' mt 'QUAF' ;
+_bas    = 'CHANGER' bas    'QUAF' ;
+_droite = 'CHANGER' droite 'QUAF' ;
+_haut   = 'CHANGER' haut   'QUAF' ;
+_gauche = 'CHANGER' gauche 'QUAF' ;
+'ELIMINATION' 1.D-6 (_gauche 'ET' _haut 'ET' _droite 'ET' _bas
+                     'ET' _mt) ;
+$mt = 'MODELISER' _mt 'NAVIER_STOKES' typdis ;
+$gauche = 'MODELISER' _gauche 'NAVIER_STOKES' typdis ;
+$droite = 'MODELISER' _droite 'NAVIER_STOKES' typdis ;
+*
+* Solution exacte
+*
+chy = 'COORDONNEE' 2 ('DOMA' $mt 'SOMMET') ;
+uyexa = 'NOMC' 'UY' ('KCHT' $mt 'SCAL' 'SOMMET' 0.D0) 'NATU' 'DISCRET' ;
+uxexa = 'NOMC' 'UX' ( '-' ('KCHT' $mt 'SCAL' 'SOMMET' 1.D0)
+                          (chy * chy))
+ 'NATU' 'DISCRET' ;
+uexact = 'KCHT' $mt 'VECT' 'SOMMET' (uxexa 'ET' uyexa) ;
+chxcp1= 'COORDONNEE' 1 ('DOMA' $mt 'CENTREP1') ;
+pexa  = 'NOMC' 'SCAL' ( '-' ('KCHT' $mt 'SCAL' 'CENTREP1' 1.D0)
+                            (chxcp1)) ;
+pexact = 'KCHT' $mt 'SCAL' 'CENTREP1' pexa ;
+*
+* On tourne et on translate
+*
+_tmt _tbas _tdroite _thaut _tgauche uexact pexact = 'TOURNER'
+_mt _bas _droite _haut _gauche uexact pexact arot orig ;
+* On n'a pas besoin de tourner les contraintes imposées avec TOIM
+* car elles sont exprimées dans le repère local.
+*cgau cdro = 'TOURNER' cgau cdro arot orig ;
+_tmt _tbas _tdroite _thaut _tgauche uexact pexact = 'PLUS'
+_tmt _tbas _tdroite _thaut _tgauche uexact pexact vtran ;
+$tmt = 'MODELISER' _tmt 'NAVIER_STOKES' typdis ;
+$tgauche = 'MODELISER' _tgauche 'NAVIER_STOKES' typdis ;
+$tdroite = 'MODELISER' _tdroite 'NAVIER_STOKES' typdis ;
+'ELIMINATION' 1.D-6 ('ET' ('DOMA' $tmt 'SOMMET')
+                          ('EXTRAIRE' uexact 'MAIL')) ;
+uexact = 'KCHT' $tmt 'VECT' 'SOMMET' uexact ;
+'ELIMINATION' 1.D-6 ('ET' ('DOMA' $tmt 'CENTREP1')
+                    ('EXTRAIRE' pexact 'MAIL')) ;
+pexact = 'KCHT' $tmt 'SCAL' 'CENTREP1' pexact ;
+mtmt = 'DOMA' $tmt 'MAILLAGE' ;
+cmtmt = 'CONTOUR' mtmt ;
+*
+* Mise en place du calcul numérique
+*
+* équations de quantité de mouvement
+*
+rv = 'EQEX' $tmt 'ITMA' 1
+'OPTI' 'EF' 'IMPL' 'CENTREE' 'CENTREP1'
+'ZONE' $tmt 'OPER' 'KBBT' (+1.D0) 'INCO' 'UN' 'PN'
+'ZONE' $tmt 'OPER' 'NS' 1. 'UN' (+0.5D0) 'INCO' 'UN' ;
+*
+* conditions aux limites
+*
+* vitesse
+rv = 'EQEX' rv
+'CLIM' 'UN' 'UIMP' (_thaut 'ET' _tbas) 0.
+       'UN' 'VIMP' (_thaut 'ET' _tbas) 0.
+       ;
+* pression
+rv = 'EQEX' rv
+'OPTI' 'EF' 'IMPL' 'CENTREE' 'CENTREP1'
+'ZONE' $tgauche 'OPER' 'TOIM' cgau 'INCO' 'UN'
+'ZONE' $tdroite 'OPER' 'TOIM' cdro 'INCO' 'UN'
+;
+*                      ________________
+*
+*                       INITIALISATION
+*                      ________________
+*
+rv . 'INCO' = 'TABLE' 'INCO' ;
+rv . 'INCO' . 'UN' = 'KCHT' $tmt 'VECT' 'SOMMET'   (0. 0.) ;
+rv . 'INCO' . 'PN' = 'KCHT' $tmt 'SCAL' 'CENTREP1' 0. ;
+
+rv . 'NITER' = 5 ;
+rv . 'METHINV' . 'TYPINV' = ktypi ;
+rv . 'METHINV' . 'PRECOND'= 3 ;
+* Les fréquences de recalcul du préconditionneur, respectivement
+* en fonction du pas de temps et des itérations dans la boucle pour
+* résoudre les non-linéarités.
+rv . 'METHINV' . 'FCPRECT'  = 1 ;
+rv . 'METHINV' . 'FCPRECI'  = 1000 ;
+rv . 'METHINV' . 'IMPINV'   = 0 ;
+rv . 'METHINV' . 'NITMAX'   = 1000 ;
+rv . 'METHINV' . 'GMRESTRT' = 50 ;
+rv . 'METHINV' . 'RESID'    = 1.D-12 ;
+*                         __________
+*
+*                           CALCUL
+*                         __________
+*
+EXEC rv ;
+*
+* Résultats
+*
+'SI' graph ;
+*
+* solutions exactes
+*
+  un = uexact ;
+  uref = (1.D0 * ('MINIMUM' lesdens));
+  ung1 = 'VECTEUR' un uref 'UX' 'UY' 'JAUNE' ;
+  titv = 'CHAINE' 'Vitesse UX UY exactes' titglob ;
+  'TRACER' ung1 cmtmt 'TITRE' titv ;
+  pnn = 'ELNO' $tmt pexact 'CENTREP1' ;
+  titp = 'CHAINE' 'Pression exacte ELNOisée' titglob ;
+  'TRACER' pnn mtmt cmtmt nbisov  'TITRE' titp ;
+*
+* graphe de convergence de la méthode itérative (dernière
+* itération)
+*
+  'SI' ('NEG' ktypi 1) ;
+    conver = (rv . 'METHINV' . 'CONVINV') ;
+    dimcon = 'DIME' conver ;
+    labs = 'PROG' 1.D0 'PAS' 1.D0 dimcon ;
+    lord = ('LOG' conver) '/' ('LOG' 10.D0) ;
+    evtot = 'EVOL' 'MANU' 'ITER' labs 'RESID' lord ;
+    titev = 'CHAINE' 'Historique de convergence' titglob ;
+    'DESSIN' evtot 'TITR' titev 'LEGE' ;
+  'FINSI' ;
+*
+* solutions calculées
+*
+  un = rv . 'INCO' . 'UN' ;
+  ung1 = 'VECTEUR' un uref 'UX' 'UY' 'JAUNE' ;
+  titv = 'CHAINE' 'Vitesse UX UY calculées' titglob ;
+  'TRACER' ung1 cmtmt 'TITRE' titv ;
+  pnn = 'ELNO' $tmt (rv . 'INCO' . 'PN') 'CENTREP1' ;
+  pnn = 'KCHT' $tmt 'SCAL' 'SOMMET' pnn ;
+  titp = 'CHAINE' 'Pression ELNOisée' titglob ;
+  'TRACER' pnn mtmt cmtmt nbisov 'TITRE' titp ;
+'FINSI' ;
+*
+* Calcul des erreurs par rapport à la solution analytique
+*
+echloc = (('MESURE' mt) '/' ('NBEL' mt)) ** 0.5 ;
+un = (rv . 'INCO' . 'UN') ;
+pn = (rv . 'INCO' . 'PN') ;
+errutot = CALCERR2 un uexact ;
+errl2p  = CALCERR2 pn pexact ;
+'MESSAGE' ('CHAINE' 'errutot=' errutot) ;
+'MESSAGE' ('CHAINE' 'errl2p=' errl2p) ;
+'FINPROC' echloc errutot errl2p ;
+* Fin de la procédure de calcul                             *
+*___________________________________________________________*
+*
+*-----------------------------------------------------------
+* Paramètres du calcul
+*
+* Types d'inversion dans ltypi :
+*   1 = Crout (direct) ; 3 = BiCGSTAB ; 5 = GMRES
+* lraff : nb raffinement du maillage (à chaque fois, on découpe
+*         les éléments en quatre).
+* ldiscr : type d'éléments à tester.
+'SI' complet ;
+  lraff  = 'LECT' 0 PAS 1 2 ;
+  ldiscr = 'MOTS' 'QUAF' 'MACR' ;
+  ltypi  = 'LECT' 3 ;
+'SINON' ;
+  lraff  = 'LECT' 0 PAS 1 2 ;
+*!
+*! Ici, on devra mettre aussi 'MACR' quand ca marchera
+*!
+  ldiscr = 'MOTS' 'QUAF' ;
+  ltypi  = 'LECT' 1 3 5 ;
+'FINSI' ;
+*
+*-----------------------------------------------------------*
+* Boucles sur les différents paramètres du calcul           *
+ordok = VRAI ;
+precok = VRAI ;
+*
+*  Boucle sur les discrétisations
+*
+'REPETER' idiscr ('DIME' ldiscr) ;
+  discr = 'EXTRAIRE' ldiscr &idiscr ;
+* Ordres de convergence des éléments
+  'SI' ('EGA' discr 'QUAF') ;
+    orduth  = 3 ;
+    ordpth  = 2 ;
+    'SI' ('EGA' complet FAUX) ;
+      errumax = 5.D-5 ;
+      errpmax = 6.D-4 ;
+    'FINSI' ;
+  'SINON' ;
+    'SI' ('EGA' discr 'MACR') ;
+      orduth = 2 ;
+      ordpth = 1 ;
+      'SI' ('EGA' complet FAUX) ;
+        'MESSAGE' 'Définissez les erreurs admissibles pour MACR' ;
+        'ERREUR' 5 ;
+      'FINSI' ;
+    'SINON' ;
+      'MESSAGE' ('CHAINE' 'Type d_éléments non reconnus : ' discr ) ;
+      'ERREUR' 5 ;
+    'FINSI' ;
+  'FINSI' ;
+*
+*  Boucle sur les méthodes de résolution
+*
+  'REPETER' itypi ('DIME' ltypi) ;
+    typi = 'EXTRAIRE' ltypi &itypi ;
+*
+*  Boucle sur les raffinements
+*
+    lh = 'PROG' ;
+    lerl2u = 'PROG' ;
+    lerl2p = 'PROG' ;
+    'REPETER' iraff ('DIME' lraff)  ;
+      raff = 'EXTRAIRE' lraff &iraff ;
+      h erru errp = CALCUL typi raff discr ;
+      lh     = 'ET' lh     ('PROG' h ) ;
+      lerl2u = 'ET' lerl2u ('PROG' erru) ;
+      lerl2p = 'ET' lerl2p ('PROG' errp) ;
+    'FIN' iraff ;
+    lh     = ('LOG' lh)     '/' ('LOG' 10.D0) ;
+    lerl2u = ('LOG' lerl2u) '/' ('LOG' 10.D0) ;
+    lerl2p = ('LOG' lerl2p) '/' ('LOG' 10.D0) ;
+    ul2 = 'EVOL' 'MANU' 'Long. carac.' lh
+                        'Err Vitesse'  lerl2u ;
+    pl2 = 'EVOL' 'MANU' 'Long. carac'  lh
+                        'Err Pression' lerl2p ;
+*
+* Recherche des ordres de convergence
+*
+    cpu ulipol = @POMI ul2 1 'IDEM' ;
+    ordu = cpu . 1 ;
+    cpp plipol = @POMI pl2 1 'IDEM' ;
+    ordp = cpp . 1 ;
+    'MESSAGE' ('CHAINE' 'ordre vitesse=' ordu
+                        ' ; ordre pression=' ordp) ;
+*
+* Tests des ordres de convergence
+* Tests des erreurs L2 sur le maillage le plus fin dans le
+* cas complet=faux
+*
+     ordok = 'ET' ordok ('EGA' ('ENTIER' ('+' ordu 0.5)) orduth) ;
+     ordok = 'ET' ordok ('EGA' ('ENTIER' ('+' ordp 0.5)) ordpth) ;
+     'SI' ('EGA' complet FAUX) ;
+       precok = 'ET' precok ('<' erru errumax) ;
+       precok = 'ET' precok ('<' errp errpmax) ;
+     'FINSI' ;
+     'SI' ('NON' ordok) ;
+       'MESSAGE' 'On n_obtient pas un ordre de convergence correct' ;
+       'ERREUR' 5 ;
+     'FINSI' ;
+     'SI' ('NON' precok) ;
+       'MESSAGE' 'On n_obtient pas une précision correcte' ;
+       'ERREUR' 5 ;
+     'FINSI' ;
+*
+* Tracés graphiques
+*
+    'SI' graph ;
+      tableg = 'TABLE' ;
+      tableg . 'TITRE' = 'TABLE' ;
+      tableg . 1 = 'MARQ CROI NOLI' ;
+      tableg . 'TITRE' . 1 = 'Erreur L2 calculée' ;
+      tableg . 2 = 'TIRR' ;
+      tableg . 'TITRE' . 2 = 'Erreur L2 interpolée' ;
+      titdesu= 'CHAINE' 'Err L2 Vitesse, ordre=' ordu ' ; '
+                        'discr=' discr ;
+      'DESSIN' (ul2 'ET' ulipol) 'TITRE' titdesu tableg ;
+      titdesp= 'CHAINE' 'Err L2 Pression, ordre=' ordp  ' ; '
+                        'discr=' discr ;
+      'DESSIN' (pl2 'ET' plipol) 'TITRE' titdesp tableg ;
+    'FINSI' ;
+  'FIN' itypi ;
+'FIN' idiscr ;
+'SI' interact ;
+   'OPTION' 'ECHO' 1 ;
+   'OPTION' 'DONN' 5 ;
+'FINSI' ;
+'MESSAGE' 'Tout s_est bien passé' ;
+'FIN' ;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

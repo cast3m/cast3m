@@ -1,0 +1,1481 @@
+C TRIELE    SOURCE    GG250959  19/01/23    21:15:04     10082
+C=======================================================
+C  CREATION : bp, le 18.10.2005
+C  MODIFS   : -modif de la projection : bp, le 07/02/2006
+c             -refonte de l'operateur pour integration dans Cast3M (aout2008)
+c             -mise à 0. de Phi et Psi moins aleatoire (septembre 2009)
+c             -syntaxe 2 (bp, juin 2010)
+c             -ajout option 'DESENRICHISSEMENT' (bp, avril 2012)
+c
+C=======================================================
+C  FONCTION :
+C  TRIE LES ELEMENTS SELON LES ISOZEROS DES CHPOINTS LEVEL SET
+C
+c
+C=======================================================
+c  SYNTAXE 1 :
+c  chelX_n+1 |       | =  TRIE  mod_n   psi_n+1  phi_n+1 |          | ;
+c            |       |                                   | 'SAUT'   |
+c            | relaX |                                   | 'DESENR' |
+c
+c  (mod_n est actualisé --> mod_n+1)
+C
+C  E: phi_n+1 = MCHPOI distance au plan  de fissure a linstant n+1
+C  E: psi_n+1 = MCHPOI distance au front de fissure a linstant n+1
+C  E: mod_n   = MMODEL a linstant n
+C              (contient eventuellement une zone avec des element X-FEM
+C               et IVAMOD pointe alors vers chelX_n)
+C  E: 'SAUT'  = mot cle optionnel permettant de limiter le niveau
+C               d'enrichissement a H. La pointe doit etre sur un bord
+C               d'element
+C  E: 'DESENR' = mot cle optionnel permettant de 'desenrichir' le modele
+C  S: mod_n+1 = MMODEL a linstant n+1 (mise a jour de IVAMOD)
+C  S: chelX_n+1 = MCHELM d'enrichissement a linstant n+1
+C                 (construit d'apres les iso-zero de phi et psi)
+C  S: relaX : relation associée au desenrichissement
+c            (mise a zero des 'pointes devenues obsolètes')
+C
+C=======================================================
+c  SYNTAXE 2 :
+c  TRIE  mod_?   chelX_n+1
+c        mod_n+1
+c
+C  E: mod_?     = MMODEL contenant ou pas des enrichissements
+C  E: chelX_n+1 = MCHELM d'enrichissement a l instant n+1
+C  S: mod_n+1   = MMODEL pointant vers chelX_n+1 (inscrit dans IVAMOD)
+C
+C
+C=======================================================
+C
+      SUBROUTINE TRIELE
+c
+C=======================================================
+c
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+      LOGICAL LOG1
+      CHARACTER*4 nomc1,nomc2,char1
+      PARAMETER (NMOT0=2)
+      CHARACTER*4 MOTCLE(NMOT0)
+      DATA MOTCLE/'SAUT','DESE'/
+
+      PARAMETER  (NDDL1=12)
+      CHARACTER*4 MOTPR1(NDDL1),MOTDU1(NDDL1)
+      DATA MOTPR1/'B1X ','B1Y ','B1Z ','C1X ','C1Y ','C1Z ',
+     >'D1X ','D1Y ','D1Z ','E1X ','E1Y ','E1Z '/
+      DATA MOTDU1/'FB1X','FB1Y','FB1Z','FC1X','FC1Y','FC1Z',
+     >'FD1X','FD1Y','FD1Z','FE1X','FE1Y','FE1Z'/
+      CHARACTER*4 MOTPR2(NDDL1),MOTDU2(NDDL1)
+      DATA MOTPR2/'B2X ','B2Y ','B2Z ','C2X ','C2Y ','C2Z ',
+     >'D2X ','D2Y ','D2Z ','E2X ','E2Y ','E2Z '/
+      DATA MOTDU2/'FB2X','FB2Y','FB2Z','FC2X','FC2Y','FC2Z',
+     >'FD2X','FD2Y','FD2Z','FE2X','FE2Y','FE2Z'/
+
+
+C  SEGMENTS INCLUDE
+-INC CCOPTIO
+-INC SMCOORD
+-INC SMELEME
+-INC SMCHPOI
+-INC SMMODEL
+-INC SMCHAML
+-INC SMLREEL
+-INC SMINTE
+-INC SMRIGID
+C
+C  Segment (type LISTENTI) contenant les informations sur un element
+      SEGMENT INFO
+        INTEGER INFELL(JG)
+      ENDSEGMENT
+c
+      SEGMENT ITYPND(NI)
+      SEGMENT NDPT1(NI)
+      SEGMENT NDPT2(NI)
+      SEGMENT NUMND(NI)
+      SEGMENT KKGAU(NI)
+      SEGMENT IDEJVU(NBPTI)
+
+c     segment pour tableau de travail de reel
+      SEGMENT XPSI(NI)
+      SEGMENT XPHI(NI)
+
+c     autrespointeurs
+      POINTEUR MCHEX1.MCHELM,MCHEX2.MCHELM, MCHEX3.MCHELM
+      POINTEUR IPTX1.MELEME
+      POINTEUR MINT1.MINTE,MINT2.MINTE,MINT0.MINTE
+
+
+
+C=======================================================
+c
+      IDIM1 = IDIM + 1
+      segact,MCOORD*mod
+      NBPTS = XCOOR(/1)/(IDIM1)
+
+C=======================================================
+c      WRITE(*,*) 'LECTURE'
+C=======================================================
+
+C++++ le modele a l'instant n
+      CALL LIROBJ('MMODEL',MMODE1,1,IRETOU)
+
+c++++ L'option pour le niveau d'enrichissement max souhaité
+*as 2010_01_20 : selon l'option le niveau d'enrichissement est limité à 1 ou non:
+      lsaut=100
+c       CALL LIRCHA(char1,0,iretou)
+c       if (iretou.ne.0) then
+c         if (char1.ne.'SAUT') then
+c             MOTERR(1:4)=char1
+c             CALL ERREUR(7)
+c             RETURN
+c         else
+c            lsaut=1000
+c         endif
+c       endif
+*fin as 2010_01_20
+      CALL LIRMOT(MOTCLE,NMOT0,IMOT0,0)
+      if(IMOT0.eq.1) lsaut=1000
+
+c++++ lecture d un MCHEX1 d'enrichissement a brancher
+      CALL LIROBJ('MCHAML',IPIN,0,ISYNTAX)
+      IF (IERR .NE. 0) RETURN
+      if (ISYNTAX .eq. 1) then
+        CALL REDUAF(IPIN,MMODE1,MCHEX1,0,IR,KER)
+        IF(IR   .NE. 1) CALL ERREUR(KER)
+        IF(IERR .NE. 0) RETURN
+
+        segact,MCHEX1
+        if ((MCHEX1.TITCHE).ne.'ENRICHIS') then
+
+          write(*,*) 'Le MCHELM fourni doit avoir ENRICHIS pour titre'
+          segdes,MCHEX1
+          return
+        endif
+
+        if(MCHEX1.ICHAML(/1) .EQ. 0) THEN
+          CALL ERREUR(472)
+          RETURN
+        ENDIF
+
+        segdes,MCHEX1
+
+      else
+
+C++++   lecture des Level Set
+        CALL LIROBJ('CHPOINT',MCHPO1,1,IRETOU)
+        CALL LIROBJ('CHPOINT',MCHPO2,1,IRETOU)
+        if (IERR.ne.0) then
+           CALL ERREUR(181)
+c           write(*,*) 'Besoin des chpoints Level Sets'
+c           return
+        endif
+C       qq verif de base sur les chpoints
+        segact MCHPO1,MCHPO2
+        nsoup1 = MCHPO1.IPCHP(/1)
+        nsoup2 = MCHPO2.IPCHP(/1)
+        if ((nsoup1.ne.1).or.(nsoup2.ne.1)) then
+           INTERR = MCHPO1
+c           CALL ERREUR(377)
+c           write(*,*) 'Chpoint avec plus d 1 zone: Non traite test1'
+c           return
+        endif
+        MSOUP1 = MCHPO1.IPCHP(1)
+        MSOUP2 = MCHPO2.IPCHP(1)
+        segdes MCHPO1,MCHPO2
+C       composante des chpoints: 1=PSI 2=PHI
+        segact MSOUP1,MSOUP2
+        nc1 = MSOUP1.NOCOMP(/2)
+        nc2 = MSOUP2.NOCOMP(/2)
+        if ((nc1.ne.1).or.(nc2.ne.1)) then
+           CALL ERREUR(181)
+c           write(*,*) 'Chpoint avec plus d 1 composante: Non traite'
+c           return
+        endif
+        nomc1 = MSOUP1.NOCOMP(1)
+        nomc2 = MSOUP2.NOCOMP(1)
+        if (nomc1.ne.'PSI ') then
+           MOTERR(1:8) = 'PSI     '
+           CALL ERREUR(243)
+c           write(*,*) 'Chpoint 1 doit avoir pour composante PSI '
+c           return
+        endif
+        if (nomc2.ne.'PHI ') then
+           MOTERR(1:8) = 'PHI     '
+           CALL ERREUR(243)
+c           write(*,*) 'Chpoint 2 doit avoir pour composante PHI '
+c           return
+        endif
+C       recuperation des maillages et valeurs
+        IPT1   = MSOUP1.IGEOC
+        IPT2   = MSOUP2.IGEOC
+c       if (IPT1.ne.IPT2) then
+c          write(*,*) 'Chpoints doivent avoir le meme support maillage'
+c          return
+c bp (07/07/2011) : trop contraignant on introduit ndpt2 et on
+c                   va faire des test + tard
+c       endif
+        MPOVA1 = MSOUP1.IPOVAL
+        MPOVA2 = MSOUP2.IPOVAL
+        segdes MSOUP1,MSOUP2
+C       on crée MPOVA3 et MPOVA4 = versions "simplifiées" de MPOVA1 et MPOVA2
+        SEGINI,MPOVA3=MPOVA1
+        SEGINI,MPOVA4=MPOVA2
+
+      endif
+
+C       Initialisation des tableaux de sortie info erichissement a
+C       chaques noeuds
+        NI = xcoor(/1)/(IDIM1)
+        SEGINI,ITYPND
+C=======================================================
+C Première BOUCLE SUR LES SOUS MODELES
+C=======================================================
+      SEGACT,MMODE1
+      NBSMOD = MMODE1.KMODEL(/1)
+      DO 100 ISMOD1 = 1,NBSMOD
+c
+CcccccC ouverture du sous modele
+        IMODEL = MMODE1.KMODEL(ISMOD1)
+        segact IMODEL*mod
+
+c       si EF XFEM, on travaille
+*        if(NEFMOD.ne.263) goto 100
+*as 2010_01_22 : ajout de l'element 3D
+c         if (NEFMOD.eq.263.or.NEFMOD.eq.264) then
+        if(NEFMOD.ne.263.and.NEFMOD.ne.264) goto 100
+
+        NOBMO1 = IVAMOD(/1)
+
+ccccccC branchement d 1 eventuel MCHEX1 d'enrichissement fourni
+        if (ISYNTAX.ne.0) then
+          NOBMO1 = IVAMOD(/1)
+c         NOBMOD = NOBMO1 + 1
+c          if(NOBMO1.ne.0) write(6,*)'Attention: Les objets contenus',
+c     &                ' dans le IVAMOD du modele seront oubliés !!!'
+          NOBMOD=1
+cbp: attention: on ecrase tout pour l instant
+          MN3    = INFMOD(/1)
+          NFOR   = FORMOD(/2)
+          NMAT   = MATMOD(/2)
+          segadj,IMODEL
+          TYMODE(NOBMOD)='MCHAML  '
+          IVAMOD(NOBMOD) = MCHEX1
+          segdes,IMODEL
+          goto 100
+        endif
+
+
+ccccccC recup du MCHEX1 d'enrichissement pre-existant
+        if (NOBMO1.ne.0) then
+        do iobmo1=1,NOBMO1
+         if ((TYMODE(iobmo1)).eq.'MCHAML  ') then
+          MCHEX1 = IVAMOD(iobmo1)
+          segact,MCHEX1
+          if ((MCHEX1.TITCHE).eq.'ENRICHIS') then
+            isouX=1
+            MCHAM1 = MCHEX1.ICHAML(isouX)
+cbp: on suppose donc l'exitence d'autant de MCHEX1 (avec 1 seul MCHAM1)
+c    que de zones elementaires, au lieu de 1 MCHEX1 avec autant de MCHAM1
+c    que de zones elementaires... il faudrait corriger ca tres vite...
+            segact,MCHAM1
+            goto 101
+          endif
+          segdes,MCHEX1
+         endif
+        enddo
+        endif
+
+ccccccC creation d un MCHEX1 d'enrichissement vierge
+c        write(*,*) '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!'
+c        write(*,*) 'Le modele ne contient pas le MCHELM ENRICHIS'
+c        write(*,*) '=> On initialise a 0 le MCHELM ENRICHIS'
+c        write(*,*) '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!'
+        L1 = 8
+        N1 = 1
+        N3 = 6
+        SEGINI,MCHEX1
+         MCHEX1.TITCHE = 'ENRICHIS'
+         MCHEX1.IFOCHE = IFOUR
+         MCHEX1.IMACHE(1)= IMAMOD
+         MCHEX1.CONCHE(1)= IMODEL.CONMOD
+         MCHEX1.INFCHE(1,2) = 0
+         MCHEX1.INFCHE(1,3) = NIFOUR
+         MCHEX1.INFCHE(1,6) = 1
+*as 2010_01_20:
+*        N2 = 2
+         N2 = 1
+        SEGINI,MCHAM1
+         MCHEX1.ICHAML(1) = MCHAM1
+         MELEME=IMAMOD
+         SEGACT,MELEME
+         N1PTEL = 0
+         N1EL = 0
+         N2PTEL = NUM(/1)
+         N2EL   = NUM(/2)
+         SEGDES,MELEME
+         MCHAM1.NOMCHE(1)= 'H       '
+*as 2010_01_20:
+*         MCHAM1.NOMCHE(2)= 'F1      '
+         DO I2=1,N2
+            MCHAM1.TYPCHE(I2)= 'POINTEURLISTREEL'
+            SEGINI,MELVA1
+            MCHAM1.IELVAL(I2) = MELVA1
+            SEGDES,MELVA1
+         ENDDO
+c       on ajoute une petite place dans IVAMOD
+        NOBMOD=NOBMO1+1
+        MN3=INFMOD(/1)
+        NFOR=FORMOD(/2)
+        NMAT=MATMOD(/2)
+        segadj,IMODEL
+        iobmo1=NOBMOD
+
+ccccccC point de rassemblement une fois obtenu MCHEX1 et MCHAM1
+  101   continue
+c       qq verif de base
+        NCHAM1 = MCHEX1.ICHAML(/1)
+        if (NCHAM1.ne.1) then
+           INTERR(1) = MCHEX1.ICHAML
+c           CALL ERREUR(377)
+c          write(*,*) 'MCHELM doit avoir 1 seule zone test2'
+        endif
+
+c       recup du maillage et du MCHAML associé a cette zone
+        MELEME = MCHEX1.IMACHE(1)
+        if (MELEME.ne.IMAMOD) then
+          call ERREUR(124)
+c          write(*,*) 'MCHAML et ss-Model doivent avoir le meme support'
+c          return
+        endif
+        segact,MELEME
+        MCHAM1 = MCHEX1.ICHAML(1)
+
+c       recup de l enrichissement précédent (ITIP1) et calcul suivant (ITIP2)
+        ITIP1=MCHEX1.INFCHE(1,2)
+        if(ITIP1.lt.0.or.ITIP1.gt.2) then
+c          write(ioimp,*) 'Pb dans MCHEX1.INFCHE(1,2)'
+          call erreur(21)
+        endif
+        if(IMOT0.eq.1) then
+          ITIP2=0
+        else
+          if(ITIP1.eq.1) then
+            ITIP2=2
+          else
+c           cas ou ITIP1 = 0 (initial) ou 2
+            ITIP2=1
+          endif
+        endif
+
+
+C=======================================================
+c        write(*,*) 'CREATION D UN JOLI MCHEX2 identique au MCHEX1'
+c       et eventuellement d une matrice de relation pour désenrichir
+C=======================================================
+
+        SEGINI,MCHEX2=MCHEX1
+        IVAMOD(iobmo1)=MCHEX2
+        TYMODE(iobmo1)='MCHAML  '
+        MELE = NEFMOD
+c        write(*,*) 'on branche MCHEX2=',MCHEX2,' dans IVAMOD(',iobmo1
+        SEGINI,MCHAM2=MCHAM1
+        MCHEX2.ICHAML(1)=MCHAM2
+        MCHEX2.INFCHE(1,2)=ITIP2
+        segdes,MCHEX1,MCHEX2
+        N2ENR = MCHAM2.IELVAL(/1)
+        do i2enr=1,N2ENR
+          MELVA1 = MCHAM1.IELVAL(i2enr)
+          SEGINI,MELVA2=MELVA1
+          MCHAM2.IELVAL(i2enr) = MELVA2
+          SEGDES,MELVA2
+        enddo
+
+c   --- DESENRICHISSEMENT ---
+        IPRIG2=0
+        if(IMOT0.eq.2) then
+
+c        -On "oublie" les très vieux enrichissements devenus obsolètes
+c         et qu on va réutiliser
+          if(MCHAM2.IELVAL(/1).ge.ITIP2+1) then
+            MELVA2=MCHAM2.IELVAL(ITIP2+1)
+            segact,MELVA2*mod
+            do j=1,MELVA2.IELCHE(/2)
+            do i=1,MELVA2.IELCHE(/1)
+              MELVA2.IELCHE(i,j)=0
+            enddo
+            enddo
+            segdes,MELVA2
+          endif
+
+c        -On met a 0 (avec une relation) les vieux enrichissements
+          if(MCHAM2.IELVAL(/1).ge.ITIP1+1) then
+
+c           On commence par creer un maillage prototype de la rigidite (IPT6)
+c           en reperant les noeuds a traiter via idejvu
+            NBPTI=NBPTS
+            segini,idejvu
+            NBSOUS=0
+            NBREF=0
+            NBNN=2
+            NBELEM=1000
+            segini,IPT6
+            IPT6.ITYPEL=22
+c           on noublie pas de créer des noeuds pour les LX
+            NBPTS0=NBPTS
+            iilx=NBPTS0
+            NBPTS=NBPTS+NBELEM
+            segadj,MCOORD
+c           on travaille sur le melva2 de la pointe précédente
+            MELVA2=MCHAM2.IELVAL(ITIP1+1)
+            segact,MELVA2*mod
+            ii2=0
+            do 120 j=1,MELVA2.IELCHE(/2)
+            do 120 i=1,MELVA2.IELCHE(/1)
+              i120 = NUM(i,j)
+c rem: commme l enrichissement est nodal et que l on travaille sur 1 seul
+c enrichissement a annuler on se permet les lignes ci dessous
+              if(idejvu(i120).gt.0) goto 120
+              idejvu(i120)=1
+              if (MELVA2.IELCHE(i,j).ne.0) then
+                ii2=ii2+1
+                if(ii2.gt.NBELEM) then
+                  NBELEM=NBELEM + 1000
+                  NBPTS=NBPTS + 1000
+                  segadj,IPT6,MCOORD
+                endif
+c               on crée un noeud pour le multiplicateur de lagrange LX
+c                 iilx = NBPTS0+ii2
+                iilx = iilx+1
+                XCOOR((iilx-1)*(IDIM1)+1) = XCOOR((i120-1)*(IDIM1)+1)
+                XCOOR((iilx-1)*(IDIM1)+2) = XCOOR((i120-1)*(IDIM1)+2)
+                if(idim.eq.3)
+     &          XCOOR((iilx-1)*(IDIM1)+3) = XCOOR((i120-1)*(IDIM1)+3)
+                XCOOR(iilx*(IDIM1)) = XCOOR(i120*(IDIM1))
+                IPT6.NUM(1,ii2)=iilx
+                IPT6.NUM(2,ii2)=i120
+              endif
+  120       continue
+c           on ajuste IPT6 et on supprime
+            NBELEM=ii2
+            segadj,IPT6
+            segdes,MELVA2
+            segsup,idejvu
+
+c           on finit d ajuster MCOORD
+            NRIGEL=idim*4
+            NBPTS = NBPTS0+(ii2*NRIGEL)
+            segadj,MCOORD
+
+c           On crée la relation qui permet de désenrichir
+            segini,MRIGID
+            IPRIG2=MRIGID
+            IFORIG = IFOMOD
+            MTYMAT ='RIGIDITE'
+            NLIGRD=2
+            NLIGRP=2
+            NELRIG=ii2
+            jb=0
+            jdim=0
+            do iriri=1,NRIGEL
+              COERIG(iriri)=1.d0
+              segini,DESCR,XMATRI
+c               IRIGEL(1,iriri)=IPT6
+c             On duplique le maillage prototype de la rigidite
+              if(iriri.eq.1) then
+                IPT7=IPT6
+              else
+                segini,IPT7=IPT6
+c               on crée un noeud pour le multiplicateur de lagrange LX
+c               pour chaque element de ipt7
+                do ii2=1,NBELEM
+                 iilx = iilx+1
+c                iilx6=IPT6.NUM(1,ii2) on prend ipt7 actif et pas ipt6
+                 iilx6=IPT7.NUM(1,ii2)
+                 XCOOR((iilx-1)*(IDIM1)+1) = XCOOR((iilx6-1)*(IDIM1)+1)
+                 XCOOR((iilx-1)*(IDIM1)+2) = XCOOR((iilx6-1)*(IDIM1)+2)
+                 if(idim.eq.3)
+     &           XCOOR((iilx-1)*(IDIM1)+3) = XCOOR((iilx6-1)*(IDIM1)+3)
+                 XCOOR(iilx*(IDIM1)) = XCOOR(iilx6*(IDIM1))
+                 IPT7.NUM(1,ii2)=iilx
+                enddo
+              endif
+              segdes,IPT7
+              IRIGEL(1,iriri)=IPT7
+              IRIGEL(2,iriri)=0
+              IRIGEL(3,iriri)=DESCR
+              IRIGEL(4,iriri)=XMATRI
+              IRIGEL(5,iriri)=NIFOUR
+              IRIGEL(6,iriri)=0
+              IRIGEL(7,iriri)=0
+              IRIGEL(8,iriri)=0
+c             remplissage du DESCR
+              LISINC(1)='LX'
+              LISDUA(1)='FLX'
+              jb=jb+1
+              jdim=jdim+1
+              if(ITIP1.eq.1) then
+                LISINC(2)=MOTPR1(jb)
+                LISDUA(2)=MOTDU1(jb)
+              elseif(ITIP1.eq.2) then
+                LISINC(2)=MOTPR2(jb)
+                LISDUA(2)=MOTDU2(jb)
+              endif
+c             petit ajustement pour "sauter" les composantes en Z
+              if(jdim.eq.idim) then
+                jdim=0
+                if(idim.eq.2) jb=jb+1
+              endif
+              do jinc=1,NLIGRP
+                NOELEP(jinc)=jinc
+                NOELED(jinc)=jinc
+              enddo
+c             remplissage de XMATRI
+              do jel=1,NELRIG
+                RE(1,1,jel)=0.d0
+                RE(1,2,jel)=1.d0
+                RE(2,1,jel)=1.d0
+                RE(2,2,jel)=0.d0
+              enddo
+              segdes,DESCR,XMATRI
+            enddo
+            segdes,MRIGID
+  139       continue
+          endif
+
+        endif
+
+        segdes,MCHAM1,MCHAM2
+
+
+C=======================================================
+c       BOUCLE SUR LES POINTS DES CHPOINTS
+C=======================================================
+
+c      -chpoint psi
+        segact,IPT1
+        NBNO1 = IPT1.NUM(/2)
+C       on crée la table qui depuis num de noeud donne point dans chpoint
+        NI = xcoor(/1)/(IDIM1)
+        SEGINI,NDPT1
+cccccc  Vrai Debut de boucle
+        DO I1=1,NBNO1
+C         on recupere le numero de noeud
+          INUM1 = IPT1.NUM(1,I1)
+C         on remplit la table
+          NDPT1(INUM1) = I1
+        ENDDO
+
+c      -chpoint phi
+        if (IPT1.eq.IPT2) then
+         NDPT2=NDPT1
+         segdes,IPT1
+        else
+         segact,IPT2
+         NBNO2 = IPT2.NUM(/2)
+         if (NBNO1.ne.NBNO2) then
+          call ERREUR(124)
+c          write(*,*) 'Les maillages support des chpoints ',
+c     &               'doivent avoir le meme nombre de points!'
+          return
+         endif
+         SEGINI,NDPT2
+         DO I2=1,NBNO2
+C         on recupere le numero de noeud
+          INUM2 = IPT2.NUM(1,I2)
+          if (NDPT1(INUM2).eq.0) then
+          call ERREUR(124)
+c           write(*,*) 'Les maillages support des chpoints ',
+c     &                'doivent avoir les memes points!'
+           return
+          endif
+C         on remplit la table
+          NDPT2(INUM2) = I2
+         ENDDO
+         segdes,IPT1,IPT2
+        endif
+C=======FIN DE BOUCLE SUR LES POINTS DES CHPOINTS=======
+
+C=======================================================
+c       1ere BOUCLE SUR LES ELEMENTS
+c       POUR LA "SIMPLIFICATION"
+C=======================================================
+C       Ouverture du maillage et des chpoints level set
+c         SEGACT MELEME,MPOVA1,MPOVA2
+        SEGACT MPOVA1,MPOVA2
+        NBNN1 = NUM(/1)
+        NBEL1 = NUM(/2)
+c       on recupere les coord dans l element parents des noeuds
+        call elquoi(MELE,0,1,IPINF,IMODEL)
+        INFO  = IPINF
+        MINT0 = INFELL(11)
+        segact,MINT0
+c       on recupere les coord dans l element parents des points de gauss
+        call elquoi(MELE,0,3,IPINF,IMODEL)
+        INFO  = IPINF
+        MINT1 = INFELL(11)
+        segact,MINT1
+c       segment integration ef std correspondant -> inutile pour l instant
+c       MINT2 = INFELL(12)
+c       if(MINT2.ne.0)   segact,MINT2
+        segdes,IMODEL
+c       recherche du num du pt de gauss KKGAU le plus proche du noeud inode1
+        NGAU1 = INFELL(6)
+        NI = NBNN1
+        segini,KKGAU
+        do inode1=1,NBNN1
+          kgau1 = 1
+          DXi1 = ((MINT1.QSIGAU(kgau1)) - (MINT0.QSIGAU(inode1)))**2
+     &           + ((MINT1.ETAGAU(kgau1)) - (MINT0.ETAGAU(inode1)))**2
+     &           + ((MINT1.DZEGAU(kgau1)) - (MINT0.DZEGAU(inode1)))**2
+          do kgau2=2,NGAU1
+            DXi2 = ((MINT1.QSIGAU(kgau2)) - (MINT0.QSIGAU(inode1)))**2
+     &           + ((MINT1.ETAGAU(kgau2)) - (MINT0.ETAGAU(inode1)))**2
+     &           + ((MINT1.DZEGAU(kgau2)) - (MINT0.DZEGAU(inode1)))**2
+            if (DXi2.lt.DXi1) then
+              DXi1 = DXi2
+              kgau1 = kgau2
+            endif
+          enddo
+          KKGAU(inode1) = kgau1
+        enddo
+c         write(6,*) 'KKGAU'
+c         write(6,*) (KKGAU(iou),iou=1,4)
+
+        NI = NBEL1
+c         SEGINI,TYPEF
+C       Initialisation des tableaux de travail
+        NI = NBNN1
+        segini,NUMND,XPSI,XPHI
+
+
+c++++++ Debut de boucle sur les elements
+        DO 200 J=1,NBEL1
+
+C++++++++ Mini-Boucle(S) sur les noeuds de l element
+          DO  K=1,NBNN1
+C           numero INUM du Kieme noeud du Jieme element
+            INUM = NUM(K,J)
+C           numero du point correspondant des chpoints
+            I1 = NDPT1(INUM)
+            I2 = NDPT2(INUM)
+c           on verifie que le chpoint y est bien defini sinon on saute tout!
+            if(I1.eq.0) goto 200
+C           valeurs de psi et phi au Kieme noeud
+            XPSI(K) = MPOVA1.VPOCHA(I1,1)
+            XPHI(K) = MPOVA2.VPOCHA(I2,1)
+          ENDDO
+C++++++++ Fin de la Mini-Boucle sur les noeuds de l element
+
+c c         distance pour permettre la simplification
+c c bp: a supprimer tres bientot car inutile et aleatoire ...
+c (bp: supprimé le 13./07/2011)
+c           EPSTOL = 1.D-3
+c           INUM1 = NUM(1,J)
+c           INUM2 = NUM(2,J)
+c           XOM1 = (  ( XCOOR( (INUM2-1)*(IDIM1) + 1 ) )
+c      &            - ( XCOOR( (INUM1-1)*(IDIM1) + 1 ) ) )**2
+c           XOM2 = (  ( XCOOR( (INUM2-1)*(IDIM1) + 2 ) )
+c      &            - ( XCOOR( (INUM1-1)*(IDIM1) + 2 ) ) )**2
+c           if (idim.eq.3) then
+c             XOM3 = (  ( XCOOR( (INUM2-1)*(IDIM1) + 3 ) )
+c      &              - ( XCOOR( (INUM1-1)*(IDIM1) + 3 ) ) )**2
+c
+c             XTOL = sqrt(XOM1+XOM2+XOM3)
+c           else
+c             XTOL = sqrt(XOM1+XOM2)
+c           endif
+c           XTOL  = EPSTOL * XTOL
+c           if(XTOL.le.1.D-20)
+c      &    write(6,*) '!!! attention distance inter noeud faible =',XTOL
+
+C++++++++ Mini-Boucle(S) sur les noeuds de l element
+          DO  K=1,NBNN1
+C           on calcule phi au pts de gauss le + proche du noeud considéré
+            kgau1 = KKGAU(K)
+            XPSIGAU = 0.d0
+            XPHIGAU = 0.d0
+            do ii1=1,NBNN1
+              XPSIGAU = XPSIGAU
+     &        + ( (MINT1.SHPTOT(1,ii1,kgau1)) * (XPSI(ii1)) )
+              XPHIGAU = XPHIGAU
+     &        + ( (MINT1.SHPTOT(1,ii1,kgau1)) * (XPHI(ii1)) )
+            enddo
+C           numero INUM du Kieme noeud du Jieme element
+            INUM = NUM(K,J)
+C           numero du point correspondant des chpoints
+            I1 = NDPT1(INUM)
+            I2 = NDPT2(INUM)
+c C           simplification
+c             IF (((XPSI(K))*XPSIGAU).LE.0.d0) THEN
+c c                XPSI(K) = 0.d0
+c                MPOVA3.VPOCHA(I1,1) = 0.d0
+c             ELSEIF (ABS(XPSI(K)).LE.XTOL) THEN
+c                XPSI(K) = 0.d0
+c                MPOVA3.VPOCHA(I1,1) = 0.d0
+c             ENDIF
+c             IF (((XPHI(K))*XPHIGAU).LE.0.d0) THEN
+c c                XPHI(K) = 0.d0
+c                MPOVA4.VPOCHA(I2,1) = 0.d0
+c             ELSEIF (ABS(XPHI(K)).LE.XTOL)  THEN
+c c                XPHI(K) = 0.d0
+c                MPOVA4.VPOCHA(I2,1) = 0.d0
+c             ENDIF
+C           simplification (bp: 13./07/2011)
+            IF(((XPSI(K))*XPSIGAU).LE.0.d0)
+     &               MPOVA3.VPOCHA(I1,1) = 0.d0
+            IF(((XPHI(K))*XPHIGAU).LE.0.d0)
+     &               MPOVA4.VPOCHA(I2,1) = 0.d0
+          ENDDO
+C++++++++ Fin de la Mini-Boucle sur les noeuds de l element
+
+  200 CONTINUE
+C=======FIN DE la 1ere BOUCLE SUR LES ELEMENTS==========
+
+
+
+C=======================================================
+c       2EME BOUCLE SUR LES ELEMENTS
+C       POUR LE TRI DES NOEUDS ("TEST EN PAGAILLE")
+C=======================================================
+
+c++++++ Debut de boucle sur les elements
+        DO 222 J=1,NBEL1
+
+C++++++++ Mini-Boucle(S) sur les noeuds de l element
+          DO  K=1,NBNN1
+C           numero INUM du Kieme noeud du Jieme element
+            INUM = NUM(K,J)
+C           numero du point correspondant des chpoints
+            I1 = NDPT1(INUM)
+            I2 = NDPT2(INUM)
+c           on verifie que le chpoint y est bien defini sinon on saute tout!
+            if(I1.eq.0) goto 222
+C           numero INUM du Kieme noeud de l'element en cours (le Jieme)
+            NUMND(K) = INUM
+C           valeurs de psi et phi au Kieme noeud
+            XPSIK = MPOVA3.VPOCHA(I1,1)
+            XPHIK = MPOVA4.VPOCHA(I1,1)
+            XPSI(K) = XPSIK
+            XPHI(K) = XPHIK
+C           Calcul de valeurs utiles POUR LE TRI
+            if (K.eq.1) then
+              PSIMAX = XPSIK
+              PSIMIN = XPSIK
+              PSIMIA = ABS(XPSIK)
+              PHIMAX = XPHIK
+              PHIMIN = XPHIK
+              PHIMIA = ABS(XPHIK)
+            else
+              PSIMAX = MAX(PSIMAX,XPSIK)
+              PSIMIN = MIN(PSIMIN,XPSIK)
+              PSIMIA = MIN(PSIMIA,ABS(XPSIK))
+              PHIMAX = MAX(PHIMAX,XPHIK)
+              PHIMIN = MIN(PHIMIN,XPHIK)
+              PHIMIA = MIN(PHIMIA,ABS(XPHIK))
+            endif
+
+          ENDDO
+C++++++++ Fin de la Mini-Boucle sur les noeuds de l element
+c             if (JWRITE.eq.1) then
+c             write(6,*)   'EF ',J,' psi,phi_node apres simplif='
+c             write(6,*)   (XPSI(iou),iou=1,4)
+c             write(6,*)   (XPHI(iou),iou=1,4)
+c             endif
+          PSIPRD = PSIMAX * PSIMIN
+          PHIPRD = PHIMAX * PHIMIN
+c
+C
+C++++++++ Tests en pagaille pour trier
+
+c         LOG1 = Tous les noeuds de lelement sont situés en arriere du front?
+          LOG1 = (PSIMAX.LE.0.d0)
+c         ...noeuds en arriere du front + element coupé par la fissure
+          IF (LOG1.AND.(PHIPRD.LT.0.d0))  THEN
+C           => tous les noeud doivent etre H-enrichi (=10)
+            DO  K=1,NBNN1
+              INUM = NUMND(K)
+              ITYPND(INUM) = MAX(10,ITYPND(INUM))
+            ENDDO
+C
+c         ...noeuds en arriere du front + element tangent avec la fissure
+          ELSEIF (LOG1.AND.(PHIMIA.EQ.0.d0))  THEN
+C           => seuls les noeud tangents doivent etre H-enrichi (=10)
+            DO  K=1,NBNN1
+            IF (XPHI(K).EQ.0.d0)  THEN
+              INUM = NUMND(K)
+              ITYPND(INUM) =  MAX(10,ITYPND(INUM))
+            ENDIF
+            ENDDO
+C
+c         Element contenant la pointe de fissure
+          ELSEIF ((PSIPRD.LT.0.d0).AND.(PHIPRD.LT.0.d0))  THEN
+C           => tous les noeud doivent etre F-enrichi (=100)
+            DO  K=1,NBNN1
+              INUM = NUMND(K)
+              ITYPND(INUM) = 100
+            ENDDO
+C
+c         Element dont un bord contient la pointe de fissure
+          ELSEIF ((PSIPRD.LT.0.d0).AND.(PHIMIA.EQ.0.d0))  THEN
+C           => tous les noeud doivent etre F-enrichi (=100)
+            DO  K=1,NBNN1
+              INUM = NUMND(K)
+              ITYPND(INUM) = 100
+            ENDDO
+C
+c         La pointe arrive sur un bord de l element
+          ELSEIF ((PSIMIA.EQ.0.d0).AND.(PHIPRD.LT.0.d0))  THEN
+C           => choix: seuls les noeud en avant du front sont F-enrichi (=100)
+            DO  K=1,NBNN1
+              INUM = NUMND(K)
+              if (XPSI(K).GE.0.d0)   ITYPND(INUM) = 100
+            ENDDO
+C
+c         Element dont un coin contient la pointe de fissure
+          ELSEIF ((PSIMIA.EQ.0.d0).AND.(PHIMIA.EQ.0.d0))  THEN
+C           => choix: seuls les noeud en avant du front sont F-enrichi (=100)
+            DO  K=1,NBNN1
+              INUM = NUMND(K)
+              if (XPSI(K).GE.0.d0)   ITYPND(INUM) = 100
+            ENDDO
+C
+c         Les autres elements ne sont pas directement coupés ni tangents avec la fissure
+          ELSE
+C           => on met a 1 pour dire qu on les a vu
+            DO  K=1,NBNN1
+              INUM = NUMND(K)
+              ITYPND(INUM) = MAX(1,ITYPND(INUM))
+            ENDDO
+C
+          ENDIF
+C++++++++ Fin des Tests en pagaille pour trier
+
+c           DO  K=1,NBNN1
+c               INUM = NUMND(K)
+c              TYPEF.VINT(J) = TYPEF.VINT(J) + ITYPND(INUM)
+c         if(j.eq.660)  write(*,*) 'K',K,' typnd',ITYPND(INUM)
+c         if(j.eq.661)  write(*,*) 'K',K,' typnd',ITYPND(INUM)
+c           ENDDO
+
+  222 CONTINUE
+C=======FIN DE la 2eme BOUCLE SUR LES ELEMENTS==========
+        segsup,NUMND,XPSI,XPHI,KKGAU
+        segdes,MINT0,MINT1
+
+
+  100 CONTINUE
+C=====FIN DE LA PREMIERE BOUCLE SUR LES SOUS MODELES================
+
+C A ce stade on a cree le champ par point ITYPND qui vaut :
+c 1   ->  noeud non enrichi
+c 10  ->  noeud H enrichi
+c 100 ->  noeud F1 ou F2 enrichi
+
+C=======================================================
+C DEUXIEME BOUCLE SUR LES SOUS MODELES
+C=======================================================
+      nexsur = 0
+      DO 400 ISMOD1 = 1,NBSMOD
+c      write (*,*) '***** sous modele ****', ISMOD1
+c
+CcccccC ouverture du sous modele
+        IMODEL = MMODE1.KMODEL(ISMOD1)
+        segact IMODEL*mod
+        IPT3 = IMODEL.IMAMOD
+        SEGACT IPT3
+c        write(*,*) 'nefmod', nefmod, 'imamod', imamod
+         if (NEFMOD.EQ.259) GOTO 410
+
+c       si EF XFEM, on travaille
+*        if(NEFMOD.ne.263) goto 401
+*as 2010_01_22 : ajout de l'element 3D
+c         if (NEFMOD.eq.263.or.NEFMOD.eq.264) then
+        if(NEFMOD.ne.263.and.NEFMOD.ne.264) goto 400
+
+
+C=======================================================
+c       3EME BOUCLE SUR LES ELEMENTS
+C       POUR ATTRIBUER L'ENRICHISSEMENT
+C=======================================================
+
+        segact,MCHAM2
+c       on evite d'ouvrir les MELVA2 pour chaque element
+        DO I2ENR=1,N2ENR
+          MELVA2 = MCHAM2.IELVAL(I2ENR)
+          if(MELVA2.ne.0) segact,MELVA2*mod
+        ENDDO
+        segact,MPOVA1,MPOVA2
+
+
+c++++++ Debut de boucle sur les elements
+        DO 300 J=1,NBEL1
+c          write(*,*) '*****   ELEM', J,'/', NBEL1
+
+c         pour eviter de creer bcp de listreels on utilise l astuce :
+          mphi  =0
+          mpsiph=0
+c++++++++ Boucle sur les noeuds de l element j
+          DO 310 K=1,NBNN1
+C           Kieme noeud du Jieme element a pour numero INUM
+            INUM = NUM(K,J)
+c            write(*,*) 'INUM', INUM, 'ITYPND(INUM)', ITYPND(INUM)
+c           on saute les noeuds non enrichis
+            if((ITYPND(INUM)).le.1)  goto 310
+Ccccccccccc noeud H-enrichi
+            if ((ITYPND(INUM)).eq.10) then
+              MELVA2 = MCHAM2.IELVAL(1)
+c               segact,MELVA2*mod
+              MLREE1 = MELVA2.IELCHE(K,J)
+
+c             on H-enrichit ssi ce noeud n etait pas deja H-enrichi
+              if (MLREE1.eq.0) then
+               if (mphi.ne.0) then
+                MELVA2.IELCHE(K,J) = mphi
+               else
+                JG = NBNN1
+                segini,MLREE2
+                MELVA2.IELCHE(K,J) = MLREE2
+c   on remplit la listreel des valeurs de PHI aux noeuds de l element
+                do inode=1,NBNN1
+                  INUM2 = NUM(inode,J)
+                  I2 = NDPT2(INUM2)
+                  MLREE2.PROG(inode) = MPOVA2.VPOCHA(I2,1)
+                enddo
+                segdes,MLREE2
+                mphi=MLREE2
+               endif
+              endif
+c               segdes,MELVA2
+            endif
+Ccccccccccc fin des noeud H-enrichi
+
+
+Ccccccccccc noeud F-enrichi
+*            if((ITYPND(INUM)).eq.100) then
+*as 2010_01_20: lsaut =1000 si option 'SAUT' ,  =100 sinon
+c         if (((ITYPND(INUM)).eq.lsaut).OR.((ITYPND(INUM)).eq.101)) then
+c            write(*,*) 'ITYPND(INUM)', ITYPND(INUM), 'lsaut', lsaut
+c            write(*,*) 'Nelem', j , 'INUM', inum
+            if (((ITYPND(INUM)).ge.lsaut)) then
+
+c               si F1 pas prevu on le rajoute
+                if (N2ENR.lt.2) then
+                  N2ENR = 2
+                  N2 = N2ENR
+                  segadj,MCHAM2
+                  MCHAM2.NOMCHE(N2ENR) = 'F1'
+                  MCHAM2.TYPCHE(N2ENR) = 'POINTEURLISTREEL'
+                  N1PTEL=0
+                  N1EL  =0
+                  N2PTEL=NBNN1
+                  N2EL  =NBEL1
+c                   segdes,MELVA2
+                  segini,MELVA2
+                  MCHAM2.IELVAL(N2ENR) = MELVA2
+                else
+                  MELVA2 = MCHAM2.IELVAL(2)
+c                   segact,MELVA2*mod
+                endif
+
+c           - on F1-enrichit si ce noeud n etait pas deja F1-enrichi
+c             OU si on est dans une stratégie de désenrichissement
+c                et que c'est le tour de F1
+              MLREE1 = MELVA2.IELCHE(K,J)
+c               if (MLREE1.eq.0) then
+              if ((MLREE1.eq.0.and.IMOT0.ne.2).OR
+     &            .(ITIP2.eq.1.and.IMOT0.eq.2)) then
+
+               ITYPND(INUM)=101;
+               if (mpsiph.ne.0) then
+                MELVA2.IELCHE(K,J) = mpsiph
+               else
+                NBLV7=2
+                JG = NBLV7*NBNN1
+                segini,MLREE2
+                MELVA2.IELCHE(K,J) = MLREE2
+c                segdes,MELVA2
+c             on remplit la listreel des valeurs de PSI et PHI
+                do inode=1,NBNN1
+                  INUM2 = NUM(inode,J)
+                  I1 = NDPT1(INUM2)
+                  I2 = NDPT2(INUM2)
+                  MLREE2.PROG(inode) = MPOVA1.VPOCHA(I1,1)
+                  MLREE2.PROG(NBNN1+inode) = MPOVA2.VPOCHA(I2,1)
+                enddo
+                segdes,MLREE2
+                mpsiph=MLREE2
+               endif
+
+c           - si noeud deja F1-enrichi, alors on essaie de le F2-enrichir
+c             OU si on est dans une stratégie de désenrichissement
+c                et que c'est le tour de F2
+              else
+                ITYPND(INUM)=102;
+c               si F2 pas prevu on le rajoute
+                if (N2ENR.lt.3) then
+                  N2ENR = 3
+                  N2 = N2ENR
+                  segadj,MCHAM2
+                  MCHAM2.NOMCHE(N2ENR) = 'F2'
+                  MCHAM2.TYPCHE(N2ENR) = 'POINTEURLISTREEL'
+                  N1PTEL=0
+                  N1EL  =0
+                  N2PTEL=NBNN1
+                  N2EL  =NBEL1
+c                  segdes,MELVA2
+                  segini,MELVA2
+                  MCHAM2.IELVAL(N2ENR) = MELVA2
+                else
+                  MELVA2 = MCHAM2.IELVAL(3)
+                  segact,MELVA2*mod
+                endif
+c           +-- on F2-enrichit si ce noeud n etait pas deja F1-enrichi
+                MLREE1 = MELVA2.IELCHE(K,J)
+                if (MLREE1.eq.0) then
+                 if (mpsiph.ne.0) then
+                  MELVA2.IELCHE(K,J) = mpsiph
+                 else
+                  NBLV7=2
+                  JG = NBLV7*NBNN1
+                  segini,MLREE2
+                  MELVA2.IELCHE(K,J) = MLREE2
+c                  segdes,MELVA2
+c               on remplit la listreel des valeurs de PSI et PHI
+                  do inode=1,NBNN1
+                    INUM2 = NUM(inode,J)
+                    I1 = NDPT1(INUM2)
+                    I2 = NDPT2(INUM2)
+                    MLREE2.PROG(inode) = MPOVA1.VPOCHA(I1,1)
+                    MLREE2.PROG(NBNN1+inode) = MPOVA2.VPOCHA(I2,1)
+                  enddo
+                  segdes,MLREE2
+                mpsiph=MLREE2
+               endif
+
+c           +-- si on est la, c est que le noeud est deja F1 et F2 enrichi
+c               => pour l instant on genere une erreur,
+c                  mais pour le futur ajouter la possiblite d avoir N2ENR >3
+                else
+         write(*,*) 'Trop d enrichissement (> 2 pointes) au noeud',INUM
+         write(*,*) K,'ieme noeud du',J,'ieme element'
+c                    MELVA2.IELCHE(K,J) = 0.
+                  return
+                endif
+c           +-- fin de la distinction noeud deja F2-enrichi ou pas
+
+              endif
+c           - fin de la distinction noeud deja F1-enrichi ou pas
+
+            endif
+Ccccccccccc fin du cas noeud F-enrichi
+
+  310     CONTINUE
+c++++++++ Fin de Boucle sur les noeuds de l element j
+
+
+  300 CONTINUE
+C=======FIN DE la 3eme BOUCLE SUR LES ELEMENTS===========
+C A ce stade le champ par point ITYPND  vaut :
+c 1   ->  noeud non enrichi
+c 10  ->  noeud H enrichi
+c 101 ->  noeud F1 enrichi
+c 102 ->  noeud F2 enrichi
+C On a construit le champ par élément à 3 composantes
+C MCHAM2.IELVAL(1)
+C-> champ par éléments qui vaut phi sur les éléments h-enrichis
+C MCHAM2.IELVAL(2)
+C-> champ par éléments contenant les valeurs de psi et phi
+C aux noeuds F1-enrichis
+C MCHAM2.IELVAL(3)
+C-> champ par éléments contenant les valeurs de psi et phi
+C aux noeuds F2-enrichis
+
+
+      DO I2ENR=1,N2ENR
+        MELVA2 = MCHAM2.IELVAL(I2ENR)
+        if(MELVA2.ne.0) segdes,MELVA2
+      ENDDO
+      SEGDES,MELEME,MPOVA1,MPOVA2,MCHAM2
+      SEGSUP,MPOVA3,MPOVA4
+C      if(NDPT1.ne.NDPT2) SEGSUP,NDPT2
+C      SEGSUP,NDPT1
+
+C as 2010_01_22 :ajout de lelement 3D
+
+
+  410 CONTINUE
+
+      IF(NEFMOD.NE.259 ) GOTO 400
+      IF(infele(13).NE.63) GOTO 400
+C  gg 2017_07_05 : traitement des elements sure
+c  (pour les relations de compatibilite issues de RAFF)
+      nexsur = 1
+
+C=======================================================
+c        4 eme BOUCLE SUR LES ELEMENTS
+C construction d'un champ d'enrichissement associée aux sure
+C=======================================================
+
+
+c recuperation du maillage support du sous-modele de sure
+*       IPT3 = IMODEL.IMAMOD
+*       SEGACT IPT3
+       NBNN3 = IPT3.NUM(/1)
+       NBEL3 = IPT3.NUM(/2)
+       MN3=IMODEL.INFMOD(/1)
+       NFOR=IMODEL.FORMOD(/2)
+       NMAT=IMODEL.MATMOD(/2)
+
+        NOBMOD = 1
+        SEGADJ, IMODEL
+C        write(*,*) 'Creation du champ d enrichissement de sure'
+C++++  INITIALISATION d'un nouveau chamelem vierge
+        L1 = 8
+C nombre de sous champs
+        N1 = 1
+C nombre de composantes
+        N2 = 3
+        N3 = 6
+
+        SEGINI, MCHEX3
+        MCHEX3.TITCHE = 'ENRICHIS'
+        MCHEX3.IFOCHE = IFOUR
+        MCHEX3.IMACHE(1)= IMAMOD
+        MCHEX3.CONCHE(1)= IMODEL.CONMOD
+        MCHEX3.INFCHE(1,2) = 0
+        MCHEX3.INFCHE(1,3) = NIFOUR
+        MCHEX3.INFCHE(1,6) = 1
+
+        SEGINI, MCHAM3
+        MCHEX3.ICHAML(1)=MCHAM3
+        MCHAM3.NOMCHE(1)= 'H       '
+        MCHAM3.NOMCHE(2)= 'F1      '
+        MCHAM3.NOMCHE(3)= 'F2      '
+        N1PTEL=NBNN3
+        N1EL  =NBEL3
+        N2PTEL=0
+        N2EL  =0
+        SEGINI, MELVA3
+        DO 409 NCOMP2=1,N2
+           MCHAM3.TYPCHE(NCOMP2)= 'REAL*8'
+           SEGINI, MELVA3
+           MCHAM3.IELVAL(NCOMP2)=MELVA3
+           SEGDES, MELVA3
+  409   CONTINUE
+        TYMODE(1)='MCHAMLL  '
+        IVAMOD(1)=MCHAM3
+
+c       stockage du nouveau champ d'enrichissement de sure dans le champ d'enrichissement de sortie
+
+        SEGACT MCHEX2
+        N1 = MCHEX2.IMACHE(/1) + 1
+        SEGADJ, MCHEX2
+        SEGACT MCHEX2*mod
+
+        MCHEX2.IMACHE(N1)= MCHEX3.IMACHE(1)
+        MCHEX2.CONCHE(N1)= MCHEX3.CONCHE(1)
+        MCHEX2.ICHAML(N1) = MCHEX3.ICHAML(1)
+        MCHEX2.INFCHE(N1,2) = 0
+        MCHEX2.INFCHE(N1,3) = NIFOUR
+        MCHEX2.INFCHE(N1,6) = 1
+
+
+c      endif
+c++++++ Debut de boucle sur les elements
+      DO 411 J=1,NBEL3
+c         compteurs d'enrichissements dans l'élément
+          Nenrh = 0
+          Nenrf1 = 0
+          Nenrf2 = 0
+
+c++++++++ Boucle sur les noeuds de l element j
+          DO 412 K=1,NBNN3
+
+C           Kieme noeud du Jieme element a pour numero INUM
+            INUM = IPT3.NUM(K,J)
+c           on saute les noeuds non enrichis
+            if((ITYPND(INUM)).le.1)  goto 412
+
+
+Ccccccccccc noeud H-enrichi
+            if ((ITYPND(INUM)).eq.10) then
+              MELVA3 = MCHAM3.IELVAL(1)
+              segact,MELVA3*mod
+              MELVA3.VELCHE(K,J) = 1.0
+              Nenrh = Nenrh +1
+              segdes,MELVA3
+            endif
+Ccccccccccc noeud F1-enrichi
+            if ((ITYPND(INUM)).eq.101) then
+
+              MELVA3 = MCHAM3.IELVAL(2)
+              segact,MELVA3*mod
+              MELVA3.VELCHE(K,J) = 1.0
+              Nenrf1 = Nenrf1 + 1
+              segdes,MELVA3
+            endif
+Ccccccccccc noeud F2-enrichi
+            if ((ITYPND(INUM)).eq.102) then
+
+              MELVA3 = MCHAM3.IELVAL(3)
+              segact,MELVA3*mod
+              MELVA3.VELCHE(K,J) = 1.0
+              Nenrf2 = Nenrf2 + 1
+              segdes,MELVA3
+            endif
+
+  412     CONTINUE
+
+Ccccccccccc repérage des hangig nodes a enrichir
+
+          if (ITYPND(IPT3.NUM(1,J)).le.1) then
+             if (nenrh.gt.0) then
+                 ITYPND(IPT3.NUM(1,J))= ITYPND(IPT3.NUM(1,J)) + 200
+             endif
+          endif
+          if (ITYPND(IPT3.NUM(1,J)).lt.11) then
+             if (nenrf1.gt.0) then
+                ITYPND(IPT3.NUM(1,J))= ITYPND(IPT3.NUM(1,J)) + 2000
+             endif
+             if (nenrf2.gt.0) then
+                ITYPND(IPT3.NUM(1,J))= ITYPND(IPT3.NUM(1,J)) + 20000
+             endif
+          endif
+  411 CONTINUE
+c++++++ fin de boucle sur les elements
+       SEGDES IPT3
+
+  400 CONTINUE
+C=====FIN DE LA DEUXIEME BOUCLE SUR LES SOUS MODELES================
+C A ce stade le champ par point ITYPND  vaut :
+c     1 ->  noeud non enrichi
+c    10 ->  noeud H enrichi
+c   101 ->  noeud F1 enrichi
+c   102 ->  noeud F2 enrichi
+c   201 ->  noeud non enrichi à H enrichir
+c   301 ->  noeud F1 enrichi à H enrichir
+c   302 ->  noeud F2 enrichi à H enrichir
+c  2001 ->  noeud non enrichi à F1 enrichir
+c  2010 ->  noeud H enrichi à F1 enrichier
+c  2102 ->  noeud F2 enrichi à F1 enrichir
+c  2201 ->  noeud non enrichi à F1 enrichir et H enrichir
+c  2302 ->  noeud F2  enrichi à F1 enrichir et H enrichir
+c 20001 ->  noeud non enrichi à F2 enrichir
+c 20010 ->  noeud H enrichi à F2 enrichir
+c 20101 ->  noeud F1 enrichi à F2 enrichir
+c 20201 ->  noeud non enrichi à F2 enrichir et H enrichir
+c 20301 ->  noeud F1 enrichi à F2 enrichir et H enrichir
+C 22001 ->  noeud non enrichi à F2 enrichir et F1 enrichir
+c 22010 ->  noeud H enrichi à F2 enrichir et F1 enrichir
+c 22201 ->  noeud non enrichi à F2 enrichir, F1 enrichir et H enrichir
+
+c
+C On a construit le champ par élément à 3 composantes
+C Portant sur le maillage de XC8R ou XQ4R
+C MCHAM2.IELVAL(1)
+C-> champ par éléments qui vaut phi sur les éléments h-enrichis
+C MCHAM2.IELVAL(2)
+C-> champ par éléments contenant les valeurs de psi et phi
+C aux noeds F1-enrichis
+C MCHAM2.IELVAL(3)
+C-> champ par éléments contenant les valeurs de psi et phi
+C aux noeds F2-enrichis
+
+C On a construit le champ par élément à 3 composantes
+C Portant sur le maillage de SURE
+C MCHAM3.IELVAL(1)
+C-> champ par éléments qui vaut 1 sur les noeud h-enrichis
+C MCHAM3.IELVAL(2)
+C--> champ par éléments qui vaut 1 sur les noeud F1-enrichis
+C MCHAM2.IELVAL(3)
+C--> champ par éléments qui vaut 1 sur les noeud F2-enrichis
+
+      if (nexsur.eq.0) goto 999
+C=======================================================
+C 3 IEME BOUCLE SUR LES SOUS MODELES
+C=======================================================
+
+      DO 500 ISMOD1 = 1,NBSMOD
+c
+CcccccC ouverture du sous modele
+        IMODEL = MMODE1.KMODEL(ISMOD1)
+        segact IMODEL*mod
+        IPT4 = IMODEL.IMAMOD
+        SEGACT IPT4
+        NBNN4 = IPT4.NUM(/1)
+        NBEL4 = IPT4.NUM(/2)
+c       si EF XFEM, on travaille 263=XQ4R 264=XC8R
+        if(NEFMOD.ne.263.and.NEFMOD.ne.264) goto 500
+
+
+C=======================================================
+c       5EME BOUCLE SUR LES ELEMENTS
+C       pour attribuer un enrichissement aux hanging nodes non enrichis
+c       dont les sure vont etre  enrichis
+C=======================================================
+
+        segact,MCHAM2
+c       on evite d'ouvrir les MELVA2 pour chaque element
+c        DO I2ENR=1,N2ENR
+c          MELVA2 = MCHAM2.IELVAL(I2ENR)
+c          if(MELVA2.ne.0) segact,MELVA2*mod
+c        ENDDO
+        segact,MPOVA1,MPOVA2
+
+c++++++ Debut de boucle sur les elements
+        DO 600 J=1,NBEL4
+c         pour eviter de creer bcp de listreels on utilise l astuce :
+          mphi  =0
+          mpsiph=0
+
+c++++++++ Boucle sur les noeuds de l element j
+          DO 610 K=1,NBNN4
+
+C           Kieme noeud du Jieme element a pour numero INUM
+            INUM = IPT4.NUM(K,J)
+             if (INUM.EQ.132) then
+             endif
+
+c           on saute les noeuds qui ne nous interessent pas
+            if((ITYPND(INUM)).le.200)  goto 610
+Ccccccccccc noeud H-enrichi
+            if ((ITYPND(INUM)).eq.201) GOTO 611
+            if ((ITYPND(INUM)).eq.301) GOTO 611
+            if ((ITYPND(INUM)).eq.302) GOTO 611
+            if ((ITYPND(INUM)).eq.2201) GOTO 611
+            if ((ITYPND(INUM)).eq.2302) GOTO 611
+            if ((ITYPND(INUM)).eq.20201) GOTO 611
+            if ((ITYPND(INUM)).eq.20301) GOTO 611
+            if ((ITYPND(INUM)).eq.22201) GOTO 611
+            GOTO 612
+  611       CONTINUE
+            MELVA2 = MCHAM2.IELVAL(1)
+            segact,MELVA2*mod
+            MLREE1 = MELVA2.IELCHE(K,J)
+
+c           on H-enrichit ssi ce noeud n etait pas deja H-enrichi
+            if (MLREE1.eq.0) then
+              if (mphi.ne.0) then
+                MELVA2.IELCHE(K,J) = mphi
+              else
+                JG = NBNN1
+                segini,MLREE2
+                MELVA2.IELCHE(K,J) = MLREE2
+c   on remplit la listreel des valeurs de PHI aux noeuds de l element
+                do inode=1,NBNN1
+                  INUM2 = IPT4.NUM(inode,J)
+                  I2 = NDPT2(INUM2)
+                  MLREE2.PROG(inode) = MPOVA2.VPOCHA(I2,1)
+                enddo
+                segdes,MLREE2
+                mphi=MLREE2
+              endif
+            endif
+            segdes,MELVA2
+Ccccccccccc fin des noeud H-enrichi
+
+  612       CONTINUE
+Ccccccccccc noeud F1-enrichi
+            if ((ITYPND(INUM)).eq.2001) GOTO 613
+            if ((ITYPND(INUM)).eq.2010) GOTO 613
+            if ((ITYPND(INUM)).eq.2102) GOTO 613
+            if ((ITYPND(INUM)).eq.2201) GOTO 613
+            if ((ITYPND(INUM)).eq.2302) GOTO 613
+            if ((ITYPND(INUM)).eq.22001) GOTO 613
+            if ((ITYPND(INUM)).eq.22010) GOTO 613
+            if ((ITYPND(INUM)).eq.22201) GOTO 613
+            goto 614
+  613       CONTINUE
+            MELVA2 = MCHAM2.IELVAL(2)
+            segact,MELVA2*mod
+
+            if (mpsiph.ne.0) then
+               MELVA2.IELCHE(K,J) = mpsiph
+            else
+
+               NBLV7=2
+               JG = NBLV7*NBNN1
+               segini,MLREE2
+               MELVA2.IELCHE(K,J) = MLREE2
+c              segdes,MELVA2
+c              on remplit la listreel des valeurs de PSI et PHI
+               do inode=1,NBNN4
+                   INUM2 = IPT4.NUM(inode,J)
+                   I1 = NDPT1(INUM2)
+                   I2 = NDPT2(INUM2)
+                   MLREE2.PROG(inode) = MPOVA1.VPOCHA(I1,1)
+                   MLREE2.PROG(NBNN1+inode) = MPOVA2.VPOCHA(I2,1)
+               enddo
+               segdes,MLREE2
+               mpsiph=MLREE2
+            endif
+            segdes,MELVA2
+
+Ccccccccccc fin des noeud F1-enrichi
+  614       CONTINUE
+
+Ccccccccccc noeud F2-enrichi
+            if ((ITYPND(INUM)).eq.20001) GOTO 615
+            if ((ITYPND(INUM)).eq.20010) GOTO 615
+            if ((ITYPND(INUM)).eq.20101) GOTO 615
+            if ((ITYPND(INUM)).eq.20201) GOTO 615
+            if ((ITYPND(INUM)).eq.20301) GOTO 615
+            if ((ITYPND(INUM)).eq.22001) GOTO 615
+            if ((ITYPND(INUM)).eq.22010) GOTO 615
+            if ((ITYPND(INUM)).eq.22201) GOTO 615
+            goto 610
+  615       CONTINUE
+            MELVA2 = MCHAM2.IELVAL(3)
+            segact,MELVA2*mod
+
+            if (mpsiph.ne.0) then
+                MELVA2.IELCHE(K,J) = mpsiph
+            else
+                NBLV7=2
+                JG = NBLV7*NBNN1
+                segini,MLREE2
+                MELVA2.IELCHE(K,J) = MLREE2
+c               segdes,MELVA2
+c             on remplit la listreel des valeurs de PSI et PHI
+                do inode=1,NBNN1
+                    INUM2 = IPT4.NUM(inode,J)
+                    I1 = NDPT1(INUM2)
+                    I2 = NDPT2(INUM2)
+                    MLREE2.PROG(inode) = MPOVA1.VPOCHA(I1,1)
+                    MLREE2.PROG(NBNN1+inode) = MPOVA2.VPOCHA(I2,1)
+                enddo
+                segdes,MLREE2
+                mpsiph=MLREE2
+             endif
+             segdes,MELVA2
+Ccccccccccc fin du cas noeud F2-enrichi
+  610     CONTINUE
+  600   CONTINUE
+c++++++++ Fin de Boucle sur les noeuds de l element j
+  500 CONTINUE
+c fin de la boucle sur les sous modeles
+  999 CONTINUE
+      if(NDPT1.ne.NDPT2) SEGSUP,NDPT2
+      SEGSUP,NDPT1
+
+      SEGSUP,ITYPND
+c
+      SEGDES,MMODE1
+C
+
+      if(ISYNTAX.eq.0) then
+        if(IPRIG2.ne.0) CALL ECROBJ('RIGIDITE',IPRIG2)
+        CALL ECROBJ('MCHAML',MCHEX2)
+      endif
+C
+
+      RETURN
+      END
+
+
+
+
+
+
+

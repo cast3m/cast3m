@@ -1,0 +1,248 @@
+C RECOF1    SOURCE    CB215821  18/09/13    21:16:10     9917
+      SUBROUTINE RECOF1(itbst,itbm,ichp1,ipout)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*
+************************************************************************
+*
+* CREATION : Joel KICHENIN
+* MODIFS :
+* Benoit PRABEL, 1/08/2014 : ajout possibilite de n'avoir que itbm
+* BP, 11/12/2017 : corrections pour parallelisme
+*
+************************************************************************
+
+-INC CCOPTIO
+-INC SMCHPOI
+-INC SMELEME
+-INC SMTABLE
+-INC SMCOORD
+************************************************************************
+*  -INC TMYTAB
+*
+*     SEGMENT POUR "DEBOBINER" UN OBJET DE TYPE 'TABLE'
+*     D'UN SOUSTYPE PARTICULIER PRECISE PAR ITYTAB
+*     Le but est de faciliter la programmation esope notamment en //
+*
+*     ITYTAB = | BASE_MODALE
+*              | LIAISONS_STATIQUES
+*              | ... a completer
+*
+*     KPTREP(i) = POINT_REPERE du ieme mode/solution statique
+*     KDEFO(i)  = DEFORMEE_MODALE / DEFORMEE
+*     KICPR(#noeud POINT_REPERE) = i^eme mode
+*     DDLLIA(i) = composante de la liaison statique
+*     KPTLIA(i) = point en jeu dans la liaison statique
+*
+
+      SEGMENT MYTAB
+       CHARACTER*24 ITYTAB
+       INTEGER      KPTREP(NMY),KDEFO(NMY)
+       INTEGER      KICPR(NMY2)
+       CHARACTER*4  DDLLIA(NMY3)
+       INTEGER      KPTLIA(NMY3)
+      ENDSEGMENT
+      POINTEUR MYTAB1.MYTAB,MYTAB2.MYTAB,MYTAB3.MYTAB
+
+************************************************************************
+
+c     icpr(ip)=nombre de fois ou l'on a vu le noeud POINT_LIAISON ip
+      segment icpr(nbpts)
+c     ITACH=liste des chpoints, ITAFL.TAFL=liste des coefficients
+      SEGMENT ITACH(0)
+      SEGMENT/ITAFL/(TAFL(0)*D)
+
+      CHARACTER*4  mocom1
+
+
+      ipout =0
+      it1=0
+      it2=0
+      MYTAB1=0
+      MYTAB2=0
+
+
+************************************************************************
+*     ACTIVATION DES TABLES si elles existent
+************************************************************************
+c     recup des solutions statiques si la table existe
+      if (itbst.gt.0) then
+        mtable = itbst
+        segact mtable
+        nbpts=xcoor(/1)/(idim+1)
+        segini icpr
+        iicpr=icpr
+c       DEBOBINAGE DE LA TABLE itbst VERS MYTAB1
+        CALL TAB2MY(itbst,2,iicpr,it1)
+        MYTAB1=it1
+      endif
+
+c     recup des modes si la table existe
+      itbm2=0
+      if (itbm.gt.0) then
+        CALL ACCTAB(itbm,'MOT',0,0.0D0,'MODES',.TRUE.,0,
+     &        'TABLE',0,0.0D0,' ',.TRUE.,itbm2)
+        if (ierr.ne.0) return
+        mtable = itbm2
+        segact mtable
+c       DEBOBINAGE DE LA TABLE itbm2 VERS MYTAB2
+        CALL TAB2MY(itbm2,1,0,it2)
+        MYTAB2=it2
+      endif
+
+************************************************************************
+*     RECOMBINAISON
+************************************************************************
+
+c     creation des segments pour la combinaison lineaire
+      segini,ITACH,ITAFL
+      NA=0
+
+c     recup du chpoint d'entree (de composante ALFA BETA)
+      mchpoi = ichp1
+      segact mchpoi
+      nsoupo = ipchp(/1)
+
+c   - boucle sur les zones du chpoint d'entree
+      DO 10 is = 1 ,nsoupo
+
+       msoupo = ipchp(is)
+       segact msoupo
+       NC = NOCOMP(/2)
+       meleme = igeoc
+       mpoval = ipoval
+       segact meleme,mpoval
+       N = vpocha(/1)
+
+c    - boucle sur les composantes
+       DO 20 ic = 1,NC
+
+        mocom1 = nocomp(ic)
+        if (mocom1.eq.'BETA') then
+          if(itbst.le.0) goto 20
+          MYTAB=MYTAB1
+        elseif (mocom1.eq.'ALFA') then
+          if(itbm2.le.0) goto 20
+          MYTAB=MYTAB2
+        elseif (mocom1.eq.'LX') then
+          write(ioimp,*) 'LX a recopier tel quel... ',
+     &          'mais pas encore fait !'
+          goto 20
+        else
+          write(ioimp,*) 'RECO : le chpoint doit avoir les composantes',
+     &                   ' ALFA ou BETA !'
+          MOTERR(1:4)=mocom1
+          call erreur(197)
+          return
+        endif
+
+c     - boucle sur les noeuds du chpoint d'entree
+        DO 90 ipn = 1,N
+          ipts = num(1,ipn)
+          sca1 = vpocha(ipn,ic)
+
+c           on a deja enregistré tous les modes
+            im=KICPR(ipts)
+            if (im.le.0) then
+              INTERR(1)=ipts
+              CALL ERREUR(1072)
+            endif
+            ichin=KDEFO(im)
+
+c           combinaison lineaire
+c             if (ipout.gt.0) then
+c               ich1 = ipout
+c               call adchpo(ich1,ichin,ipout,1.d0,sca1)
+c             else
+c               call muchpo(ichin,sca1,ipout,1)
+c             endif
+c           mutualisation des sources : appel a COMBIL
+            ITACH(**)=ichin
+            TAFL(**)=sca1
+            NA=NA+1
+
+ 90     CONTINUE
+
+ 20    CONTINUE
+
+       segdes msoupo,meleme,mpoval
+ 10   CONTINUE
+      segdes mchpoi
+
+c     combinaison lineaire effective optimisee
+      CALL COMBIL(ITACH,ITAFL,NA,ipout)
+
+      if (itbst.le.0) goto 999
+
+
+************************************************************************
+*     CORRECTION DU CHPOINT AUX POINTS DE LIAISON
+************************************************************************
+c
+c de maniere a ne pas compter plusieurs fois un noeud en commun
+c a plusieurs deformees statiques (ex. du noeud x ci dessous).
+c  |---------------x x-----------------|
+c        \psi_1            \psi2
+c
+
+      MYTAB=MYTAB1
+c       ima = icpt(/1)
+      ima = KPTLIA(/1)
+      mchpoi = ipout
+      segact mchpoi
+      nsoupo = ipchp(/1)
+
+      DO is = 1 ,nsoupo
+        msoupo = ipchp(is)
+        segact msoupo
+        NC = NOCOMP(/2)
+        meleme = igeoc
+        mpoval = ipoval
+
+        segact meleme,mpoval*mod
+        N = vpocha(/1)
+
+        DO ic = 1,NC
+          mocom1 = nocomp(ic)
+
+          DO 180 ipn = 1 , N
+            ipts = num(1,ipn)
+            kpt = 0
+            if (icpr(ipts).eq.0) goto 180
+c           on a repere un point de liaison
+            do 170 im = 1,ima
+              if (KPTLIA(im).ne.ipts) goto 170
+              if (DDLLIA(im).ne.mocom1) goto 170
+              kpt = kpt + 1
+ 170        continue
+c           kpt=nombre de fois ou apparait point_liaison + ddl_liaison
+            if (kpt.gt.1) vpocha(ipn,ic) = vpocha(ipn,ic)/kpt
+
+ 180      CONTINUE
+
+        ENDDO
+        segdes meleme,mpoval,msoupo
+
+      ENDDO
+      segdes mchpoi
+      segsup icpr
+
+
+************************************************************************
+*     FIN DU PROGRAMME
+************************************************************************
+ 999  CONTINUE
+
+      SEGSUP,ITACH,ITAFL
+      IF(MYTAB1.ne.0) SEGSUP MYTAB1
+      IF(MYTAB2.ne.0) SEGSUP MYTAB2
+c     on ne desactive pas les 2 tables d'entrees (//isation)
+
+      RETURN
+      END
+
+
+
+
+
+

@@ -1,0 +1,2856 @@
+C VORO2     SOURCE    CB215821  17/11/30    21:17:29     9639
+C
+      SUBROUTINE VORO2(IPT1,IPT2,DDMAX,MCHPOI,MTAB1)
+C----------------------------------------------------------------------C
+C              Decoupage de la partition de Voronoi selon              C
+C                un contour (2D) ou une enveloppe (3D)                 C
+C                                                                      C
+C     IPT1  = maillage de POI1, centres des cellules                   C
+C     IPT2  = maillage contour/enveloppe limitant la partition de      C
+C             Voronoi                                                  C
+C     XZERO = Zero relatif a la taille de la partition a creer.        C
+C             Utile pour considerer deux sommets de cellule de Voronoi C
+C             confondus afin de supprimer les aretes trop petites      C
+C     MTAB1 = table contenant le maillage des cellules de Voronoi non  C
+C             coupees, obtenue avec VORO1.                             C
+C                                                                      C
+C             MTAB1 est modifiee pour correspondre a la nouvelle       C
+C             partition de Voronoi restreinte par IPT2                 C
+C                                                                      C
+C  L'algorithme utilise pour la decoupe est issu de :                  C
+C  Yan D-M et al. Efficient computation of clipped Voronoi diagram for C
+C  mesh generation, Computer-Aided Design (2011)                       C
+C                                                                      C
+C----------------------------------------------------------------------C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+-INC SMCHPOI
+-INC CCOPTIO
+-INC SMELEME
+-INC SMCOORD
+-INC CCGEOME
+-INC SMLENTI
+-INC SMLREEL
+-INC SMTABLE
+      LOGICAL BOOL1,BOOL2,BOOL3,BOOL4,BOOL5,BOOL6,BOOL7,BOOL8,BOOL9
+C     Listes d'entiers utilisees un peu partout
+      POINTEUR LV1.MLENTI,LV2.MLENTI,LV3.MLENTI,LV4.MLENTI,LV5.MLENTI
+      POINTEUR LV6.MLENTI
+      POINTEUR LC.MLENTI,LT.MLENTI
+C     Tables, maillages et listes pour la table de sortie
+      POINTEUR MTAB11.MTABLE,IPTG.MELEME,MTABC.MTABLE,MTABI1.MTABLE
+      POINTEUR IPTI1.MELEME,LFI1.MLENTI,IPTVI1.MELEME,MTABF.MTABLE
+      POINTEUR IPTF1.MELEME,LA1.MLENTI,MTABA.MTABLE,IPTA1.MELEME
+      POINTEUR MTABI2.MTABLE,IPTI2.MELEME,IPTVI2.MELEME
+C     Tables, maillages et listes intermediaires
+      POINTEUR MTAB10.MTABLE,IPTG0.MELEME,MTABCC.MTABLE,MTABI0.MTABLE
+      POINTEUR IPTI0.MELEME,LFI0.MLENTI,IPTVI0.MELEME,MTABFF.MTABLE
+      POINTEUR MTABF0.MTABLE,IPTF0.MELEME,LA0.MLENTI,MTABAA.MTABLE
+      POINTEUR IPTA0.MELEME
+      POINTEUR LA2.MLENTI,LA3.MLENTI
+C     Tables, maillages et listes pour la table d'entree
+      POINTEUR MTABCCC.MTABLE,MTABI00.MTABLE,MTABJ00.MTABLE
+      POINTEUR LFI00.MLENTI,LFJ00.MLENTI,MTABFFF.MTABLE
+      POINTEUR MTABF100.MTABLE,IPTVI00.MELEME
+      POINTEUR LA00.MLENTI,LA000.MLENTI,MTABAAA.MTABLE
+C     Liste de flottants (pour les coordonnees barycentriques des
+C     points internes)
+      POINTEUR LZ1.MLREEL
+C     Tableau destine a decrire les elements adjacents de l'enveloppe
+      SEGMENT,MADJACEN
+         INTEGER LEAC(NBL1,IDIM,2)
+      ENDSEGMENT
+      POINTEUR ILEA1.MADJACEN
+C     Tableau d'entiers a deux dimensions
+      SEGMENT,MVORO
+         INTEGER LACT(N1,N2)
+      ENDSEGMENT
+      POINTEUR ITL1.MVORO,ITARE1.MVORO,ITFAC1.MVORO
+C
+C     Tableau de flottants a deux dimensions
+      SEGMENT,MVORO2
+         REAL*8 XACT(N1,N2)
+      ENDSEGMENT
+      POINTEUR LTL1.MVORO2,LTL2.MVORO2
+C
+      CHARACTER*8 CHARIN,CHARRE
+      LOGICAL     LOGIN ,LOGRE
+C
+C
+      IVALIN=0
+      IVALRE=0
+      XVALIN=0.D0
+      XVALRE=0.D0
+      CHARIN='        '
+      CHARRE='        '
+      LOGIN =.FALSE.
+      LOGRE =.FALSE.
+
+
+      IDIMP1=IDIM+1
+      NBSOUS=0
+      NBREF=0
+C
+C     ZERO & ZERO2 : tolerances pour eliminer noeuds confondus,
+C                    aretes coplanaires...
+      XTOL = DDMAX*1.D-10
+      ZERO=1D-14*DDMAX
+      ZERO2=1D-10*DDMAX
+C
+C----------------------------------------------------------------------C
+C                      PARTIE 1 : Pre-traitement                       C
+C  - creation d'une table des elements adjacents du maillage           C
+C    contour/enveloppe IPT2 --> ILEA1                                  C
+C----------------------------------------------------------------------C
+C     Le tableau ILEA1.LEAC comporte 3 dimensions : ILEA1.LEAC(I,J,K)
+C     dimension 1 : I est le numero de l'element du contour/enveloppe
+C     dimension 2 : J est le numero du noeud de l'element I
+C     dimension 3 : K=1 --> renvoie le numero de l'element adjacent a
+C                           l'element I par rapport au noeud J
+C                   K=2 --> renvoie le numero du noeud de l'element
+C                           adjacent situe en vis a vis du noeud J
+C     On a donc les symetries suivantes :
+C     si     ILEA1.LEAC(I,J,1)   = I' et  ILEA1.LEAC(I,J,2)   = J'
+C     alors  ILEA1.LEAC(I',J',1) = I  et  ILEA1.LEAC(I',J',2) = J
+C
+C     Initialisation de la table des elements adjacents
+      NBL1=IPT2.NUM(/2)
+      NBL2=IPT2.NUM(/1)
+      SEGINI,ILEA1
+      JG=IPT2.NUM(/1)
+      SEGINI,LV1
+C     Nombre de noeuds en commun a trouver
+      NNREF=IPT2.NUM(/1)-1
+C     Somme des numeros des noeuds
+      IF (IDIM.EQ.2) THEN
+         NSREF=1+2
+      ELSE
+         NSREF=1+2+3
+      ENDIF
+C     Boucle sur les elements de IPT2
+      DO I=1,IPT2.NUM(/2)
+C        Numeros des noeuds de l'element I
+         DO J=1,IPT2.NUM(/1)
+            LV1.LECT(J)=IPT2.NUM(J,I)
+         ENDDO
+C        Deuxieme boucle sur les elements de numero superieurs a I
+         DO II=I+1,IPT2.NUM(/2)
+            NNC=0
+            NSOMA=0
+            NSOMB=0
+C           Test si l'element II a des noeuds communs a l'element I
+            DO J=1,IPT2.NUM(/1)
+               NTEST=IPT2.NUM(J,II)
+               DO K=1,IPT2.NUM(/1)
+                  IF (NTEST.EQ.LV1.LECT(K)) THEN
+                     NNC=NNC+1
+                     NSOMA=NSOMA+K
+                     NSOMB=NSOMB+J
+                  ENDIF
+               ENDDO
+            ENDDO
+C           Si l'element II est bien adjacent a l'element I
+            IF (NNC.EQ.NNREF) THEN
+               NI=NSREF-NSOMA
+               NII=NSREF-NSOMB
+               ILEA1.LEAC(I,NI,1)=II
+               ILEA1.LEAC(I,NI,2)=NII
+               ILEA1.LEAC(II,NII,1)=I
+               ILEA1.LEAC(II,NII,2)=NI
+            ENDIF
+         ENDDO
+C        Test si on a bien trouve un voisin pour chaque cote de I
+         DO J=1,IPT2.NUM(/1)
+            IF (ILEA1.LEAC(I,J,1).EQ.0) THEN
+C              Le contour n'est pas reconnu ferme
+               CALL ERREUR(28)
+               GOTO 999
+            ENDIF
+         ENDDO
+      ENDDO
+C
+C
+C----------------------------------------------------------------------C
+C                               PARTIE 2                               C
+C    Construction de la surface externe de la partition de Voronoi     C
+C           par decoupage en parcourant la surface enveloppe           C
+C----------------------------------------------------------------------C
+C
+      IF (IDIM.EQ.2) THEN
+C        Idee : on parcoure les segments de l'enveloppe et pour chacun
+C               d'eux on determine son intersection avec la partition de
+C               Voronoi
+C        On construit ainsi la liste des couples (Ti;Ci) possedant une
+C        intersection non vide
+C        Ti : le numero de segment dans IPT2
+C        Ci : le numero de la cellule dans IPT1
+C        La liste des couples (Ti;Ci) a traiter est incrementee au fur
+C        et a mesure des rencontres
+C
+C------- Etape 1 : Initialisations
+C        Initialisation d'une file pour les Ci et Tj
+C        on utilise deux listes d'entiers LT et LC
+         JG=(IPT2.NUM(/2))*(IPT1.NUM(/2))
+         SEGINI,LT,LC
+C        On demarre sur le premier segment de l'enveloppe
+         NLT=1
+         NT0=1
+         LT.LECT(NLT)=NT0
+C        Recherche d'une cellule intersectant le segment NT0, on prend
+C        celle dont le centre est le plus proche du barycentre du
+C        segment NT0
+         NRA=IPT2.NUM(1,NT0)
+         NRB=IPT2.NUM(2,NT0)
+         XG=((XCOOR((NRA-1)*IDIMP1+1))+(XCOOR((NRB-1)*IDIMP1+1)))/2.
+         YG=((XCOOR((NRA-1)*IDIMP1+2))+(XCOOR((NRB-1)*IDIMP1+2)))/2.
+         DO NCJ=1,IPT1.NUM(/2)
+            NRCJ=IPT1.NUM(1,NCJ)
+            XCJ=XCOOR((NRCJ-1)*IDIMP1+1)
+            YCJ=XCOOR((NRCJ-1)*IDIMP1+2)
+            DJG=SQRT(((XCJ-XG)*(XCJ-XG))+((YCJ-YG)*(YCJ-YG)))
+            IF (NCJ.EQ.1) THEN
+               DJG0=DJG
+               NCJ0=NCJ
+               NRCJ0=NRCJ
+            ENDIF
+            IF (DJG.LT.DJG0) THEN
+               DJG0=DJG
+               NCJ0=NCJ
+               NRCJ0=NRCJ
+            ENDIF
+         ENDDO
+         LC.LECT(NLT)=NCJ0
+C        Initialisation d'une table pour les couples (Ti,Ci)
+         N1=IPT2.NUM(/2)
+         N2=IPT1.NUM(/2)
+         SEGINI,ITL1
+         ITL1.LACT(NT0,NCJ0)=1
+C        Maillage global IPTG des aretes de la partition coupee
+         NBNN=2
+         NBELEM=200
+         SEGINI,IPTG
+         IPTG.ITYPEL=2
+         NBELEG=0
+C        Liste de tous les points ajoutes a MCOORD suite au decoupage
+         JG=0
+         SEGINI,LV1
+         NLV1=0
+C        Maillage global IPT6 des centres des cellules dans la
+C        partition coupee
+         NBNN=1
+         NBELEM=IPT1.NUM(/2)
+         SEGINI,IPT6
+         IPT6.ITYPEL=1
+         NBELE6=0
+C        Table de sortie MTAB11
+         CALL CRTABL(MTAB11)
+         CALL CRTABL(MTABC)
+         CALL CRTABL(MTABA)
+         CALL ECCTAB(MTAB11,'MOT     ',0,0,'VISU',0,0,
+     &                      'MAILLAGE',0,0,0,0,IPTG)
+         CALL ECCTAB(MTAB11,'MOT     ',0,0,'CELL',0,0,
+     &                      'TABLE   ',0,0,0,0,MTABC)
+         CALL ECCTAB(MTAB11,'MOT     ',0,0,'ARTS',0,0,
+     &                      'TABLE   ',0,0,0,0,MTABA)
+C
+C------- Etape 2 : Calcul des intersections
+C        Maintenant que la file (LT,LC) est non vide, on debute
+C        les iterations. Pour chaque couple, on determine le segment
+C        d'intersection et on le range dans la table de sortie.
+C        On incremente egalement la file avec les cellules voisines et
+C        les segments voisins du segment d'intersection
+C        Les iterations s'arretent lorsque la file est vide
+C
+C        Tables des cellules et des aretes non coupees
+         CALL ACCTAB(MTAB1,'MOT     ',0,0,'CELL',0,0,
+     &                     'TABLE   ',0,0,0,0,MTABCCC)
+         CALL ACCTAB(MTAB1,'MOT     ',0,0,'ARTS',0,0,
+     &                     'TABLE   ',0,0,0,0,MTABAAA)
+C        Debut de la boucle sur la file (LT,LC)
+         NB1=IPT1.NUM(/2)*IPT2.NUM(/2)
+         DO I=1,NB1
+C           Test d'arret de la boucle (la file est vide)
+            IF (I.GT.NLT) THEN
+               GOTO 35
+            ENDIF
+C           NTI designe le numero de segment dans IPT2
+            NTI=LT.LECT(I)
+C           NCI designe le numero la cellule dans IPT1
+            NCI=LC.LECT(I)
+C           NRCI designe le numero du point centre de la cellule NCI
+            NRCI=IPT1.NUM(1,NCI)
+C           Creation d'un indice NRCI dans la table MTAB11.CELL
+C           si besoin
+            CALL ECROBJ('POINT   ',NRCI)
+            CALL ECROBJ('TABLE   ',MTABC)
+            CALL EXIS
+            CALL LIRLOG(BOOL1,1,IRETOU)
+            IF (BOOL1) THEN
+C              Si MTAB11.CELL.NRCI existe, on va le chercher
+               CALL ACCTAB(MTABC,'POINT   ',0,0,' ',0,NRCI,
+     &                           'TABLE   ',0,0,0,0,MTABI1)
+C              Recuperation des indices VISU, ARTS et VOIS
+               CALL ACCTAB(MTABI1,'MOT     ',0,0,'VISU',0,0,
+     &                            'MAILLAGE',0,0,0,0,IPTI1)
+               CALL ACCTAB(MTABI1,'MOT     ',0,0,'ARTS',0,0,
+     &                            'LISTENTI',0,0,0,0,LA1)
+               CALL ACCTAB(MTABI1,'MOT     ',0,0,'VOIS',0,0,
+     &                            'MAILLAGE',0,0,0,0,IPTVI1)
+            ELSE
+C              Sinon, on cree un nouvel indice
+               CALL CRTABL(MTABI1)
+               CALL ECCTAB(MTABC,'POINT   ',0,0,' ',0,NRCI,
+     &                           'TABLE   ',0,0,0,0,MTABI1)
+C              Initialisation des indices VISU, ARTS et VOIS
+               NBNN=2
+               NBELEM=0
+               SEGINI,IPTI1
+               IPTI1.ITYPEL=2
+               CALL ECCTAB(MTABI1,'MOT     ',0,0,'VISU',0,0,
+     &                            'MAILLAGE',0,0,0,0,IPTI1)
+               JG=0
+               SEGINI,LA1
+               CALL ECCTAB(MTABI1,'MOT     ',0,0,'ARTS',0,0,
+     &                            'LISTENTI',0,0,0,0,LA1)
+               NBNN=1
+               NBELEM=0
+               SEGINI,IPTVI1
+               IPTVI1.ITYPEL=1
+               CALL ECCTAB(MTABI1,'MOT     ',0,0,'VOIS',0,0,
+     &                            'MAILLAGE',0,0,0,0,IPTVI1)
+               NBELE6=NBELE6+1
+               IPT6.NUM(1,NBELE6)=NRCI
+            ENDIF
+C           Determination de l'intersection entre le segment NTI et
+C           le polygone NCI
+C           Clipping selon l'algorithme de Sutherland et Hodgman
+C           Le segment resultant de l'intersection est decrit par la
+C           table LTL1 avec :
+C           LTL1.XACT(i,j) = coordonnee j du i-eme noeud du segment
+C           i valant 1 ou 2
+C           --> initialisation de LTL1 aux noeuds du segment NTI
+            NRTI1=IPT2.NUM(1,NTI)
+            NRTI2=IPT2.NUM(2,NTI)
+            N1=2
+            N2=3
+            SEGINI,LTL1
+            XI10=XCOOR((NRTI1-1)*IDIMP1+1)
+            YI10=XCOOR((NRTI1-1)*IDIMP1+2)
+            XI20=XCOOR((NRTI2-1)*IDIMP1+1)
+            YI20=XCOOR((NRTI2-1)*IDIMP1+2)
+            LTL1.XACT(1,1)=XI10
+            LTL1.XACT(1,2)=YI10
+            LTL1.XACT(2,1)=XI20
+            LTL1.XACT(2,2)=YI20
+C           --> table du polygone NRCI infini (MTABI0)
+            CALL ACCTAB(MTABCCC,'POINT   ',0,0,' ',0,NRCI,
+     &                          'TABLE   ',0,0,0,0,MTABI00)
+C           --> liste de ses aretes
+            CALL ACCTAB(MTABI00,'MOT     ',0,0,'ARTS',0,0,
+     &                          'LISTENTI',0,0,0,0,LA00)
+C           --> maillage de ses voisins
+            CALL ACCTAB(MTABI00,'MOT     ',0,0,'VOIS',0,0,
+     &                          'MAILLAGE',0,0,0,0,IPT3)
+C           Boucle sur toutes les aretes du polygone NCI
+            DO J=1,LA00.LECT(/1)
+C              Maillage IPT4 de l'arete J du polygone NCI
+               NFJ=LA00.LECT(J)
+               CALL ACCTAB(MTABAAA,'ENTIER  ',NFJ,0,' ',0,0,
+     &                             'MAILLAGE',0,0,0,0,IPT4)
+               NREFA=IPT4.NUM(1,1)
+               NREFB=IPT4.NUM(2,1)
+C              Massicotage du segment LTL1 selon le demi plan definit
+C              la ligne IPT4 et le centre I du polygone de Voronoi
+C              Coordonnees des points P1 et P2
+               X1=LTL1.XACT(1,1)
+               Y1=LTL1.XACT(1,2)
+               X2=LTL1.XACT(2,1)
+               Y2=LTL1.XACT(2,2)
+C              Intersection du segment P1P2 avec le demi plan
+               CALL INTPSEG2(NREFA,NREFB,NRCI,X1,Y1,X2,Y2,
+     &                       IINT,XI1,YI1,XI2,YI2)
+C              Il y a 2 cas possibles
+C              -1) l'intersection est vide --> erreur
+              IF (IINT.EQ.0) THEN
+C                 WRITE(6,*) '> Intersection segment/polygone vide'
+C                 WRITE(6,*) 'Numero du segment concerne:',nti
+C                 WRITE(6,*) 'Point de la cellule concernee',nrci
+                  INTERR(1)=nti
+                  INTERR(2)=nrci
+                  CALL ERREUR(1032)
+                  GOTO 999
+               ENDIF
+C              -2) l'intersection n'est pas vide
+               IF (IINT.EQ.1) THEN
+                  LTL1.XACT(1,1)=XI1
+                  LTL1.XACT(1,2)=YI1
+                  LTL1.XACT(2,1)=XI2
+                  LTL1.XACT(2,2)=YI2
+               ENDIF
+            ENDDO
+C
+C
+C           Maintenant, on va incrementer la file (LT,LC)
+C           avec les intersections voisines
+C
+C           Extremite 1 du segment d'intersection LTL1
+            XI1=LTL1.XACT(1,1)
+            YI1=LTL1.XACT(1,2)
+C           1er cas  : P1 correspond l'extremite 1 du segment NTI
+C                     donc le segment adjacent a NTI coupe aussi la
+C                     cellule NCI
+            IF ((XI1.EQ.XI10).AND.(YI1.EQ.YI10)) THEN
+               NTVI=ILEA1.LEAC(NTI,2,1)
+C              On a trouve le segment NTVI coupant la cellule NCI
+C              On verifie que le couple (NTVI,NCI) n'a pas deja
+C              ete traite et on l'ajoute a la file
+               IF (ITL1.LACT(NTVI,NCI).EQ.0) THEN
+                  ITL1.LACT(NTVI,NCI)=1
+                  NLT=NLT+1
+                  LT.LECT(NLT)=NTVI
+                  LC.LECT(NLT)=NCI
+               ENDIF
+C           2eme cas : P1 est un point d'intersection
+C                     donc le polygone voisin coupe le segment NTI
+            ELSE
+C              Recherche du polygone voisin en question
+C              Boucle sur voisins du polygone NCI (on ne s'interesse
+C              qu'aux aretes internes)
+               DO J=1,IPT3.NUM(/2)
+                  NRCJ=IPT3.NUM(1,J)
+C                 Liste des aretes du polyedre NRCJ
+                  CALL ACCTAB(MTABCCC,'POINT   ',0,0,' ',0,NRCJ,
+     &                                'TABLE   ',0,0,0,0,MTABJ00)
+                  CALL ACCTAB(MTABJ00,'MOT     ',0,0,'ARTS',0,0,
+     &                                'LISTENTI',0,0,0,0,LA000)
+C                 Recherche du numero de l'arete entre NRCI et NRCJ
+C                 cette arete est a la fois dans LA00 et LA000
+                  NAJ=0
+                  DO K=1,LA00.LECT(/1)
+                     NAJ=LA00.LECT(K)
+                     DO L=1,LA000.LECT(/1)
+                        IF (LA000.LECT(L).EQ.NAJ) GOTO 27
+                     ENDDO
+                  ENDDO
+27                CONTINUE
+C                 Maillage IPT5 de l'arete J
+                  CALL ACCTAB(MTABAAA,'ENTIER  ',NAJ,0,' ',0,0,
+     &                                'MAILLAGE',0,0,0,0,IPT5)
+C                 Points AB definissant l'arete IPT5
+                  NRA=IPT5.NUM(1,1)
+                  NRB=IPT5.NUM(2,1)
+                  XA=XCOOR((NRA-1)*IDIMP1+1)
+                  YA=XCOOR((NRA-1)*IDIMP1+2)
+                  XB=XCOOR((NRB-1)*IDIMP1+1)
+                  YB=XCOOR((NRB-1)*IDIMP1+2)
+C                 Test si P1 est situe entre A et B
+                  DA1=SQRT(((XA-XI1)**2)+((YA-YI1)**2))
+                  DB1=SQRT(((XB-XI1)**2)+((YB-YI1)**2))
+                  DAB=SQRT(((XA-XB)**2)+((YA-YB)**2))
+                  DTEST=(DA1+DB1-DAB)/DAB
+                  IF (DTEST.LT.ZERO2) THEN
+C                    NRCJ est bien le voisin de NRCI qui coupe aussi NTI
+C                    Identification de la cellule associee au point NRCJ
+                     NCJ=0
+                     DO K=1,IPT1.NUM(/2)
+                        NRTEST=IPT1.NUM(1,K)
+                        IF (NRTEST.EQ.NRCJ) THEN
+                           NCJ=K
+                           GOTO 28
+                        ENDIF
+                     ENDDO
+                  ENDIF
+               ENDDO
+C              Si on passe ici c'est que l'on a pas trouve la cellule
+C              voisine partageant l'arete
+C              WRITE(6,*) '  > Cellule voisine non trouvee'
+               INTERR(1)=NRCI
+               INTERR(2)=NAJ
+               CALL ERREUR(1034)
+               GOTO 999
+28             CONTINUE
+C              On a trouve la cellule NCJ coupant le segment NTI
+C              On verifie que le couple (NTI,NCJ) n'a pas deja
+C              ete traite et on l'ajoute a la file
+               IF (ITL1.LACT(NTI,NCJ).EQ.0) THEN
+                  ITL1.LACT(NTI,NCJ)=1
+                  NLT=NLT+1
+                  LT.LECT(NLT)=NTI
+                  LC.LECT(NLT)=NCJ
+               ENDIF
+            ENDIF
+C
+C           Extremite 2 du segment d'intersection LTL1
+            XI2=LTL1.XACT(2,1)
+            YI2=LTL1.XACT(2,2)
+C           1er cas  : P2 correspond l'extremite 2 du segment NTI
+C                     donc le segment adjacent a NTI coupe aussi la
+C                     cellule NCI
+            IF ((XI2.EQ.XI20).AND.(YI2.EQ.YI20)) THEN
+               NTVI=ILEA1.LEAC(NTI,1,1)
+C              On a trouve le segment NTVI coupant la cellule NCI
+C              On verifie que le couple (NTVI,NCI) n'a pas deja
+C              ete traite et on l'ajoute a la file
+               IF (ITL1.LACT(NTVI,NCI).EQ.0) THEN
+                  ITL1.LACT(NTVI,NCI)=1
+                  NLT=NLT+1
+                  LT.LECT(NLT)=NTVI
+                  LC.LECT(NLT)=NCI
+               ENDIF
+C           2eme cas : P2 est un point d'intersection
+C                     donc le polygone voisin coupe le segment NTI
+            ELSE
+C              Recherche du polygone voisin en question
+C              Boucle sur voisins du polygone NCI (on ne s'interesse
+C              qu'aux aretes internes)
+               DO J=1,IPT3.NUM(/2)
+                  NRCJ=IPT3.NUM(1,J)
+C                 Liste des aretes du polyedre NRCJ
+                  CALL ACCTAB(MTABCCC,'POINT   ',0,0,' ',0,NRCJ,
+     &                                'TABLE   ',0,0,0,0,MTABJ00)
+                  CALL ACCTAB(MTABJ00,'MOT     ',0,0,'ARTS',0,0,
+     &                                'LISTENTI',0,0,0,0,LA000)
+C                 Recherche du numero de l'arete entre NRCI et NRCJ
+C                 cette arete est a la fois dans LA00 et LA000
+                  NAJ=0
+                  DO K=1,LA00.LECT(/1)
+                     NAJ=LA00.LECT(K)
+                     DO L=1,LA000.LECT(/1)
+                        IF (LA000.LECT(L).EQ.NAJ) GOTO 29
+                     ENDDO
+                  ENDDO
+29                CONTINUE
+C                 Maillage IPT5 de l'arete J du polygone NCI
+                  CALL ACCTAB(MTABAAA,'ENTIER  ',NAJ,0,' ',0,0,
+     &                                'MAILLAGE',0,0,0,0,IPT5)
+C                 Points AB definissant l'arete IPT5
+                  NRA=IPT5.NUM(1,1)
+                  NRB=IPT5.NUM(2,1)
+                  XA=XCOOR((NRA-1)*IDIMP1+1)
+                  YA=XCOOR((NRA-1)*IDIMP1+2)
+                  XB=XCOOR((NRB-1)*IDIMP1+1)
+                  YB=XCOOR((NRB-1)*IDIMP1+2)
+C                 Test si P2 est situe entre A et B
+                  DA2=SQRT(((XA-XI2)**2)+((YA-YI2)**2))
+                  DB2=SQRT(((XB-XI2)**2)+((YB-YI2)**2))
+                  DAB=SQRT(((XA-XB)**2)+((YA-YB)**2))
+                  DTEST=(DA2+DB2-DAB)/DAB
+                  IF (DTEST.LT.ZERO2) THEN
+C                    NRCJ est bien le voisin de NRCI qui coupe aussi NTI
+C                    Identification de la cellule associee au point NRCJ
+                     NCJ=0
+                     DO K=1,IPT1.NUM(/2)
+                        NRTEST=IPT1.NUM(1,K)
+                        IF (NRTEST.EQ.NRCJ) THEN
+                           NCJ=K
+                           GOTO 30
+                        ENDIF
+                     ENDDO
+                  ENDIF
+               ENDDO
+C              Si on passe ici c'est que l'on a pas trouve la cellule
+C              voisine partageant l'arete
+C              WRITE(6,*) '  > Cellule voisine non trouvee'
+               INTERR(1)=NRCI
+               INTERR(2)=NAJ
+               CALL ERREUR(1034)
+               GOTO 999
+30             CONTINUE
+C              On a trouve la cellule NCJ coupant le segment NTI
+C              On verifie que le couple (NTI,NCJ) n'a pas deja
+C              ete traite et on l'ajoute a la file
+               IF (ITL1.LACT(NTI,NCJ).EQ.0) THEN
+                  ITL1.LACT(NTI,NCJ)=1
+                  NLT=NLT+1
+                  LT.LECT(NLT)=NTI
+                  LC.LECT(NLT)=NCJ
+               ENDIF
+            ENDIF
+C
+C           Determination des noeuds P1 et P2 de l'arete
+C           Doit on creer de nouveaux noeuds ?
+C           On examine la liste LV1 des noeuds crees
+C           test si P1 est deja present ou non dans LV1
+            BOOL2=.FALSE.
+            DO L=1,LV1.LECT(/1)
+               NRL=LV1.LECT(L)
+               XL=XCOOR((NRL-1)*IDIMP1+1)
+               YL=XCOOR((NRL-1)*IDIMP1+2)
+               IF ((ABS(XL-XI1).LT.XTOL).AND.
+     &             (ABS(YL-YI1).LT.XTOL)) THEN
+                  BOOL2=.TRUE.
+                  NRP1=NRL
+                  GOTO 31
+               ENDIF
+            ENDDO
+            IF (.NOT.BOOL2) THEN
+C              ajout d'un nouveau noeud dans MCOORD
+               NRP1=(XCOOR(/1)/IDIMP1)+1
+               NBPTS=NRP1
+               SEGADJ,MCOORD
+               XCOOR((NRP1-1)*IDIMP1+1)=XI1
+               XCOOR((NRP1-1)*IDIMP1+2)=YI1
+               NLV1=NLV1+1
+               IF (NLV1.GT.LV1.LECT(/1)) THEN
+                  JG=NLV1
+                  SEGADJ,LV1
+               ENDIF
+               LV1.LECT(NLV1)=NRP1
+            ENDIF
+31          CONTINUE
+C           test si P2 est deja present ou non dans LV1
+            BOOL2=.FALSE.
+            DO L=1,LV1.LECT(/1)
+               NRL=LV1.LECT(L)
+               XL=XCOOR((NRL-1)*IDIMP1+1)
+               YL=XCOOR((NRL-1)*IDIMP1+2)
+               IF ((ABS(XL-XI2).LT.XTOL).AND.
+     &             (ABS(YL-YI2).LT.XTOL)) THEN
+                  BOOL2=.TRUE.
+                  NRP2=NRL
+                  GOTO 32
+               ENDIF
+            ENDDO
+            IF (.NOT.BOOL2) THEN
+C              ajout d'un nouveau noeud dans MCOORD
+               NRP2=(XCOOR(/1)/IDIMP1)+1
+               NBPTS=NRP2
+               SEGADJ,MCOORD
+               XCOOR((NRP2-1)*IDIMP1+1)=XI2
+               XCOOR((NRP2-1)*IDIMP1+2)=YI2
+               NLV1=NLV1+1
+               IF (NLV1.GT.LV1.LECT(/1)) THEN
+                  JG=NLV1
+                  SEGADJ,LV1
+               ENDIF
+               LV1.LECT(NLV1)=NRP2
+            ENDIF
+32          CONTINUE
+C           Test sur l'existence de l'arete P1 P2 dans IPTG
+            IAE=0
+            DO L=1,NBELEG
+               NG1=IPTG.NUM(1,L)
+               NG2=IPTG.NUM(2,L)
+               IF (((NG1.EQ.NRP1).AND.(NG2.EQ.NRP2)).OR.
+     &             ((NG2.EQ.NRP1).AND.(NG1.EQ.NRP2))) THEN
+C                 si l'arete P1 P2 a deja ete creee, on
+C                 l'indique au moyen de IAE
+                  IAE=1
+                  NAE=L
+                  GOTO 33
+               ENDIF
+            ENDDO
+33          CONTINUE
+C           --> Ajout de l'arete dans MTAB11.VISU
+            IF (IAE.EQ.0) THEN
+               NBELEG=NBELEG+1
+               IPTG.NUM(1,NBELEG)=NRP1
+               IPTG.NUM(2,NBELEG)=NRP2
+               IF (NBELEG.EQ.IPTG.NUM(/2)) THEN
+                  NBNN=IPTG.NUM(/1)
+                  NBELEM=IPTG.NUM(/2)+100
+                  SEGADJ,IPTG
+               ENDIF
+               NAE=NBELEG
+            ENDIF
+C           --> Ajout de l'arete dans MTAB11.ARTS
+            IF (IAE.EQ.0) THEN
+               NBNN=2
+               NBELEM=1
+               SEGINI,IPTA1
+               IPTA1.ITYPEL=2
+               IPTA1.NUM(1,1)=NRP1
+               IPTA1.NUM(2,1)=NRP2
+               CALL ECCTAB(MTABA,'ENTIER  ',NAE,0,' ',0,0,
+     &                           'MAILLAGE',0,0,0,0,IPTA1)
+            ENDIF
+C           --> Ajout de l'arete dans MTAB11.CELL.NRCI si besoin
+            DO L=1,LA1.LECT(/1)
+               NAL=LA1.LECT(L)
+               IF (NAL.EQ.NAE) GOTO 34
+            ENDDO
+C           dans le maillage de la cellule
+            NBNN=IPTI1.NUM(/1)
+            NBELEM=IPTI1.NUM(/2)+1
+            SEGADJ,IPTI1
+            IPTI1.NUM(1,NBELEM)=NRP1
+            IPTI1.NUM(2,NBELEM)=NRP2
+C           et la liste des aretes de la cellule
+            JG=LA1.LECT(/1)+1
+            SEGADJ,LA1
+            LA1.LECT(JG)=NAE
+34          CONTINUE
+         ENDDO
+35       CONTINUE
+C        Ajustement du maillage global des centres des cellules dans la
+C        partition coupee IPT6
+         NBNN=IPT6.NUM(/1)
+         NBELEM=NBELE6
+         SEGADJ,IPT6
+C        Ajustement du maillage global des aretes IPTG
+         NBNN=IPTG.NUM(/1)
+         NBELEM=NBELEG
+         SEGADJ,IPTG
+C
+C
+C        Fusion des aretes coplanaires (a faire)
+C
+C
+C
+      ELSEIF (IDIM.EQ.3) THEN
+C        Idee : on parcoure les triangles de l'enveloppe et pour chacun
+C               d'eux on determine son intersection avec la partition de
+C               Voronoi
+C        On construit ainsi la liste des couples (Ti;Ci) possedant une
+C        intersection non vide
+C        Ti : le numero de triangle dans IPT2
+C        Ci : le numero de la cellule dans IPT1
+C        La liste des couples (Ti;Ci) a traiter est incrementee au fur
+C        et a mesure des rencontres
+C
+C------- Etape 1 : Initialisations
+C        Initialisation d'une file pour les Ci et Tj
+C        on utilise deux listes d'entiers LT et LC
+         JG=(IPT2.NUM(/2))*(IPT1.NUM(/2))
+         SEGINI,LT,LC
+C        On demarre sur le premier triangle de l'enveloppe
+         NLT=1
+         NT0=1
+         LT.LECT(NLT)=NT0
+C        Recherche d'une cellule intersectant le triangle NT0, on prend
+C        celle dont le centre est le plus proche du barycentre du
+C        triangle NT0
+         NRA=IPT2.NUM(1,NT0)
+         NRB=IPT2.NUM(2,NT0)
+         NRC=IPT2.NUM(3,NT0)
+         XG=((XCOOR((NRA-1)*IDIMP1+1))+(XCOOR((NRB-1)*IDIMP1+1))+
+     &       (XCOOR((NRC-1)*IDIMP1+1)))/3.
+         YG=((XCOOR((NRA-1)*IDIMP1+2))+(XCOOR((NRB-1)*IDIMP1+2))+
+     &       (XCOOR((NRC-1)*IDIMP1+2)))/3.
+         ZG=((XCOOR((NRA-1)*IDIMP1+3))+(XCOOR((NRB-1)*IDIMP1+3))+
+     &       (XCOOR((NRC-1)*IDIMP1+3)))/3.
+         DO NCJ=1,IPT1.NUM(/2)
+            NRCJ=IPT1.NUM(1,NCJ)
+            XCJ=XCOOR((NRCJ-1)*IDIMP1+1)
+            YCJ=XCOOR((NRCJ-1)*IDIMP1+2)
+            ZCJ=XCOOR((NRCJ-1)*IDIMP1+3)
+            DJG=SQRT(((XCJ-XG)*(XCJ-XG))+((YCJ-YG)*(YCJ-YG))+
+     &               ((ZCJ-ZG)*(ZCJ-ZG)))
+            IF (NCJ.EQ.1) THEN
+               DJG0=DJG
+               NCJ0=NCJ
+               NRCJ0=NRCJ
+            ENDIF
+            IF (DJG.LT.DJG0) THEN
+               DJG0=DJG
+               NCJ0=NCJ
+               NRCJ0=NRCJ
+            ENDIF
+         ENDDO
+         LC.LECT(NLT)=NCJ0
+C        Initialisation d'une table pour les couples (Ti,Ci)
+         N1=IPT2.NUM(/2)
+         N2=IPT1.NUM(/2)
+         SEGINI,ITL1
+         ITL1.LACT(NT0,NCJ0)=1
+C        Maillage global IPTG des aretes de la partition coupee
+         NBNN=2
+         NBELEM=200
+         SEGINI,IPTG
+         IPTG.ITYPEL=2
+         NBELEG=0
+C        Liste de tous les points ajoutes a MCOORD suite au decoupage
+         JG=0
+         SEGINI,LV1
+         NLV1=0
+C        Maillage global IPT6 des centres des cellules dans la
+C        partition coupee
+         NBNN=1
+         NBELEM=IPT1.NUM(/2)
+         SEGINI,IPT6
+         IPT6.ITYPEL=1
+         NBELE6=0
+C        Table de sortie MTAB11
+         CALL CRTABL(MTAB11)
+         CALL CRTABL(MTABC)
+         CALL CRTABL(MTABF)
+         CALL CRTABL(MTABA)
+         CALL ECCTAB(MTAB11,'MOT     ',0,0,'VISU',0,0,
+     &                      'MAILLAGE',0,0,0,0,IPTG)
+         CALL ECCTAB(MTAB11,'MOT     ',0,0,'CELL',0,0,
+     &                      'TABLE   ',0,0,0,0,MTABC)
+         CALL ECCTAB(MTAB11,'MOT     ',0,0,'FACS',0,0,
+     &                      'TABLE   ',0,0,0,0,MTABF)
+         CALL ECCTAB(MTAB11,'MOT     ',0,0,'ARTS',0,0,
+     &                      'TABLE   ',0,0,0,0,MTABA)
+C
+C------- Etape 2 : Calcul des intersections
+C        Maintenant que la file (LT,LC) est non vide, on debute
+C        les iterations. Pour chaque couple, on determine le polygone
+C        d'intersection et on le range dans la table de sortie.
+C        On incremente egalement la file avec les cellules voisines et
+C        les triangles voisins du polygone d'intersection
+C        Les iterations s'arretent lorsque la file est vide
+C
+C        Tables des cellules et des faces non coupees
+         CALL ACCTAB(MTAB1,'MOT     ',0,0,'CELL',0,0,
+     &                     'TABLE   ',0,0,0,0,MTABCCC)
+         CALL ACCTAB(MTAB1,'MOT     ',0,0,'FACS',0,0,
+     &                     'TABLE   ',0,0,0,0,MTABFFF)
+C
+C        NF  : nombre de faces total dans la partition coupee
+         NF=0
+C        ITFAC1 : donne le numero de face pour chaque couple de cellules
+         N1=IPT1.NUM(/2)
+         N2=IPT1.NUM(/2)
+         SEGINI,ITFAC1
+C        On construit LV5 et LV6 qui donnent le couple de cellule
+C        associe a chaque numero de face (inverse de ITFAC1)
+C        LV5(f1)=ci et LV6(f1)=cj --> la face f1 est interne et separe
+C                                     les cellules ci et cj
+C        LV5(f1)=0 et LV6(f1)=0   --> la face f1 est externe
+         JG=2*IPT2.NUM(/2)
+         SEGINI,LV5,LV6
+C        Debut de la boucle sur la file (LT,LC)
+         NB1=IPT1.NUM(/2)*IPT2.NUM(/2)
+         DO I=1,NB1
+C           Test d'arret de la boucle (la file est vide)
+            IF (I.GT.NLT) THEN
+               GOTO 1
+            ENDIF
+            NF=NF+1
+C           NTI designe le numero de triangle dans IPT2
+            NTI=LT.LECT(I)
+C           NCI designe le numero la cellule dans IPT1
+            NCI=LC.LECT(I)
+C           NRCI designe le numero du point centre de la cellule NCI
+            NRCI=IPT1.NUM(1,NCI)
+C           Creation d'un indice NRCI dans la table MTAB11.CELL
+C           si besoin
+            CALL ECROBJ('POINT   ',NRCI)
+            CALL ECROBJ('TABLE   ',MTABC)
+            CALL EXIS
+            CALL LIRLOG(BOOL1,1,IRETOU)
+            IF (BOOL1) THEN
+C              Si MTAB11.CELL.NRCI existe, on va le chercher
+               CALL ACCTAB(MTABC,'POINT   ',0,0,' ',0,NRCI,
+     &                           'TABLE   ',0,0,0,0,MTABI1)
+C              Recuperation des indices VISU, FACS et VOIS
+               CALL ACCTAB(MTABI1,'MOT     ',0,0,'VISU',0,0,
+     &                            'MAILLAGE',0,0,0,0,IPTI1)
+               CALL ACCTAB(MTABI1,'MOT     ',0,0,'FACS',0,0,
+     &                            'LISTENTI',0,0,0,0,LFI1)
+               CALL ACCTAB(MTABI1,'MOT     ',0,0,'VOIS',0,0,
+     &                            'MAILLAGE',0,0,0,0,IPTVI1)
+            ELSE
+C              Sinon, on cree un nouvel indice
+               CALL CRTABL(MTABI1)
+               CALL ECCTAB(MTABC,'POINT   ',0,0,' ',0,NRCI,
+     &                           'TABLE   ',0,0,0,0,MTABI1)
+C              Initialisation des indices VISU, FACS et VOIS
+               NBNN=2
+               NBELEM=0
+               SEGINI,IPTI1
+               IPTI1.ITYPEL=2
+               CALL ECCTAB(MTABI1,'MOT     ',0,0,'VISU',0,0,
+     &                            'MAILLAGE',0,0,0,0,IPTI1)
+               JG=0
+               SEGINI,LFI1
+               CALL ECCTAB(MTABI1,'MOT     ',0,0,'FACS',0,0,
+     &                            'LISTENTI',0,0,0,0,LFI1)
+               NBNN=1
+               NBELEM=0
+               SEGINI,IPTVI1
+               IPTVI1.ITYPEL=1
+               CALL ECCTAB(MTABI1,'MOT     ',0,0,'VOIS',0,0,
+     &                            'MAILLAGE',0,0,0,0,IPTVI1)
+               NBELE6=NBELE6+1
+               IPT6.NUM(1,NBELE6)=NRCI
+            ENDIF
+C           Determination de l'intersection entre le triangle NTI et
+C           le polyedre NCI
+C           Clipping selon l'algorithme de Sutherland et Hodgman
+C           Le polygone resultant de l'intersection est decrit par la
+C           table LTL1 avec :
+C           LTL1.XACT(i,j) = coordonnee j du i-eme noeud du polygone
+C           --> initialisation de LTL1 aux noeuds du triangle NTI
+            NRTI1=IPT2.NUM(1,NTI)
+            NRTI2=IPT2.NUM(2,NTI)
+            NRTI3=IPT2.NUM(3,NTI)
+            N1=3
+            N2=3
+            SEGINI,LTL1
+            LTL1.XACT(1,1)=XCOOR((NRTI1-1)*IDIMP1+1)
+            LTL1.XACT(1,2)=XCOOR((NRTI1-1)*IDIMP1+2)
+            LTL1.XACT(1,3)=XCOOR((NRTI1-1)*IDIMP1+3)
+            LTL1.XACT(2,1)=XCOOR((NRTI2-1)*IDIMP1+1)
+            LTL1.XACT(2,2)=XCOOR((NRTI2-1)*IDIMP1+2)
+            LTL1.XACT(2,3)=XCOOR((NRTI2-1)*IDIMP1+3)
+            LTL1.XACT(3,1)=XCOOR((NRTI3-1)*IDIMP1+1)
+            LTL1.XACT(3,2)=XCOOR((NRTI3-1)*IDIMP1+2)
+            LTL1.XACT(3,3)=XCOOR((NRTI3-1)*IDIMP1+3)
+C           --> table du polyedre NRCI (MTABI0)
+            CALL ACCTAB(MTABCCC,'POINT   ',0,0,' ',0,NRCI,
+     &                          'TABLE   ',0,0,0,0,MTABI00)
+C           --> liste des faces du polyedre NRCI
+            CALL ACCTAB(MTABI00,'MOT     ',0,0,'FACS',0,0,
+     &                          'LISTENTI',0,0,0,0,LFI00)
+C           --> maillage IPT3 des voisins du polyedre NRCI
+            CALL ACCTAB(MTABI00,'MOT     ',0,0,'VOIS',0,0,
+     &                          'MAILLAGE',0,0,0,0,IPT3)
+C           Boucle sur toutes les faces du polyedre NCI
+            DO J=1,LFI00.LECT(/1)
+C              Maillage IPT4 de la face J du polyedre NCI
+               NFJ=LFI00.LECT(J)
+               CALL ACCTAB(MTABFFF,'ENTIER  ',NFJ,0,' ',0,0,
+     &                            'TABLE   ',0,0,0,0,MTABF100)
+               CALL ACCTAB(MTABF100,'MOT     ',0,0,'VISU',0,0,
+     &                              'MAILLAGE',0,0,0,0,IPT4)
+               NREFA=IPT4.NUM(1,1)
+               NREFB=IPT4.NUM(1,2)
+               NREFC=IPT4.NUM(1,3)
+C              Massicotage du polygone LTL1 selon le demi espace definit
+C              par le plan de IPT4 et le centre I du polyedre de Voronoi
+C              Boucle sur les aretes du polygone LTL1
+C              On utilise un polygone temporaire LTL2
+               N1=LTL1.XACT(/1)+20
+               N2=LTL1.XACT(/2)
+               SEGINI,LTL2
+               NLV2=0
+               DO K=1,LTL1.XACT(/1)
+C                 Coordonnees des points P1 et P2
+                  X1=LTL1.XACT(K,1)
+                  Y1=LTL1.XACT(K,2)
+                  Z1=LTL1.XACT(K,3)
+                  IF (K.EQ.LTL1.XACT(/1)) THEN
+                     X2=LTL1.XACT(1,1)
+                     Y2=LTL1.XACT(1,2)
+                     Z2=LTL1.XACT(1,3)
+                  ELSE
+                     X2=LTL1.XACT(K+1,1)
+                     Y2=LTL1.XACT(K+1,2)
+                     Z2=LTL1.XACT(K+1,3)
+                  ENDIF
+C                 Intersection du segment P1P2 avec le demi plan ABC,I
+                  CALL INTPSEG(NREFA,NREFB,NREFC,NRCI,X1,Y1,Z1,X2,Y2,Z2,
+     &                         IINT,XI1,YI1,ZI1,XI2,YI2,ZI2,ZERO)
+C                 Il y a 4 cas possibles
+C                 -1) le segment P1P2 est entierment hors du demi plan
+C                     on ajoute rien dans LTL2
+                  IF (IINT.EQ.0) THEN
+                  ENDIF
+C                 -2) le segment P1P2 rentre le demi plan
+C                    on ajoute le point d'intersection et P2 dans LTL2
+                  IF (IINT.EQ.1) THEN
+                     NLV2=NLV2+1
+                     LTL2.XACT(NLV2,1)=XI1
+                     LTL2.XACT(NLV2,2)=YI1
+                     LTL2.XACT(NLV2,3)=ZI1
+                     NLV2=NLV2+1
+                     LTL2.XACT(NLV2,1)=XI2
+                     LTL2.XACT(NLV2,2)=YI2
+                     LTL2.XACT(NLV2,3)=ZI2
+                  ENDIF
+C                 -3) le segment P1P2 est entierement dans le demi plan
+C                     on ajoute P2 dans LTL2
+                  IF (IINT.EQ.2) THEN
+                     NLV2=NLV2+1
+                     LTL2.XACT(NLV2,1)=XI2
+                     LTL2.XACT(NLV2,2)=YI2
+                     LTL2.XACT(NLV2,3)=ZI2
+                  ENDIF
+C                 -4) le segment P1P2 quitte le demi plan
+C                     on ajoute le point d'intersection dans LTL2
+                  IF (IINT.EQ.3) THEN
+                     NLV2=NLV2+1
+                     LTL2.XACT(NLV2,1)=XI2
+                     LTL2.XACT(NLV2,2)=YI2
+                     LTL2.XACT(NLV2,3)=ZI2
+                  ENDIF
+C                 Augmentation eventuelle de LTL2
+                  IF (NLV2.GE.(LTL2.XACT(/1)-1)) THEN
+                     N1=NLV2+20
+                     N2=LTL2.XACT(/2)
+                     SEGADJ,LTL2
+                  ENDIF
+               ENDDO
+C              Ajustement final de LTL2, ce polygone est l'intersection
+C              de LTL1 avec le demi espace definit par la face J
+               IF (NLV2.LT.3) THEN
+C                 WRITE(6,*) '  > Intersection triangle/cellule vide'
+C                 WRITE(6,*) 'NLV2=',nlv2
+C                 WRITE(6,*) 'Numero du triangle concerne:',nti
+C                 WRITE(6,*) 'Points de la face concernee',nrci,nrcj
+                  INTERR(1)=nti
+                  INTERR(2)=nrci
+                  CALL ERREUR(1033)
+                  GOTO 999
+               ENDIF
+               N1=NLV2
+               N2=LTL2.XACT(/2)
+               SEGADJ,LTL2
+C              Le polygone LTL1 devient LTL2 puis on passe a la face
+C              suivante
+               LTL1=LTL2
+            ENDDO
+C          --> Elimination des "petites aretes" selon la tolerance XZERO
+C           on fusionne les sommets du polygonne LTL1 trop proches
+            N1=LTL1.XACT(/1)
+            N2=LTL1.XACT(/2)
+            SEGINI,LTL2
+            NLTL2=0
+            DO J=1,LTL1.XACT(/1)
+               JJ=J+1
+               IF (J.EQ.LTL1.XACT(/1)) JJ=1
+               X1=LTL1.XACT(J,1)
+               Y1=LTL1.XACT(J,2)
+               Z1=LTL1.XACT(J,3)
+               JJ=J+1
+               IF (J.EQ.LTL1.XACT(/1)) JJ=1
+               X2=LTL1.XACT(JJ,1)
+               Y2=LTL1.XACT(JJ,2)
+               Z2=LTL1.XACT(JJ,3)
+               D12=SQRT(((X2-X1)**2)+((Y2-Y1)**2)+((Z2-Z1)**2))
+c-----------------------------------------------------------------------
+c               IF (D12.GE.XZERO) THEN
+               IF (D12.GE.XTOL) THEN
+c-----------------------------------------------------------------------
+                  NLTL2=NLTL2+1
+                  LTL2.XACT(NLTL2,1)=X1
+                  LTL2.XACT(NLTL2,2)=Y1
+                  LTL2.XACT(NLTL2,3)=Z1
+               ENDIF
+            ENDDO
+            N1=NLTL2
+            N2=LTL2.XACT(/2)
+            SEGADJ,LTL2
+            LTL1=LTL2
+C
+C
+C           Maintenant, on va incrementer la file (LT,LC)
+C           avec les intersections voisines
+C           Au fur et a mesure que l'on identifie les aretes du polygone
+C           LTL1, on cree un maillage que l'on range dans MTAB11
+C
+C           Nombre d'aretes identifiees (a comparer au nombre de points
+C           du polygone LTL1 pour verification)
+            NAI=0
+C
+C           1er cas : recherche des cellules voisines de NCI coupant le
+C                     triangle NTI
+            NFF=NF
+C           Boucle sur voisins du polyedre NCI (on ne s'interesse qu'aux
+C           faces internes)
+            DO J=1,IPT3.NUM(/2)
+               NRCJ=IPT3.NUM(1,J)
+C              Liste des faces du polyedre NRCJ
+               CALL ACCTAB(MTABCCC,'POINT   ',0,0,' ',0,NRCJ,
+     &                             'TABLE   ',0,0,0,0,MTABJ00)
+               CALL ACCTAB(MTABJ00,'MOT     ',0,0,'FACS',0,0,
+     &                             'LISTENTI',0,0,0,0,LFJ00)
+C              Recherche du numero de la face entre NRCI et NRCJ
+C              cette face est a la fois dans LFI00 et LFJ00
+               NFJ=0
+               DO K=1,LFI00.LECT(/1)
+                  NFJ=LFI00.LECT(K)
+                  DO L=1,LFJ00.LECT(/1)
+                     IF (LFJ00.LECT(L).EQ.NFJ) GOTO 25
+                  ENDDO
+               ENDDO
+25             CONTINUE
+C              Maillage IPT5 de la face J du polyedre NCI
+               CALL ACCTAB(MTABFFF,'ENTIER  ',NFJ,0,' ',0,0,
+     &                             'TABLE   ',0,0,0,0,MTABF100)
+               CALL ACCTAB(MTABF100,'MOT     ',0,0,'VISU',0,0,
+     &                              'MAILLAGE',0,0,0,0,IPT5)
+C              Points ABC definissant le plan de la face IPT5
+               SEGINI,IPT7=IPT5
+               CALL CHANGE(IPT7,1)
+               NRA=IPT7.NUM(1,1)
+               NRB=IPT7.NUM(1,2)
+               XA=XCOOR((NRA-1)*IDIMP1+1)
+               YA=XCOOR((NRA-1)*IDIMP1+2)
+               ZA=XCOOR((NRA-1)*IDIMP1+3)
+               XB=XCOOR((NRB-1)*IDIMP1+1)
+               YB=XCOOR((NRB-1)*IDIMP1+2)
+               ZB=XCOOR((NRB-1)*IDIMP1+3)
+C              Boucle pour trouver un point C non aligne avec les points
+C              A et B
+               DO K=3,IPT7.NUM(/2)
+                  NRC=IPT7.NUM(1,K)
+                  XC=XCOOR((NRC-1)*IDIMP1+1)
+                  YC=XCOOR((NRC-1)*IDIMP1+2)
+                  ZC=XCOOR((NRC-1)*IDIMP1+3)
+C                 Calcul d'un vecteur normal au plan (ABC)
+                  XN=((YB-YA)*(ZC-ZA))-((ZB-ZA)*(YC-YA))
+                  YN=((ZB-ZA)*(XC-XA))-((XB-XA)*(ZC-ZA))
+                  ZN=((XB-XA)*(YC-YA))-((YB-YA)*(XC-XA))
+                  DN=SQRT((XN**2)+(YN**2)+(ZN**2))
+                  IF (DN.GE.ZERO2) GOTO 24
+               ENDDO
+C              Si l'on passe ici, c'est que l'on a pas trouve 3 points
+C              suffisament espaces pour definir le plan
+C          WRITE(6,*) '> Impossible de determiner l''equation du plan'
+C          WRITE(6,*) '    points alignes (1)'
+               INTERR(1)=NFJ
+               INTERR(2)=NRCI
+               CALL ERREUR(1035)
+               GOTO 999
+24             CONTINUE
+               XN=XN/DN
+               YN=YN/DN
+               ZN=ZN/DN
+               W=-1D0*((XN*XA)+(YN*YA)+(ZN*ZA))
+C              Recherche des aretes du polygone LTL1 dans le plan ABC
+               DO K=1,LTL1.XACT(/1)
+                  IAE=0
+C                 Coordonnees des points 41 et 42 de l'arete K
+                  X41=LTL1.XACT(K,1)
+                  Y41=LTL1.XACT(K,2)
+                  Z41=LTL1.XACT(K,3)
+                  IF (K.EQ.LTL1.XACT(/1)) THEN
+                     X42=LTL1.XACT(1,1)
+                     Y42=LTL1.XACT(1,2)
+                     Z42=LTL1.XACT(1,3)
+                  ELSE
+                     X42=LTL1.XACT(K+1,1)
+                     Y42=LTL1.XACT(K+1,2)
+                     Z42=LTL1.XACT(K+1,3)
+                  ENDIF
+C                 Test si P41 et P42 sont dans le plan ABC
+                  D41=(XN*X41)+(YN*Y41)+(ZN*Z41)+W
+                  D42=(XN*X42)+(YN*Y42)+(ZN*Z42)+W
+                  IF ((ABS(D41).LT.ZERO2).AND.(ABS(D42).LT.ZERO2)) THEN
+C                    L'arete K du polygone LTL1 est dans le plan ABC
+C                    Identification de la cellule associee au point NRCJ
+                     NCJ=0
+                     DO L=1,IPT1.NUM(/2)
+                        NRTEST=IPT1.NUM(1,L)
+                        IF (NRTEST.EQ.NRCJ) THEN
+                           NCJ=L
+                           GOTO 2
+                        ENDIF
+                     ENDDO
+2                    CONTINUE
+C                    On verifie que le couple (NTI,NCJ) n'a pas deja
+C                    ete traite et on l'ajoute a la file
+                     IF (ITL1.LACT(NTI,NCJ).EQ.0) THEN
+                        ITL1.LACT(NTI,NCJ)=1
+                        NLT=NLT+1
+                        LT.LECT(NLT)=NTI
+                        LC.LECT(NLT)=NCJ
+                     ELSE
+                     ENDIF
+C                    Determination des noeuds P1 et P2 de l'arete
+C                    Doit on creer de nouveaux noeuds ?
+C                    LV2 liste des noeuds a examiner = LV1 et les
+C                    noeuds de la face I,J
+                     JG=LV1.LECT(/1)
+                     SEGINI,LV2=LV1
+                     JG=LV2.LECT(/1)+IPT5.NUM(/2)
+                     SEGADJ,LV2
+                     NLV2=LV1.LECT(/1)
+                     DO L=1,IPT5.NUM(/2)
+                        NLV2=NLV2+1
+                        LV2.LECT(NLV2)=IPT5.NUM(1,L)
+                     ENDDO
+C                    test si P1 est deja present ou non dans LV2
+                     BOOL2=.FALSE.
+                     DO L=1,LV2.LECT(/1)
+                        NRL=LV2.LECT(L)
+                        XL=XCOOR((NRL-1)*IDIMP1+1)
+                        YL=XCOOR((NRL-1)*IDIMP1+2)
+                        ZL=XCOOR((NRL-1)*IDIMP1+3)
+                        IF ((ABS(XL-X41).LT.XTOL).AND.
+     &                      (ABS(YL-Y41).LT.XTOL).AND.
+     &                      (ABS(ZL-Z41).LT.XTOL)) THEN
+                           BOOL2=.TRUE.
+                           NRP1=NRL
+                           GOTO 4
+                        ENDIF
+                     ENDDO
+                     IF (.NOT.BOOL2) THEN
+C                       ajout d'un nouveau noeud dans MCOORD
+                        NRP1=(XCOOR(/1)/IDIMP1)+1
+                        NBPTS=NRP1
+                        SEGADJ,MCOORD
+                        XCOOR((NRP1-1)*IDIMP1+1)=X41
+                        XCOOR((NRP1-1)*IDIMP1+2)=Y41
+                        XCOOR((NRP1-1)*IDIMP1+3)=Z41
+                        NLV1=NLV1+1
+                        IF (NLV1.GT.LV1.LECT(/1)) THEN
+                           JG=NLV1
+                           SEGADJ,LV1
+                        ENDIF
+                        LV1.LECT(NLV1)=NRP1
+                     ENDIF
+4                    CONTINUE
+C                    test si P2 est deja present ou non dans LV2
+                     BOOL2=.FALSE.
+                     DO L=1,LV2.LECT(/1)
+                        NRL=LV2.LECT(L)
+                        XL=XCOOR((NRL-1)*IDIMP1+1)
+                        YL=XCOOR((NRL-1)*IDIMP1+2)
+                        ZL=XCOOR((NRL-1)*IDIMP1+3)
+                        IF ((ABS(XL-X42).LT.XTOL).AND.
+     &                      (ABS(YL-Y42).LT.XTOL).AND.
+     &                      (ABS(ZL-Z42).LT.XTOL)) THEN
+                           BOOL2=.TRUE.
+                           NRP2=NRL
+                           GOTO 5
+                        ENDIF
+                     ENDDO
+                     IF (.NOT.BOOL2) THEN
+C                       ajout d'un nouveau noeud dans MCOORD
+                        NRP2=(XCOOR(/1)/IDIMP1)+1
+                        NBPTS=NRP2
+                        SEGADJ,MCOORD
+                        XCOOR((NRP2-1)*IDIMP1+1)=X42
+                        XCOOR((NRP2-1)*IDIMP1+2)=Y42
+                        XCOOR((NRP2-1)*IDIMP1+3)=Z42
+                        NLV1=NLV1+1
+                        IF (NLV1.GT.LV1.LECT(/1)) THEN
+                           JG=NLV1
+                           SEGADJ,LV1
+                        ENDIF
+                        LV1.LECT(NLV1)=NRP2
+                     ENDIF
+5                    CONTINUE
+C                    Test sur l'existence de l'arete P1 P2 dans IPTG
+                     DO L=1,NBELEG
+                        NG1=IPTG.NUM(1,L)
+                        NG2=IPTG.NUM(2,L)
+                        IF (((NG1.EQ.NRP1).AND.(NG2.EQ.NRP2)).OR.
+     &                      ((NG2.EQ.NRP1).AND.(NG1.EQ.NRP2))) THEN
+C                          si l'arete P1 P2 a deja ete creee, on
+C                          l'indique au moyen de IAE
+                           IAE=1
+                           NAE=L
+                           GOTO 21
+                        ENDIF
+                     ENDDO
+21                   CONTINUE
+C                    --> Ajout de l'arete dans MTAB11.VISU
+                     IF (IAE.EQ.0) THEN
+                        NBELEG=NBELEG+1
+                        IPTG.NUM(1,NBELEG)=NRP1
+                        IPTG.NUM(2,NBELEG)=NRP2
+                        IF (NBELEG.EQ.IPTG.NUM(/2)) THEN
+                           NBNN=IPTG.NUM(/1)
+                           NBELEM=IPTG.NUM(/2)+100
+                           SEGADJ,IPTG
+                        ENDIF
+                        NAE=NBELEG
+                     ENDIF
+C                    --> Ajout de l'arete dans MTAB11.ARTS
+                     IF (IAE.EQ.0) THEN
+                        NBNN=2
+                        NBELEM=1
+                        SEGINI,IPTA1
+                        IPTA1.ITYPEL=2
+                        IPTA1.NUM(1,1)=NRP1
+                        IPTA1.NUM(2,1)=NRP2
+                        CALL ECCTAB(MTABA,'ENTIER  ',NAE,0,' ',0,0,
+     &                                    'MAILLAGE',0,0,0,0,IPTA1)
+                     ENDIF
+C                    --> Ajout de l'arete dans MTAB11.FACS
+                     CALL ECROBJ('ENTIER  ',NF)
+                     CALL ECROBJ('TABLE   ',MTABF)
+                     CALL EXIS
+                     CALL LIRLOG(BOOL1,1,IRETOU)
+                     IF (.NOT.BOOL1) THEN
+C                    si MTAB11.FACS.NF n'existe pas, on le cree
+                        CALL CRTABL(MTABF1)
+                        CALL ECCTAB(MTABF,'ENTIER  ',NF,0,' ',0,0,
+     &                                    'TABLE   ',0,0,0,0,MTABF1)
+                        NBNN=2
+                        NBELEM=0
+                        SEGINI,IPTF1
+                        IPTF1.ITYPEL=2
+                        CALL ECCTAB(MTABF1,'MOT     ',0,0,'VISU',0,0,
+     &                                     'MAILLAGE',0,0,0,0,IPTF1)
+                        JG=0
+                        SEGINI,LA1
+                        CALL ECCTAB(MTABF1,'MOT     ',0,0,'ARTS',0,0,
+     &                                     'LISTENTI',0,0,0,0,LA1)
+                     ENDIF
+C                    acces a la table de la face NF
+                     CALL ACCTAB(MTABF,'ENTIER  ',NF,0,' ',0,0,
+     &                                 'TABLE   ',0,0,0,0,MTABF1)
+C                    ajout d'une arete dans l'indice VISU
+                     CALL ACCTAB(MTABF1,'MOT     ',0,0,'VISU',0,0,
+     &                                  'MAILLAGE',0,0,0,0,IPTF1)
+                     NBNN=IPTF1.NUM(/1)
+                     NBELEM=IPTF1.NUM(/2)+1
+                     SEGADJ,IPTF1
+                     IPTF1.NUM(1,NBELEM)=NRP1
+                     IPTF1.NUM(2,NBELEM)=NRP2
+C                    ajout du numero de l'arete l'indice ARTS
+                     CALL ACCTAB(MTABF1,'MOT     ',0,0,'ARTS',0,0,
+     &                                  'LISTENTI',0,0,0,0,LA1)
+                     JG=LA1.LECT(/1)+1
+                     SEGADJ,LA1
+                     LA1.LECT(JG)=NAE
+C                    --> Ecriture dans MTAB11.CELL.NRCI
+C                    ajout d'une arete dans l'indice VISU si besoin
+                     DO L=1,IPTI1.NUM(/2)
+                        NI1=IPTI1.NUM(1,L)
+                        NI2=IPTI1.NUM(2,L)
+                        IF (((NI1.EQ.NRP1).AND.(NI2.EQ.NRP2)).OR.
+     &                      ((NI2.EQ.NRP1).AND.(NI1.EQ.NRP2))) GOTO 15
+                     ENDDO
+                     NBNN=IPTI1.NUM(/1)
+                     NBELEM=IPTI1.NUM(/2)+1
+                     SEGADJ,IPTI1
+                     IPTI1.NUM(1,NBELEM)=NRP1
+                     IPTI1.NUM(2,NBELEM)=NRP2
+15                   CONTINUE
+C                    ajout du numero de la face dans l'indice FACS
+C                    si besoin
+                     CALL ECRENT(NF)
+                     CALL ECROBJ('LISTENTI',LFI1)
+                     CALL EXIS
+                     CALL LIRLOG(BOOL1,1,IRETOU)
+                     SEGACT,LFI1
+                     IF (.NOT.BOOL1) THEN
+                        JG=LFI1.LECT(/1)+1
+                        SEGADJ,LFI1
+                        LFI1.LECT(JG)=NF
+                     ENDIF
+C                    ajout de NRCJ dans l'indice VOIS si besion
+                     CALL ECROBJ('MAILLAGE',IPTVI1)
+                     CALL ECROBJ('POINT   ',NRCJ)
+                     CALL DANS
+                     SEGACT,IPTVI1
+                     CALL LIRLOG(BOOL1,1,IRETOU)
+                     IF (.NOT.BOOL1) THEN
+                        NBNN=IPTVI1.NUM(/1)
+                        NBELEM=IPTVI1.NUM(/2)+1
+                        SEGADJ,IPTVI1
+                        IPTVI1.NUM(1,NBELEM)=NRCJ
+                     ENDIF
+C                    Cette arete appartient aussi a la face interne
+C                    situee entre NRCI et NRCJ
+C                    --> Ecriture dans MTAB11.CELL.NRCJ
+                     MMTABI1=MTABI1
+                     IIPTI1=IPTI1
+                     LLFI1=LFI1
+                     IIPTVI1=IPTVI1
+                     CALL ECROBJ('POINT   ',NRCJ)
+                     CALL ECROBJ('TABLE   ',MTABC)
+                     CALL EXIS
+                     CALL LIRLOG(BOOL1,1,IRETOU)
+C                    si MATB11.CELL.NRCJ n'existe pas on le cree
+                     IF (.NOT.BOOL1) THEN
+                        CALL CRTABL(MTABI1)
+                        CALL ECCTAB(MTABC,'POINT   ',0,0,' ',0,NRCJ,
+     &                                    'TABLE   ',0,0,0,0,MTABI1)
+                        NBNN=2
+                        NBELEM=0
+                        SEGINI,IPTI1
+                        IPTI1.ITYPEL=2
+                        CALL ECCTAB(MTABI1,'MOT     ',0,0,'VISU',0,0,
+     &                                     'MAILLAGE',0,0,0,0,IPTI1)
+                        JG=0
+                        SEGINI,LFI1
+                        CALL ECCTAB(MTABI1,'MOT     ',0,0,'FACS',0,0,
+     &                                     'LISTENTI',0,0,0,0,LFI1)
+                        NBNN=1
+                        NBELEM=0
+                        SEGINI,IPTVI1
+                        IPTVI1.ITYPEL=1
+                        CALL ECCTAB(MTABI1,'MOT     ',0,0,'VOIS',0,0,
+     &                                     'MAILLAGE',0,0,0,0,IPTVI1)
+                        NBELE6=NBELE6+1
+                        IPT6.NUM(1,NBELE6)=NRCJ
+                     ENDIF
+C                    acces a la table de la cellule NRCJ
+                     CALL ACCTAB(MTABC,'POINT   ',0,0,' ',0,NRCJ,
+     &                                 'TABLE   ',0,0,0,0,MTABI1)
+                     CALL ACCTAB(MTABI1,'MOT     ',0,0,'VISU',0,0,
+     &                                  'MAILLAGE',0,0,0,0,IPTI1)
+                     CALL ACCTAB(MTABI1,'MOT     ',0,0,'FACS',0,0,
+     &                                  'LISTENTI',0,0,0,0,LFI1)
+                     CALL ACCTAB(MTABI1,'MOT     ',0,0,'VOIS',0,0,
+     &                                  'MAILLAGE',0,0,0,0,IPTVI1)
+C                    ajout d'une arete dans l'indice VISU si besoin
+                     DO L=1,IPTI1.NUM(/2)
+                        NI1=IPTI1.NUM(1,L)
+                        NI2=IPTI1.NUM(2,L)
+                        IF (((NI1.EQ.NRP1).AND.(NI2.EQ.NRP2)).OR.
+     &                      ((NI2.EQ.NRP1).AND.(NI1.EQ.NRP2))) GOTO 16
+                     ENDDO
+                     NBNN=IPTI1.NUM(/1)
+                     NBELEM=IPTI1.NUM(/2)+1
+                     SEGADJ,IPTI1
+                     IPTI1.NUM(1,NBELEM)=NRP1
+                     IPTI1.NUM(2,NBELEM)=NRP2
+16                   CONTINUE
+C                    s'agit il d'une nouvelle face ou pas et si oui
+C                    laquelle ?
+                     NFI=ITFAC1.LACT(NCI,NCJ)
+                     IF (NFI.EQ.0) THEN
+C                       on renseigne cette nouvelle face dans ITFAC1
+                        NFF=NFF+1
+                        ITFAC1.LACT(NCI,NCJ)=NFF
+                        ITFAC1.LACT(NCJ,NCI)=NFF
+                        NFI=NFF
+C                       ainsi que dans LV5 et LV6
+                        IF (NFF.GT.LV5.LECT(/1)) THEN
+                           JG=NFF+100
+                           SEGADJ,LV5,LV6
+                        ENDIF
+                        IF (LV5.LECT(NFF).EQ.0) THEN
+                           LV5.LECT(NFF)=NCI
+                           LV6.LECT(NFF)=NCJ
+                        ENDIF
+                     ENDIF
+C                    ajout du numero de la face dans l'indice FACS
+C                    si besoin
+                     CALL ECRENT(NFI)
+                     CALL ECROBJ('LISTENTI',LFI1)
+                     CALL EXIS
+                     CALL LIRLOG(BOOL1,1,IRETOU)
+                     SEGACT,LFI1
+                     IF (.NOT.BOOL1) THEN
+                        JG=LFI1.LECT(/1)+1
+                        SEGADJ,LFI1
+                        LFI1.LECT(JG)=NFI
+                     ENDIF
+C                    ajout de NRCI dans l'indice VOIS si besion
+                     BOOL1=.FALSE.
+                     DO L=1,IPTVI1.NUM(/2)
+                        IF (IPTVI1.NUM(1,L).EQ.NRCI) BOOL1=.TRUE.
+                     ENDDO
+                     IF (.NOT.BOOL1) THEN
+                        NBNN=IPTVI1.NUM(/1)
+                        NBELEM=IPTVI1.NUM(/2)+1
+                        SEGADJ,IPTVI1
+                        IPTVI1.NUM(1,NBELEM)=NRCI
+                     ENDIF
+                     MTABI1=MMTABI1
+                     IPTI1=IIPTI1
+                     LFI1=LLFI1
+                     IPTVI1=IIPTVI1
+C                    ajout de l'arete dans MTAB11.FACS.NFI
+                     MMTABF1=MTABF1
+                     IIPTF1=IPTF1
+                     LLA1=LA1
+                     CALL ECROBJ('ENTIER  ',NFI)
+                     CALL ECROBJ('TABLE   ',MTABF)
+                     CALL EXIS
+                     CALL LIRLOG(BOOL1,1,IRETOU)
+                     IF (.NOT.BOOL1) THEN
+C                       si MTAB11.FACS.NFI n'existe pas, on le cree
+                        CALL CRTABL(MTABF1)
+                        CALL ECCTAB(MTABF,'ENTIER  ',NFI,0,' ',0,0,
+     &                                    'TABLE   ',0,0,0,0,MTABF1)
+                        NBNN=2
+                        NBELEM=0
+                        SEGINI,IPTF1
+                        IPTF1.ITYPEL=2
+                        CALL ECCTAB(MTABF1,'MOT     ',0,0,'VISU',0,0,
+     &                                     'MAILLAGE',0,0,0,0,IPTF1)
+                        JG=0
+                        SEGINI,LA1
+                        CALL ECCTAB(MTABF1,'MOT     ',0,0,'ARTS',0,0,
+     &                                     'LISTENTI',0,0,0,0,LA1)
+                     ENDIF
+C                    acces a la table de la face NFI
+                     CALL ACCTAB(MTABF,'ENTIER  ',NFI,0,' ',0,0,
+     &                                 'TABLE   ',0,0,0,0,MTABF1)
+C                    ajout d'une arete dans la face si besoin
+                     CALL ACCTAB(MTABF1,'MOT     ',0,0,'VISU',0,0,
+     &                                  'MAILLAGE',0,0,0,0,IPTF1)
+                     CALL ACCTAB(MTABF1,'MOT     ',0,0,'ARTS',0,0,
+     &                                  'LISTENTI',0,0,0,0,LA1)
+                     CALL ECRENT(NAE)
+                     CALL ECROBJ('LISTENTI',LA1)
+                     CALL EXIS
+                     SEGACT,LA1
+                     CALL LIRLOG(BOOL1,1,IRETOU)
+                     IF (.NOT.BOOL1) THEN
+                        JG=LA1.LECT(/1)+1
+                        SEGADJ,LA1
+                        LA1.LECT(JG)=NAE
+                        NBNN=IPTF1.NUM(/1)
+                        NBELEM=IPTF1.NUM(/2)+1
+                        SEGADJ,IPTF1
+                        IPTF1.NUM(1,NBELEM)=NRP1
+                        IPTF1.NUM(2,NBELEM)=NRP2
+                     ENDIF
+                     MTABF1=MMTABF1
+                     IPTF1=IIPTF1
+                     LA1=LLA1
+C                    On incremente le nombre d'aretes identifiees
+                     NAI=NAI+1
+                  ENDIF
+               ENDDO
+            ENDDO
+C
+C           2eme cas : recherche des triangles voisins de NTI coupant
+C                      la cellule NCI
+C           Boucle sur les cotes du triangle NTI
+            DO J=1,3
+               IF (J.EQ.1) THEN
+                  NRA=IPT2.NUM(2,NTI)
+                  NRB=IPT2.NUM(3,NTI)
+               ENDIF
+               IF (J.EQ.2) THEN
+                  NRA=IPT2.NUM(1,NTI)
+                  NRB=IPT2.NUM(3,NTI)
+               ENDIF
+               IF (J.EQ.3) THEN
+                  NRA=IPT2.NUM(1,NTI)
+                  NRB=IPT2.NUM(2,NTI)
+               ENDIF
+               XA=XCOOR((NRA-1)*IDIMP1+1)
+               YA=XCOOR((NRA-1)*IDIMP1+2)
+               ZA=XCOOR((NRA-1)*IDIMP1+3)
+               XB=XCOOR((NRB-1)*IDIMP1+1)
+               YB=XCOOR((NRB-1)*IDIMP1+2)
+               ZB=XCOOR((NRB-1)*IDIMP1+3)
+C              La droite (AB) est definie par les deux equations de plan
+C              Ax + By + Cy + D = 0
+C              Ex + Fy + Gy + H = 0
+C              --> pour le plan 1, on definit un point C dans ce plan
+               XC=XA+(YB-YA)
+               YC=YA+(ZB-ZA)
+               ZC=ZA+(XB-XA)
+C              --> vecteur normal au plan ABC : n=AB^AC
+               A=((YB-YA)*(ZC-ZA))-((ZB-ZA)*(YC-YA))
+               B=((ZB-ZA)*(XC-XA))-((XB-XA)*(ZC-ZA))
+               C=((XB-XA)*(YC-YA))-((YB-YA)*(XC-XA))
+C              --> calcul de D, sachant que A est dans le plan
+               D=-1D0*((A*XA)+(B*YA)+(C*ZA))
+C              --> pour le plan 2, on definit un point D dans ce plan
+               XD=XA+(ZB-ZA)
+               YD=YA+(XB-XA)
+               ZD=ZA+(YB-YA)
+C              --> vecteur normal au plan ABD : n=AB^AD
+               E=((YB-YA)*(ZD-ZA))-((ZB-ZA)*(YD-YA))
+               F=((ZB-ZA)*(XD-XA))-((XB-XA)*(ZD-ZA))
+               G=((XB-XA)*(YD-YA))-((YB-YA)*(XD-XA))
+C              --> calcul de H, sachant que A est dans le plan
+               H=-1D0*((E*XA)+(F*YA)+(G*ZA))
+C              Recherche des aretes du polygone LTL1 sur la droite AB
+               DO K=1,LTL1.XACT(/1)
+                  IAE=0
+                  X41=LTL1.XACT(K,1)
+                  Y41=LTL1.XACT(K,2)
+                  Z41=LTL1.XACT(K,3)
+                  IF (K.EQ.LTL1.XACT(/1)) THEN
+                     X42=LTL1.XACT(1,1)
+                     Y42=LTL1.XACT(1,2)
+                     Z42=LTL1.XACT(1,3)
+                  ELSE
+                     X42=LTL1.XACT(K+1,1)
+                     Y42=LTL1.XACT(K+1,2)
+                     Z42=LTL1.XACT(K+1,3)
+                  ENDIF
+C                 Test si les points 1 et 2 de l'arete K sont sur la
+C                 droite (AB)
+                  I41=0
+                  I42=0
+C                 Test si P1 est sur la droite (AB)
+                  V41=(A*X41)+(B*Y41)+(C*Z41)+D
+                  W41=(E*X41)+(F*Y41)+(G*Z41)+H
+                  IF ((ABS(V41).LT.ZERO2).AND.(ABS(W41).LT.ZERO2)) THEN
+                     I41=1
+                  ELSE
+                     GOTO 3
+                  ENDIF
+C                 Test si P2 est sur la droite (AB)
+                  V42=(A*X42)+(B*Y42)+(C*Z42)+D
+                  W42=(E*X42)+(F*Y42)+(G*Z42)+H
+                  IF ((ABS(V42).LT.ZERO2).AND.(ABS(W42).LT.ZERO2)) THEN
+                     I42=1
+                  ELSE
+                     GOTO 3
+                  ENDIF
+C                 Si N41 et N42 sont sur l'arete [AB], on va chercher le
+C                 numero du triangle adjacent sur cette arete
+                  IF ((I41.EQ.1).AND.(I42.EQ.1)) THEN
+                     NTVI=ILEA1.LEAC(NTI,J,1)
+C                    On verifie que le couple (NTVI,NCI) n'a pas deja
+C                    ete traite et on l'ajoute a la file
+                     IF (ITL1.LACT(NTVI,NCI).EQ.0) THEN
+                        ITL1.LACT(NTVI,NCI)=1
+                        NLT=NLT+1
+                        LT.LECT(NLT)=NTVI
+                        LC.LECT(NLT)=NCI
+                     ENDIF
+                  ENDIF
+C                 Determination des noeuds P1 et P2 de l'arete
+C                 Doit on creer de nouveaux noeuds ?
+C                 LV2 liste des noeuds a examiner = LV1 et NRA et NRB
+                  JG=LV1.LECT(/1)
+                  SEGINI,LV2=LV1
+                  JG=LV2.LECT(/1)+2
+                  SEGADJ,LV2
+                  NLV2=LV1.LECT(/1)
+                  NLV2=NLV2+1
+                  LV2.LECT(NLV2)=NRA
+                  NLV2=NLV2+1
+                  LV2.LECT(NLV2)=NRB
+C                 test si P1 est deja present ou non dans LV2
+                  BOOL1=.FALSE.
+                  DO L=1,LV2.LECT(/1)
+                     NRL=LV2.LECT(L)
+                     XL=XCOOR((NRL-1)*IDIMP1+1)
+                     YL=XCOOR((NRL-1)*IDIMP1+2)
+                     ZL=XCOOR((NRL-1)*IDIMP1+3)
+                     IF ((ABS(XL-X41).LT.XTOL).AND.
+     &                   (ABS(YL-Y41).LT.XTOL).AND.
+     &                   (ABS(ZL-Z41).LT.XTOL)) THEN
+                        BOOL1=.TRUE.
+                        NRP1=NRL
+                        GOTO 6
+                     ENDIF
+                  ENDDO
+                  IF (.NOT.BOOL1) THEN
+C                    ajout d'un nouveau noeud dans MCOORD
+                     NRP1=(XCOOR(/1)/IDIMP1)+1
+                     NBPTS=NRP1
+                     SEGADJ,MCOORD
+                     XCOOR((NRP1-1)*IDIMP1+1)=X41
+                     XCOOR((NRP1-1)*IDIMP1+2)=Y41
+                     XCOOR((NRP1-1)*IDIMP1+3)=Z41
+                     NLV1=NLV1+1
+                     IF (NLV1.GT.LV1.LECT(/1)) THEN
+                        JG=NLV1
+                        SEGADJ,LV1
+                     ENDIF
+                     LV1.LECT(NLV1)=NRP1
+                  ENDIF
+6                 CONTINUE
+C                 test si P2 est deja present ou non dans LV2
+                  BOOL1=.FALSE.
+                  DO L=1,LV2.LECT(/1)
+                     NRL=LV2.LECT(L)
+                     XL=XCOOR((NRL-1)*IDIMP1+1)
+                     YL=XCOOR((NRL-1)*IDIMP1+2)
+                     ZL=XCOOR((NRL-1)*IDIMP1+3)
+                     IF ((ABS(XL-X42).LT.XTOL).AND.
+     &                   (ABS(YL-Y42).LT.XTOL).AND.
+     &                   (ABS(ZL-Z42).LT.XTOL)) THEN
+                        BOOL1=.TRUE.
+                        NRP2=NRL
+                        GOTO 7
+                     ENDIF
+                  ENDDO
+                  IF (.NOT.BOOL1) THEN
+                     NRP2=(XCOOR(/1)/IDIMP1)+1
+                     NBPTS=NRP2
+                     SEGADJ,MCOORD
+                     XCOOR((NRP2-1)*IDIMP1+1)=X42
+                     XCOOR((NRP2-1)*IDIMP1+2)=Y42
+                     XCOOR((NRP2-1)*IDIMP1+3)=Z42
+                     NLV1=NLV1+1
+                     IF (NLV1.GT.LV1.LECT(/1)) THEN
+                        JG=NLV1
+                        SEGADJ,LV1
+                     ENDIF
+                     LV1.LECT(NLV1)=NRP2
+                  ENDIF
+7                 CONTINUE
+C                 Test sur l'existence de l'arete P1 P2 dans IPTG
+                  DO L=1,NBELEG
+                     NG1=IPTG.NUM(1,L)
+                     NG2=IPTG.NUM(2,L)
+                     IF (((NG1.EQ.NRP1).AND.(NG2.EQ.NRP2)).OR.
+     &                   ((NG2.EQ.NRP1).AND.(NG1.EQ.NRP2))) THEN
+C                       si l'arete P1 P2 a deja ete creee, on
+C                       l'indique au moyen de IAE
+                        IAE=1
+                        NAE=L
+                        GOTO 19
+                     ENDIF
+                  ENDDO
+19                CONTINUE
+C                 --> Ajout de l'arete dans MTAB11.VISU
+                  IF (IAE.EQ.0) THEN
+                     NBELEG=NBELEG+1
+                     IPTG.NUM(1,NBELEG)=NRP1
+                     IPTG.NUM(2,NBELEG)=NRP2
+                     IF (NBELEG.EQ.IPTG.NUM(/2)) THEN
+                        NBNN=IPTG.NUM(/1)
+                        NBELEM=IPTG.NUM(/2)+100
+                        SEGADJ,IPTG
+                     ENDIF
+                     NAE=NBELEG
+                  ENDIF
+C                 --> Ajout de l'arete dans MTAB11.ARTS
+                  IF (IAE.EQ.0) THEN
+                     NBNN=2
+                     NBELEM=1
+                     SEGINI,IPTA1
+                     IPTA1.ITYPEL=2
+                     IPTA1.NUM(1,1)=NRP1
+                     IPTA1.NUM(2,1)=NRP2
+                     CALL ECCTAB(MTABA,'ENTIER  ',NAE,0,' ',0,0,
+     &                                 'MAILLAGE',0,0,0,0,IPTA1)
+                  ENDIF
+C                 --> Ajout de l'arete dans MTAB11.FACS
+                  CALL ECROBJ('ENTIER  ',NF)
+                  CALL ECROBJ('TABLE   ',MTABF)
+                  CALL EXIS
+                  CALL LIRLOG(BOOL1,1,IRETOU)
+                  IF (.NOT.BOOL1) THEN
+C                    si MTAB11.FACS.NF n'existe pas, on le cree
+                     CALL CRTABL(MTABF1)
+                     CALL ECCTAB(MTABF,'ENTIER  ',NF,0,' ',0,0,
+     &                                 'TABLE   ',0,0,0,0,MTABF1)
+                     NBNN=2
+                     NBELEM=0
+                     SEGINI,IPTF1
+                     IPTF1.ITYPEL=2
+                     CALL ECCTAB(MTABF1,'MOT     ',0,0,'VISU',0,0,
+     &                                  'MAILLAGE',0,0,0,0,IPTF1)
+                     JG=0
+                     SEGINI,LA1
+                     CALL ECCTAB(MTABF1,'MOT     ',0,0,'ARTS',0,0,
+     &                                  'LISTENTI',0,0,0,0,LA1)
+                  ENDIF
+C                 acces a MTAB11.FACS.NF
+                  CALL ACCTAB(MTABF,'ENTIER  ',NF,0,' ',0,0,
+     &                              'TABLE   ',0,0,0,0,MTABF1)
+C                 ajout d'une arete dans l'indice VISU
+                  CALL ACCTAB(MTABF1,'MOT     ',0,0,'VISU',0,0,
+     &                               'MAILLAGE',0,0,0,0,IPTF1)
+                  NBNN=IPTF1.NUM(/1)
+                  NBELEM=IPTF1.NUM(/2)+1
+                  SEGADJ,IPTF1
+                  IPTF1.NUM(1,NBELEM)=NRP1
+                  IPTF1.NUM(2,NBELEM)=NRP2
+C                 ajout du numero de l'arete l'indice ARTS
+                  CALL ACCTAB(MTABF1,'MOT     ',0,0,'ARTS',0,0,
+     &                               'LISTENTI',0,0,0,0,LA1)
+                  JG=LA1.LECT(/1)+1
+                  SEGADJ,LA1
+                  LA1.LECT(JG)=NAE
+C                 --> Ecriture dans MTAB11.CELL.NRCI
+C                 ajout d'une arete dans l'indice VISU si besoin
+                  DO L=1,IPTI1.NUM(/2)
+                     NI1=IPTI1.NUM(1,L)
+                     NI2=IPTI1.NUM(2,L)
+                     IF (((NI1.EQ.NRP1).AND.(NI2.EQ.NRP2)).OR.
+     &                   ((NI2.EQ.NRP1).AND.(NI1.EQ.NRP2))) GOTO 17
+                  ENDDO
+                  NBNN=IPTI1.NUM(/1)
+                  NBELEM=IPTI1.NUM(/2)+1
+                  SEGADJ,IPTI1
+                  IPTI1.NUM(1,NBELEM)=NRP1
+                  IPTI1.NUM(2,NBELEM)=NRP2
+17                CONTINUE
+C                 ajout du numero de la face dans l'indice FACS
+C                 si besoin
+                  CALL ECRENT(NF)
+                  CALL ECROBJ('LISTENTI',LFI1)
+                  CALL EXIS
+                  CALL LIRLOG(BOOL1,1,IRETOU)
+                  SEGACT,LFI1
+                  IF (.NOT.BOOL1) THEN
+                     JG=LFI1.LECT(/1)+1
+                     SEGADJ,LFI1
+                     LFI1.LECT(JG)=NF
+                  ENDIF
+                  NAI=NAI+1
+3                 CONTINUE
+               ENDDO
+            ENDDO
+            NF=NFF
+C
+C           Test pour verifier que le nombre d'aretes identifiees est
+C           bien egal au nombre de sommets du polygone d'intersection
+            IF (NAI.NE.LTL1.XACT(/1)) THEN
+C              WRITE(6,*) '> Le nombre d''aretes identifiees est'
+C              WRITE(6,*) '  different du nombre de sommets du polygone'
+C              WRITE(6,*) nai,LTL1.XACT(/1)
+C              WRITE(6,*) 'Numero du triangle concerne:',nti
+C              WRITE(6,*) 'Point de la cellule concernee',nrci
+               CALL ERREUR(1036)
+               GOTO 999
+            ENDIF
+         ENDDO
+1        CONTINUE
+C        Ajustement du maillage global des centres des cellules dans la
+C        partition coupee IPT6
+         NBNN=IPT6.NUM(/1)
+         NBELEM=NBELE6
+         SEGADJ,IPT6
+C        Ajustement du maillage global des aretes IPTG
+         NBNN=IPTG.NUM(/1)
+         NBELEM=NBELEG
+         SEGADJ,IPTG
+C        Ajustement de la liste des faces internes LV5 et LV6
+         JG=NF
+         SEGADJ,LV5,LV6
+C
+C
+C        Fusion des faces coplanaires
+C        On construit la liste des faces regroupees : LV1
+C        si LV1(n1)=n1 la face n1 est seule (interne ou englobante)
+C        si LV1(n1)=n2 la face n1 est reliee a la face n2 qui constitue
+C                      sa face "englobante" et donc LV1(n2)=n2
+         JG=NF
+         SEGINI,LV1
+C        Boucle sur les cellules existantes
+         DO I=1,IPT6.NUM(/2)
+            NRCI=IPT6.NUM(1,I)
+            CALL ACCTAB(MTABC,'POINT   ',0,0,' ',0,NRCI,
+     &                        'TABLE   ',0,0,0,0,MTABI1)
+            CALL ACCTAB(MTABI1,'MOT     ',0,0,'FACS',0,0,
+     &                         'LISTENTI',0,0,0,0,LFI1)
+C           Boucle sur les faces de la cellule NRCI
+            DO J=1,LFI1.LECT(/1)
+               NFJ=LFI1.LECT(J)
+C              Si cette face a deja ete regroupee, on examine la face
+C              suivante
+               IF (LV1.LECT(NFJ).NE.0) GOTO 9
+C              Sinon, on la considere comme englobante
+               LV1.LECT(NFJ)=NFJ
+C              Mais s'il s'agit d'une face interne, pas besoin de
+C              checher des faces coplanaires, on examine la suivante
+               IF (LV5.LECT(NFJ).NE.0) GOTO 9
+C              A partir d'ici, on va rechercher les autres faces de la
+C              cellule NRCI qui sont coplanaires a NFJ
+C              Ces faces sont listees dans LV2, utilisee par la suite
+C              pour regrouper les maillages des faces
+               JG=0
+               SEGINI,LV2
+               CALL ACCTAB(MTABF,'ENTIER  ',NFJ,0,' ',0,0,
+     &                           'TABLE   ',0,0,0,0,MTABF1)
+               CALL ACCTAB(MTABF1,'MOT     ',0,0,'VISU',0,0,
+     &                            'MAILLAGE',0,0,0,0,IPTF1)
+C              Determination de l'equation du plan NFJ avec 3 points
+C              A, B et C non alignes
+               SEGINI,IPT3=IPTF1
+               CALL CHANGE(IPT3,1)
+               NRA=IPT3.NUM(1,1)
+               NRB=IPT3.NUM(1,2)
+C              Boucle pour trouver un point C non aligne avec les points
+C              A et B
+               DO K=3,IPT3.NUM(/2)
+                  NRC=IPT3.NUM(1,K)
+                  XA=XCOOR((NRA-1)*IDIMP1+1)
+                  YA=XCOOR((NRA-1)*IDIMP1+2)
+                  ZA=XCOOR((NRA-1)*IDIMP1+3)
+                  XB=XCOOR((NRB-1)*IDIMP1+1)
+                  YB=XCOOR((NRB-1)*IDIMP1+2)
+                  ZB=XCOOR((NRB-1)*IDIMP1+3)
+                  XC=XCOOR((NRC-1)*IDIMP1+1)
+                  YC=XCOOR((NRC-1)*IDIMP1+2)
+                  ZC=XCOOR((NRC-1)*IDIMP1+3)
+C                 Calcul d'un vecteur normal au plan (ABC)
+                  XN=((YB-YA)*(ZC-ZA))-((ZB-ZA)*(YC-YA))
+                  YN=((ZB-ZA)*(XC-XA))-((XB-XA)*(ZC-ZA))
+                  ZN=((XB-XA)*(YC-YA))-((YB-YA)*(XC-XA))
+                  DN=SQRT((XN**2)+(YN**2)+(ZN**2))
+                  IF (DN.GE.ZERO) GOTO 14
+               ENDDO
+C              Si l'on passe ici, c'est que l'on a pas trouve 3 points
+C              suffisament espaces pour definir le plan
+C        WRITE(6,*) '  > Impossible de determiner l''equation du plan'
+C        WRITE(6,*) '    points alignes (2)'
+               INTERR(1)=NFJ
+               INTERR(2)=NRCI
+               CALL ERREUR(1035)
+               GOTO 999
+14             CONTINUE
+               XN=XN/DN
+               YN=YN/DN
+               ZN=ZN/DN
+               W=-1D0*((XN*XA)+(YN*YA)+(ZN*ZA))
+C              Boucle sur les faces suivantes
+               MMTABF1=MTABF1
+               IIPTF1=IPTF1
+               DO K=J+1,LFI1.LECT(/1)
+                  NFK=LFI1.LECT(K)
+C                 S'il s'agit d'une face interne, on ne regarde pas
+C                 la coplaneite et on examine la face suivante
+                  IF (LV5.LECT(NFK).NE.0) GOTO 8
+C                 Si la face NFK a ete traitee (ratachee a une face ou
+C                 bien considere comme face englobante), on recupere le
+C                 numero de ratachement
+                  IF (LV1.LECT(NFK).NE.0) THEN
+                     NFK=LV1.LECT(NFK)
+                  ENDIF
+C                 Si la face NFK est deja reliee a la face NFJ,
+C                 on ne refait pas le travail
+                  IF (NFK.EQ.NFJ) GOTO 8
+C                 Acces au maillage de la face NFK
+                  CALL ACCTAB(MTABF,'ENTIER  ',NFK,0,' ',0,0,
+     &                              'TABLE   ',0,0,0,0,MTABF1)
+                  CALL ACCTAB(MTABF1,'MOT     ',0,0,'VISU',0,0,
+     &                               'MAILLAGE',0,0,0,0,IPTF1)
+C                 Verification que les points de la face NFK sont dans
+C                 le plan ABC
+                  SEGINI,IPT4=IPTF1
+                  CALL CHANGE(IPT4,1)
+                  DO L=1,IPT4.NUM(/2)
+                     NRL=IPT4.NUM(1,L)
+                     XL=XCOOR((NRL-1)*IDIMP1+1)
+                     YL=XCOOR((NRL-1)*IDIMP1+2)
+                     ZL=XCOOR((NRL-1)*IDIMP1+3)
+                     DTEST=(XN*XL)+(YN*YL)+(ZN*ZL)+W
+                     IF (ABS(DTEST).GE.ZERO2) GOTO 8
+                  ENDDO
+C                 Si on passe ici, c'est que la face NFK est coplanaire
+C                 a la face NFJ, on le note dans LV2 et on modifie
+C                 l'indice NFK de LV1 pour rediriger vers la face NFJ
+                  JG=LV2.LECT(/1)+1
+                  SEGADJ,LV2
+                  LV2.LECT(JG)=NFK
+                  LV1.LECT(NFK)=NFJ
+8                 CONTINUE
+               ENDDO
+               MTABF1=MMTABF1
+               IPTF1=IIPTF1
+C              Si on a trouve aucune face coplanaire a NFJ, on itere
+               IF (LV2.LECT(/1).EQ.0) GOTO 9
+C              On a determine la liste LV2 des faces coplanaires la face
+C              NFJ, on incorpore les aretes dans la table MTABF1 dediee
+C              a la face NFJ
+               MMTABF1=MTABF1
+               CALL ACCTAB(MTABF1,'MOT     ',0,0,'ARTS',0,0,
+     &                            'LISTENTI',0,0,0,0,LA1)
+C              Boucle sur les faces coplanaires a la face NFJ
+               DO K=1,LV2.LECT(/1)
+                  NFK=LV2.LECT(K)
+                  CALL ACCTAB(MTABF,'ENTIER  ',NFK,0,' ',0,0,
+     &                              'TABLE   ',0,0,0,0,MTABF1)
+                  CALL ACCTAB(MTABF1,'MOT     ',0,0,'ARTS',0,0,
+     &                               'LISTENTI',0,0,0,0,LA2)
+C                 Boucle sur les aretes de cette face NFK
+                  DO L=1,LA2.LECT(/1)
+                     NAL=LA2.LECT(L)
+C                    Si l'arete NAL est presente dans LA1, alors elle
+C                    est supprimee de la face NFJ car elle est commune a
+C                    deux faces coplanaires
+                     DO M=1,LA1.LECT(/1)
+                        IF ((LA1.LECT(M)).EQ.NAL) THEN
+                           CALL ENLEV2(LA1,M,LA3,0)
+                           SEGACT,LA1,LA3
+                           LA1=LA3
+                           GOTO 13
+                        ENDIF
+                     ENDDO
+C                    Si on passe ici, c'est que l'arete NAL est absente
+C                    de LA1, donc elle est ajoutee et contribue ainsi a
+C                    la face NFJ
+                     JG=LA1.LECT(/1)+1
+                     SEGADJ,LA1
+                     LA1.LECT(JG)=NAL
+13                   CONTINUE
+                  ENDDO
+               ENDDO
+               MTABF1=MMTABF1
+C              Ecriture de la nouvelle liste d'aretes pour la face NFJ
+               CALL ECCTAB(MTABF1,'MOT     ',0,0,'ARTS',0,0,
+     &                            'LISTENTI',0,0,0,0,LA1)
+C              Reconstruction du maillage de la face NFJ
+               IIPTF1=IPTF1
+               CALL ACCTAB(MTABF1,'MOT     ',0,0,'VISU',0,0,
+     &                            'MAILLAGE',0,0,0,0,IPTF1)
+               NBNN=IPTF1.NUM(/1)
+               NBELEM=LA1.LECT(/1)
+               SEGINI,IPTF1
+               IPTF1.ITYPEL=2
+               DO K=1,LA1.LECT(/1)
+                  NAK=LA1.LECT(K)
+                  CALL ACCTAB(MTABA,'ENTIER  ',NAK,0,' ',0,0,
+     &                              'MAILLAGE',0,0,0,0,IPTA1)
+                  IPTF1.NUM(1,K)=IPTA1.NUM(1,1)
+                  IPTF1.NUM(2,K)=IPTA1.NUM(2,1)
+               ENDDO
+               CALL ECCTAB(MTABF1,'MOT     ',0,0,'VISU',0,0,
+     &                            'MAILLAGE',0,0,0,0,IPTF1)
+               IPTF1=IIPTF1
+9              CONTINUE
+            ENDDO
+         ENDDO
+C
+C        Ainsi, les faces englobees sont identifiees dans LV1,
+C               les faces englobantes aussi et leur maillage et liste
+C               d'aretes sont mises a jour dans MTABF1
+C        Il faut maintenant re-numeroter les faces et ne plus faire
+C        apparaitre les faces englobees
+C
+C        Re-ecriture de la table de sortie pour ne plus faire figurer
+C        les faces/aretes supprimees
+         CALL CRTABL(MTAB10)
+         CALL CRTABL(MTABCC)
+         CALL CRTABL(MTABFF)
+         CALL CRTABL(MTABAA)
+         NBARETES=0
+         NBFACES=0
+C        listes faisant la correspondance entre les anciens et les
+C        nouveaux elements numerotes :
+C        LV3(n)=m l'ancienne arete numero n porte maintenant le numero m
+C        LV4(n)=m l'ancienne face numero n porte maintenant le numero m
+C                 n doit correpondre a une face englobante
+C                 si n correspond a une face "englobee" alors LV4(n)=0
+         JG=IPTG.NUM(/2)
+         SEGINI,LV3
+         JG=NF
+         SEGINI,LV4
+C        initialisation du nouveau maillage global des aretes
+         NBNN=2
+         NBELEM=IPTG.NUM(/2)
+         SEGINI,IPTG0
+         IPTG0.ITYPEL=2
+         CALL ECCTAB(MTAB10,'MOT     ',0,0,'VISU',0,0,
+     &                      'MAILLAGE',0,0,0,0,IPTG0)
+C        initialisation de la table des cellules MTABCC
+         CALL ECCTAB(MTAB10,'MOT     ',0,0,'CELL',0,0,
+     &                      'TABLE   ',0,0,0,0,MTABCC)
+C        initialisation de la table des faces MTABF0
+         CALL ECCTAB(MTAB10,'MOT     ',0,0,'FACS',0,0,
+     &                      'TABLE   ',0,0,0,0,MTABFF)
+C        initialisation de la table des aretes MTABA0
+         CALL ECCTAB(MTAB10,'MOT     ',0,0,'ARTS',0,0,
+     &                      'TABLE   ',0,0,0,0,MTABAA)
+C        boucle sur les cellules
+         DO I=1,IPT6.NUM(/2)
+            NRCI=IPT6.NUM(1,I)
+C           initialisation de la table MTABI0 de la cellule NRCI
+            CALL CRTABL(MTABI0)
+            CALL ECCTAB(MTABCC,'POINT   ',0,0,' ',0,NRCI,
+     &                         'TABLE   ',0,0,0,0,MTABI0)
+C           initialisation du maillage IPTI0 de la cellule NRCI
+            NBNN=2
+            NBELEM=0
+            SEGINI,IPTI0
+            IPTI0.ITYPEL=2
+            CALL ECCTAB(MTABI0,'MOT     ',0,0,'VISU',0,0,
+     &                         'MAILLAGE',0,0,0,0,IPTI0)
+C           initialisation de la liste LFI0 des faces de NRCI
+            JG=0
+            SEGINI,LFI0
+            CALL ECCTAB(MTABI0,'MOT     ',0,0,'FACS',0,0,
+     &                         'LISTENTI',0,0,0,0,LFI0)
+C           ecriture du maillage IPTVI0 des voisins de NRCI (inchange)
+            CALL ACCTAB(MTABC,'POINT   ',0,0,' ',0,NRCI,
+     &                        'TABLE   ',0,0,0,0,MTABI1)
+            CALL ACCTAB(MTABI1,'MOT     ',0,0,'VOIS',0,0,
+     &                         'MAILLAGE',0,0,0,0,IPTVI1)
+            CALL ECCTAB(MTABI0,'MOT     ',0,0,'VOIS',0,0,
+     &                         'MAILLAGE',0,0,0,0,IPTVI1)
+C           boucle sur les faces de la cellule NRCI
+            CALL ACCTAB(MTABI1,'MOT     ',0,0,'FACS',0,0,
+     &                         'LISTENTI',0,0,0,0,LFI1)
+            DO J=1,LFI1.LECT(/1)
+               NFJ=LFI1.LECT(J)
+C              s'il s'agit il d'une face englobee, on passe a la face
+C              suivante
+               IF (LV1.LECT(NFJ).NE.NFJ) GOTO 18
+C              la face est elle nouvelle pour cette re-numerotation ?
+               NNFJ=LV4.LECT(NFJ)
+               BOOL1=NNFJ.EQ.0
+               IF (BOOL1) THEN
+C                 NFJ n'a pas ete re-numerotee, donc on le fait ici
+C                 NFJ est re-numerotee en NNFJ
+                  NBFACES=NBFACES+1
+                  NNFJ=NBFACES
+                  LV4.LECT(NFJ)=NNFJ
+C                 creation de la table MTABF0 de la face NNFJ
+                  CALL CRTABL(MTABF0)
+                  CALL ECCTAB(MTABFF,'ENTIER  ',NNFJ,0,' ',0,0,
+     &                               'TABLE   ',0,0,0,0,MTABF0)
+               ELSE
+C                 NFJ correspond a une face deja re-numerotee, on va
+C                 chercher sa table
+                  CALL ACCTAB(MTABFF,'ENTIER  ',NNFJ,0,' ',0,0,
+     &                               'TABLE   ',0,0,0,0,MTABF0)
+               ENDIF
+C              ajout de cette face dans la liste LFI0 de la cellule NRCI
+               JG=LFI0.LECT(/1)+1
+               SEGADJ,LFI0
+               LFI0.LECT(JG)=NNFJ
+C              acces a la liste des aretes de cette face
+               CALL ACCTAB(MTABF,'ENTIER  ',NFJ,0,' ',0,0,
+     &                           'TABLE   ',0,0,0,0,MTABF1)
+               CALL ACCTAB(MTABF1,'MOT     ',0,0,'VISU',0,0,
+     &                            'MAILLAGE',0,0,0,0,IPTF1)
+               CALL ACCTAB(MTABF1,'MOT     ',0,0,'ARTS',0,0,
+     &                            'LISTENTI',0,0,0,0,LA1)
+C              attention, la liste des aretes LA1 contient les anciens
+C              numeros d'arete
+               IF (BOOL1) THEN
+C                 si la face NFJ vient d'etre re-numerotee NNFJ, alors
+C                 on ecrit le maillage de la face dans MTABF0
+                  CALL ECCTAB(MTABF0,'MOT     ',0,0,'VISU',0,0,
+     &                               'MAILLAGE',0,0,0,0,IPTF1)
+C                 initialisation de la liste LA0 des aretes de la face
+C                 NNFJ que l'on va remplir de suite
+                  JG=LA1.LECT(/1)
+                  SEGINI,LA0
+                  NA0=0
+                  CALL ECCTAB(MTABF0,'MOT     ',0,0,'ARTS',0,0,
+     &                               'LISTENTI',0,0,0,0,LA0)
+               ENDIF
+C              boucle sur les aretes de la face
+               DO K=1,LA1.LECT(/1)
+C                 ancien numero d'arete
+                  NAK=LA1.LECT(K)
+                  CALL ACCTAB(MTABA,'ENTIER  ',NAK,0,' ',0,0,
+     &                              'MAILLAGE',0,0,0,0,IPTA1)
+                  NRA=IPTA1.NUM(1,1)
+                  NRB=IPTA1.NUM(2,1)
+C                 acces au nouveau numero de cette arete
+                  NNAK=LV3.LECT(NAK)
+C                 s'il s'agit d'une nouvelle face
+                  IF (BOOL1) THEN
+C                    s'agit il d'une arete non re-numerotee ?
+                     IF (NNAK.EQ.0) THEN
+                        NBARETES=NBARETES+1
+                        NNAK=NBARETES
+                        LV3.LECT(NAK)=NNAK
+C                       ecriture du maillage IPTA0 (identique a IPTA1)
+C                       de l'arete NNAK
+                        CALL ECCTAB(MTABAA,'ENTIER  ',NNAK,0,' ',0,0,
+     &                                     'MAILLAGE',0,0,0,0,IPTA1)
+C                       ajout cette arete dans le maillage global IPTG0
+                        IPTG0.NUM(1,NBARETES)=NRA
+                        IPTG0.NUM(2,NBARETES)=NRB
+                     ENDIF
+C                    ajout du numero d'arete dans la liste LA0
+                     NA0=NA0+1
+                     LA0.LECT(NA0)=NNAK
+                  ENDIF
+C                 ajout de l'arete dans le maillage IPTI0 de la cellule
+C                 si elle n'y est pas deja
+                  BOOL2=.FALSE.
+                  DO L=1,IPTI0.NUM(/2)
+                     NRL1=IPTI0.NUM(1,L)
+                     NRL2=IPTI0.NUM(2,L)
+                     IF (((NRA.EQ.NRL1).AND.(NRB.EQ.NRL2)).OR.
+     &                   ((NRA.EQ.NRL2).AND.(NRB.EQ.NRL1))) THEN
+                        BOOL2=.TRUE.
+                        GOTO 23
+                     ENDIF
+                  ENDDO
+23                CONTINUE
+                  IF (.NOT.BOOL2) THEN
+                     NBNN=IPTI0.NUM(/1)
+                     NBELEM=IPTI0.NUM(/2)+1
+                     SEGADJ,IPTI0
+                     IPTI0.NUM(1,NBELEM)=NRA
+                     IPTI0.NUM(2,NBELEM)=NRB
+                  ENDIF
+               ENDDO
+18             CONTINUE
+            ENDDO
+         ENDDO
+C        Ajustement de IPTG0
+         NBNN=IPTG0.NUM(/1)
+         NBELEM=NBARETES
+         SEGADJ,IPTG0
+C        Mise a jour de ITFAC1 avec cette nouvelle numerotation
+         DO I=1,LV5.LECT(/1)
+C           cellules definissant l'ancienne face I
+            NCI=LV5.LECT(I)
+            NCJ=LV6.LECT(I)
+            IF (NCI.NE.0) THEN
+C              ancienne face englobante de I
+               NFOLD=LV1.LECT(I)
+C              nouveau numero de cette face
+               NFNEW=LV4.LECT(NFOLD)
+               ITFAC1.LACT(NCI,NCJ)=NFNEW
+               ITFAC1.LACT(NCJ,NCI)=NFNEW
+            ENDIF
+         ENDDO
+C        Ecrasement des tables et maillages precedents
+         MTAB11=MTAB10
+         IPTG=IPTG0
+         MTABC=MTABCC
+         MTABF=MTABFF
+         MTABA=MTABAA
+         NF=NBFACES
+      ENDIF
+C
+C
+C
+C----------------------------------------------------------------------C
+C                               PARTIE 3                               C
+C  Construction des cellules entieres en ajoutant les aretes internes  C
+C----------------------------------------------------------------------C
+C
+      IF (IDIM.EQ.2) THEN
+C        IPT3 : maillage des cellules non coupees de MTAB1
+         CALL ACCTAB(MTAB1,'MOT     ',0,0,'VISU',0,0,
+     &                     'MAILLAGE',0,0,0,0,IPT3)
+C        ITARE1 : tableau donnant les cellules appuyees sur chaque
+C        arete de IPT3
+         CALL ACCTAB(MTAB1,'MOT     ',0,0,'TAR',0,0,
+     &                     'MVORO   ',0,0,0,0,ITARE1)
+         SEGACT,IPT3,ITARE1
+C        MTABCC : table des cellules coupees fixee
+         SEGINI,MTABCC=MTABC
+C        Balayage des aretes non coupees IPT3 et ajout dans MTAB11 si
+C        elles sont contenues dans l'enveloppe
+         DO I=1,IPT3.NUM(/2)
+C           LV1 : liste des cellules appuyees sur l'arete I
+            JG=ITARE1.LACT(/1)
+            SEGINI,LV1
+            DO J=1,ITARE1.LACT(/1)
+               NCJ=ITARE1.LACT(J,I)
+               IF (NCJ.EQ.0) THEN
+                  JG=J-1
+                  GOTO 36
+               ENDIF
+               LV1.LECT(J)=NCJ
+            ENDDO
+36          CONTINUE
+            SEGADJ,LV1
+C           Si l'arete s'appuie sur 1 cellule, elle est forcement
+C           externe, donc on ne l'examine meme pas !
+            IF (LV1.LECT(/1).LT.1) THEN
+               GOTO 39
+            ENDIF
+C           Extremites de l'arete non coupee
+            NPA=IPT3.NUM(1,I)
+            NPB=IPT3.NUM(2,I)
+C           LV2 : Liste des noeuds situes sur l'arete de A vers B
+            JG=2
+            SEGINI,LV2
+            LV2.LECT(1)=NPA
+            LV2.LECT(2)=NPB
+C           LV3 : Indique si les noeuds de LV2 sont a inclure dans le
+C           maillage de l'arete coupee a sortir
+            JG=LV2.LECT(/1)
+            SEGINI,LV3
+            IA=0
+            CALL DEDANS(NPA,IPT2,ZERO2,BOOL1)
+            IF (BOOL1) IA=1
+            LV3.LECT(1)=IA
+            IB=0
+            CALL DEDANS(NPB,IPT2,ZERO2,BOOL1)
+            IF (BOOL1) IB=1
+            LV3.LECT(2)=IB
+C           LZ1 : Coordonnees barycentriques des noeuds de LV2
+C           0 pour A, 1 pour B
+            JG=LV2.LECT(/1)
+            SEGINI,LZ1
+            LZ1.PROG(1)=0D0
+            LZ1.PROG(2)=1D0
+C           La premiere cellule de LV1 est elle une cellule coupee ?
+            BOOL1=.FALSE.
+            NC1=LV1.LECT(1)
+            NRC1=IPT1.NUM(1,NC1)
+            CALL ECROBJ('POINT   ',NRC1)
+            CALL ECROBJ('TABLE   ',MTABCC)
+            CALL EXIS
+            CALL LIRLOG(BOOL1,1,IRETOU)
+            IF (BOOL1) THEN
+C              La cellule C1 est coupee, donc l'arete I est peut etre
+C              coupee. Elle peut etre en plusieurs morceaux, on etablit
+C              la liste des noeuds definissant cette arete grace a
+C              LV2 et LV3 en ordonnant de PA vers PB
+C              Examen des noeuds de MTAB11.CELL.NRC1.VISU alignes
+C              sur la droite PA PB
+               CALL ACCTAB(MTABC,'POINT   ',0,0,' ',0,NRC1,
+     &                           'TABLE   ',0,0,0,0,MTABI1)
+               CALL ACCTAB(MTABI1,'MOT     ',0,0,'VISU',0,0,
+     &                            'MAILLAGE',0,0,0,0,IPTI1)
+               SEGINI,IPT4=IPTI1
+               CALL CHANGE(IPT4,1)
+               DO J=1,IPT4.NUM(/2)
+                  NPC=IPT4.NUM(1,J)
+                  IF ((NPC.EQ.NPA).OR.(NPC.EQ.NPB)) GOTO 37
+C                 C est il dans le segment [AB] ?
+                  XA=XCOOR((NPA-1)*IDIMP1+1)
+                  YA=XCOOR((NPA-1)*IDIMP1+2)
+                  XB=XCOOR((NPB-1)*IDIMP1+1)
+                  YB=XCOOR((NPB-1)*IDIMP1+2)
+                  XC=XCOOR((NPC-1)*IDIMP1+1)
+                  YC=XCOOR((NPC-1)*IDIMP1+2)
+C                 Test sur les distances, si AC+CB=AB alors A,C,B
+C                 sont alignes et se suivent
+                  AB=SQRT(((XB-XA)**2)+((YB-YA)**2))
+                  AC=SQRT(((XC-XA)**2)+((YC-YA)**2))
+                  CB=SQRT(((XB-XC)**2)+((YB-YC)**2))
+c-----------------------------------------------------------------------
+                  IF ((ABS((AC+CB)-AB))/AB.LT.ZERO) THEN
+c                   IF (ABS((AC+CB)-AB).LT.ZERO) THEN
+c-----------------------------------------------------------------------
+C                    Rangement du point C dans LV2 et LV3 selon sa
+C                    coordonnee barycentrique LC
+                     GC=AC/AB
+                     DO K=1,LZ1.PROG(/1)-1
+                        G1=LZ1.PROG(K)
+                        G2=LZ1.PROG(K+1)
+                        IF ((G1.LT.GC).AND.(GC.LT.G2)) THEN
+                           IEME=K+1
+                           GOTO 38
+                        ENDIF
+                     ENDDO
+38                   CONTINUE
+                     CALL INSER1(LZ1,IEME,GC)
+                     SEGACT,LZ1
+                     CALL INSER2(LV2,IEME,NPC)
+                     SEGACT,LV2
+                     IC=0
+                     CALL DEDANS(NPC,IPT2,ZERO2,BOOL2)
+                     IF (BOOL2) IC=1
+                     CALL INSER2(LV3,IEME,IC)
+                     SEGACT,LV3
+                  ENDIF
+37                CONTINUE
+               ENDDO
+            ELSE
+C              La cellule C1 n'est pas coupee, donc l'arete I n'est pas
+C              coupee. Est elle a inclure ou bien a exclure ?
+C              Test si le centre NRC1 est dans l'enveloppe
+               CALL DEDANS(NRC1,IPT2,ZERO2,BOOL2)
+               IF (BOOL2) THEN
+C                 L'arete (LV2,LV3) est a inclure entierement et ne
+C                 contient que les points A et B
+                  LV3.LECT(1)=1
+                  LV3.LECT(2)=1
+               ELSE
+C                 L'arete LV2 est a exclure entierement, on itere
+                  GOTO 39
+               ENDIF
+            ENDIF
+C           Test si l'arete decrite par LV2 et LV3 est externe
+            BOOL1=.FALSE.
+            DO J=1,LV3.LECT(/1)
+               IF (LV3.LECT(J).NE.0) BOOL1=.TRUE.
+            ENDDO
+            IF (.NOT.BOOL1) THEN
+               GOTO 39
+            ENDIF
+C           Maillage IPT4 de l'arete suivant les listes LV2 et LV3
+C           IPT4 peut contenir plusieurs elements si cette arete est
+C           en plusieurs morceaux
+            NBNN=2
+            NBELEM=0
+            SEGINI,IPT4
+            IPT4.ITYPEL=2
+            BOOL1=.TRUE.
+            DO J=1,(LV2.LECT(/1)-1)
+               NA=LV2.LECT(J)
+               IA=LV3.LECT(J)
+               NB=LV2.LECT(J+1)
+               IB=LV3.LECT(J+1)
+               IF ((IA.EQ.1).AND.(IB.EQ.1).AND.BOOL1) THEN
+C                 Ajout d'un element de maillage pour l'arete IPT4
+                  NBNN=IPT4.NUM(/1)
+                  NBELEM=IPT4.NUM(/2)+1
+                  SEGADJ,IPT4
+                  IPT4.NUM(1,NBELEM)=NA
+                  IPT4.NUM(2,NBELEM)=NB
+                  BOOL1=.FALSE.
+               ELSE
+                  BOOL1=.TRUE.
+               ENDIF
+            ENDDO
+C           Recuperation du maillage, de la liste des aretes et du
+C           maillage des voisins pour les 2 cellules concernees
+            NC1=LV1.LECT(1)
+            NC2=LV1.LECT(2)
+            NRC1=IPT1.NUM(1,NC1)
+            NRC2=IPT1.NUM(1,NC2)
+            CALL ECROBJ('POINT   ',NRC1)
+            CALL ECROBJ('TABLE   ',MTABC)
+            CALL EXIS
+            CALL LIRLOG(BOOL1,1,IRETOU)
+            IF (.NOT.BOOL1) THEN
+               CALL CRTABL(MTABI1)
+               CALL ECCTAB(MTABC,'POINT   ',0,0,' ',0,NRC1,
+     &                           'TABLE   ',0,0,0,0,MTABI1)
+               NBNN=2
+               NBELEM=0
+               SEGINI,IPTI1
+               IPTI1.ITYPEL=2
+               CALL ECCTAB(MTABI1,'MOT     ',0,0,'VISU',0,0,
+     &                            'MAILLAGE',0,0,0,0,IPTI1)
+               JG=0
+               SEGINI,LA1
+               CALL ECCTAB(MTABI1,'MOT     ',0,0,'ARTS',0,0,
+     &                            'LISTENTI',0,0,0,0,LA1)
+               NBNN=1
+               NBELEM=0
+               SEGINI,IPTVI1
+               IPTVI1.ITYPEL=1
+               CALL ECCTAB(MTABI1,'MOT     ',0,0,'VOIS',0,0,
+     &                            'MAILLAGE',0,0,0,0,IPTVI1)
+            ENDIF
+            CALL ACCTAB(MTABC,'POINT   ',0,0,' ',0,NRC1,
+     &                        'TABLE   ',0,0,0,0,MTABI1)
+            CALL ACCTAB(MTABI1,'MOT     ',0,0,'VISU',0,0,
+     &                         'MAILLAGE',0,0,0,0,IPTI1)
+            CALL ACCTAB(MTABI1,'MOT     ',0,0,'ARTS',0,0,
+     &                         'LISTENTI',0,0,0,0,LA1)
+            CALL ACCTAB(MTABI1,'MOT     ',0,0,'VOIS',0,0,
+     &                         'MAILLAGE',0,0,0,0,IPTVI1)
+            CALL ECROBJ('POINT   ',NRC2)
+            CALL ECROBJ('TABLE   ',MTABC)
+            CALL EXIS
+            CALL LIRLOG(BOOL1,1,IRETOU)
+            IF (.NOT.BOOL1) THEN
+               CALL CRTABL(MTABI2)
+               CALL ECCTAB(MTABC,'POINT   ',0,0,' ',0,NRC2,
+     &                           'TABLE   ',0,0,0,0,MTABI2)
+               NBNN=2
+               NBELEM=0
+               SEGINI,IPTI2
+               IPTI2.ITYPEL=2
+               CALL ECCTAB(MTABI2,'MOT     ',0,0,'VISU',0,0,
+     &                            'MAILLAGE',0,0,0,0,IPTI2)
+               JG=0
+               SEGINI,LA2
+               CALL ECCTAB(MTABI2,'MOT     ',0,0,'ARTS',0,0,
+     &                            'LISTENTI',0,0,0,0,LA2)
+               NBNN=1
+               NBELEM=0
+               SEGINI,IPTVI2
+               IPTVI2.ITYPEL=1
+               CALL ECCTAB(MTABI2,'MOT     ',0,0,'VOIS',0,0,
+     &                            'MAILLAGE',0,0,0,0,IPTVI2)
+            ENDIF
+            CALL ACCTAB(MTABC,'POINT   ',0,0,' ',0,NRC2,
+     &                        'TABLE   ',0,0,0,0,MTABI2)
+            CALL ACCTAB(MTABI2,'MOT     ',0,0,'VISU',0,0,
+     &                         'MAILLAGE',0,0,0,0,IPTI2)
+            CALL ACCTAB(MTABI2,'MOT     ',0,0,'ARTS',0,0,
+     &                         'LISTENTI',0,0,0,0,LA2)
+            CALL ACCTAB(MTABI2,'MOT     ',0,0,'VOIS',0,0,
+     &                         'MAILLAGE',0,0,0,0,IPTVI2)
+C           Rangement des elements de IPT4 dans les indices de la table
+C           de sortie TAB11
+C           --> Ajout de(s) arete(s) dans TAB11.VISU et TAB11.ARTS
+C           ainsi que dans les tables des 2 cellules NRC1 et NRC2
+            NBELEG0=IPTG.NUM(/2)
+            NBNN=IPTG.NUM(/1)
+            NBELEM=NBELEG0+IPT4.NUM(/2)
+            SEGADJ,IPTG
+            DO J=1,IPT4.NUM(/2)
+C              pour IPTG
+               JJ=J+NBELEG0
+               IPTG.NUM(1,JJ)=IPT4.NUM(1,J)
+               IPTG.NUM(2,JJ)=IPT4.NUM(2,J)
+C              pour la table des aretes MTABA
+               NBNN=2
+               NBELEM=1
+               SEGINI,IPT5
+               IPT5.ITYPEL=2
+               IPT5.NUM(1,1)=IPT4.NUM(1,J)
+               IPT5.NUM(2,1)=IPT4.NUM(2,J)
+               CALL ECCTAB(MTABA,'ENTIER  ',JJ,0,' ',0,0,
+     &                           'MAILLAGE',0,0,0,0,IPT5)
+C              indice VISU pour la cellule NRC1
+               NBNN=IPTI1.NUM(/1)
+               NBELEM=IPTI1.NUM(/2)+1
+               SEGADJ,IPTI1
+               IPTI1.NUM(1,NBELEM)=IPT4.NUM(1,J)
+               IPTI1.NUM(2,NBELEM)=IPT4.NUM(2,J)
+C              indice ARTS pour la cellule NRC1
+               JG=LA1.LECT(/1)+1
+               SEGADJ,LA1
+               LA1.LECT(JG)=JJ
+C              indice VOIS pour la cellule NRC1
+               NBNN=IPTVI1.NUM(/1)
+               NBELEM=IPTVI1.NUM(/2)+1
+               SEGADJ,IPTVI1
+               IPTVI1.NUM(1,NBELEM)=NRC2
+C              indice VISU pour la cellule NRC2
+               NBNN=IPTI2.NUM(/1)
+               NBELEM=IPTI2.NUM(/2)+1
+               SEGADJ,IPTI2
+               IPTI2.NUM(1,NBELEM)=IPT4.NUM(1,J)
+               IPTI2.NUM(2,NBELEM)=IPT4.NUM(2,J)
+C              indice ARTS pour la cellule NRC2
+               JG=LA2.LECT(/1)+1
+               SEGADJ,LA2
+               LA2.LECT(JG)=JJ
+C              indice VOIS pour la cellule NRC2
+               NBNN=IPTVI2.NUM(/1)
+               NBELEM=IPTVI2.NUM(/2)+1
+               SEGADJ,IPTVI2
+               IPTVI2.NUM(1,NBELEM)=NRC1
+            ENDDO
+39          CONTINUE
+         ENDDO
+C
+C
+      ELSEIF (IDIM.EQ.3) THEN
+         NF0=NF
+C        IPT3 : maillage MAV cellules non coupees de MTAB1
+         CALL ACCTAB(MTAB1,'MOT     ',0,0,'VISU',0,0,
+     &                     'MAILLAGE',0,0,0,0,IPT3)
+C        ITARE1 : tableau donnant les cellules appuyees sur chaque
+C        arete de IPT3
+         CALL ACCTAB(MTAB1,'MOT     ',0,0,'TAR',0,0,
+     &                     'MVORO   ',0,0,0,0,ITARE1)
+         SEGACT,IPT3,ITARE1
+C        MTABCC : table des cellules coupees fixee
+         SEGINI,MTABCC=MTABC
+C        Balayage des aretes non coupees IPT3 et ajout dans MTAB11 si
+C        elles sont contenues dans l'enveloppe
+         DO I=1,IPT3.NUM(/2)
+C           LV1 : liste des cellules appuyees sur l'arete I
+            JG=ITARE1.LACT(/1)
+            SEGINI,LV1
+            DO J=1,ITARE1.LACT(/1)
+               NCJ=ITARE1.LACT(J,I)
+               IF (NCJ.EQ.0) THEN
+                  JG=J-1
+                  GOTO 10
+               ENDIF
+               LV1.LECT(J)=NCJ
+            ENDDO
+10          CONTINUE
+            SEGADJ,LV1
+C           Si l'arete s'appuie sur moins de 3 cellules, elle est
+C           forcement externe, donc on ne l'examine meme pas !
+            IF (LV1.LECT(/1).LT.3) THEN
+               GOTO 11
+            ENDIF
+C           Extremites de l'arete non coupee
+            NPA=IPT3.NUM(1,I)
+            NPB=IPT3.NUM(2,I)
+C           LV2 : Liste des noeuds situes sur l'arete de A vers B
+            JG=2
+            SEGINI,LV2
+            LV2.LECT(1)=NPA
+            LV2.LECT(2)=NPB
+C           LV3 : Indique si les noeuds de LV2 sont a inclure dans le
+C           maillage de l'arete coupee a sortir
+            JG=LV2.LECT(/1)
+            SEGINI,LV3
+            IA=0
+            CALL DEDANS(NPA,IPT2,ZERO2,BOOL1)
+            IF (BOOL1) IA=1
+            LV3.LECT(1)=IA
+            IB=0
+            CALL DEDANS(NPB,IPT2,ZERO2,BOOL1)
+            IF (BOOL1) IB=1
+            LV3.LECT(2)=IB
+C           LZ1 : Coordonnees barycentriques des noeuds de LV2
+C           0 pour A, 1 pour B
+            JG=LV2.LECT(/1)
+            SEGINI,LZ1
+            LZ1.PROG(1)=0D0
+            LZ1.PROG(2)=1D0
+C           La premiere cellule de LV1 est elle une cellule coupee ?
+            BOOL1=.FALSE.
+            NC1=LV1.LECT(1)
+            NRC1=IPT1.NUM(1,NC1)
+            CALL ECROBJ('POINT   ',NRC1)
+            CALL ECROBJ('TABLE   ',MTABCC)
+            CALL EXIS
+            CALL LIRLOG(BOOL1,1,IRETOU)
+            IF (BOOL1) THEN
+C              La cellule C1 est coupee, donc l'arete I est peut etre
+C              coupee. Elle peut etre en plusieurs morceaux, on etablit
+C              la liste des noeuds definissant cette arete grace a
+C              LV2 et LV3 en ordonnant de PA vers PB
+C              Examen des noeuds de MTAB11.CELL.NRC1.VISU alignes
+C              sur la droite PA PB
+               CALL ACCTAB(MTABC,'POINT   ',0,0,' ',0,NRC1,
+     &                           'TABLE   ',0,0,0,0,MTABI1)
+               CALL ACCTAB(MTABI1,'MOT     ',0,0,'VISU',0,0,
+     &                            'MAILLAGE',0,0,0,0,IPTI1)
+               SEGINI,IPT4=IPTI1
+               CALL CHANGE(IPT4,1)
+               DO J=1,IPT4.NUM(/2)
+                  NPC=IPT4.NUM(1,J)
+                  IF ((NPC.EQ.NPA).OR.(NPC.EQ.NPB)) GOTO 22
+C                 C est il dans le segment [AB] ?
+                  XA=XCOOR((NPA-1)*IDIMP1+1)
+                  YA=XCOOR((NPA-1)*IDIMP1+2)
+                  ZA=XCOOR((NPA-1)*IDIMP1+3)
+                  XB=XCOOR((NPB-1)*IDIMP1+1)
+                  YB=XCOOR((NPB-1)*IDIMP1+2)
+                  ZB=XCOOR((NPB-1)*IDIMP1+3)
+                  XC=XCOOR((NPC-1)*IDIMP1+1)
+                  YC=XCOOR((NPC-1)*IDIMP1+2)
+                  ZC=XCOOR((NPC-1)*IDIMP1+3)
+C                 Test sur les distances, si AC+CB=AB alors A,C,B
+C                 sont alignes et se suivent
+                  AB=SQRT(((XB-XA)**2)+((YB-YA)**2)+((ZB-ZA)**2))
+                  AC=SQRT(((XC-XA)**2)+((YC-YA)**2)+((ZC-ZA)**2))
+                  CB=SQRT(((XB-XC)**2)+((YB-YC)**2)+((ZB-ZC)**2))
+c-----------------------------------------------------------------------
+                  IF ((ABS((AC+CB)-AB))/AB.LT.ZERO) THEN
+c                  IF (ABS((AC+CB)-AB).LT.ZERO) THEN
+c-----------------------------------------------------------------------
+C                    Rangement du point C dans LV2 et LV3 selon sa
+C                    coordonnee barycentrique LC
+                     GC=AC/AB
+                     DO K=1,LZ1.PROG(/1)-1
+                        G1=LZ1.PROG(K)
+                        G2=LZ1.PROG(K+1)
+                        IF ((G1.LT.GC).AND.(GC.LT.G2)) THEN
+                           IEME=K+1
+                           GOTO 12
+                        ENDIF
+                     ENDDO
+12                   CONTINUE
+                     CALL INSER1(LZ1,IEME,GC)
+                     SEGACT,LZ1
+                     CALL INSER2(LV2,IEME,NPC)
+                     SEGACT,LV2
+                     IC=0
+                     CALL DEDANS(NPC,IPT2,ZERO2,BOOL2)
+                     IF (BOOL2) IC=1
+                     CALL INSER2(LV3,IEME,IC)
+                     SEGACT,LV3
+                  ENDIF
+22                CONTINUE
+               ENDDO
+            ELSE
+C              La cellule C1 n'est pas coupee, donc l'arete I n'est pas
+C              coupee. Est elle a inclure ou bien a exclure ?
+C              Test si le centre NRC1 est dans l'enveloppe
+               CALL DEDANS(NRC1,IPT2,ZERO2,BOOL2)
+               IF (BOOL2) THEN
+C                 L'arete (LV2,LV3) est a inclure entierement et ne
+C                 contient que les points A et B
+                  LV3.LECT(1)=1
+                  LV3.LECT(2)=1
+               ELSE
+C                 L'arete LV2 est a exclure entierement, on itere
+                  GOTO 11
+               ENDIF
+            ENDIF
+C           Test si l'arete decrite par LV2 et LV3 est externe
+            BOOL1=.FALSE.
+            DO J=1,LV3.LECT(/1)
+               IF (LV3.LECT(J).NE.0) BOOL1=.TRUE.
+            ENDDO
+            IF (.NOT.BOOL1) THEN
+               GOTO 11
+            ENDIF
+C           Maillage IPT4 de l'arete suivant les listes LV2 et LV3
+C           IPT4 peut contenir plusieurs elements si cette arete est
+C           en plusieurs morceaux
+            NBNN=2
+            NBELEM=0
+            SEGINI,IPT4
+            IPT4.ITYPEL=2
+            BOOL1=.TRUE.
+            DO J=1,(LV2.LECT(/1)-1)
+               NA=LV2.LECT(J)
+               IA=LV3.LECT(J)
+               NB=LV2.LECT(J+1)
+               IB=LV3.LECT(J+1)
+               IF ((IA.EQ.1).AND.(IB.EQ.1).AND.BOOL1) THEN
+C                 Ajout d'un element de maillage pour l'arete IPT4
+                  NBNN=IPT4.NUM(/1)
+                  NBELEM=IPT4.NUM(/2)+1
+                  SEGADJ,IPT4
+                  IPT4.NUM(1,NBELEM)=NA
+                  IPT4.NUM(2,NBELEM)=NB
+                  BOOL1=.FALSE.
+               ELSE
+                  BOOL1=.TRUE.
+               ENDIF
+            ENDDO
+C           Rangement des elements de IPT4 dans les indices de la table
+C           de sortie TAB11
+C           --> Ajout de(s) arete(s) dans TAB11.VISU et TAB11.ARTS
+            NBELEG0=IPTG.NUM(/2)
+            NBNN=IPTG.NUM(/1)
+            NBELEM=NBELEG0+IPT4.NUM(/2)
+            SEGADJ,IPTG
+            DO J=1,IPT4.NUM(/2)
+               JJ=J+NBELEG0
+               IPTG.NUM(1,JJ)=IPT4.NUM(1,J)
+               IPTG.NUM(2,JJ)=IPT4.NUM(2,J)
+               NBNN=2
+               NBELEM=1
+               SEGINI,IPT5
+               IPT5.ITYPEL=2
+               IPT5.NUM(1,1)=IPT4.NUM(1,J)
+               IPT5.NUM(2,1)=IPT4.NUM(2,J)
+               CALL ECCTAB(MTABA,'ENTIER  ',JJ,0,' ',0,0,
+     &                           'MAILLAGE',0,0,0,0,IPT5)
+            ENDDO
+C           --> Ajout de(s) arete(s) pour chaque cellule concernee dans
+C           TAB11.CELL.NRC1
+            DO J=1,LV1.LECT(/1)
+               NC1=LV1.LECT(J)
+               NRC1=IPT1.NUM(1,NC1)
+               CALL ECROBJ('POINT   ',NRC1)
+               CALL ECROBJ('TABLE   ',MTABC)
+               CALL EXIS
+               CALL LIRLOG(BOOL1,1,IRETOU)
+               IF (.NOT.BOOL1) THEN
+                  CALL CRTABL(MTABI1)
+                  CALL ECCTAB(MTABC,'POINT   ',0,0,' ',0,NRC1,
+     &                              'TABLE   ',0,0,0,0,MTABI1)
+                  NBNN=2
+                  NBELEM=0
+                  SEGINI,IPTI1
+                  IPTI1.ITYPEL=2
+                  CALL ECCTAB(MTABI1,'MOT     ',0,0,'VISU',0,0,
+     &                               'MAILLAGE',0,0,0,0,IPTI1)
+                  JG=0
+                  SEGINI,LFI1
+                  CALL ECCTAB(MTABI1,'MOT     ',0,0,'FACS',0,0,
+     &                               'LISTENTI',0,0,0,0,LFI1)
+                  NBNN=1
+                  NBELEM=0
+                  SEGINI,IPTVI1
+                  IPTVI1.ITYPEL=1
+                  CALL ECCTAB(MTABI1,'MOT     ',0,0,'VOIS',0,0,
+     &                               'MAILLAGE',0,0,0,0,IPTVI1)
+               ENDIF
+               CALL ACCTAB(MTABC,'POINT   ',0,0,' ',0,NRC1,
+     &                           'TABLE   ',0,0,0,0,MTABI1)
+C              ajout des elements de l'arete IPT4 dans l'indice
+C              TAB11.CELL.NRC1.VISU
+               CALL ACCTAB(MTABI1,'MOT     ',0,0,'VISU',0,0,
+     &                            'MAILLAGE',0,0,0,0,IPTI1)
+               NBELEI10=IPTI1.NUM(/2)
+               NBNN=IPTI1.NUM(/1)
+               NBELEM=NBELEI10+IPT4.NUM(/2)
+               SEGADJ,IPTI1
+               DO K=1,IPT4.NUM(/2)
+                  KK=K+NBELEI10
+                  IPTI1.NUM(1,KK)=IPT4.NUM(1,K)
+                  IPTI1.NUM(2,KK)=IPT4.NUM(2,K)
+               ENDDO
+               CALL ACCTAB(MTABI1,'MOT     ',0,0,'FACS',0,0,
+     &                            'LISTENTI',0,0,0,0,LFI1)
+               CALL ACCTAB(MTABI1,'MOT     ',0,0,'VOIS',0,0,
+     &                            'MAILLAGE',0,0,0,0,IPTVI1)
+C              renseignement des faces/voisins pour le polyedre NRC1
+C              boucle sur les autres cellules partageant l'arete IPT4
+               DO K=1,LV1.LECT(/1)
+                  IF (K.EQ.J) GOTO 20
+C                 la cellule NRC2 partage l'arete IPT4
+                  NC2=LV1.LECT(K)
+                  NRC2=IPT1.NUM(1,NC2)
+C                 mais est elle voisine de NRC1 ? on regarde dans le
+C                 maillage de ses voisins
+                  CALL ACCTAB(MTAB1,'MOT     ',0,0,'CELL',0,0,
+     &                              'TABLE   ',0,0,0,0,MTABCCC)
+                  CALL ACCTAB(MTABCCC,'POINT   ',0,0,' ',0,NRC1,
+     &                                'TABLE   ',0,0,0,0,MTABI00)
+                  CALL ACCTAB(MTABI00,'MOT     ',0,0,'VOIS',0,0,
+     &                                'MAILLAGE',0,0,0,0,IPTVI00)
+                  BOOL1=.FALSE.
+                  DO L=1,IPTVI00.NUM(/2)
+                     IF (IPTVI00.NUM(1,L).EQ.NRC2) THEN
+                        BOOL1=.TRUE.
+                        GOTO 26
+                     ENDIF
+                  ENDDO
+26                CONTINUE
+                  IF (BOOL1) THEN
+C                    si oui, NC1.NC2 forment une face mais laquelle ?
+C                    on va checher le numero de la face dans ITFAC1
+                     NF12=ITFAC1.LACT(NC1,NC2)
+                     IF (NF12.EQ.0) THEN
+C                       il s'agit d'une nouvelle face a creer
+                        NF=NF+1
+                        NF12=NF
+                        ITFAC1.LACT(NC1,NC2)=NF12
+                        ITFAC1.LACT(NC2,NC1)=NF12
+                     ENDIF
+C                    ajout du numero NF12 a la liste des faces si besoin
+                     CALL ECRENT(NF12)
+                     CALL ECROBJ('LISTENTI',LFI1)
+                     CALL EXIS
+                     SEGACT,LFI1
+                     CALL LIRLOG(BOOL2,1,IRETOU)
+                     IF (.NOT.BOOL2) THEN
+                        JG=LFI1.LECT(/1)+1
+                        SEGADJ,LFI1
+                        LFI1.LECT(JG)=NF12
+                     ENDIF
+C                    ajout du point NRC2 au maillage des voisins
+C                    si besoin
+                     CALL ECROBJ('MAILLAGE',IPTVI1)
+                     CALL ECROBJ('POINT   ',NRC2)
+                     CALL DANS
+                     SEGACT,IPTVI1
+                     CALL LIRLOG(BOOL2,1,IRETOU)
+                     IF (.NOT.BOOL2) THEN
+                        NBNN=IPTVI1.NUM(/1)
+                        NBELEM=IPTVI1.NUM(/2)+1
+                        SEGADJ,IPTVI1
+                        IPTVI1.NUM(1,NBELEM)=NRC2
+                     ENDIF
+C                    ajout de(s) arete(s) dans la face NF12 si besoin
+                     CALL ECRENT(NF12)
+                     CALL ECROBJ('TABLE   ',MTABF)
+                     CALL EXIS
+                     CALL LIRLOG(BOOL2,1,IRETOU)
+                     IF (.NOT.BOOL2) THEN
+                        CALL CRTABL(MTABF1)
+                        CALL ECCTAB(MTABF,'ENTIER  ',NF12,0,' ',0,0,
+     &                                    'TABLE   ',0,0,0,0,MTABF1)
+                        NBNN=2
+                        NBELEM=0
+                        SEGINI,IPTF1
+                        IPTF1.ITYPEL=2
+                        CALL ECCTAB(MTABF1,'MOT     ',0,0,'VISU',0,0,
+     &                                     'MAILLAGE',0,0,0,0,IPTF1)
+                        JG=0
+                        SEGINI,LA1
+                        CALL ECCTAB(MTABF1,'MOT     ',0,0,'ARTS',0,0,
+     &                                     'LISTENTI',0,0,0,0,LA1)
+
+                     ENDIF
+                     CALL ACCTAB(MTABF,'ENTIER  ',NF12,0,' ',0,0,
+     &                                 'TABLE   ',0,0,0,0,MTABF1)
+                     CALL ACCTAB(MTABF1,'MOT     ',0,0,'VISU',0,0,
+     &                                  'MAILLAGE',0,0,0,0,IPTF1)
+                     CALL ACCTAB(MTABF1,'MOT     ',0,0,'ARTS',0,0,
+     &                                  'LISTENTI',0,0,0,0,LA1)
+                     DO L=1,IPT4.NUM(/2)
+                        NARETL=NBELEG0+L
+                        CALL ECRENT(NARETL)
+                        CALL ECROBJ('LISTENTI',LA1)
+                        CALL EXIS
+                        SEGACT,LA1
+                        CALL LIRLOG(BOOL2,1,IRETOU)
+                        IF (.NOT.BOOL2) THEN
+                           JG=LA1.LECT(/1)+1
+                           SEGADJ,LA1
+                           LA1.LECT(JG)=NARETL
+                           NBNN=IPTF1.NUM(/1)
+                           NBELEM=IPTF1.NUM(/2)+1
+                           SEGADJ,IPTF1
+                           IPTF1.NUM(1,NBELEM)=IPT4.NUM(1,L)
+                           IPTF1.NUM(2,NBELEM)=IPT4.NUM(2,L)
+                        ENDIF
+                     ENDDO
+                  ENDIF
+20                CONTINUE
+               ENDDO
+            ENDDO
+11          CONTINUE
+         ENDDO
+      ENDIF
+C
+C
+c     enregistrer le champ par point
+      IF (MCHPOI .ne. 0) then
+      CALL ECCTAB(MTAB11,'MOT     ',0,0,'POND',0,0,
+     &                  'CHPOINT',0,0,0,0,MCHPOI)
+      ENDIF
+C
+C----------------------------------------------------------------------C
+C                               PARTIE 4                               C
+C                       On rend la table MTAB11                        C
+C----------------------------------------------------------------------C
+C
+C
+      MTAB1=MTAB11
+999   RETURN
+      END
+
+
+
+
+
+
+
+

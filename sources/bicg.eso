@@ -1,0 +1,269 @@
+C BICG      SOURCE    PV        16/11/17    21:58:18     9180
+      SUBROUTINE BICG(KMORS,KISA,B,X,
+     $     KPREC,INVDIA,ILUM,ILUI,
+     $     LRES,LNMV,
+     $     R,RTLD,Z,ZTLD,P,PTLD,Q,QTLD,
+     $     ITER,INMV,RESID,BRTOL,ICALRS,IDDOT,IMVEC,IMPR,IRET)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+C***********************************************************************
+C NOM         : BICG
+C DESCRIPTION :
+C     Résolution d'un système linéaire Ax=b
+C     par la méthode du bi-gradient conjugué préconditionné.
+C
+C LANGAGE     : FORTRAN 77 + chouhia ESOPE (pour les E/S)
+C AUTEUR      : Stéphane GOUNAND (CEA/DRN/DMT/SEMT/TTMF)
+C               mél : gounand@semt2.smts.cea.fr
+C REFERENCE (bibtex-like) :
+C  @BOOK{templates,
+C        AUTHOR={R.Barrett, M.Berry, T.F.Chan, J.Demmel, J.Donato,
+C                J.Dongarra, V.Eijkhout, R.Pozo, C.Romine,
+C                H. Van der Vorst},
+C        TITLE={Templates for the Solution of Linear Systems :
+C               Building Blocks for Iterative Methods},
+C        PUBLISHER={SIAM}, YEAR={1994}, ADDRESS={Philadelphia,PA} }
+C  -> URL : http://www.netlib.org/templates/Templates.html
+C***********************************************************************
+C APPELES (BLAS 1) : GCOPY, GAXPY (subroutines)
+C                    GNRM2, GDOT  (functions)
+C APPELES (Calcul) : GMOMV  : produit Matrice Morse - Vecteur
+C                    PSOLVE : Preconditionner solve
+C***********************************************************************
+C ENTREES            :
+C ENTREES/SORTIES    :
+C SORTIES            :
+C CODE RETOUR (IRET) : 0 si ok
+C                     <0 si problème (non utilisé !)
+C                     >0 si l'algorithme n'a pas convergé
+C***********************************************************************
+C VERSION    : v1, 09/02/06
+C HISTORIQUE : v1, 09/02/06, création
+C HISTORIQUE :
+C HISTORIQUE :
+C***********************************************************************
+C Prière de PRENDRE LE TEMPS de compléter les commentaires
+C en cas de modification de ce sous-programme afin de faciliter
+C la maintenance !
+C***********************************************************************
+*
+*     .. Includes .. a commenter si mise au point ok
+-INC CCOPTIO
+-INC CCREEL
+-INC SMLREEL
+      POINTEUR LRES.MLREEL
+-INC SMLENTI
+      POINTEUR LNMV.MLENTI
+-INC SMMATRIK
+      POINTEUR KMORS.PMORS
+      POINTEUR KISA.IZA
+      POINTEUR INVDIA.IZA
+      POINTEUR ILUM.PMORS
+      POINTEUR ILUI.IZA
+      POINTEUR B.IZA
+      POINTEUR X.IZA
+*     .. Work Vectors for CG
+      POINTEUR R.IZA,P.IZA,Q.IZA,Z.IZA
+      POINTEUR RTLD.IZA,PTLD.IZA,QTLD.IZA,ZTLD.IZA
+*     .. Scalar Arguments ..
+      INTEGER ITER, KPREC, IMPR, IRET
+      REAL*8  RESID
+*
+*
+*     .. Variables locales
+*     .. Parameters
+      REAL*8     ZERO      , ONE
+      PARAMETER (ZERO=0.0D0, ONE=1.0D0)
+*     ..
+      INTEGER MAXIT
+      REAL*8 ALPHA,BETA,RHO,RHO1,TOL,GNRM2,OMEGA
+      REAL*8 GDOT,BNRM2
+*     ..
+*     .. External subroutines and functions..
+      EXTERNAL GAXPY,GCOPY,GDOT,GNRM2
+*     ..
+*     .. Executable Statements ..
+*
+
+      IRET  = 0
+      INMV  = 0
+      IWARN = 0
+      IGRAN = 0
+      MGRAN = 5
+      MAXIT = ITER
+      TOL   = RESID
+      IF(IMPR.GT.5) WRITE(IOIMP,*) 'Entrée dans bicg.eso'
+*
+*     Set parameter tolerances.
+*
+      RHOTOL = BRTOL
+      OMETOL = BRTOL
+      RRMAX = 1.D0/(XZPREC**0.25D0)
+*
+*     Calcul du résidu initial
+*
+C                    r(0)=b
+      CALL GCOPY(B,R)
+
+C                    r(0)=b-Ax
+      CALL GMOMV(IMVEC,'N',-ONE,KMORS,KISA,X,ONE,R)
+      INMV=INMV+1
+*
+      ITER = 0
+      BNRM2 = GNRM2(B)
+      IF(IMPR.GT.5) THEN
+         WRITE(IOIMP,*) '||B||=',BNRM2
+      ENDIF
+      RNRM2 = GNRM2(R)
+      IF (ICALRS.EQ.1) BNRM2=RNRM2
+      IF (BNRM2.LT.XPETIT) BNRM2 = ONE
+      RESID = RNRM2 / BNRM2
+      IF(IMPR.GT.5) THEN
+         WRITE(IOIMP,*) 'Initial residual=',RESID
+      ENDIF
+      RESMAX = RESID * RRMAX
+      LRES.PROG(ITER+1)=RESID
+      LNMV.LECT(ITER+1)=INMV
+*
+      IF (RESID.LE.TOL) THEN
+         IRET = 0
+         GOTO 30
+      ENDIF
+      CALL GCOPY(R,RTLD)
+*
+ 10   CONTINUE
+*
+*     Perform (Preconditioned) BiConjugate Gradient Iteration.
+*
+      ITER = ITER +1
+      IF(IMPR.GT.7) THEN
+         WRITE(IOIMP,*) 'ITER=',ITER
+      ENDIF
+*
+*     Preconditioner Solve
+C                    Mz(i-1)=r(i-1)
+      CALL PSOLVE('N',KPREC,KMORS,KISA,INVDIA,ILUM,ILUI
+*!      CALL PSOLVE(KPREC,KMORS,KISA,INVDIA,ILUM,ILUI
+     $     ,Z,R)
+C                    M'z'(i-1)=r'(i-1)
+*!      CALL PSOLVE(KPREC,KMORS,KISA,INVDIA,ILUM,ILUI
+      CALL PSOLVE('T',KPREC,KMORS,KISA,INVDIA,ILUM,ILUI
+     $     ,ZTLD,RTLD)
+C                   rho(i-1)=z(i-1)'r'(i-1)
+      RHO = GDOT(Z,RTLD,IDDOT)
+C      WRITE(IOIMP,*) '  RHO=',RHO
+C      XR1 = GDOT(Z,R)
+C      WRITE(IOIMP,*) '  XR1=',XR1
+C      XR2 = GDOT(ZTLD,RTLD)
+C      WRITE(IOIMP,*) '  XR2=',XR2
+      IF (ABS(RHO).LT.RHOTOL) THEN
+         RHO=SIGN(XZPREC,RHO)
+         IWARN=IWARN+1
+      ENDIF
+*
+*     Compute direction vector P
+*
+      IF (ITER.GT.1) THEN
+C                   beta(i-1)=rho(i-1)/rho(i-2)
+         BETA = RHO / RHO1
+C                   p(i)=z(i-1)+beta(i-1)p(i-1)
+C                   p'(i)=z'(i-1)+beta(i-1)p'(i-1)
+         CALL GAXPY(BETA,P,Z)
+         CALL GCOPY(Z,P)
+         CALL GAXPY(BETA,PTLD,ZTLD)
+         CALL GCOPY(ZTLD,PTLD)
+      ELSE
+C                   p(1)=z(0)
+C                   p'(1)=z'(0)
+         CALL GCOPY(Z,P)
+         CALL GCOPY(ZTLD,PTLD)
+      ENDIF
+*
+*     Compute scalar ALPHA (save A*p to q)
+*
+C                   q(i)=Ap(i)
+      CALL GMOMV(IMVEC,'N',ONE,KMORS,KISA,P,ZERO,Q)
+      INMV=INMV+1
+C                   q'(i)=A'p'(i)
+      CALL GMOMV(IMVEC,'T',ONE,KMORS,KISA,PTLD,ZERO,QTLD)
+      INMV=INMV+1
+C                   alpha(i)=rho(i-1)/(p'(i)'q(i))
+      OMEGA = GDOT(PTLD,Q,IDDOT)
+C      WRITE(IOIMP,*) '  OMEGA=',OMEGA
+C      XOM1 = GDOT(P,Q)
+C      WRITE(IOIMP,*) '  XOM1 =',XOM1
+C      XOM2 = GDOT(PTLD,QTLD)
+C      WRITE(IOIMP,*) '  XOM2 =',XOM2
+      IF (ABS(OMEGA).LT.OMETOL) THEN
+         OMEGA=SIGN(XZPREC,OMEGA)
+         IWARN=IWARN+1
+      ENDIF
+      ALPHA = RHO / OMEGA
+*
+*     Compute current solution vector x
+*
+C                   x(i)=x(i-1)+alpha(i)p(i)
+      CALL GAXPY(ALPHA,P,X)
+*
+*     Compute residual vector R, find norm,
+*     then check for tolerance
+*
+C                   r(i)=r(i-1)-alpha(i)q(i)
+      CALL GAXPY(-ALPHA,Q,R)
+*
+      RESID = GNRM2(R) / BNRM2
+      IF(IMPR.GT.7) THEN
+         WRITE(IOIMP,*) 'Résidu=',RESID
+      ENDIF
+      LRES.PROG(ITER+1)=RESID
+      LNMV.LECT(ITER+1)=INMV
+      IF (RESID.GT.RESMAX) THEN
+         IGRAN=IGRAN+1
+      ELSE
+         IGRAN=0
+      ENDIF
+*
+*     Iteration successful
+*
+      IF (RESID.LE.TOL) THEN
+         IRET = 0
+*
+*     Iteration fails
+*
+*      ELSE IF (ITER.EQ.MAXIT.OR.IGRAN.GT.MGRAN) THEN
+      ELSE IF (INMV.GE.MAXIT.OR.IGRAN.GT.MGRAN) THEN
+         IRET = 1
+*
+*     Do some more
+*
+      ELSE
+C                   r'(i)=r'(i-1)-alpha(i)q'(i)
+         CALL GAXPY(-ALPHA,QTLD,RTLD)
+         RHO1 = RHO
+         GOTO 10
+      ENDIF
+*
+*     Normal termination
+*
+ 30   CONTINUE
+      IF (IWARN.GT.0.AND.IMPR.GT.0) THEN
+         WRITE(IOIMP,*) 'BiCG nearly failed ',IWARN
+     $        ,' times.'
+      ENDIF
+      RETURN
+*
+*     End of BICG
+*
+      END
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,537 @@
+* fichier :  smithhutton_cvg.dgibi
+************************************************************************
+* Section : Fluides Transport
+* Section : Fluides Transitoire
+* Section : Fluides Diffusion
+* Section : Fluides Convection
+************************************************************************
+'OPTI' 'ECHO' 0 ;
+************************************************************************
+* NOM         : SMITHHUTTON_CVG
+* DESCRIPTION : Une variante du cas-test de convection-diffusion d'un
+*               scalaire dû à Smith et Hutton [1]
+*               (voir aussi smithhutton.dgibi)
+*
+* On cherche à vérifier les ordres de convergence spatiale pour les
+* éléments quadratiques et linéaires avec une méthode de discrétisation
+* 'CENTREE' pour les termes de convection et à Péclet=20.
+*
+* Pour ce faire, on construit une solution de référence sur un maillage
+* fin et on calcule les ordres avec des maillages plus grossiers.
+* On compare les évolutions de la solution sur la frontière de sortie
+* avec une norme L2 discrète.
+*
+* Pour retrouver les ordres de convergence, il y a plusieurs subtilités
+* :
+* - la première est que le cas proposé par Smith et Hutton présente une
+* singularité au point (0,0) : en effet, on passe d'une condition à la
+* limite de Dirichlet (température imposée) à gauche, à une condition de
+* Neumann (flux diffusif nul) à droite, sur le bord rectiligne bas du
+* domaine.  Il s'agit de la singularité Dirichlet-Neumann expliquée, par
+* exemple, dans mon cours sur le Laplacien p.26 [2]. Les ordres
+* théoriques de convergence sont de 1 lorsque la solution cherchée
+* présente ce type de singularité.
+*
+* Pour s'affranchir de cette singularité, on peut modifier le cas en ne
+* gardant que le demi-domaine x>0 et en imposant la condition d'entrée
+* en tangente hyperbolique sur le côté gauche (x=0) de ce demi-domaine.
+* On introduit la variable logique demi : si demi=faux, on a le cas
+* singulier et si demi=vrai, on a le cas régulier.
+*
+* - la deuxième subtilité est que lorsqu'on utilise IPOL pour calculer
+* l'erreur, on introduit également une erreur en O(h^2) car IPOL utilise
+* une interpolation linéaire par morceaux ! Pour remédier à ce problème,
+* on peut utiliser une interpolation par spline cubique en O(h^4) en
+* précisant le mot-clé 'SPLINE' à IPOL. On introduit la variable logique
+* spli pour ce faire dans le jeu de données.
+*
+* Les résultats de l'étude avec ces deux paramètres plus le type
+* d'éléments finis sont les suivants (complet = vrai) :
+*
+* EF      demi       spli    ||  ordre p de      minimum du log10
+*                            ||  convergence     de l'erreur
+* ------------------------------------------------------------------
+* QUAF    VRAI       VRAI    ||      3.6             -7.5
+* QUAF    VRAI       FAUX    ||      1.9             -4.7
+*
+* LINE    VRAI       VRAI    ||      2.2             -4.7
+* ------------------------------------------------------------------
+* QUAF    FAUX       VRAI    ||      1.7             -3.0
+* LINE    FAUX       VRAI    ||      1.3             -2.8
+* ------------------------------------------------------------------
+*
+* Les deux premières lignes illustrent le fait que si l'on n'utilise pas
+* l'option SPLINE, on massacre le calcul de l'erreur lorsque celle-ci
+* est petite.  Les lignes 1 et 3 donnent des ordres de convergence
+* consistants avec la théorie pour le cas régulier : ordre 3 pour les
+* éléments quadratiques (ici 3.6) et 2 pour les éléments linéaires (ici
+* 2.2).
+*
+* Pour le cas singulier (les deux dernières lignes), on observe une
+* dégradation des ordres de convergence pour les deux types d'éléments
+* finis. On note que les erreurs sont également beaucoup plus grandes
+* que dans le cas régulier.  L'ordre théorique est de 1, mais il
+* faudrait raffiner encore plus pour l'obtenir.
+*
+* Il serait intéressant d'investiguer le cas du décentrement SUPG et des
+* Péclets plus élevés pour voir si les résultats restent cohérents avec
+* ces explications.
+*
+* Pour le cas complet = faux avec des maillages moins fins (résultats
+* moins précis) :
+*
+* EF      demi       spli    ||  ordre p de      minimum du log10
+*                            ||  convergence     de l'erreur
+* ------------------------------------------------------------------
+* QUAF    VRAI       VRAI    ||      6.0             -6.6
+* QUAF    VRAI       FAUX    ||      2.2             -4.0
+*
+* LINE    VRAI       VRAI    ||      2.7             -3.6
+* ------------------------------------------------------------------
+* QUAF    FAUX       VRAI    ||      2.9             -3.1
+* LINE    FAUX       VRAI    ||      1.7             -2.4
+* ------------------------------------------------------------------
+*
+* Références :
+* [1] Smith, R. M. and Hutton, A. G., THE NUMERICAL TREATMENT OF
+*     ADVECTION: A PERFORMANCE COMPARISON OF CURRENT METHODS , Numerical
+*     Heat Transfer vol 5, n4, pp 439-461, 1982
+* [2] S. Gounand, Introduction à la méthode des éléments finis en
+*     mécanique des fluides incompressibles, 2012, Cours ENSTA B2-1
+*
+*
+* LANGAGE     : GIBIANE-CAST3M
+* AUTEURS     : Stéphane GOUNAND (CEA/DEN/DM2S/STMF/LMSF)
+*               Guillaume BARBA ROSSA (Ecole Polytechnique)
+*               mél : stephane.gounand@cea.fr
+*
+**********************************************************************
+* VERSION    : v1, 22/10/2013, version initiale
+* HISTORIQUE : v1, 22/10/2013, création
+* HISTORIQUE :
+* HISTORIQUE :
+************************************************************************
+*
+'SAUTER' 'PAGE' ;
+*
+interact= FAUX ;
+complet = FAUX ;
+graph   = FAUX ;
+*
+'SI' ('NON' interact) ;
+  'OPTION' 'TRAC' 'PSC' ;
+'SINON' ;
+  'OPTION' 'TRAC' 'X' ;
+'FINSI' ;
+'OPTI' 'DIME' 2 'ELEM' 'QUA4' ;
+************************************************************************
+* Procédure pour changer les maillages en QUAF (quadratique fluide)
+* faire les éliminations et construire les modèles Navier_Stokes.
+*
+* SYNTAXE
+*  mail1 $mail1 mail2 $mail2 ... =  MODIF 'LINE' mail1 mail2  .....
+* mail1,2,... maillages avant et apres transformation en QUAF
+* $mail1,2 ... modeles associes aux maillages.
+'DEBPROC' MODIF DISCR*'MOT';
+* on boucle sur les arguments d'entree
+* on cree une table pour stocker les arguments
+  toto = 'TABLE' ESCLAVE;
+  tata = 'TABLE' ;
+ 'REPETER' barg ;
+*   On lit le premier argument
+    'ARGUMENT' titi/'MAILLAGE';
+    'SI' ('EXISTE' titi) ;
+       toto . &barg = 'CHANGER' titi 'QUAF' ;
+       tata . &barg = 'MODELISER' (toto . &barg) 'NAVIER_STOKES'  discr;
+    'SINON' ;
+        nargu = &barg '-' 1;
+       'QUITTER' barg;
+    'FINSI'              ;
+ 'FIN' barg      ;
+ 'ELIMINATION' ('ET' toto) 1.D-6 ;
+
+ 'REPETER' bsort nargu;
+*   On sort les arguments
+*    'MESSAGE' 'coucou' &bsort;
+    'RESPRO' ('DOMA' (tata . &bsort) 'MAILLAGE') ;
+    'RESPRO' (tata . &bsort);
+*    'RESPRO' (tata . &bsort);
+ 'FIN' bsort ;
+'FINPROC' ;
+
+***************************************************************
+* Procédure appelée dans EQEX pour tracer les champs en cours
+* de calcul.
+*
+'DEBPROC' TRINCO;
+'ARGUMENT' RVX * 'TABLE';
+RV=RVX.'EQEX';
+
+'TRACER' 'NCLK' (RV.'INCO'.'CN') MT;
+
+CHVID MATVID = 'KOPS' 'MATRIK';
+'RESPRO' CHVID MATVID;
+
+'FINPROC';
+
+***************************************************************
+* Procédure effectuant la résolution du problème de
+* convection-diffusion et renvoyant l'erreur ou l'évolution
+* de référence (suivant la valeur de REF)
+*
+'DEBPROC' CALCUL ;
+*'ARGUMENT' hh * 'FLOTTANT' REF * 'ENTIER';
+'ARGUMENT' NX*'ENTIER' REF*'ENTIER';
+'ARGUMENT' MET*'MOT' DISC*'MOT' ;
+'ARGUMENT' Pe*'FLOTTANT' ;
+'ARGUMENT' demi*'LOGIQUE' ;
+'ARGUMENT' spli*'LOGIQUE' ;
+NY =NX ;
+*MESSAGE (CHAINE 'NX  = ' NX ' NY = ' NY);
+*MESSAGE (CHAINE 'MET = ' MET ' DISC = ' DISC);
+*MESSAGE (CHAINE 'Pe = ' Pe ' demi=' demi ' spli=' spli);
+*'h = ' hh '
+L=1.; ML = '*' L -1. ;
+H=1.;
+*
+O=0. 0. ;
+A=0. H ;
+B=ML 0.;
+C=ML H ;
+D=L  H ;
+E=L  0.;
+*
+AO= 'DROIT'  NY A O;
+OB= 'DROIT' NX O B;
+BC= 'DROIT' NY B C;
+CA= 'DROIT' NX C A;
+AD= 'DROIT' NX A D;
+DE= 'DROIT' NY D E;
+OE= 'DROIT' NX O E;
+
+M1='DALLER' AO OB BC CA;
+M2='DALLER' AO OE DE AD;
+'SI' demi ;
+   MT = M2;
+'SINON' ;
+   MT = M1 'ET' M2;
+'FINSI' ;
+*'TRACER' mt ;
+*'ELIMINATION' 1E-4 MT ;
+'SI' demi ;
+MT $MT LIMP $LIMP LIN $LIN LOU $LOU  = MODIF MT
+           (AD 'ET' DE) AO OE DISC ;
+'SINON' ;
+MT $MT LIMP $LIMP LIN $LIN LOU $LOU  = MODIF MT
+           (BC 'ET' CA 'ET' AD 'ET' DE) OB OE DISC ;
+'FINSI' ;
+*LIST (DOMA $MT 'TABLE');
+*TRACER ((DOMA $MT 'CENTRE') 'ET' (DOMA $MT 'MAILLAGE')) QUAL;
+
+X Y='COORDONNEE' MT;
+
+'SI' demi ;
+   CIN=1 '+' ('TANH' (10 * ((-2 * Y) '+' 1) ));
+   CIMP=(0.0*X)+(1 '-' ('TANH' 10));
+'SINON' ;
+   CIN=1 '+' ('TANH' (10 * ((2 * X) '+' 1) ));
+   CIMP=(0.0*X)+(1 '-' ('TANH' 10));
+'FINSI' ;
+CIN= 'REDU' CIN LIN;
+CIMP= 'REDU' CIMP LIMP;
+
+*EVC='EVOL' 'CHPO' CIN LIN;
+*DESSSIN EVC;
+
+*'TRACER' CIMP MT;
+
+UX0='NOMC' 'UX' (2*Y*(1-(X**2)));
+UY0='NOMC' 'UY' ((-1)*(2*X*(1-(Y**2))));
+
+V=UX0 + UY0;
+*CVEC='VECT' V 'UX' 'UY';
+*TRACER CVEC MT;
+
+*description des equations
+'SI' ('EGA' Pe 0. 1.D-6) ;
+   iPe = 1. ;
+'SINON' ;
+   iPe = '/' 1. Pe ;
+'FINSI' ;
+
+RV = 'EQEX'
+     'OPTI' 'EF' 'IMPL'
+*     'ITMA' 20
+*     'NITER' 10
+     'ZONE' $MT
+     'OPER' 'LAPN' iPe 'INCO' 'CN' ;
+
+*RV = 'EQEX' RV
+*     'OPTI' 'EF' 'IMPL' 'CENTREE'
+*     'ZONE' $MT
+*     'OPER' 'DFDT' 1. 'CN' 1. 'INCO' 'CN' ;
+
+*'SI' (REF 'EGA' 1);
+*    MET='CENTREE';
+*
+**SINON;
+**toujours centree pour la reference
+*    MET='CENTREE';
+*FINSI;
+
+*MESSAGE (CHAINE 'methode : ' MET);
+
+'SI' ('NEG' Pe 0. 1.D-6) ;
+   RV = 'EQEX' RV
+        'OPTI' 'EF' 'IMPL' MET
+        'ZONE' $MT
+        'OPER' 'KONV' 1. 'VITESSE' iPe 'INCO' 'CN' ;
+'FINSI' ;
+
+*RV = 'EQEX' RV
+*     'ZONE' $MT
+*     'OPER' 'TRINCO' ;
+
+*description des inconnues, CI
+RV.'INCO' = 'TABLE' 'INCO';
+RV.'INCO'.'CN' = 'KCHT' $MT 'SCAL' 'SOMMET' 0.;
+RV.'INCO'.'VITESSE' = V;
+
+*conditions aux limites
+RV = 'EQEX' RV
+     'CLIM' 'CN' 'TIMP' (LIMP 'ET' LIN) (CIN 'ET' CIMP) ;
+rv . 'METHINV' . 'TYPINV' = 3 ;
+rv . 'METHINV' . 'IMPINV' = 1 ;
+rv . 'METHINV' . 'RESID' = 1.D-20 ;
+
+*resolution
+EXEC RV;
+CN = RV.'INCO'.'CN';
+
+*tracer de la solution
+*'TRACER' CN MT;
+
+*post-traitement
+COU = 'REDU' CN LOU;
+EVCO = 'EVOL' 'CHPO' COU LOU;
+EVCO = EVCO 'COULEUR' 'ROUGE' ;
+
+COUPT='EXTR' EVCO 'ORDO';
+XOUPT='EXTR' EVCO 'ABSC';
+'SI' spli ;
+   COUI='IPOL' XOUC XOUPT COUPT 'SPLINE' ;
+'SINON' ;
+   COUI='IPOL' XOUC XOUPT COUPT  ;
+'FINSI' ;
+
+*'LISTE' COUI;
+
+err=0;
+
+SI (REF 'EGA' 0);
+    err= 'SOMM'  ((COUI '-' COUC) '**' 2) ;
+    NOUT= 'FLOTTANT' ('DIME' COUI);
+    err = (err '/' NOUT) '**' 0.5 ;
+*    'LISTE'  err ;
+    'MESSAGE' ('CHAINE' 'erreur =' err);
+
+*    'DESSIN' (EVCO 'ET' EVEX) 'GRILL' ;
+FINSI;
+
+'RESPRO' err COUI;
+'FINPROC';
+
+***************************************************************
+* Procédure appelant CALCUL et effectuant le calcul de l'ordre
+* de convergence. Elle renvoie également la valeur minimale de
+* l'erreur.
+*
+'DEBPROC' ODCVG ;
+'ARGUMENT' complet*'LOGIQUE' ;
+'ARGUMENT' Pe*'FLOTTANT' ;
+'ARGUMENT' disc*'MOT' ;
+'ARGUMENT' met*'MOT' ;
+'ARGUMENT' demi*'LOGIQUE' ;
+'ARGUMENT' spli*'LOGIQUE' ;
+*
+
+'SI' complet ;
+   'SI' ('EGA' disc 'QUAF') ;
+      LNX = 'LECT' 200 70 50 30 20 10 ;
+   'SINON' ;
+      LNX = 'LECT' 400 140 100 70 50 30 20 10 ;
+   'FINSI' ;
+'SINON' ;
+   'SI' ('EGA' disc 'QUAF') ;
+      LNX = 'LECT' 40 30 25 ;
+   'SINON' ;
+      LNX = 'LECT' 60 35 25 10 ;
+   'FINSI' ;
+'FINSI' ;
+NXREF = 'EXTRAIRE' LNX 1 ;
+*MET = 'CENTREE' ;
+*DEMI = vrai ; SPLI = vrai ;
+*
+XOUC = PROG 0. 'PAS' (1.0 '/' (FLOTTANT (NXREF))) 1.0 ;
+*XOUC = PROG 0. 'PAS' 0.1 1.0 ;
+href=2.0 * (1.0 '/' (FLOTTANT (NXREF)));
+err COUC=CALCUL nxref 1 MET DISC Pe DEMI spli ;
+EVEX = 'EVOL' 'MANUEL' XOUC COUC;
+EVEX = EVEX 'COULEUR' 'BLEU' ;
+*
+lnxr = 'EXTRAIRE' LNX ('LECT' 2 'PAS' 1 ('DIME' LNX)) ;
+lh = '**' ('FLOTTANT' lnxr) -1. ;
+*
+*lh='PROG' 0.1 'PAS' -0.01 0.01;
+lerr='PROG';
+
+NLH='DIME' lh;
+
+'REPETER' bcl NLH;
+      hh='EXTRAIRE' lnxr &bcl;
+      err COUI=CALCUL hh 0 MET DISC Pe DEMI spli ;
+      lerr=lerr 'ET' ('PROG' err);
+'FIN' bcl;
+llh = '/' ('LOG' lh) ('LOG' 10.) ;
+llerr = '/' ('LOG' lerr ) ('LOG' 10.) ;
+
+EVERR='EVOL' 'MANU' llh llerr ;
+*DESSIN EVERR  'GRILL';
+* determination de la pente
+
+*X0='LOG' ('EXTRAIRE' lh NLH);
+*X0 = '/' X0 ('LOG' 10.) ;
+*X1='LOG' ('EXTRAIRE' lh ('-' NLH 1));
+*X1 = '/' X1 ('LOG' 10.) ;
+EVEI = 'EXTRAIRE' EVERR 'AVAN' 'ENTI' 2;
+*EVEI = 'EXTRAIRE' EVEI 'APRE' X0;
+TCN PN = @POMI EVEI 1;
+ordp = TCN . 1 ;
+minr = 'MINIMUM' ('EXTRAIRE' evei 'ORDO') ;
+*
+tit = 'CHAINE' 'MET = ' MET ' DISC = ' DISC ' Pe = ' Pe
+   ' demi=' demi ' spli=' spli ;
+'SI' graph ;
+   DESSIN (EVERR 'ET' PN) 'GRILL' 'TITR' tit ;
+'FINSI' ;
+'MESSAGE' tit ;
+tr = 'CHAINE' 'ord.=' ordp ' min. log10 err.=' minr ;  ;
+'MESSAGE' tr ;
+'RESPRO' ordp minr ;
+'FINPROC' ;
+
+***************************************************************
+* Jeu de donnés effectuant le test des ordres de convergences
+* pour diverses options.
+*
+Pe=20. ;
+tabtest = 'TABLE' ;
+tabtest . 1 = 'TABLE' ;
+tabtest . 1 . 'disc' = 'QUAF' ;
+tabtest . 1 . 'demi' = VRAI ;
+tabtest . 1 . 'spli' = VRAI ;
+tabtest . 1 . 'ordtheo' = 3 ;
+'SI' complet ;
+   tabtest . 1 . 'errminr' = -7.4 ;
+'SINON' ;
+   tabtest . 1 . 'errminr' = -6.5 ;
+'FINSI' ;
+tabtest . 2 = 'TABLE' ;
+tabtest . 2 . 'disc' = 'QUAF' ;
+tabtest . 2 . 'demi' = VRAI ;
+tabtest . 2 . 'spli' = FAUX ;
+tabtest . 2 . 'ordtheo' = 2 ;
+'SI' complet ;
+   tabtest . 2 . 'errminr' = -4.6 ;
+'SINON' ;
+   tabtest . 2 . 'errminr' = -3.9 ;
+'FINSI' ;
+tabtest . 3 = 'TABLE' ;
+tabtest . 3 . 'disc' = 'LINE' ;
+tabtest . 3 . 'demi' = VRAI ;
+tabtest . 3 . 'spli' = VRAI ;
+tabtest . 3 . 'ordtheo' = 2 ;
+'SI' complet ;
+   tabtest . 3 . 'errminr' = -4.6 ;
+'SINON' ;
+   tabtest . 3 . 'errminr' = -3.5 ;
+'FINSI' ;
+tabtest . 4 = 'TABLE' ;
+tabtest . 4 . 'disc' = 'QUAF' ;
+tabtest . 4 . 'demi' = FAUX ;
+tabtest . 4 . 'spli' = VRAI ;
+tabtest . 4 . 'ordtheo' = 1 ;
+'SI' complet ;
+   tabtest . 4 . 'errminr' = -2.9 ;
+'SINON' ;
+   tabtest . 4 . 'errminr' = -2.9 ;
+'FINSI' ;
+tabtest . 5 = 'TABLE' ;
+tabtest . 5 . 'disc' = 'LINE' ;
+tabtest . 5 . 'demi' = FAUX ;
+tabtest . 5 . 'spli' = VRAI ;
+tabtest . 5 . 'ordtheo' = 1 ;
+'SI' complet ;
+   tabtest . 5 . 'errminr' = -2.7 ;
+'SINON' ;
+   tabtest . 5 . 'errminr' = -2.4 ;
+'FINSI' ;
+* Les calculs
+'REPETER' itest ('DIME' tabtest) ;
+   tt = tabtest . &itest ;
+   disc = tt . 'disc' ;
+   demi = tt . 'demi' ;
+   spli = tt . 'spli' ;
+   ordp minr = ODCVG complet Pe disc 'CENTREE' demi spli ;
+   topt = 'CHAINE' 'disc=' disc ' demi=' demi ' spli=' spli ;
+   tt . 'topt' = topt ;
+   tt . 'ordp' = ordp ;
+   tt . 'minr' = minr ;
+'FIN' itest ;
+* Les tests
+lok = VRAI ;
+'REPETER' itest ('DIME' tabtest) ;
+   tt = tabtest . &itest ;
+   ordtheo = tt . 'ordtheo' ;
+   errminr = tt . 'errminr' ;
+   topt    = tt . 'topt' ;
+   ordp    = tt . 'ordp' ;
+   minr    = tt . 'minr' ;
+   'SAUTER' 1 'LIGN' ;
+   'MESSAGE' ('CHAINE' 'Test ' &itest ' ' topt) ;
+   'MESSAGE' ('CHAINE' 'ordtheo =' ordtheo ' ordcalc =' ordp) ;
+   'MESSAGE' ('CHAINE' 'minrtheo=' errminr ' minrcalc=' minr) ;
+   tok = (ordp '>' ('-' ordtheo 0.1)) 'ET' (minr '<' errminr) ;
+   'SI' ('NON' tok) ;
+      'MESSAGE' '!!!!! Pas bon !!!!!!!' ;
+   'FINSI' ;
+   lok = lok 'ET' tok ;
+'FIN' itest ;
+*
+'SAUTER' 2 'LIGNE' ;
+'SI' lok ;
+   'MESSAGE' 'Tout sest bien passe' ;
+'SINON' ;
+   'MESSAGE' 'Il y a eu des erreurs' ;
+'FINSI' ;
+'SAUTER' 2 'LIGNE' ;
+'SI' ('NON' lok) ;
+   'ERREUR' 5 ;
+'FINSI' ;
+*
+* Fin des tests
+*
+************************************************************************
+'SI' interact ;
+   'OPTION' 'DONN' 5 'ECHO' 1 ;
+'FINSI' ;
+*
+'FIN' ;
+
+
+
+
+
+
+
+

@@ -1,0 +1,652 @@
+C TASSP2    SOURCE    CB215821  19/03/18    21:16:28     10161
+C
+      SUBROUTINE TASSP2(ITLAC1,ICPR,ICDOUR,ICOLAC,mena)
+C======================================================================
+C   CE SOUS PROGRAMME EST APPELE PAR TASSPO ELIMIN OU CONFON
+C
+C   itlac1 est une list de pointeur sur les maillage arguments
+C   icpr etabli une correspondance entre la numerotation globale
+C        des noeuds et une numerotation locale qui tient compte de
+C        l'elimination
+C   icdour est le max des valeurs de icpr
+C
+C  MODIF OCTOBRE 1988 PAR PV  TRAITE TOUS LES MELEME
+C  QUE SAUVER SAIT TRAITER
+C=====================================================================
+      implicit integer (i-n)
+      implicit real*8(a-h,o-z)
+
+      integer I, I1, I2, I3, IA, IB
+      integer ICDOUR, mena
+      integer ICHPOI, ICOMPT
+      integer IGE, ILG, IMA, IN, IOB, IOU, IP,IPILE, IPREME
+      integer IRATT, ITL, J, JJ, K, LCONMO, NAL1, NAL2
+      integer NBEMEL, NBNNAC, NBNNPR, NBPTS, NCONCH, NPM, NSOUPO
+
+-INC CCOPTIO
+-INC COCOLL
+-INC CCNOYAU
+-INC CCGEOME
+-INC CCPRECO
+
+-INC SMELEME
+-INC SMCOORD
+      POINTEUR MCOOR1.MCOORD
+-INC SMTABLE
+-INC SMCHAML
+-INC TMLCHA8
+-INC SMCHPOI
+-INC SMNUAGE
+-INC TMCOLAC
+
+      SEGMENT TAB1
+        REAL*8 XCOOR1(ILG)
+      ENDSEGMENT
+      SEGMENT ICPR(0)
+      SEGMENT ITRAV(NPM)
+      segment itrav2(xcoor(/1)/(idim+1))
+
+C     Piles de communication MPI
+      pointeur piles.LISPIL
+      pointeur jcolac.ICOLAC
+      pointeur jlisse.ILISSE
+      pointeur jtlacc.ITLACC
+      pointeur pile.ITLACC
+C
+      CHARACTER*8 TYPE
+C      LOGICAL FLAG
+      DATA NBNNPR/0/
+C=====================================================================
+      TYPE=' '
+      K=-1
+C     on recupere dans k  -npossi, le nombre de type objet possibles
+      CALL TYPFIL(TYPE,K)
+C     la pile icolac est cree
+      CALL CREPIL(ICOLAC,-K)
+      SEGACT ICOLAC*MOD
+      ITLACC=KCOLA(1)
+      ILISSE=ILISSG
+      segact ilisse*mod
+      IF (ITLAC1.NE.0) THEN
+         SEGSUP ITLACC
+         KCOLA(1)=ITLAC1
+         ITLACC=KCOLA(1)
+C il faut initialiser ilisse sinon on retrouve deux fois les segments
+         DO 5468 K=1,ITLAC(/1)
+           IA=ITLAC(K)
+           IF(IA.EQ.0) GO TO 5468
+           ILISEG((IA-1)/npgcd)=K
+ 5468    CONTINUE
+      ENDIF
+C initialisation avec les maillages preconditionnees
+      do ip=1,nbemel
+       ipreme= premel(ip)
+       if (ipreme.ne.0) then
+        call ajoun(itlacc,ipreme,ilisse,1)
+       endif
+      enddo
+
+C preconditionnement des MMODEL et MTABLE ESCLAVES de CCPRECO
+      DO IIMOD = 1, NMOPAR
+        IMO = PARMOD(IIMOD)
+        IF (IMO .EQ. 0) GOTO 143
+        IES = PESCLA(IIMOD)
+C       38 pour les MMODEL
+C       10 pour les MTABLE
+        ITLACC=KCOLA(38)
+        call ajoun(itlacc,IMO,ilisse,1)
+        ITLACC=KCOLA(10)
+        call ajoun(itlacc,IES,ilisse,1)
+      ENDDO
+ 143  CONTINUE
+
+C     recupere la list des types des objets en memoire
+      CALL LISTYP(MLCHA8)
+C       rempli les piles itlacc avec les objet de type mlcha8
+      CALL FILLPO(ICOLAC,MLCHA8)
+      SEGSUP MLCHA8
+C reinitialise preconditionnement COMP
+      do ip = 1,30
+        precle(ip) = ' '
+        prepre(ip) = 0
+        preori(ip) = 0
+      enddo
+C
+C       complete icolac apres l'examan de chaque pile itlacc
+C
+      CALL FILLPI(ICOLAC)
+C
+C   on ne traite les points que si leur nombre a change
+C
+      nbnnac = xcoor(/1)/(idim+1)
+      nbnnpr=min(nbnnac,nbnnpr)
+C     write (6,*) 'nb points avant maintenant ',nbnnpr,nbnnac,locerr
+      if (mena.eq.1) then
+      if (nbnnac.le.nbnnpr+10000) goto 570
+      endif
+C     write (6,*) ' menage complet '
+      nbnnpr = nbnnac
+C
+C
+C   TRAVAILLER SUR LES MELEME
+C
+C
+      SEGACT ICOLAC*MOD
+      ITLACC=KCOLA(1)
+      ITL=ITLAC(/1)
+      IF (IIMPI.EQ.9) WRITE(IOIMP,1111) (ITLAC(I),I=1,ITL)
+ 1111 FORMAT (/,' LISTE DES OBJETS ACCESSIBLES',/,(10I8))
+C  RENUMEROTATION EN FONCTION DU PREMIER OBJET
+      npm=20
+      segini itrav,itrav2
+C
+C     boucle sur chaque objet de type maillage
+      icompt=0
+      DO 10 IOB=1,ITL
+        MELEME=ITLAC(IOB)
+        IF (MELEME.EQ.0) goto 10
+        SEGACT MELEME*MOD
+        IF (LISOUS(/1).NE.0) GOTO 60
+        if (num(/1).gt.npm) then
+         npm=num(/1)
+         segadj itrav
+        endif
+C       boucle sur chaque element
+        DO 12 I2=1,NUM(/2)
+         icompt=icompt+1
+          do 14 i1=1,num(/1)
+            itrav(i1)=num(i1,i2)
+  14      continue
+C       boucle sur chaque noeud
+        DO 13 I1=1,NUM(/1)
+          IP=NUM(I1,I2)
+          if (ip.ne.0) then
+          IF (ICPR(IP).EQ.0) THEN
+C         on affecte un nouveau numero a ce noeud
+           ICDOUR=ICDOUR+1
+           ICPR(IP)=ICDOUR
+          ENDIF
+C         on change la reference avec le nouveau numero
+          NUM(I1,I2)=ICPR(IP)
+          ENDIF
+C  VERIFICATION PAS DE NOEUDS DOUBLE  DANS UN ELEMENT
+          if (itrav2(icpr(ip)).eq.icompt) then
+           DO 11  i3=1,i1-1
+            if (num(i3,i2).eq.num(i1,i2).and.itrav(i1).ne.itrav(i3))
+     >      then
+             INTERR(1)=NUM(I1,I2)
+             INTERR(2)=MELEME
+             INTERR(3)=I2
+C            on signale la creation d'un noeud double
+             CALL ERREUR(516)
+            endif
+  11       continue
+          endif
+          itrav2(icpr(ip))=icompt
+  13    CONTINUE
+  12    CONTINUE
+  60    CONTINUE
+        SEGACT,MELEME*NOMOD
+  10  CONTINUE
+      SEGSUP ITRAV,itrav2
+C
+C  MISE A JOUR DE L'OEIL PAR DEFAUT
+C
+      IF (IOEIL.NE.0) THEN
+       IF (ICPR(IOEIL).EQ.0) THEN
+        ICDOUR=ICDOUR+1
+        ICPR(IOEIL)=ICDOUR
+       ENDIF
+       IF (IIMPI.NE.0) WRITE (6,*) ' ANCIEN OEIL ',IOEIL,
+     >                             ' NOUVEL OEIL ',ICPR(IOEIL)
+       IOEIL=ICPR(IOEIL)
+      ENDIF
+C
+C  MISE A JOUR DE ILGNI si necessaire
+C
+C*    write (6,*) ' tassp2 ilgnio ilgnin ',ilgni,icpr(ilgni)
+      IF (ILGNI.NE.0) THEN
+       IF (ICPR(ILGNI).EQ.0) THEN
+        ICDOUR=ICDOUR+1
+        ICPR(ILGNI)=ICDOUR
+       ENDIF
+       ILGNI=ICPR(ILGNI)
+      ENDIF
+C
+C   TRAVAILLER SUR LES POINTS DANS LES TABLES (NOUS SOMMES TROP BON)
+C
+      ITLACC=KCOLA(10)
+      ITL=ITLAC(/1)
+      IF (IIMPI.EQ.9) WRITE(IOIMP,1112) (ITLAC(I),I=1,ITL)
+ 1112 FORMAT (/,' LISTE DES TABLES ACCESSIBLES',/,(10I8))
+C  RENUMEROTATION EN FONCTION DU PREMIER OBJET
+      DO 110 IOB=1,ITL
+      MTABLE=ITLAC(IOB)
+      SEGACT MTABLE*MOD
+      DO 120 I=1,MLOTAB
+      IF (MTABTI(I).EQ.'POINT   ') THEN
+       IP=MTABII(I)
+       IF (IP.EQ.0) write(6,*) 'tassp2 1'
+       IF (IP.EQ.0) CALL ERREUR(5)
+       IF (ICPR(IP).EQ.0) THEN
+        ICDOUR=ICDOUR+1
+        ICPR(IP)=ICDOUR
+       ENDIF
+      MTABII(I)=ICPR(IP)
+      ENDIF
+      IF (MTABTV(I).EQ.'POINT   ') THEN
+       IP=MTABIV(I)
+       if(icpr(IP) .gt.icdour) then
+         write(6,*) ' pas beau icpr(ip) icdour', icpr(ip) , icdour
+         CALL ERREUR(5)
+       endif
+       IF (IP.EQ.0) write(6,*) 'tassp2 point'
+       IF (IP.EQ.0) CALL ERREUR(5)
+       IF (ICPR(IP).EQ.0) THEN
+C         write(6,*) ' ip icdour ' , ip,icdour
+        ICDOUR=ICDOUR+1
+        ICPR(IP)=ICDOUR
+      ENDIF
+      MTABIV(I)=ICPR(IP)
+      ENDIF
+ 120  CONTINUE
+      SEGDES MTABLE
+ 110  CONTINUE
+C
+C  attention a la derniere lecture dans gibiane si c'etait un point!
+C
+C      write(6,*) ' ibpile ,ihpile ', ibpile, ihpile
+      do ib=ibpile,ihpile
+        if( jtyobj(ib).eq.'POINT   ') then
+          ip= jpoob4(ib)
+C          write(6,*) ' on a trouve le point ' , ip
+          if(icpr(ip).eq.0) then
+            icdour=icdour+1
+            icpr(ip)=icdour
+          endif
+          jpoob4(ib)=icpr(ip)
+        endif
+      enddo
+C
+C   TRAVAILLER SUR LES POINTS DANS LES OBJETS
+C
+      ITLACC=KCOLA(44)
+      ITL=ITLAC(/1)
+      IF (IIMPI.EQ.9) WRITE(IOIMP,4112) (ITLAC(I),I=1,ITL)
+ 4112 FORMAT (/,' LISTE DES OBJETS ACCESSIBLES',/,(10I8))
+C  RENUMEROTATION EN FONCTION DU PREMIER OBJET
+      DO 4110 IOB=1,ITL
+      MTABLE=ITLAC(IOB)
+      SEGACT MTABLE*MOD
+      DO 4120 I=1,MLOTAB
+      IF (MTABTI(I).EQ.'POINT   ') THEN
+       IP=MTABII(I)
+       IF (IP.EQ.0) write(6,*) 'tassp2 2'
+       IF (IP.EQ.0) CALL ERREUR(5)
+       IF (ICPR(IP).EQ.0) THEN
+        ICDOUR=ICDOUR+1
+        ICPR(IP)=ICDOUR
+       ENDIF
+      MTABII(I)=ICPR(IP)
+      ENDIF
+      IF (MTABTV(I).EQ.'POINT   ') THEN
+       IP=MTABIV(I)
+       IF (IP.EQ.0) write(6,*) 'tassp2 3'
+       IF (IP.EQ.0) CALL ERREUR(5)
+       IF (ICPR(IP).EQ.0) THEN
+        ICDOUR=ICDOUR+1
+        ICPR(IP)=ICDOUR
+       ENDIF
+      MTABIV(I)=ICPR(IP)
+      ENDIF
+ 4120  CONTINUE
+      SEGDES MTABLE
+ 4110  CONTINUE
+
+C
+C   TRAVAll sur les points dans les nuages (grande mansuetude)
+C
+      ITLACC=KCOLA(41)
+      ITL=ITLAC(/1)
+      IF (IIMPI.EQ.9) WRITE(IOIMP,1121) (ITLAC(I),I=1,ITL)
+ 1121 FORMAT (/,' LISTE DES NUAGES ACCESSIBLES',/,(10I8))
+      DO 7230 IOB=1,ITL
+      MNUAGE=ITLAC(IOB)
+      SEGACT MNUAGE
+      DO 7231 I=1,NUAPOI(/1)
+      IF(NUATYP(I).EQ.'POINT   ')THEN
+      NUAVIN=NUAPOI(I)
+      SEGACT NUAVIN*MOD
+      DO 7233 K=1,NUAINT(/1)
+      IP=NUAINT(K)
+       IF (IP.EQ.0) write(6,*) 'tassp2 4'
+      IF (IP.EQ.0) CALL ERREUR(5)
+      IF (ICPR(IP).EQ.0) THEN
+        ICDOUR=ICDOUR+1
+        ICPR(IP)=ICDOUR
+      ENDIF
+      NUAINT(K)=ICPR(IP)
+ 7233 CONTINUE
+      SEGDES NUAVIN
+      ENDIF
+ 7231 CONTINUE
+      SEGDES MNUAGE
+ 7230 CONTINUE
+
+C   TRAVAILLER SUR LES POINTS DANS LES MCHAML
+C                (NOUS SOMMES VRAIMENT TROP BONS)
+C
+      ITLACC=KCOLA(39)
+      ITL=ITLAC(/1)
+      IF (IIMPI.EQ.9) WRITE(IOIMP,1113) (ITLAC(I),I=1,ITL)
+ 1113 FORMAT (/,' LISTE DES MCHAMLS ACCESSIBLES',/,(10I8))
+C  RENUMEROTATION EN FONCTION DU PREMIER OBJET
+
+      DO 210 IOB=1,ITL
+        MCHELM=ITLAC(IOB)
+        if (mchelm.eq.0) goto 210
+        SEGACT MCHELM
+        DO 220 I=1,ICHAML(/1)
+          MCHAML=ICHAML(I)
+          SEGACT MCHAML*MOD
+          DO 230 J=1,TYPCHE(/2)
+            IF(TYPCHE(J).EQ.'POINTEURPOINT   ') THEN
+              MELVAL = IELVAL(J)
+              IF(MELVAL.LT.0) GO TO 230
+              SEGACT MELVAL*MOD
+              NAL1 = IELCHE(/1)
+              NAL2 = IELCHE(/2)
+                DO 240 I2=1,NAL2
+                  DO 250 I1=1,NAL1
+                  IP = IELCHE(I1,I2)
+                  if (ip.lt.0) goto 250
+      IF(IP.EQ.0) write(6,*)'tassp2 5',nomche(j),conche(i),imache(i)
+                  IF (IP.EQ.0) CALL ERREUR(5)
+                  IF (ICPR(IP).EQ.0) THEN
+                     ICDOUR=ICDOUR+1
+                     ICPR(IP)=ICDOUR
+                  ENDIF
+                  IELCHE(I1,I2)=-ICPR(IP)
+ 250              CONTINUE
+ 240            CONTINUE
+              SEGACT,MELVAL*NOMOD
+              IELVAL(J)=-IELVAL(J)
+            ENDIF
+ 230      CONTINUE
+C PP   ON  DESACTIVE
+           SEGACT,MCHAML*NOMOD
+ 220    CONTINUE
+ 210  CONTINUE
+C on remet tout dans l'etat initial
+      DO 211 IOB=1,ITL
+        MCHELM=ITLAC(IOB)
+        if (mchelm.eq.0) goto 211
+        DO 221 I=1,ICHAML(/1)
+          MCHAML=ICHAML(I)
+C PP   ON  REACTIVE
+           SEGACT MCHAML*MOD
+          DO 231 J=1,TYPCHE(/2)
+            IF(TYPCHE(J).EQ.'POINTEURPOINT   ') THEN
+              IELVAL(J)=ABS(IELVAL(J))
+              MELVAL = IELVAL(J)
+              SEGACT MELVAL*MOD
+              NAL1 = IELCHE(/1)
+              NAL2 = IELCHE(/2)
+                DO 241 I2=1,NAL2
+                  DO 251 I1=1,NAL1
+                  IELCHE(I1,I2)=abs(IELCHE(I1,I2))
+ 251              CONTINUE
+ 241            CONTINUE
+              SEGDES MELVAL
+            ENDIF
+ 231      CONTINUE
+          SEGACT,MCHAML*NOMOD
+ 221    CONTINUE
+C        SEGACT,MCHELM*NOMOD
+ 211  CONTINUE
+C
+C   CAS DE LA DEFORMATION PLANE GENERALISEE :
+C   Les points supports etant maintenant stockes dans un maillage
+C   (MELEME) de type POI1 (1 seul element), il n'y a plus de travail
+C   specifique a realiser. NSDPGE n'est plus utilise aussi.
+C
+C   Pour les CHARGEMENTS, les rares points utilises pour decrire le
+C   mouvement du chargement sont maintenant stockes dans des maillages
+C   (MELEME) et ne necessitent donc pas de traitement particulier.
+C   A noter qu'avant ces points n'etaient pas traites, d'ou un risque de
+C   probleme, suite a une renumerotation.
+C
+C   travail sur le itlac des points deja sauves
+C
+      IF(IPSAUV.NE.0) THEN
+        ICOLA1=IPSAUV
+        SEGACT ICOLA1
+        ITLAC2=ICOLA1.KCOLA(32)
+        SEGACT ITLAC2*MOD
+        IF(ITLAC2.ITLAC(/1).NE.0) THEN
+           DO 560 K=1,ITLAC2.ITLAC(/1)
+             If(icpr(ITLAC2.ITLAC(K)).eq.0) then
+               icdour=icdour+1
+               icpr(ITLAC2.ITLAC(K))=icdour
+             endif
+             ITLAC2.ITLAC(K) =  icpr(ITLAC2.ITLAC(K))
+  560     CONTINUE
+        ENDIF
+       SEGDES ICOLA1,ITLAC2
+      ENDIF
+C
+C   travail sur les itlac des points communiques
+C
+      if(piComm.gt.0) then
+         piles=piComm
+         segact piles
+         do ipile=1,piles.proc(/1)
+            jcolac= piles.proc(ipile)
+            if(jcolac.ne.0) then
+               segact jcolac
+               pile = jcolac.kcola(32)
+               segact pile*mod
+               if(pile.itlac(/1).ne.0) then
+                  do k=1,pile.itlac(/1)
+                     if(icpr(pile.itlac(k)).eq.0) then
+                        icdour=icdour+1
+                        icpr(pile.itlac(k))=icdour
+                     endif
+                     pile.itlac(k) =  icpr(pile.itlac(k))
+                  enddo
+               endif
+               segdes jcolac,pile
+            endif
+         enddo
+         segdes piles
+      endif
+C
+C  ON MET A LA SUITE LES POINTS NOMMES NON DEJA ACCEDES
+C  POUR COMPLETER LA NOUVELLE LA NUMEROTATION ICPR
+      DO 50 I=1,LMNNOM
+      IF (INOOB2(I).NE.'POINT   ') GOTO 50
+      IP=IOUEP2(I)
+      IF (IP.EQ.0) GOTO 50
+      IF (ICPR(IP).NE.0) GOTO 51
+      ICDOUR=ICDOUR+1
+      ICPR(IP)=ICDOUR
+  51  CONTINUE
+      IOUEP2(I)=ICPR(IP)
+  50  CONTINUE
+C  ICPR CONTIENT LA NOUVELLE NUMEROTATION (LES POINTS A GARDER)
+C  LES SEGMENTS D'ELEMENTS ONT ETE MIS A JOUR
+C  DONC   TASSER LES POINTS
+      SEGACT MCOORD
+      ILG=ICDOUR*(IDIM+1)
+      SEGINI TAB1
+      DO 22 I=ICPR(/1),1,-1
+      IF (ICPR(I).EQ.0) GOTO 22
+      DO 21 K=1,IDIM+1
+       XCOOR1((ICPR(I)-1)*(IDIM+1)+K)=XCOOR((I-1)*(IDIM+1)+K)
+  21  CONTINUE
+  22  CONTINUE
+C  IL FAUT GARDER LE MEME POINTEUR SUR MCOORD
+      NBPTS=ICDOUR
+      SEGADJ MCOORD
+      DO 23 K=1,ILG
+       XCOOR(K)=XCOOR1(K)
+  23  CONTINUE
+      SEGSUP TAB1
+C
+C petit travail pour les objets configuration!
+C
+      MCOOR1=MCOORD
+      ITLACC=KCOLA(33)
+
+      ITL=ITLAC(/1)
+      IF (IIMPI.EQ.9) WRITE(IOIMP,1114) (ITLAC(I),I=1,ITL)
+ 1114 FORMAT (/,' LISTE DES CONFIGURATIONS ACCESSIBLES',/,(10I8))
+      DO 70 IOB=1,ITL
+      MCOORD=ITLAC(IOB)
+      if (mcoord.eq.mcoor1) then
+         goto 70
+      endif
+      SEGACT MCOORD
+      IMA=XCOOR(/1) /(IDIM+1)
+      ILG=ICDOUR*(IDIM+1)
+      SEGINI TAB1
+      DO 2201 I=ICPR(/1),IMA+1,-1
+      IF (ICPR(I).EQ.0) GOTO 2201
+      DO 2101 K=1,IDIM+1
+       XCOOR1((ICPR(I)-1)*(IDIM+1)+K)=
+     > MCOOR1.XCOOR((ICPR(I)-1)*(IDIM+1)+K)
+ 2101 CONTINUE
+ 2201 CONTINUE
+      DO 2200 I=MIN(IMA,ICPR(/1)),1,-1
+      IF (ICPR(I).EQ.0) GOTO 2200
+      DO 2100 K=1,IDIM+1
+       XCOOR1((ICPR(I)-1)*(IDIM+1)+K)=XCOOR((I-1)*(IDIM+1)+K)
+ 2100 CONTINUE
+ 2200 CONTINUE
+C  IL FAUT GARDER LE MEME POINTEUR SUR MCOORD
+      NBPTS=ICDOUR
+      SEGADJ MCOORD
+      DO 2300 K=1,ILG
+        XCOOR(K)=XCOOR1(K)
+ 2300 CONTINUE
+      SEGSUP TAB1
+      SEGDES MCOORD
+   70 CONTINUE
+      MCOORD=MCOOR1
+C  on garde icpr pour construire le maillage resultat
+C     SEGSUP ICPR
+C     ILP=ICDOUR
+C------------------------------------------------------------------
+C       on travaille sur les champs de points pour signaler le cas
+C       de points multiples
+C
+C     on recherche les noms des objets
+      CALL FILLNO(ICOLAC)
+C      attention fillno  desactive icolac
+      SEGACT ICOLAC*MOD
+      ITLAC1= KCOLA(1)
+      ITLACC=KCOLA(2)
+      SEGACT ITLACC*MOD
+      ITL=ITLAC(/1)
+      IF (IIMPI.EQ.9) WRITE(IOIMP,1115) (ITLAC(I),I=1,ITL)
+ 1115 FORMAT (/,' LISTE DES OBJETS ACCESSIBLES',/,(10I8))
+C
+      NPM = ICDOUR
+      SEGINI ITRAV
+C     BOUCLE SUR LES CHAMPS DE POINTS DE LA PILE ITLACC
+      DO 550 I=1,ITL
+        MCHPOI=ITLAC(I)
+        IF (MCHPOI.EQ.0) goto 550
+        SEGACT MCHPOI
+        NSOUPO=IPCHP(/1)
+C
+C       BOUCLE SUR LES SOUS CHAMP DE POINTS
+        DO 520 J=1,NSOUPO
+          MSOUPO=IPCHP(J)
+          SEGACT MSOUPO
+          MELEME=IGEOC
+          SEGACT MELEME
+          IF ( LISOUS(/1) .NE. 0 ) GOTO 515
+C         BOUCLE SUR LES POINTS DU SOUS CHAMP
+          DO 510 I1=1,NUM(/1)
+          DO 510 I2=1,NUM(/2)
+            ITRAV(NUM(I1,I2))=ITRAV(NUM(I1,I2))+1
+C         ITRAV CONTIENT LE NBRE D'OCCURENCE DE CHAQUE POINT
+ 510      CONTINUE
+ 515      CONTINUE
+ 520    CONTINUE
+C
+C       Y A T-IL UN NOEUD DOUBLE ?
+C
+C        FLAG = .FALSE.
+        DO 521 J=1,NSOUPO
+          MSOUPO=IPCHP(J)
+          SEGACT MSOUPO
+          MELEME=IGEOC
+          SEGACT,MELEME
+          IF ( LISOUS(/1) .NE. 0 ) GOTO 516
+C         BOUCLE SUR LES POINTS DU SOUS CHAMP
+          DO 511 I1=1,NUM(/1)
+          DO 511 I2=1,NUM(/2)
+C
+           IF (ITRAV(num(i1,i2)) .GT. 1 ) THEN
+            ICHPOI = MCHPOI
+            iratt=0
+            CALL ELCHPO(ICHPOI,iratt)
+            segact meleme
+            ITLAC(I)=ICHPOI
+            IF (Iratt .NE. 0 ) THEN
+              ISGTR = ICOLA(2)
+C       le chpoint a t-il un nom
+              MOTERR =' '
+              DO 530 JJ=1,ISGTRC(/2)
+                IF ( ISGTRI(JJ) .EQ. I )  MOTERR = ISGTRC(I)
+ 530          CONTINUE
+C
+              INTERR(1)= num(i1,i2)
+              INTERR(2)= MCHPOI
+              INTERR(3)= ITRAV(num(i1,i2))
+              CALL ERREUR(622)
+c     remise a zero de ierr por pouvoir afficher les erreurs suivantes
+              IERR = 0
+            ENDIF
+           ENDIF
+           ITRAV(num(i1,i2)) = 0
+C
+ 511      continue
+C        SEGDES MELEME
+ 516      continue
+C        SEGDES MSOUPO
+ 521    CONTINUE
+c
+            SEGACT ITLAC1*MOD
+            MCHPO1=mCHPOI
+            SEGACT MCHPO1
+            ILISSE=ILISSG
+            SEGACT ILISSE*MOD
+            DO 566 IOU=1,MCHPO1.IPCHP(/1)
+              MSOUP1=MCHPO1.IPCHP(IOU)
+              SEGACT MSOUP1
+              IGE=MSOUP1.IGEOC
+              CALL AJOUN(ITLAC1,IGE,ILISSE,1)
+C              SEGDES MSOUP1
+  566      CONTINUE
+C           SEGDES ILISSE
+C           SEGDES MCHPO1
+C
+C        SEGDES MCHPOI
+ 550   CONTINUE
+C
+      SEGsup ITRAV
+ 570   CONTINUE
+       segact icolac*mod
+
+       call chleha(2,0,0,0,0)
+
+C------------------------------------------------------------------
+C  ON APPELLE MAINTENANT MENAG5 POUR FAIRE LE NETTOYAGE DE LA MEMOIRE
+C      CALL MENAG5(ICOLAC,ITLAC1)
+C  ON NOTE QUE ITLAC1 N'A PAS ETE DETRUIT (DANS MENAG5)
+
+      END
+

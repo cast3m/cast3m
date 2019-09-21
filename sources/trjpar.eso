@@ -1,0 +1,485 @@
+C TRJPAR    SOURCE    CHAT      11/03/16    21:32:44     6902
+      SUBROUTINE TRJPAR(MELEME,IZVIT,IZCENT,IELTFA,IFACEL,MTAB2,
+     *                  IICAL,IZPOR,IZDIFF,IZDISP,MCHELM,MMODEL)
+C
+C
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C    calcul de trajectoires appelé par TRAJEC decode la table de
+C       lacher et pilote le calcul
+C
+C    sous programmes appelés:
+C               TRJCN2 controle des données
+C               TRJINI premiere localisation et initialisation des
+C                      segments de travail
+C               TRJAVA fait avancer une particule
+C               TRJRAL en fin de calcul passe des coordonnées de
+C                      références aux coordonnées réelles
+C    Les tables résultats sont chargées par ce sous programme
+C
+C     ARGUMENTS
+C     E   MELEME pointeur du maillage de calcul ( DOMAINE.MAILLAGE)
+C     E   IZVIT  pointeur du segment décrivant les vitesses .
+C               Ce segment est créé dans TRJVIT et TRJFLU
+C     E   IZCENT pointeur de DOMAINE.CENTRE
+C     E   IELTFA pointeur de DOMAINE.ELTFA
+C     E   IFACEL pointeur de DOMAINE.FACEL
+C     E   MTAB2  pointeur de la table des lachers
+C
+C     S   MCHELM CHAMELEM resultat
+C     S   MMODEL modele sur lequel s'appuie MCHELM
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+      PARAMETER(MPNO9=9)
+C              MPNO9 NOMBRE MAX DE NOEUDS POUR LES ELEMENTS CONSIDERES
+C
+-INC SMELEME
+-INC SMTABLE
+-INC SMMODEL
+-INC SMCHAML
+-INC SMCHPOI
+-INC CCOPTIO
+-INC CCREEL
+-INC SMLREEL
+      POINTEUR MLREE4.MLREEL,MLREE5.MLREEL,MLREE6.MLREEL
+***   pteurs sur les MAILLAGES
+      POINTEUR IZCENT.MELEME,IELTFA.MELEME,IZLAC.MELEME,IFACEL.MELEME
+***   variable de travail pour sp 'ACCTAB' % table de lacher 'MTAB2'
+      CHARACTER*20 MTYPI,CHARI,MTYPR,CHARR
+      LOGICAL LOGRE
+***   'IZPART' segment contenant position ref des particules au départ du lacher :
+***   'NPART' nbre de particules lachées
+***   'NLEPA' = n° global de l'element contenant ieme particule lachée,
+***   'NUMPA' = n° ieme particule lachée, 'COORPA' = coords ieme particule lachée
+      SEGMENT IZPART
+         INTEGER NLEPA(NPART),NUMPA(NPART)
+         REAL*8  COORPA(NDIM,NPART)
+      ENDSEGMENT
+      POINTEUR IZN.IZPART,IZL.IZPART
+***   'IZCOU' segment content pas de tps des mailles traversées (selon critere convectif)
+      SEGMENT  IZCOU
+         REAL*8 DTCO(NEL),COU
+      ENDSEGMENT
+***   'IZSH' segment de travail (pour passage réel -> réf)
+***   'SHP' fonctions de forme et leurs dérivées
+***   'SHY' fonctions de base et leurs dérivées
+***   'XYZL(i, j)' = ieme coord reelle du jeme noeud d'1 elem donne
+      SEGMENT IZSH
+         REAL*8 SHP(6,MNO9),SHY(12,MNO9),XYZL(3,MNO9)
+      ENDSEGMENT
+***   'IZVIT' segment décrivant les vitesses ou flux
+***   'TEMTRA' = tableau des divers tps de palier (cas transitoire)
+***   'NVIPT' = nbre de pas de tps (chgt) (cas transitoire)
+***   'NBS' = nbre de sous-maillages
+***   'IPUN' = pteurs sur les 'IZUN'
+***   'IDUN(I)' = nbre d'éléments avant le sous-maillage I
+***   'IPVPT(J)' = pteur sur les 'IZVPT' pour le pas de tps n° J (cas transitoire)
+      SEGMENT IZVIT
+         REAL*8 TEMTRA(NVIPT)
+         INTEGER IPUN(NBS),IDUN(NBS),IPVPT(NVIPT),IFORML
+      ENDSEGMENT
+***   'IPARPO' segment permettant stockage resultats pdt 'avancee particule
+***   'NPOS' = nbre d'elements traversés, 'NAPAR' = n° des élémts traversés
+***   'NUMP' = inutile, 'CREF' = coord sauvegardées de chaque elemt traversee
+***   'TPAR' = tps sauvegardé associé aux coords sauvegardées
+      SEGMENT  IPARPO
+         INTEGER NAPAR(NPOS),NUMP(NPOS)
+         REAL*8 CREF(NDIM,NPOS),TPAR(NPOS)
+      ENDSEGMENT
+      POINTEUR IZN3.IPARPO
+***   tableau contenant tps et coordonnées de sortie (et non sauvegarde)
+      DIMENSION SORTIE(4)
+
+****************************************************************
+C
+C
+      SEGACT MTAB2
+      SEGACT IZCENT
+      NEL=IZCENT.NUM(/2)
+      SEGINI IZCOU
+      CALL INITD(DTCO,NEL,0.D0)
+      MNO9=MPNO9
+      SEGINI IZSH
+C
+C   RECUPERATION D'ELEMENTS PROVENANT DE LA TABLE DE LACHER
+      IVALI=1
+      XVALI=0.D0
+      IRETI=0
+      IVALR=0
+      XVALR=0.D0
+      IRETR=0
+      MTYPI='MOT     '
+C     CHARI='CFL'
+C     MTYPR='FLOTTANT'
+      MTYPR='        '
+      CHARR='        '
+      COU=0.05D0
+      CALL ACCTAB(MTAB2,MTYPI,IVALI,XVALI,'CFL',.TRUE.,IRETI,
+     *            MTYPR,IVALR,XVALR,CHARR,.TRUE.,IRETR)
+      IF(IERR.NE.0)RETURN
+      IF(MTYPR.NE.'        ')THEN
+          IF(MTYPR.NE.'FLOTTANT')THEN
+          MOTERR(1:11)='CFL        '
+          MOTERR(12:20)='FLOTTANT'
+          CALL ERREUR(627)
+          RETURN
+          ENDIF
+          COU=XVALR
+          IF(COU.LT.1.D-8)THEN
+              MOTERR(1:8)='CFL     '
+              REAERR(1)=REAL(COU)
+              REAERR(2)=1.E-8
+              CALL ERREUR(41)
+              RETURN
+          ENDIF
+      ENDIF
+      IVALI=1
+      XVALI=0.D0
+      IRETI=0
+      IVALR=0
+      XVALR=0.D0
+      IRETR=0
+      MTYPI='MOT     '
+C     MTYPR='FLOTTANT'
+      MTYPR='        '
+      CHARR='        '
+      CALL ACCTAB(MTAB2,MTYPI,IVALI,XVALI,'DELTAT_SAUVE',.TRUE.,
+     *            IRETI,MTYPR,IVALR,XVALR,CHARR,.TRUE.,IRETR)
+      IF(MTYPR.NE.'        ')THEN
+             IF(MTYPR.NE.'FLOTTANT')THEN
+             MOTERR(1:11)='DELTAT_SAUV'
+             MOTERR(12:20)='FLOTTANT'
+             CALL ERREUR(627)
+             RETURN
+             ENDIF
+      ENDIF
+      IF(IERR.NE.0)RETURN
+      DELTAT=XVALR
+      IF ((IICAL.EQ.3).AND.(DELTAT.GT.0.D0)) THEN
+         JG=1
+         SEGINI MLREE6
+         MLREE6.PROG(1)=DELTAT
+         NSAUV=0
+      ENDIF
+      IVALI=1
+      XVALI=0.D0
+      IRETI=0
+      IVALR=0
+      XVALR=0.D0
+      IRETR=0
+      MTYPI='MOT     '
+      MTYPR='FLOTTANT'
+      CHARR='        '
+      CALL ACCTAB(MTAB2,MTYPI,IVALI,XVALI,'TEMPS_LIMITE',.TRUE.,
+     *            IRETI,MTYPR,IVALR,XVALR,CHARR,.TRUE.,IRETR)
+      IF(IERR.NE.0)RETURN
+      TMAX=XVALR
+      CALL TRJCN7(TMAX,IZVIT)
+      IF(IERR.NE.0)RETURN
+
+C     LECTURE DU TABLEAU DES TEMPS DE LACHER
+      IVALI=1
+      XVALI=0.D0
+      IRETI=0
+      IVALR=0
+      XVALR=0.D0
+      IRETR=0
+      MTYPI='MOT     '
+C     CHARI='BORNES'
+      MTYPR='LISTREEL'
+      CHARR='        '
+      CALL ACCTAB(MTAB2,MTYPI,IVALI,XVALI,'TEMPS_LACHER',.TRUE.,IRETI,
+     *            MTYPR,IVALR,XVALR,CHARR,.TRUE.,IRETR)
+      IF(IERR.NE.0)RETURN
+      MLREE3=IRETR
+      SEGACT MLREE3
+      NLAC=MLREE3.PROG(/1)
+
+C     DONNEES SUPLEMENTAIRES POUR CONVECTION_DIFFUSION
+      IVALI=1
+      XVALI=0.D0
+      IRETI=0
+      IVALR=0
+      XVALR=0.D0
+      IRETR=0
+      MTYPI='MOT     '
+      MTYPR='        '
+      CHARR='        '
+      CALL ACCTAB(MTAB2,MTYPI,IVALI,XVALI,'IMPERMEABLE',.TRUE.,IRETI,
+     *            MTYPR,IVALR,XVALR,CHARR,LOGRE,IRETR)
+      IF(MTYPR.NE.'        ')THEN
+           IF(MTYPR.NE.'MAILLAGE')THEN
+                MOTERR(1:11)='IMPERMEABLE'
+                MOTERR(12:20)='MAILLAGE'
+                CALL ERREUR(627)
+                RETURN
+           ENDIF
+      ENDIF
+      IF(IERR.NE.0)RETURN
+      IZFACE=IRETR
+      IVALI=1
+      XVALI=0.D0
+      IRETI=0
+      IVALR=0
+      XVALR=0.D0
+      IRETR=0
+      MTYPI='MOT         '
+      MTYPR='            '
+      CHARR='            '
+***   recuperation de la liste des tps de sauvegarde des resultats
+      CALL ACCTAB(MTAB2,MTYPI,IVALI,XVALI,'TEMPS_SAUVES',.TRUE.,
+     $           IRETI,MTYPR,IVALR,XVALR,CHARR,.TRUE.,IRETR)
+      IF (MTYPR.NE.'        ') THEN
+         IF (MTYPR.NE.'LISTREEL') THEN
+            MOTERR(1:12)='TEMPS_SAUVES'
+            MOTERR(13:20)='LISTREEL'
+            CALL ERREUR(627)
+            RETURN
+         ENDIF
+      ENDIF
+      IF (IERR.NE.0) RETURN
+      IZSAUV=IRETR
+      IF (IZSAUV.GT.0) THEN
+         IF (DELTAT.GT.0.D0) THEN
+            MOTERR(1:8)= 'DELTAT_S'
+            MOTERR(9:16)='TEMPS_SA'
+            CALL ERREUR(135)
+            RETURN
+         ELSE
+            MLREE6=IZSAUV
+            SEGACT MLREE6
+            NSAUV=MLREE6.PROG(/1)
+         ENDIF
+      ELSE
+         IF (DELTAT.LE.0.D0) NSAUV=-1
+      ENDIF
+
+C     ON ACTIVE LES TABLEAUX
+***   activation du chamelem de dispersion si nécessaire
+      IF (IZDISP.GT.0) THEN
+         MCHEL1=IZDISP
+         SEGACT MCHEL1
+         MCHAML=MCHEL1.ICHAML(1)
+         SEGACT MCHAML
+         MELVA1=IELVAL(1)
+         SEGACT MELVA1
+         MELVA2=IELVAL(2)
+         SEGACT MELVA2
+         SEGDES MCHEL1,MCHAML
+      ENDIF
+***   activation du chamelem de diffusivité si nécessaire
+      IF (IZDIFF.GT.0) THEN
+         MCHEL1=IZDIFF
+         SEGACT MCHEL1
+         MCHAML=MCHEL1.ICHAML(1)
+         SEGACT MCHAML
+         MELVA3=IELVAL(1)
+         SEGACT MELVA3
+         SEGDES MCHEL1,MCHAML
+      ENDIF
+***   activation du maillage des faces impermeables si nécessaire
+      IF (IZFACE.GT.0) THEN
+         IPT9=IZFACE
+         SEGACT IPT9
+      ENDIF
+
+C     PRISE EN COMPTE DE LA POROSITE
+C
+      IF(IZPOR.NE.0)THEN
+         CALL TRJPOR(IZPOR,IZVIT,MELEME)
+         IF(IERR.NE.0)RETURN
+      ENDIF
+C
+C     STRUCTURES DE RESULTATS
+C
+      L1=5
+      N1=1
+      N3=6
+      SEGINI MCHELM
+      TITCHE(1:5)='NOEUD'
+      SEGINI MMODEL
+
+C     ------------------------------
+C     BOUCLE SUR LES TEMPS DE LACHER
+C     ------------------------------
+
+      EPSILO=10*SQRT(XZPREC)
+      NPART0=0
+      DO 80 KLAC=1,NLAC
+
+      TMIN=MLREE3.PROG(KLAC)
+      CALL TRJCN7(TMIN,IZVIT)
+      IF(ABS(DELTAT).GT.1.D-15)CALL TRJCN4(TMIN,TMAX,DELTAT)
+
+C     LECTURE D UN MAILLAGE DE LACHER
+      IVALI=KLAC
+      XVALI=0.D0
+      IRETI=0
+      IVALR=0
+      XVALR=0.D0
+      IRETR=0
+      MTYPI='ENTIER  '
+      CHARI='        '
+      MTYPR='MAILLAGE'
+      CHARR='MAILLAGE'
+      CALL ACCTAB(MTAB2,MTYPI,IVALI,XVALI,CHARI,.TRUE.,IRETI,
+     *            MTYPR,IVALR,XVALR,CHARR,.TRUE.,IRETR)
+      IF(IERR.NE.0)RETURN
+      IZLAC=IRETR
+      CALL TRJCN2(IZLAC)
+      IF(IERR.NE.0)RETURN
+C
+      CALL TRJINI(IZPART,IZCOU,IZLAC,MELEME,IZVIT,IZCENT,IELTFA,IZSH,
+     *            TMIN)
+      NPARTI=NUMPA(/1)
+      N1=NPART0+NPARTI
+      SEGADJ MCHELM
+      SEGADJ MMODEL
+
+C     ........................................
+C
+C     BOUCLE SUR LES PARTICULES DU LACHER KLAC
+C     ........................................
+
+      DO 50 IPART=1,NPARTI
+      IIPOS=0
+      IREP=0
+      NDIM=COORPA(/1)
+      TMINI=TMIN
+      DT1=0.D0
+      IDD1=1
+   53 CONTINUE
+
+      IF(IICAL.EQ.1) THEN
+          CALL TRJAVA(IZVIT,IZPART,IZN3,IPART,TMINI,TMAX,IZCOU,MELEME,
+     *                IELTFA,IZCENT,IFACEL,DELTAT,IZSH,IEROR,DT1)
+          IF(IERR.NE.0)RETURN
+          CALL TRJRAL(IZN3,IPARPO,MELEME,IZSH)
+          SEGSUP IZN3
+      ELSEIF(IICAL.EQ.2) THEN
+C         convection seule avec méthode analytique
+          CALL TRJAV2(IZVIT,IZPART,IZN3,IPART,TMINI,TMAX,MELEME,
+     *                IELTFA,IZCENT,IFACEL,DELTAT,IZSH)
+          IF(IERR.NE.0)RETURN
+          CALL TRJRAL(IZN3,IPARPO,MELEME,IZSH)
+          SEGSUP IZN3
+      ELSE
+C**       convection + dispersion + diffusion
+          CALL TRJAV3(EPSILO,NSAUV,MLREE6,MELVA1,MELVA2,
+     $                MELVA3,IPT9,IZVIT,IZPART,IPART,TMINI,TMAX,MELEME,
+     $                IELTFA,IZCENT,IFACEL,IPARPO,IZSH,SORTIE)
+          IF (IERR.NE.0) RETURN
+C**       cas ou particule i est eliminee du probleme
+          IF (SORTIE(1).LT.0.D0) THEN
+              NPART0=NPART0-1
+              N1=NPART0+NPARTI
+              SEGADJ MCHELM
+              SEGADJ MMODEL
+              GOTO 50
+          ENDIF
+      ENDIF
+
+      NPOS=NAPAR(/1)
+      IF(IIMPI.GT.0)THEN
+            WRITE(6,*)' PARTICULE ',IPART,NPOS
+            WRITE(6,*)NAPAR(1),NUMP(1),(CREF(J,1),J=1,NDIM),TPAR(1)
+            I2=NPOS
+            IF(IIMPI.GT.1)I2=2
+            DO 10 I=I2,NPOS
+               WRITE(6,*)NAPAR(I),NUMP(I),(CREF(J,I),J=1,NDIM),TPAR(I)
+   10       CONTINUE
+      ENDIF
+
+C     CAS OU TOUS LES ELEMENTS N'ONT PAS LA MEME ORIENTATION
+C     ON MET LES RESULTATS DANS LE MEME SEGMENT
+      NPOS1=NPOS
+      IF(IREP.NE.0)THEN
+            IZN3=IREP
+            NPOS=IIPOS+NPOS+1-IDD1
+            SEGADJ IZN3
+            DO 54 II=IDD1,NPOS1
+                 II1=II+1-IDD1
+                 IZN3.CREF(1,IIPOS+II1)=CREF(1,II)
+                 IZN3.CREF(2,IIPOS+II1)=CREF(2,II)
+                 IZN3.TPAR(IIPOS+II1)=TPAR(II)
+   54       CONTINUE
+            IF(NDIM.EQ.3)THEN
+                 DO 55 II=1,NPOS1
+                      IZN3.CREF(3,IIPOS+II+1-IDD1)=CREF(3,II)
+   55            CONTINUE
+            ENDIF
+            SEGSUP IPARPO
+            IPARPO=IZN3
+      ENDIF
+C
+      IF(IEROR.EQ.1)THEN
+         TMINI=TPAR(NPOS)
+         TTEMP=TPAR(NPOS)
+         NPART=1
+         SEGINI IZN,IZL
+         DO 56 I=1,NDIM
+            IZL.COORPA(I,1)=CREF(I,NPOS)
+   56    CONTINUE
+
+         IZN.NLEPA(1)=0
+         IZN.NUMPA(1)=1
+         IZL.NLEPA(1)=0
+         IZL.NUMPA(1)=1
+         IIPOS=IIPOS+NPOS1-IDD1
+         CALL TRJPEL(IZL,IZN,MELEME,IZVIT,IZCOU,IZCENT,IELTFA,IZSH,
+     &               TTEMP)
+         IF(IZN.NLEPA(1).NE.0)THEN
+            IREP=IPARPO
+            DO 57 I=1,NDIM
+               COORPA(I,IPART)=IZN.COORPA(I,1)
+   57       CONTINUE
+            NLEPA(IPART)=IZN.NLEPA(1)
+            DT1=0.D0
+            IDD1=1
+C           CAS D'UN PAS CONSTANT, ON RECALE LE CALCUL AVEC DT1
+            IF((ABS(DELTAT).GT.1.D-15).AND.
+     *        ((TPAR(NPOS)-TPAR(NPOS-1)).NE.DELTAT))THEN
+                DT1=TPAR(NPOS)-TPAR(NPOS-1)
+                IDD1=2
+            ENDIF
+            SEGSUP IZL,IZN
+            GO TO 53
+         ENDIF
+         SEGSUP IZL,IZN
+      ENDIF
+C
+      IVALI=IPART+NPART0
+      CALL TRJCHA(IPARPO,MCHELM,MMODEL,IVALI)
+      SEGSUP IPARPO
+   50 CONTINUE
+
+C     ............................................
+C
+C     FIN BOUCLE SUR LES PARTICULES DU LACHER KLAC
+C     ............................................
+
+      NPART0=NPART0+NPARTI
+      SEGSUP IZPART
+   80 CONTINUE
+
+C     ----------------------------------
+C     FIN BOUCLE SUR LES TEMPS DE LACHER
+C     ----------------------------------
+
+      SEGDES MLREE3
+      SEGDES MTAB2
+      SEGSUP IZCOU
+      SEGSUP IZSH
+C
+C
+      RETURN
+      END
+
+
+
+

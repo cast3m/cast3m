@@ -1,0 +1,371 @@
+* fichier : four3.dgibi
+************************************************************************
+* Section : Mecanique Fourier
+************************************************************************
+************************************************************************
+*
+* Mots-clés : Dynamique, calcul fréquentiel, reponse harmonique,
+*             2D Fourier
+*
+* Etude de la flexion d'un cylindre sollicité par une excitation
+* harmonique en mode de Fourier
+* test des operateurs : IMPE, VIBR, RESO, PJBA
+* creation : 2013-11-29, Benoit Prabel (#7870)
+*
+************************************************************************
+
+
+*** OPTIONS ************************************************************
+COMPLET = FAUX ;
+GRAPH = VRAI; OPTI 'TRAC' 'PSC' 'POTR' 'HELVETICA_16' EPTR 5;
+*GRAPH = VRAI;
+*
+OPTI DIME 2 ELEM QUA4 MODE FOUR NOHA ;
+OPTI EPSI LINEAIRE;
+
+nhar = 1;
+
+
+*** DONNEES GEO + DISCRETISATION ***************************************
+*
+R = 0.01 ; H = 0.5;
+nr = 2 ; nz = 20;
+
+moU  = mots  'UR'  'UT'  'UZ';
+moIU = mots 'IUR' 'IUT' 'IUZ';
+
+
+*** MAILLAGE ***********************************************************
+*
+p1 = 0.   0.;
+p2 = R    0.;
+d12 = p1 droi nr p2;
+d34 = d12 plus (0. H);
+p3 = poin d34 initial; p4 = d34 poin final;
+s1 = d12 regl nz d34;
+
+
+*** MODELE MATERIAU ****************************************************
+*
+E1 = 2.E11; nu1=0.3; rho1=8000.;
+visq1 = 1.E-1*((E1 * rho1)**0.5);
+mod1 = mode s1 mecanique elastique isotrope;
+mat1 = mate mod1 YOUN E1 NU nu1 RHO rho1 VISQ visq1;
+
+
+*** MATRICES ***********************************************************
+*
+* matrices : partie symetrique (UR UZ UT seulement)
+opti mode four nhar;
+K1 = rigi (mod1) (mat1);
+M1 = mass (mod1) (mat1);
+C1 = amor mod1 mat1;
+blo1 = BLOQ UR UT UZ d12;
+Ktot1 = K1 et blo1;
+
+*matrices impedances version 1 : on duplique la symetrique pour ddl IU
+K2 = impe K1 'RAIDEUR';
+M2 = IMPE M1 'MASSE' ;
+C2 = impe C1 'AMORTISSEMENT';
+* ! attention ! cela n'est pas equivalent a :
+* IMPE C1 Cm1 'AMORTISSEMENT';
+* ou Cm1 calculé depuis OPTI MODE FOUR (-1*nhar);
+* car il ne s'agit de machines tournantes ici : on reste
+* mono-directionnel  : les ddl imaginaires correspondent au dephasage !
+*
+* blo2 = blo1 et (BLOQ IUR IUT IUZ d12);
+* ci dessus avant evol #7774, ci dessous apres :
+blo2 = IMPE blo1 'RAIDEUR';
+Ktot2 = K2 et blo2;
+
+
+
+*** CALCUL MODAL *******************************************************
+*
+nmod1 = 2;
+fpro1 = 1.1;
+tmod1 = VIBR 'PROCH' Ktot2 (-1.*M2)  (prog fpro1) (lect nmod1);
+imod1 = 0;
+repe bmod1 nmod1; imod1 = imod1 + 1;
+  frq1 = tmod1 . 'MODES' . imod1 . 'FREQUENCE' ;
+  u1   = tmod1 . 'MODES' . imod1 . 'DEFORMEE_MODALE' ;
+  tit1 = chai 'mode ' imod1 ' f=' frq1 'Hz';
+  mess tit1;
+  list (resu u1);
+  si GRAPH; TRAC (defo u1 s1) TITR tit1; finsi;
+fin  bmod1;
+
+tstat = tabl 'LIAISONS_STATIQUES';
+
+
+*** REPONSE **************************************************
+
+* A UNE FORCE UNITAIRE
+F2 = MANU 'CHPO' p4 2 'FR' 0.5 'FT' -0.5 NATURE DISCRET;
+
+* Projection sur base modale
+M3 = pjba M2 tmod1;
+C3 = pjba C2 tmod1;
+Ktot3 = pjba Ktot2 tmod1;
+F3 = pjba F2 tmod1;
+
+
+*** REPONSE STATIQUE  **************************************************
+
+* A UNE FORCE UNITAIRE sur base physique
+  u2 = reso Ktot2 F2;
+  urp4 = extr u2 p4 'UR';
+  utp4 = extr u2 p4 'UT';
+  mess urp4 utp4;
+
+* A UN DEPLACEMENT IMPOSÉ
+  CLurp4 = BLOQ 'UR' p4;
+  CLutp4 = BLOQ 'UT' p4;
+  UIMP2 = (DEPI CLurp4 urp4) et (DEPI CLutp4 utp4);
+  uu2 = RESO (Ktot2 et CLurp4 et CLutp4) UIMP2;
+  ff2 = reac (CLurp4 et CLutp4) uu2;
+
+* A UNE FORCE UNITAIRE sur base modale
+  u3 = reso Ktot3 F3;
+  u3 = reco u3 tmod1 tstat;
+  ur3p4 = extr u3 p4 'UR';
+  ut3p4 = extr u3 p4 'UT';
+  mess ur3p4 ut3p4;
+
+* A UN DEPLACEMENT sur base modale
+*   UIMP3 = (DEPI CLurp4 ur3p4) et (DEPI CLutp4 ut3p4);
+*   UIMP3 = PJBA UIMP3 tmod1;
+*   CLur3p4 = PJBA CLurp4 tmod1;
+*   CLut3p4 = PJBA CLutp4 tmod1;
+* !!! attention !!!
+* A ce jour, il est impossible de projeter directement sur base modale :
+* - un second membre de type FLX portant sur des relation non decrite
+*   dans cette base !
+* - des relations et blocage non decrite dans cette base !
+*==> pour l instant on fait "a la main" :
+UIMP3 = VIDE 'CHPOINT'/'DIFFUS';
+imod1 = 0;
+repe bmod1 nmod1; imod1 = imod1 + 1;
+  umod1 = Tmod1 . 'MODES' . imod1 . 'DEFORMEE_MODALE';
+  ptrep = Tmod1 . 'MODES' . imod1 . 'POINT_REPERE';
+  UIMP3 = UIMP3 et (MANU 'CHPO' ptrep 1 'ALFA' (extr umod1 'UR' p4)
+          'NATURE' 'DIFFUS');
+fin  bmod1;
+  CL3 = RELA UIMP3;
+  list CL3;
+  UIMP3 = DEPI CL3 ur3p4;
+  list UIMP3;
+  uu3 = RESO (Ktot3 et CL3) UIMP3;
+* verif du respect de la liaison :
+  uu3u = reco uu3 tmod1 tstat;
+  list (redu uu3u p4);
+  ERROR6u = maxi (prog ((extr uu3u 'UR' p4) - ur3p4)
+                       ((extr uu3u 'UT' p4) - ut3p4)) 'ABS';
+  ff3  = reac CL3  uu3;
+
+
+*** REPONSE DYNAMIQUE **************************************************
+
+* on trace les deformees pour les frequences suivantes
+prtrac = prog 25. 50. 75. 100. PAS 100. 500.;
+
+* fonction de transfert : on boucle sur les frequences
+si (COMPLET);
+  promeg = prog 50.  PAS 2.   70.
+                71.  PAS 0.2  74.8
+                74.9 PAS 0.05 75.7
+                75.8 PAS 0.2 80.
+                82.  PAS 2. 100.;
+sino;
+  promeg = prog  70.  PAS 0.2 80.;
+fins;
+* on cherche la resonance exacte (rem : on a de l amortissement)
+promeg = ordo (promeg et frq1);
+nomeg = dime promeg ;
+
+* preparation des listreel resultats
+ur2top = prog;  ut2top = prog;
+iur2top = prog;  iut2top = prog;
+
+
+ ur3top = prog;  ut3top = prog;
+iur3top = prog; iut3top = prog;
+
+iomeg=  0 ;
+REPE BOMEG nomeg; iomeg = iomeg + 1 ;
+
+  omeg = extr promeg iomeg; w1 = 2. * pi * omeg;
+  chacha = chai iomeg ' : \W = ' omeg 'Hz';
+  mess chacha;
+
+* formation de la rigidite dynamique
+  Kdyn2 = Ktot2 et (w1 * C2) et ((w1 ** 2) * M2);
+
+* resolution
+  u2 = reso Kdyn2 F2;
+
+* resultats
+  ur2top  = ur2top et (extr u2 UR p4);
+  ut2top  = ut2top et (extr u2 UT p4);
+  iur2top = iur2top et (extr u2 IUR p4);
+  iut2top = iut2top et (extr u2 IUT p4);
+
+* trace
+  si (GRAPH);
+  si (exis prtrac omeg 0.0001);
+    trac ((defo u2 s1 BLEU) et (defo (u2 exco moIU moU) s1 OCEA))
+    'TITR' chacha;
+  fins;
+  fins;
+
+* idem sur base modale
+  Kdyn3 = Ktot3 et (w1 * C3) et ((w1 ** 2) * M3);
+  u3 = reso Kdyn3 F3;
+  u3 = reco u3 tmod1 tstat;
+  ur3top  = ur3top et (extr u3 'UR' p4);
+  ut3top  = ut3top et (extr u3 'UT' p4);
+  iur3top = iur3top et (extr u3 'IUR' p4);
+  iut3top = iut3top et (extr u3 'IUT' p4);
+
+
+FIN  BOMEG;
+
+*** POST TRAITEMENT ****************************************************
+
+
+* evolutions brutes
+ev2r  = EVOL 'BLEU' 'MANU' 'OMEG' promeg 'UR' ur2top;
+ev2t  = EVOL 'BLEU' 'MANU' 'OMEG' promeg 'UT' ut2top;
+ev2ir = EVOL 'OCEA' 'MANU' 'OMEG' promeg 'IUR' iur2top;
+ev2it = EVOL 'OCEA' 'MANU' 'OMEG' promeg 'IUT' iut2top;
+ev3r  = EVOL 'ROUG' 'MANU' 'OMEG' promeg 'UR' ur3top;
+ev3t  = EVOL 'ROUG' 'MANU' 'OMEG' promeg 'UT' ut3top;
+ev3ir = EVOL 'ROSE' 'MANU' 'OMEG' promeg 'IUR' iur3top;
+ev3it = EVOL 'ROSE' 'MANU' 'OMEG' promeg 'IUT' iut3top;
+
+* amplitude phase
+ampx2 = ((ur2top**2) + (iur2top**2))**0.5;
+ev2ax = EVOL 'BLEU' 'MANU' 'OMEG' promeg '|UX|' ampx2;
+phix2 = atg iur2top ur2top;
+ev2px = EVOL 'BLEU' 'MANU' 'OMEG' promeg 'phi' phix2;
+ampx3 = ((ur3top**2) + (iur3top**2))**0.5;
+ev3ax = EVOL 'BLEU' 'MANU' 'OMEG' promeg '|UX|' ampx3;
+phix3 = atg iur3top ur3top;
+ev3px = EVOL 'BLEU' 'MANU' 'OMEG' promeg 'phi' phix3;
+
+* tracé des résultats
+si GRAPH;
+* table Tdess1
+  Tdess1 = tabl;
+  Tdess1 . 1 = mot     ' MARQ PLUS REGU';
+  Tdess1 . 2 = mot     ' MARQ S ROND REGU';
+  Tdess1 . 3 = mot 'TIRR MARQ PLUS REGU';
+  Tdess1 . 4 = mot 'TIRR MARQ S ROND REGU';
+  Tdess1 . 'TITRE' = tabl;
+  Tdess1 . 'TITRE' . 1 = mot 'UR';
+  Tdess1 . 'TITRE' . 2 = mot 'UT';
+  Tdess1 . 'TITRE' . 3 = mot 'IUR';
+  Tdess1 . 'TITRE' . 4 = mot 'IUT';
+
+  dess (ev2r et ev2t et ev2ir et ev2it)
+    TITX '\W (Hz)' POSX 'CENT'
+    TITY 'U (m)'   POSY 'CENT'
+    TITR 'Fonction de transfert poutre Fourier base physique'
+    LEGE 'SO' Tdess1 ;
+  dess (ev3r et ev3t et ev3ir et ev3it)
+    TITX '\W (Hz)' POSX 'CENT'
+    TITY 'U (m)'   POSY 'CENT'
+    TITR 'Fonction de transfert poutre Fourier base modale'
+    LEGE 'SO' Tdess1 ;
+
+  Tdess2 = tabl;
+  Tdess2 . 1 = mot     ' MARQ PLUS REGU';
+  Tdess2 . 2 = mot 'TIRR MARQ S ROND REGU';
+  Tdess2 . 'TITRE' = tabl;
+  Tdess2 . 'TITRE' . 1 = mot 'base physique';
+  Tdess2 . 'TITRE' . 2 = mot 'base modale';
+  dess (ev2ax et ev3ax)
+    GRIL POINTILLE GRIS
+    TITX '\W (Hz)' POSX 'CENT'
+    TITY '|U| (m)' POSY 'CENT' LOGY
+    TITR 'Fonction de transfert poutre Fourier'
+    LEGE 'NO' Tdess2 ;
+  dess (ev2px et ev3px)
+    GRIL POINTILLE GRIS
+    TITX '\W (Hz)' POSX 'CENT' TITY '\j (°)' POSY 'CENT' YGRA 45.
+    TITR 'Fonction de transfert poutre Fourier'
+    LEGE 'SO' Tdess2 ;
+finsi;
+
+
+
+*** TESTS DE BON FONCTIONNEMENT ****************************************
+
+*  valeur de reference (obtenue depuis un calcul 3d avec des elements cub8
+*  et 24 elements sur la circonference)
+   wref3d = 75.354;
+   uref3d = 1.51858E-03;
+*  tolerance
+   XTOL1 = 1.E-2;
+   XTOL3 = 5.E-2;
+   XTOL4 = 0.5E-2;
+   XTOL5 = 1.E-9;
+
+*  frequence du 1er mode
+   ERROR1 = abs (1. - (frq1 / wref3d));
+   mess  frq1 ERROR1;
+   ERROR1 = ERROR1 > XTOL1;
+
+*  frequence de resonance calculée depuis la phase = -90°
+   wres2 = ipol -90. phix2 promeg;
+   ERROR2 = abs (1. - (wres2 / wref3d));
+   mess  wres2 ERROR2;
+   ERROR2 = ERROR2 > XTOL1;
+
+*  amplitude de la resonance
+   uamp2 = ipol frq1 promeg ampx2;
+   ERROR3 = abs (1. - (uamp2 / uref3d));
+   mess  uamp2 ERROR3;
+   ERROR3 = ERROR3 > XTOL3;
+
+*  verif de la reponse projetee sur base modale
+   dur  = (maxi(ur2top - ur3top) abs) / (maxi ur2top abs);
+   dut  = (maxi(ut2top - ut3top) abs) / (maxi ut2top abs);
+   diur = (maxi(iur2top - iur3top) abs) / (maxi iur2top abs);
+   diut = (maxi(iut2top - iut3top) abs) / (maxi iut2top abs);
+   ERROR4 = maxi (prog dur dut diur diut);
+   mess dur dut diur diut ERROR4 XTOL4;
+   ERROR4 = ERROR4 > XTOL4;
+
+*  verif du deplacement impose sur base physique
+   ERROR5 = maxi (ff2 - F2) ABS;
+   ERROR5 = ERROR5 > XTOL5;
+
+*  verif du deplacement impose sur base physique
+   ERROR6 = maxi (ff3 - F3) ABS;
+   ERROR6 = (ERROR6 > XTOL5) ou (ERROR6u > XTOL5);
+   ERROR7 = (maxi (prog (ur3p4 - urp4) (ut3p4 - utp4) ) ABS)
+          / (maxi (prog urp4 utp4) ABS);
+   mess ur3p4 urp4 ut3p4 utp4 ERROR7 XTOL3;
+   ERROR7 = ERROR7 > XTOL3;
+
+   TEMP 'IMPR' 'SGAC' 'IMPR';
+   si (ERROR1 ou ERROR2 ou ERROR3 ou ERROR4
+    ou ERROR5 ou ERROR6 ou ERROR7);
+     mess ERROR1  ERROR2  ERROR3  ERROR4  ERROR5  ERROR6 ERROR7;
+     ERRE 5;
+   sinon ;
+     MESS 'Aucun probleme detecte !' ;
+   finsi;
+
+FIN ;
+
+
+
+
+
+
+
+
+
+

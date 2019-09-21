@@ -1,0 +1,859 @@
+C DPRAN3D   SOURCE    CB215821  16/04/21    21:16:31     8920
+      SUBROUTINE dpran3d(parahot3,idimpara3,H66t,rt1,rc1,esigma,
+     .             deps,lg,ntot,lerror,i1,i2,i3,i4,i5,i6,n,lnoconv,
+     .             istep,lcp,lbroyden,H66,lfulldamage)
+
+c     parahot3 is the array that contains the material parameters and state variables
+c     idimpara3 is the number of parameters for parahot3
+c     H66t is the tangent matrix
+c     rt1 and rc1 are the vectors used in DAMTG3D for the calculation of the tangent matrix
+c     esigma is the effective stress vector
+c     deps is the incremental strains vector
+c     lg and lerror are logical
+c     ntot is the integration point (global number for the whole structure): counter
+c     n, istep, lnoconv, lbroyden and lfulldamage are used for the algorithmic strategy (step subdivider)
+c     H66 is the elastic matrix
+
+c     ===========================================================================================
+c     !     Plastic Box of the 3D plastic-damage concrete model by T. Gernay                    !
+c     !     Yield functions of Drucker Prager in compression and Rankine in tension             !
+c     !     Calculate the effective stresses and the effective elastoplastic tangent            !
+c     !       modulus Dt (implicit process)                                                     !
+c     !                                                                                         !
+c     ! input                                                                                   !
+c     !    DEPS     : Incremental strain vector (6 components)                                  !
+c     !                                                                                         !
+c     ! output                                                                                  !
+c     !    H66t     : tangent stiffness matrix (6x6)                                            !
+c     !                                                                                         !
+c     ! input and output                                                                        !
+c     !    PARAHOT3 : the first columns contain the material properties at elevated temperature !
+c     !               the last columns contain strains, stresses, ....                          !
+c     !                                                                                         !
+c     !    ESIGMA   : Effective stress vector (6 components)                                    !
+c     !                                                                                         !
+c     ===========================================================================================
+
+      IMPLICIT REAL*8 (A-B,D-H,O-Z)
+      implicit integer (I-K,M,N)
+      implicit logical (L)
+      implicit character*10 (C)
+
+      dimension deps(i6)
+c        Incremental strain since the end of the previous time step (input)
+c              i.e. since the last converged point
+      dimension H66t(i6,i6)
+c        Tangent matrix (output)
+      dimension parahot3(idimpara3)
+c       parahot3:               Material prop. and various info. at elevated temp. (input and output)
+c       parahot3(idimpara3-37,ntot): equivalent plastic strain in tension     at the last converged step
+c       parahot3(idimpara3-35,ntot): equivalent plastic strain in tension     at the end of the current step
+c       parahot3(idimpara3-36,ntot): equivalent plastic strain in compression at the last converged step
+c       parahot3(idimpara3-34,ntot): equivalent plastic strain in compression at the end of the current step
+c       parahot3(idimpara3-30:idimpara3-25,ntot) = strain at the end of the previous time step
+c       parahot3(idimpara3-24:idimpara3-19,ntot) = plastic strains at the beginning of dpran3D
+c       parahot3(idimpara3-18:idimpara3-13,ntot) = strain at the end           of dpran3D
+c       parahot3(idimpara3- 6:idimpara3- 1,ntot) = effective stress at the end of dpran3D
+c       parahot3(idimpara3,ntot)               = thermal strain
+      dimension esigma(i6)
+c       Effective stress (output)
+****  dimension EPSMEC(i6),EPSSIG(i6),esigmae(i6),esigmaf(i6)
+      dimension EPSMEC(6),EPSSIG(6),esigmae(6),esigmaf(6)
+****  dimension H66(i6,i6),x(i2),d2gt(i6,i6),trav66b(i6,i6),trav6(i6)
+      dimension H66(6,6),x(2),d2gt(6,6),trav66b(6,6),trav6(6)
+****  dimension trav66(i6,i6),Da(i6,i6),dft(i6)
+      dimension trav66(6,6),Da(6,6),dft(6)
+****  dimension dfc(i6),dgc(i6),dgt(i6)
+      dimension dfc(6),dgc(6),dgt(6)
+****  dimension trav1(1),DftD(i1,i6),DfcD(i1,i6),Ddgt(i6),Ddgc(i6)
+      dimension trav1(1),DftD(1,6),DfcD(1,6),Ddgt(6),Ddgc(6)
+****  dimension trav16(i1,i6),rn1(i1,i6),rn2(i1,i6),rn3(i1,i6)
+      dimension trav16(1,6),rn1(1,6),rn2(1,6),rn3(1,6)
+****  dimension rt1(i1,i6),rc1(i1,i6),vloc1(i1),vloc(i6)
+      dimension rt1(1,6),rc1(1,6),vloc1(1),vloc(6)
+****  dimension Ddgtn1(i6,i6),Ddgtn2(i6,i6),Ddgcn3(i6,i6)
+      dimension Ddgtn1(6,6),Ddgtn2(6,6),Ddgcn3(6,6)
+****  dimension Ddgcn4(i6,i6),rn4(i1,i6),dplas(6),d2gc(6,6),vloc2(6)
+      dimension Ddgcn4(6,6),rn4(1,6),dplas(6),d2gc(6,6),vloc2(6)
+
+
+c     Deviatoric projection operator P2  (stressdeviator = P2 * stress)
+c      --------------------------------
+      dimension P2(6,6)
+      data P2 /  2.0d0, -1.0d0, -1.0d0, 0.0d0, 0.0d0, 0.0d0,
+     .          -1.0d0,  2.0d0, -1.0d0, 0.0d0, 0.0d0, 0.0d0,
+     .          -1.0d0, -1.0d0,  2.0d0, 0.0d0, 0.0d0, 0.0d0,
+     .           0.0d0,  0.0d0,  0.0d0, 6.0d0, 0.0d0, 0.0d0,
+     .           0.0d0,  0.0d0,  0.0d0, 0.0d0, 6.0d0, 0.0d0,
+     .           0.0d0,  0.0d0,  0.0d0, 0.0d0, 0.0d0, 6.0d0  /
+
+
+c     Matrix of unity I, or U
+c      -----------------------
+      dimension U(6,6)
+      data U / 1.0d0, 0.0d0, 0.0d0, 0.0d0, 0.0d0, 0.0d0,
+     .         0.0d0, 1.0d0, 0.0d0, 0.0d0, 0.0d0, 0.0d0,
+     .         0.0d0, 0.0d0, 1.0d0, 0.0d0, 0.0d0, 0.0d0,
+     .         0.0d0, 0.0d0, 0.0d0, 1.0d0, 0.0d0, 0.0d0,
+     .         0.0d0, 0.0d0, 0.0d0, 0.0d0, 1.0d0, 0.0d0,
+     .         0.0d0, 0.0d0, 0.0d0, 0.0d0, 0.0d0, 1.0d0  /
+
+c     Vector pi2
+c      -----------------------
+      dimension pi2(6)
+      data pi2 / 1.0d0,
+     .           1.0d0,
+     .           1.0d0,
+     .           0.0d0,
+     .           0.0d0,
+     .           0.0d0 /
+
+
+
+*****
+*     MESSAGES D'ERREUR ( SUPPRESSION DES AUTOMATIC OBJECTS)
+      IF(I1.GT.1) PRINT *, ' DPRAND3D - ERREUR  I1 = ', I1, ' > 1 '
+      IF(I6.GT.6) PRINT *, ' DPRAND3D - ERREUR  I6 = ', I6, ' > 6 '
+*****
+
+      lerror = .false.
+      lnoconv = .false.
+
+      P2(1,1) = 2.0d0
+      P2(2,2) = 2.0d0
+      P2(3,3) = 2.0d0
+      i7 = 7
+      i8 = 8
+      i9 = 9
+      i10=10
+      i11=11
+      i12=12
+      i13=13
+      i14=14
+      i15=15
+      i16=16
+      i17=17
+      i18=18
+      i19=19
+      i20=20
+      i21=21
+      i22=22
+      i23=23
+      i24=24
+      i25=25
+      i26=26
+      i27=27
+      i28=28
+      i29=29
+      i30=30
+      i31=31
+      i32=32
+      i33=33
+      i34=34
+      i35=35
+      i36=36
+      i37=37
+      i38=38
+      i39=39
+
+      r0 = 0.
+      r1 = 1.
+      r2 = 2.
+      r10 = 10.
+
+
+      Eo     = parahot3(i1)
+      poison = parahot3(i2)
+      fc     = parahot3(i3)
+      ft     = parahot3(i4)
+c     Strain at peak stress
+      epsc1  = parahot3(i5)
+c     Compressive limit of elasticity
+      fc0    = parahot3(i6)
+c     Biaxial compressive strength
+      fb     = parahot3(i7)
+c     Dilatancy parameter
+      ag     = parahot3(i8)
+c     Damage to peak stress
+      dc     = parahot3(i9)
+c     Compressive dissipated energy parameter
+      rxc     = parahot3(i10)
+c     Crack energy in tension
+      gt     = parahot3(i11)
+c     Model parameters
+      rkappa1 = parahot3(i13)
+      ac     = parahot3(i14)
+      bc     = parahot3(i15)
+
+c     small strain for starting the return mapping algorithm
+      tol    = 0.0001*epsc1
+
+c     Hardening parameter for tension     at the beginning of the step
+      rkappait= parahot3(idimpara3-37)
+c     Hardening parameter for compression at the beginning of the step
+      rkappaic= parahot3(idimpara3-36)
+
+c     ===================================================================
+c     !                                                                 !
+c     !           CALCULATION OF THE MATRIX OF ELASTICITY               !
+c     !           =======================================               !
+c     ===================================================================
+
+c          Matrix of elasticity, (6x6, full 3D)
+c          --------------------
+c          [Eo*(1-nu)/((1+nu)*(1-2*nu))  Eo*nu/((1+nu)*(1-2*nu))      Eo*nu/((1+nu)*(1-2*nu))      0    0     0     ]
+c          [Eo*nu/((1+nu)*(1-2*nu))      Eo*(1-nu)/((1+nu)*(1-2*nu))  Eo*nu/((1+nu)*(1-2*nu))      0    0     0     ]
+c  H66 =   [Eo*nu/((1+nu)*(1-2*nu))      Eo*nu/((1+nu)*(1-2*nu))      Eo*(1-nu)/((1+nu)*(1-2*nu))  0    0     0     ]
+c          [0                            0                            0                      Eo/(1+nu)  0     0     ]
+c          [0                            0                            0                      0     Eo/(1+nu)  0     ]
+c          [0                            0                            0                      0     0     Eo/(1+nu)  ]
+
+c          Matrix of elasticity, (3x3, plane stress)
+c          --------------------
+c                      [ 1   nu   0        0      0   0]
+c  H66 = Eo/(1-nu*nu)  [nu    1   0        0      0   0]
+c                      [ 0    0   0        0      0   0]
+c                      [ 0    0   0   (1-nu)/2    0   0]
+c                      [ 0    0   0        0      0   0]
+c                      [ 0    0   0        0      0   0]
+c++
+
+      do jloc=i1,i6
+          do iloc=i1,i6
+            H66(iloc,jloc) = r0
+          end do
+      end do
+
+      if (.not.lcp) then
+c       3D model
+        rloc = Eo/((r1+poison)*(r1-2.0d0*poison))
+        H66(i1,i1) = rloc*(r1-poison)
+        H66(i2,i2) = rloc*(r1-poison)
+        H66(i3,i3) = rloc*(r1-poison)
+        H66(i1,i2) = rloc*poison
+        H66(i1,i3) = rloc*poison
+        H66(i2,i3) = rloc*poison
+        H66(i2,i1) = rloc*poison
+        H66(i3,i1) = rloc*poison
+        H66(i3,i2) = rloc*poison
+        rloc2 = Eo/(2.0d0*(r1+poison))
+        H66(i4,i4) =rloc2
+        H66(i5,i5) =rloc2
+        H66(i6,i6) =rloc2
+      else
+c       PLANE STRESS
+        rloc = Eo/(r1-poison*poison)
+        H66(i1,i1) = rloc
+        H66(i2,i1) = poison * (rloc)
+        H66(i1,i2) = poison * (rloc)
+        H66(i2,i2) = rloc
+        H66(4,4)   = rloc * ((1.0d0-poison)/(2.0d0))
+        deps(3) = 0.d0
+        deps(5) = 0.d0
+        deps(6) = 0.d0
+      endif
+
+c     =============================================================
+c     !                                                           !
+c     !                 ELASTIC STRESS PREDICTOR                  !
+c     !                 ========================                  !
+c     =============================================================
+
+c     Total mechanical strain: EPSMEC[i,j] = epsmec[i-1,conv] + deps[i,j] - epspl[i-1,j]
+c     epsplastic has to be subtracted because Sigma initial = 0.
+      do iloc=i1,i6
+        EPSMEC(iloc) =   parahot3(idimpara3-31+iloc)
+     .                  + ( (DEPS(iloc) * istep)/n  )
+     .                 - parahot3(idimpara3-25+iloc)
+c       Calculation of the INSTANTANEOUS STRESS-DEPENDENT STRAIN
+        EPSSIG(iloc) = EPSMEC(iloc) - parahot3(17+iloc)
+      end do
+c     The effective stresses are calculated as functions of the instantaneous
+c     stress-dependent strain eps,sig because the transient creep strain is explicitly
+c     calculated apart from these constitutive relationships. Still in parahot, the mechanical
+c     strains are saved, not the instantaneous stress-dependent strains.
+
+
+      if ( (.not.lnoconv).and.(n.gt.1) ) then
+c       We are in a subdivision of the step (for algorithmic reasons)
+c       The plastic strain considered in epsmec has to be adjusted
+        rkappait = parahot3(idimpara3-35)
+        rkappaic = parahot3(idimpara3-34)
+        x1 = rkappait - parahot3(idimpara3-37)
+        x2 = rkappaic - parahot3(idimpara3-36)
+        call dplas3D(x1,x2,P2,pi2,ag,fc,fb,parahot3,idimpara3,
+     .               dplas,lcp)
+        do iloc=i1,i6
+          EPSSIG(iloc) = EPSMEC(iloc)-dplas(iloc)-parahot3(17+iloc)
+        end do
+      endif
+
+c     Elastic stress predictor: eff sigma[i,j] = Hel x EPSSIG[i,j]
+      call mulab(H66,EPSSIG,ESIGMAE,i6,i6,i6,i1)
+
+*
+*       print *,' prediction contraintes = ',esigmae
+*
+
+c     ==============================================================
+c     !                                                            !
+c     !                CONCRETE COMPLETELY DAMAGED                 !
+c     !                ===========================                 !
+c     ==============================================================
+      dc = parahot3(idimpara3-40)
+      dt = parahot3(idimpara3-41)
+
+      if ((dc.gt.0.98).or.(lfulldamage).or.(dt.gt.0.98)) then
+c     Concrete completely damaged
+        do iloc=1,6
+          ESIGMA(iloc) = 0.d0
+        end do
+        do iloc=1,6
+          parahot3(idimpara3-13+iloc) = esigma(iloc)
+        end do
+        do jloc=1,6
+          do iloc=1,6
+           H66t(iloc,jloc) = 0.d0
+          end do
+        end do
+c      store the mechanical strain at the end of this iteration
+c      mechanical strain = epsmec + epspl
+        do iloc=i1,i6
+          parahot3(idimpara3-19+iloc) = EPSMEC(iloc) +
+     .                 parahot3(idimpara3-25+iloc)
+        end do
+        return
+      endif
+
+c     ==========================================================================
+c     !                                                                        !
+c     !  CALCULATE THE PLASTICITY FUNCTIONS WITH THE ELASTIC STRESS PREDICTOR  !
+c     !  ====================================================================  !
+c     ==========================================================================
+
+c     Calculation of the hardening functions
+      tau_compr = fhardcc(rkappaic,fc,fc0,rkappa1,
+     .                            ac,bc,lerror)
+      tau_tension = fhardct(rkappait,ft)
+      if (lerror) then
+        write(2,*) '>Error returned from compressive hardening
+     .               to DPRAN3d'
+        return
+      endif
+
+c     Calculation of the yield functions for the elastic stress predictor
+      alpha  = (fb-fc)/(2.*fb-fc)
+      f_compr = DPfunc(esigmae,alpha)
+
+      f_tension = Ranfunc(esigmae,i3,i6,parahot3,
+     .            idimpara3,lcp)
+
+c++
+      f_compr = f_compr - ( (1.0d0-alpha) * tau_compr )
+      f_tension = f_tension - tau_tension
+
+c     =======================================================
+c     !                                                     !
+c     !             TEST ELASTIC OR PLASTIC STEP            !
+c     !             ============================            !
+c     =======================================================
+
+c     The plasticity functions must be satisfied with a precision of 10 Pa, i.e. 0.000010 N/mm²
+      if ((f_compr.lt.-r10).and.(f_tension.lt.-r10)) then
+
+C       ***************
+c       ! ELASTICITY  !
+C       ***************
+
+        do iloc=i1,i6
+          ESIGMA(iloc) = ESIGMAE(iloc)
+        end do
+
+        do jloc=i1,i6
+          do iloc=i1,i6
+            H66T(iloc,jloc) = H66(iloc,jloc)
+          end do
+        end do
+c       store the stress at the end of this iteration
+        do iloc=i1,i6
+          parahot3(idimpara3-7+iloc) = ESIGMAE(iloc)
+        end do
+
+c       The equivalent plastic strain in tension has not changed
+        parahot3(idimpara3-35) = parahot3(idimpara3-37)
+c       The equivalent plastic strain in compression has not changed
+        parahot3(idimpara3-34) = parahot3(idimpara3-36)
+
+c       vectors for the calculation of H66t in subroutine damtg3d
+        do iloc=i1,i6
+          rt1(i1,iloc) = r0
+          rc1(i1,iloc) = r0
+        end do
+
+      else
+
+C       ***************
+c       ! PLASTICITY  !
+C       ***************
+
+*        PRINT *, ' >>>>>>>>  ON ENTRE EN PLASTICITE'
+
+c       RETURN MAPPING
+c       --------------
+c       Calculation of Dlambdac and Dlambdat, the increments of the eq. plastic strain which brings
+c       back on the plasticity surfaces
+c       We have to solve the following non linear system of equations
+c             rkt * function_t(Dlambdac,Dlambdat) + (1-rkt) * Dlambdat = 0
+c             rkc * function_c(Dlambdac,Dlambdat) + (1-rkc) * Dlambdac = 0
+c             with rkc and rkt = 1 or 0, depending whether the related surface of plasticity is violated
+
+        if (f_compr.lt.-r10) then
+c         only the tension surface is violated by the trial stress
+          Dlambdac  = r0
+          rkc       = r0
+          rkt       = r1
+
+        else if (f_tension.lt.-r10) then
+c         only the compression surface is violated by the trial stress
+          Dlambdat  = r0
+          rkc       = r1
+          rkt       = r0
+
+        else
+c         Both surfaces are violated by the trial stress
+          rkc       = r1
+          rkt       = r1
+
+        endif
+
+c       X=0 at the beginning of every SAFIR iteration, X being the vector (Dlambdat,Dlambdac)
+        X(i1) = r0
+        X(i2) = r0
+
+c       ===================================================================================
+c       !                                                                                 !
+c       ! CALL TO SUBROUTINE ALGOPLAS TO SOLVE THE NONLINEAR SYSTEM IN DLAMBDAT, DLAMBDAC !
+c       ! =============================================================================== !
+c       ===================================================================================
+
+        if (.not.lcp) then
+c         3D MODEL
+          if (.not.lbroyden) then
+            call Algoplas1(rkt,rkc,esigmae,H66,P2,pi2,alpha,
+     .          rkappait,rkappaic,x,fc,fb,ft,Eo,poison,lg,ntot,
+     .          fc0,rkappa1,ac,bc,ag,lerror,i1,i2,i3,i4,i5,i6,
+     .          parahot3,idimpara3,deps,lnoconv,lcp,U)
+          else
+            call Algoplas2(rkt,rkc,esigmae,H66,P2,pi2,alpha,
+     .          rkappait,rkappaic,x,fc,fb,ft,Eo,poison,lg,ntot,
+     .          fc0,rkappa1,ac,bc,ag,lerror,i1,i2,i3,i4,i5,i6,
+     .          parahot3,idimpara3,deps,lnoconv,lcp,U)
+          endif
+          if (lnoconv) then
+            return
+          endif
+
+          if (lerror) then
+            write(2,*) 'lerror is returned from ALGOPLAS to
+     .          DPRAN3D. Ntot =',ntot
+            return
+          endif
+
+c         The increment of plastic multipliers Dlambdat, Dlambdac have been found
+
+c         ==========================================================
+c         !                                                        !
+c         !   UPDATE OF THE HARDENING PARAMETERS AND THE STRESSES  !
+c         !   ===================================================  !
+c         ==========================================================
+
+          Dlambdat = x(i1)
+          Dlambdac = x(i2)
+
+          if (n.gt.1) then
+c           we are currently in a step subdivision (for algorithmic reason)
+c           we take the value saved at the end of the previous step-subdivision
+            rkappait = parahot3(idimpara3-35)
+            rkappaic = parahot3(idimpara3-34)
+          else
+c           we take the value at the previous (converged) time step
+            rkappait= parahot3(idimpara3-37)
+            rkappaic= parahot3(idimpara3-36)
+          endif
+
+c         update of the hardening parameters
+          rkappat = rkappait+Dlambdat
+          rkappac = rkappaic+Dlambdac
+
+c         Update of the stresses: esigmaf = F(Dlambdat,Dlambdac (and esigmae))
+          ag     = parahot3(8)
+          call sigf3D_implicit(esigmae,Dlambdat,Dlambdac,esigmaf,H66,
+c              ***************
+     .              P2,pi2,ag,i6,fc,fb,parahot3,idimpara3,lerror,lcp,
+     .              esigmae,U)
+
+          if (lerror) then
+            return
+          endif
+
+        else
+
+c         PLANE STRESS MODEL
+          if (.not.lbroyden) then
+            call Algoplas1cp(rkt,rkc,esigmae,H66,P2,pi2,alpha,
+     .          rkappait,rkappaic,x,fc,fb,ft,Eo,poison,lg,ntot,
+     .          fc0,rkappa1,ac,bc,ag,lerror,i1,i2,i3,i4,i5,i6,
+     .          parahot3,idimpara3,deps,esigmaf,rkappat,rkappac,
+     .          lnoconv,lcp,U)
+          else
+            call Algoplas2cp(rkt,rkc,esigmae,H66,P2,pi2,alpha,
+     .          rkappait,rkappaic,x,fc,fb,ft,Eo,poison,lg,ntot,
+     .          fc0,rkappa1,ac,bc,ag,lerror,i1,i2,i3,i4,i5,i6,
+     .          parahot3,idimpara3,deps,esigmaf,rkappat,rkappac,
+     .          lnoconv,lcp,U)
+          endif
+
+          if (lnoconv) then
+            return
+          endif
+
+          if (lerror) then
+            write(2,*) 'lerror is returned from ALGOPLAS to
+     .          DPRAN3D. Ntot =',ntot
+            return
+          endif
+
+          Dlambdat = x(i1)
+          Dlambdac = x(i2)
+          if (n.gt.1) then
+c           we are currently in a step subdivision (for algorithmic reason)
+c           we take the value saved at the end of the previous step-subdivision
+            rkappait = parahot3(idimpara3-35)
+            rkappaic = parahot3(idimpara3-34)
+          else
+c           we take the value at the previous (converged) time step
+            rkappait= parahot3(idimpara3-37)
+            rkappaic= parahot3(idimpara3-36)
+          endif
+
+c         update of the hardening parameters
+          rkappat = rkappait+Dlambdat
+          rkappac = rkappaic+Dlambdac
+
+        endif
+
+c       store the stress at the end of this iteration
+        do iloc=i1,i6
+          ESIGMA(iloc) = ESIGMAF(iloc)
+        end do
+        do iloc=i1,i6
+          parahot3(idimpara3-i7+iloc) = ESIGMAF(iloc)
+        end do
+
+c       store the accumulated plastic strains at the end of this iteration
+        parahot3(idimpara3-35) = rkappat
+        parahot3(idimpara3-34) = rkappac
+
+c       THE EFFECTIVE STRESSES HAVE BEEN FOUND
+c       **************************************
+
+c       ================================================================
+c       !               TANGENT MATRIX. (effective!)                   !
+c       !               ----------------------------                   !
+c       !  Here, we calculate the effective elastoplastic tangent      !
+c       !  modulus Dt. As this is a damage-plastic model, we have      !
+c       !  then to correct this modulus Dt with the damage terms to    !
+c       !  obtain the (nominal) consistent algorithmic tangent modulus !
+c       !  Ct. This will be done in DAMTG3D. Here, we calculate Dt.    !
+c       ================================================================
+
+c       APEX of Drucker-Prager surface
+        alpha  = (fb-fc)/(2.*fb-fc)
+        f_compr = DPfunc(esigmae,alpha)
+        if ((ABS(f_compr).le.100.).and.(rkc.eq.1)) then
+          do jloc=i1,i6
+            do iloc=i1,i6
+              H66t(iloc,jloc) = 0.d0
+            end do
+          enddo
+          do iloc=i1,i6
+            parahot3(idimpara3-19+iloc) = EPSMEC(iloc) +
+     .                 parahot3(idimpara3-25+iloc)
+          end do
+          RETURN
+        endif
+
+        if (lcp) then
+c         recalculate the full 3D matrix
+          do jloc=i1,i6
+            do iloc=i1,i6
+              H66(iloc,jloc) = r0
+            end do
+          end do
+          rloc = Eo/((r1+poison)*(r1-2.0d0*poison))
+          H66(i1,i1) = rloc*(r1-poison)
+          H66(i2,i2) = rloc*(r1-poison)
+          H66(i3,i3) = rloc*(r1-poison)
+          H66(i1,i2) = rloc*poison
+          H66(i1,i3) = rloc*poison
+          H66(i2,i3) = rloc*poison
+          H66(i2,i1) = rloc*poison
+          H66(i3,i1) = rloc*poison
+          H66(i3,i2) = rloc*poison
+          rloc2 = Eo/(2.0d0*(r1+poison))
+          H66(i4,i4) =rloc2
+          H66(i5,i5) =rloc2
+          H66(i6,i6) =rloc2
+        endif
+        if (lcp) then
+          tau_tension = fhardct(rkappat,ft)
+          psi1 = tau_tension - (esigmaf(1)+esigmaf(2))/2
+          if (abs(psi1).le.fc*1.e-5) then
+            do jloc=1,6
+              do iloc=1,6
+                H66t(iloc,jloc) = 0
+              enddo
+            enddo
+            do iloc=i1,i6
+              parahot3(idimpara3-19+iloc) = EPSMEC(iloc) +
+     .                 parahot3(idimpara3-25+iloc)
+            end do
+              RETURN
+            endif
+        endif
+
+c       First, calculation of Da, the effective algorithmic modulus
+c       **************************************************
+
+        call ddsigrank(esigmaf,d2gt,i1,i2,i3,i4,i5,i6,lcp,
+     .                    parahot3,idimpara3)
+
+        do jloc=i1,i6
+          do iloc=i1,i6
+            TRAV66b(iloc,jloc) = Dlambdat*d2gt(iloc,jloc)
+c             [6;6]
+          end do
+        end do
+        call mulAB(H66,TRAV66b,TRAV66b,i6,i6,i6,i6)
+c            [6;6]  =  [6;6]  x  [6;6]
+
+        tau_c = fhardcc(rkappac,fc,fc0,rkappa1,
+     .                          ac,bc,lerror)
+        if (lerror) then
+          write(2,*) '>Error returned from compressive hardening
+     .                to DPRAN3d'
+          return
+        endif
+        call mulATB(pi2,esigmaf,vloc1,i6,i1,i6,i1)
+c            [1]   =   [1;6]  x  [6;1]
+        psi2 = (1d0-alpha)*tau_c - alpha*vloc1(i1)
+
+c       First come the second order terms.
+        call mulab(P2,ESIGMAF,TRAV6,i6,i6,i6,i1)
+c           [6;1]  =  [6;6] x [6;1]
+
+c                  t         t  t
+c       T66 = T6 T6  = P2 s s P2
+        call mulABT(trav6,trav6,trav66,i6,i1,i6,i1)
+c           [6;6]  =  [6;1] x [1;6]
+        test = 1.E+6
+        psi2lim=max(1.E-7*test,1.d-3)
+        if (abs(psi2).le.psi2lim) then
+          do jloc=i1,i6
+            do iloc=i1,i6
+              TRAV66(iloc,jloc) = r0
+            end do
+          end do
+        else
+          do jloc=i1,i6
+            do iloc=i1,i6
+              TRAV66(iloc,jloc) = (P2(iloc,jloc)-TRAV66(iloc,jloc)
+     .              /(r2*psi2*psi2))/(r2*psi2)
+c              [6;6]
+            end do
+          end do
+        endif
+
+        do jloc=i1,i6
+          do iloc=i1,i6
+            TRAV66(iloc,jloc) = Dlambdac*TRAV66(iloc,jloc)
+          end do
+        end do
+        call mulAB(H66,TRAV66,TRAV66,i6,i6,i6,i6)
+c        **** *****  [6;6]=[6;6]x[6;6]
+        do jloc=i1,i6
+          do iloc=i1,i6
+            TRAV66(iloc,jloc) = U(iloc,jloc)+TRAV66(iloc,jloc)
+c            TRAV66(iloc,jloc)=U(iloc,jloc)+TRAV66(iloc,jloc)
+     .                       +TRAV66b(iloc,jloc)
+c            TRAV66b requires the calculation of d2gt - we prefer not to take it
+          end do
+        end do
+c                                                                    t  t           -1
+c       Da = ( I + Dlambdat H66 d2gt + Dlambdac H66 (P2/2psi2)-(P2 s s P2)/(4psi2³) )   H66
+
+        call invert9(TRAV66,i6,i6)
+c        **** *******   [6;6]
+        call mulab(TRAV66,H66,Da,i6,i6,i6,i6)
+c        [6;6]=[6;6]x[6;6]
+
+c       The effective algorithmic modulus Da has been obtained
+c       Now, calculation of the effective elastoplastic tangent modulus Dt
+c       ******************************************************************
+c       Now come the first order terms
+
+        dtau1 = dfhardct(rkappat)
+        dtau2 = dfhardcc(rkappac,fc,fc0,rkappa1,ac,bc)
+
+c       Calculation of n1, n2, n3, n4
+
+        call dsigRank(esigmaf,dgt,i3,i6,parahot3,idimpara3,
+c       **** ********        [6;1]
+     .                rkappait,lcp)
+        rloc = 0.d0
+        do iloc=1,6
+          rloc = rloc + (dgt(iloc))**2
+        enddo
+        if (rloc.eq.0.d0) rkt = 0.d0
+        do iloc=i1,i6
+          dft(iloc) = rkt*dgt(iloc)
+c         [6;1] = [1] x [6;1]
+        end do
+
+        e1 = r1-rkt*(r1+dtau1)
+c       [1]
+        e2 = r1-rkc*(r1+dtau2)
+c       [1]
+
+        fc     = parahot3(i3)
+c       Compressive strength
+        fb     = parahot3(i7)
+c       Biaxial compressive strength
+
+        call dsigDrucker(fc,fb,esigmaf,dfc,alpha,P2,
+c       **** ****************       [6;1]
+     .                    pi2,i1,i6,lcp)
+        do iloc=i1,i6
+          dfc(iloc) = rkc*dfc(iloc)
+c         [6;1]     = [1]x[6;1]
+        end do
+        ag     = parahot3(i8)
+        call dsiggc(esigmaf,dgc,ag,P2,pi2,i1,i6,fc,fb,lcp)
+c       **** ****************       [6;1]
+
+        call mulATB(dft,Da,trav16,i6,i1,i6,i6)
+c          [1;6]   = [1;6]x[6;6]
+        do iloc=i1,i6
+          dftD(i1,iloc) = trav16(i1,iloc)
+        end do
+
+        call mulab(Da,dgt,Ddgt,i6,i6,i6,i1)
+c        [6;1]  = [6;6] x [6;1]
+
+        call mulATB(dfc,Da,trav16,i6,i1,i6,i6)
+c        [1;6]   = [1;6]x[6;6]
+        do iloc=i1,i6
+          dfcD(i1,iloc) = trav16(i1,iloc)
+        end do
+
+        call mulab(Da,dgc,Ddgc,i6,i6,i6,i1)
+c        [6;1]   = [6;6]x[6;1]
+
+c       n1
+        call mulATB(dft,Ddgc,trav1,i6,i1,i6,i1)
+c       **** ******   [1]=[1;6]x[6;1]
+        dftDdgc = trav1(i1)
+c        [1]
+        do iloc=i1,i6
+          rn1(i1,iloc) = -dftDdgc*dfcD(i1,iloc)
+        end do
+c        [1;6]=[1]x[1;6]
+
+c       n2   [1]=[1;6]x[6;1]
+        call mulATB(dfc,Ddgc,trav1,i6,i1,i6,i1)
+c       **** ******
+        dfcDdgc = trav1(i1)
+        do iloc=i1,i6
+          rn2(i1,iloc) = (dfcDdgc-e2)*dftD(i1,iloc)
+        end do
+
+c       n3   [1]=[1;6]x[6;1]
+        call mulATB(dft,Ddgt,trav1,i6,i1,i6,i1)
+c       **** ******
+        dftDdgt = trav1(i1)
+        do iloc=i1,i6
+          rn3(i1,iloc) = (dftDdgt-e1)*dfcD(i1,iloc)
+        end do
+
+c       n4   [1]=[1;6]x[6;1]
+        call mulATB(dfc,Ddgt,trav1,i6,i1,i6,i1)
+c       **** ******
+        dfcDdgt = trav1(i1)
+        do iloc=i1,i6
+          rn4(i1,iloc) = -(dfcDdgt)*dftD(i1,iloc)
+        end do
+
+c       denominator   [1]
+        Denom = (dftDdgt-e1)*(dfcDdgc-e2) - (dfcDdgt*dftDdgc)
+
+c       Calculation of rt1 and rc1 that are used in Mater 2 for calculation of Ct
+        do iloc=i1,i6
+          rt1(i1,iloc) = (rn1(i1,iloc)+rn2(i1,iloc))/denom
+          rc1(i1,iloc) = (rn3(i1,iloc)+rn4(i1,iloc))/denom
+        end do
+
+        do iloc=i1,i6
+          vloc(iloc) = rn1(i1,iloc)
+        end do
+        call mulABT(Ddgt,vloc,Ddgtn1,i6,i1,i6,i1)
+c       **** ******     [6;6]=[6;1]x[1;6]
+        do iloc=i1,i6
+          vloc(iloc) = rn2(i1,iloc)
+        end do
+        call mulABT(Ddgt,vloc,Ddgtn2,i6,i1,i6,i1)
+c       **** ******     [6;6]=[6;1]x[1;6]
+        do iloc=i1,i6
+          vloc(iloc) = rn3(i1,iloc)
+        end do
+        call mulABT(Ddgc,vloc,Ddgcn3,i6,i1,i6,i1)
+c       **** ******     [6;6]=[6;1]x[1;6]
+        do iloc=i1,i6
+          vloc(iloc) = rn4(i1,iloc)
+        end do
+        call mulABT(Ddgc,vloc,Ddgcn4,i6,i1,i6,i1)
+c       **** ******     [6;6]=[6;1]x[1;6]
+
+        do jloc=i1,i6
+          do iloc=i1,i6
+            TRAV66(iloc,jloc) = Ddgtn1(iloc,jloc) + Ddgtn2(iloc,jloc)
+     .                       +  Ddgcn3(iloc,jloc) + Ddgcn4(iloc,jloc)
+c       [6;6]
+            TRAV66(iloc,jloc) = TRAV66(iloc,jloc)/Denom
+c       [6;6]
+          end do
+        end do
+
+        do jloc=i1,i6
+          do iloc=i1,i6
+            H66t(iloc,jloc) = Da(iloc,jloc) - TRAV66(iloc,jloc)
+          end do
+        end do
+c       END OF CALCULATION OF EFFECTIVE TANGENT MATRIX
+c       **************************************************
+
+      endif
+c     END OF PLASTICITY
+
+c     store the mechanical strain at the end of this iteration
+c     mechanical strain = epsmec + epspl
+      do iloc=i1,i6
+        parahot3(idimpara3-19+iloc) = EPSMEC(iloc) +
+     .                 parahot3(idimpara3-25+iloc)
+      end do
+
+      RETURN
+      END
+
+
+
+

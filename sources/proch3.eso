@@ -1,0 +1,391 @@
+C PROCH3    SOURCE    BP208322  10/06/29    21:15:01     6698
+C     SUBROUTINE PROCH3( FREQ,NBMOD,IPRIGI,IPMASS,INF0,IPMODE,LIMAGE,
+C     INSYM, MTAB3, I )
+************************************************************************
+*
+*                             P R O C H 3
+*                             -----------
+*
+* FONCTION:
+* ---------
+*
+*     RECHERCHE DES NBMOD MODES PROPRES LES PLUS PROCHES DE FREQ
+*     ET CONSTRUIT L'OBJET 'SOLUTION' CORRESPONDANT.
+*
+* MODE D'APPEL:
+* -------------
+*
+*     CALL   PROCH3( FREQ,NBMOD,IPRIGI,IPMASS,INF0,IPMODE,LIMAGE, INSYM )
+*
+* PARAMETRES:   (E)=ENTREE   (S)=SORTIE
+* -----------
+*
+*     FREQ    REEL DP   (E)  FREQUENCE A APPROCHER PAR UNE FREQUENCE
+*                            PROPRE.
+*     NBMOD   ENTIER    (E)  ORDRE DE MULTIPLICITE DE LA FREQ PROPRE
+*     IPRIGI  ENTIER    (E)  POINTEUR DE L'OBJET 'RIGIDITE' CONTENANT
+*                            LA MATRICE DE RIGIDITE.
+*     IPMASS  ENTIER    (E)  POINTEUR DE L'OBJET 'RIGIDITE' CONTENANT
+*                            LA MATRICE MASSE.
+*     INF0    ENTIER    (E)  NOMBRE DE TERMES DIAGONAUX NEGATIFS DE LA
+*                            'RIGIDITE' "K" DECOMPOSEE EN L.D.LT .
+*                            CE NOMBRE N'EST PAS NUL A CAUSE DE LA FACON
+*                            DONT SONT INTRODUITS LES BLOCAGES DES
+*                            D.D.L. (MULTIPLICATEURS DE LAGRANGE "LX").
+*     IPMODE  ENTIER    (S)  POINTEUR DE L'OBJET 'SOLUTION' CONTENANT
+*                            LE MODE PROPRE TROUVE.
+*     LIMAGE  BOOLEEN   (E)  VRAI SI ON SOUHAITE DE FREQ. NEGATIVES.
+*
+* LEXIQUE: (ORDRE ALPHABETIQUE)
+* --------
+*
+*     IPKW2M  ENTIER    POINTEUR DE LA 'RIGIDITE' "DECALEE"  K - W2.M
+*     IPLVER  LISTCHPO  LISTE DE CHPO A ITERER. ILS FORMENT UN SOUS-
+*                       ESPACE QUI CONVERGE VERS LE SOUS-ESPACE PROPRE
+*                       DOMINANT DE DIMENSION NBMOD. SORTIE: PARTIE REELLE
+*                       DES CHPOINTS SOLUTIONS
+*     IPLVEI  LISTCHPO  LISTE DE CHPO.SORTIE: PARTIE IMAGINAIRE
+*                       DES CHPOINTS SOLUTIONS
+*     IPVECP  ENTIER    POINTEUR DU 'CHPOINT' QUI CONTIENT DES NOMBRES
+*                       ALEATOIRES, PUIS UN VECTEUR PROPRE.
+*     OMEGA2  REEL DP   PULSATION PROPRE TROUVEE AU CARRE.
+*                       ( NE SERT A RIEN ! )
+*     PROPRE  REEL DP   TABLEAU CONTENANT DES CARACTERISTIQUES DU
+*                       MODE PROPRE CALCULE:
+*                            PROPRE(1) = FREQ. PROPRE ,
+*                            PROPRE(2) = MASSE GEN.
+*                            PROPRE(3)ET(4) ET(5) DEPL.GEN. SELON X,Y,Z
+*     W2      REEL DP   PULSATION AU CARRE A APPROCHER.
+*
+* MODE DE FONCTIONNEMENT:
+* -----------------------
+*
+*     LE CALCUL D'UN VECTEUR PROPRE SE FAIT PAR LA METHODE DE
+*     L'ITERATION D'UN SOUS-ESPACE, AVEC DECALAGE INITIAL ("SHIFTING")
+*     DE W2
+*
+* AUTEUR, DATE DE CREATION:
+* -------------------------
+*
+*     PASCAL MANIGOT     16 OCTOBRE 1984
+*
+* MODIF: Benoit PRABEL   MARS 2009
+*
+* LANGAGE:
+* --------
+*
+*     ESOPE
+*
+************************************************************************
+
+      SUBROUTINE PROCH3 ( FREQ,NBMOD,IPRIGI,IPMASS,INF0,IPMODE,LIMAGE
+     & ,INSYM, MTAB3, I)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCREEL
+-INC CCOPTIO
+-INC SMLCHPO
+-INC SMLREEL
+-INC SMCHPOI
+
+******
+*     -- CONSTANTES --
+***
+      PARAMETER (LPROPR = 10)
+      PARAMETER (DEUXPI = (2.D0*XPI))
+
+******
+*     -- ARGUMENTS --
+***
+      REAL*8  FREQ
+      INTEGER NBMOD, IPRIGI, IPMASS, INF0, IPMODE
+      LOGICAL LIMAGE
+      CHARACTER*4 MOTCLE
+
+******
+*     -- VARIABLES LOCALES --
+***
+      POINTEUR IPLVER.MLCHPO, IPLVE1.MLCHPO, IPLVEI.MLCHPO
+      POINTEUR IPLVAR.MLREEL, IPLVA1.MLREEL, IPLVAI.MLREEL
+      INTEGER  NBVEC
+      REAL*8   OMEGA2, PROPRE(LPROPR)
+
+******************************************************************
+*                   INITIALISATION                               *
+******************************************************************
+
+******
+*     -- CREATION DE (K-W2M) --
+***
+      W2 = (FREQ * DEUXPI) ** 2
+*      WRITE(6,*)'DECALAGE   ', W2
+      IF( LIMAGE ) THEN
+         W2 = SIGN(W2,FREQ)
+      ENDIF
+      CALL DECALE ( IPRIGI, IPMASS, W2, IPKW2M )
+      IF ( IERR .NE. 0 ) RETURN
+
+******
+*     -- INITIALISATION DES ITERATIONS: CREATION D'UNE LISTE
+*     DE  NBVEC 'CHPOINT' ALEATOIRE --
+***
+
+*     bp (03.2009) : si on souhaite eventuellement fournir 1 CHPOINT
+      call LIROBJ('LISTCHPO',MLCHP1,0,IRET1)
+      if(IRET1 .ne. 0) then
+       segact,MLCHP1
+       NCHPO1 = MLCHP1.ICHPOI(/1)
+       IPVECP = 0
+*       call COPIE2(MLCHP1.ICHPOI(1),IPVECP)
+       ICHP1 = MLCHP1.ICHPOI(1)
+       call COPIE2(ICHP1,IPVECP)
+*      A Faire : vérifier l'accord entre chpoint et matrices...?
+      else
+       CALL ALEAT1 (IPKW2M, IPVECP )
+      endif
+       IF ( IERR .NE. 0 ) RETURN
+       N1 = 1
+       SEGINI ,IPLVER
+       IPLVER.ICHPOI(1) = IPVECP
+** on cherce le nombre de ddl sans relations
+       nddl = 0
+       ndlx = 0
+       mchpoi = ipvecp
+       segact mchpoi
+       nsous = ipchp(/1)
+        do 81 isous = 1, nsous
+          msoupo = ipchp(isous)
+          segact msoupo
+          mpoval = ipoval
+          segact mpoval
+          nn = vpocha(/1)
+          nc1 = vpocha(/2)
+          nddl = nddl + nn*nc1
+        do 95 inc = 1,nc1
+        if (nocomp(inc).eq. 'LX  ') ndlx = ndlx + nn
+ 95     continue
+        segdes msoupo, mpoval
+ 81     continue
+        segdes mchpoi
+
+      nddl = nddl - ndlx - (ndlx/2)
+      nbvec = max(2*nbmod, 8)
+      if (nbvec .gt. nddl) nbvec = nddl
+
+* on continue le tirage au sort (nous aurions pu passer par Lanzos!)
+      DO 100 IB100 = 1, NBVEC-1
+         if ( (IRET1 .ne. 0) .and. (IB100 .lt. NCHPO1) ) then
+           IPVECP = 0
+*           call COPIE2(MLCHP1.ICHPOI(1 + IB100),IPVECP)
+           ICHP1 = MLCHP1.ICHPOI(1 + IB100)
+           call COPIE2(ICHP1,IPVECP)
+         else
+           CALL ALEAT1 (IPKW2M, IPVECP )
+         endif
+         IF ( IERR .NE. 0 ) RETURN
+         IPLVER.ICHPOI(**) = IPVECP
+ 100  CONTINUE
+      SEGDES ,IPLVER
+      if(IRET1 .ne. 0)  SEGDES,MLCHP1
+
+* cette orthonormalisation n'est pas indispensable, dans la plupart
+* des cas,
+* mais, on l'a gardée pour tester la singularité de la masse
+* et mettre à jour nbvec si necessaire. On n'a besoin de ce test
+* qu'au debut, car si l'on a eliminé les eventuels vecteurs du noyau
+* de la masse ils ne peuvent pas ressurgir lors du processus iteratif
+* car ils correspondent à des frequences infinies
+*      IF ( INSYM .EQ. 0) THEN
+         CALL GRAAMO ( IPLVER, IPMASS )
+         IF ( IERR .NE. 0 ) RETURN
+          segact IPLVER
+          nbvec = IPLVER.ICHPOI(/1)
+          segdes iplver
+          if (nbmod .gt. nbvec) nbmod = nbvec
+*       END IF
+
+******************************************************************
+*                        RESOLUTION                              *
+******************************************************************
+
+******
+*     -- RESOLUTION PAR ITERATION DU SOUS-ESPACE IPLVER
+*     ET NORMALISATION DES MODES PROPRES --
+***
+*on differentie NBMOD=dim du sous espace initialement recherché et
+*NBMOD2 qui peut etre modifié par sespac si dernier vecteur complexe
+      NBMOD2 = NBMOD
+      IF (INSYM .EQ. 0) THEN
+         CALL SESPA  ( IPLVAR, IPLVER, NBMOD, IPKW2M, IPMASS )
+         IF ( IERR .NE. 0 ) RETURN
+          segact iplver
+         nblgn = IPLVER.ICHPOI(/1)
+         ICOMP = 0
+               mlchpo = iplver
+               segact mlchpo*mod
+          do 101 ibmod = 1,nbmod
+                ix = ichpoi(ibmod)
+                CALL MOTS1( IPLMOT, MOTCLE )
+                call norma1 (ix,iplmot,motcle,ixx)
+                call dtchpo(ix)
+                ichpoi(ibmod) = ixx
+ 101       continue
+           segdes mlchpo
+
+        ELSE
+           CALL SESPAC(IPLVAR,IPLVAI,IPLVER,NBMOD2,IPKW2M,IPMASS)
+           ICOMP = 0
+*
+        END IF
+
+
+******************************************************************
+*      CREATION DE L'OBJET REPRESENTANT LE MODE MULTIPLE         *
+******************************************************************
+
+******
+*     -- TRANSLATION DES FREQUENCES PROPRES -- CLASSEMENT
+*     DES MODES PROPRES --
+***
+      SEGACT ,IPLVAR*MOD
+*      IF (ICOMP .EQ. 0) THEN
+*---- Cas d'un appel a sespa (matrices symetriques => mode Reel)
+      IF (INSYM .EQ. 0) THEN
+         DO 200 IB200 =1, NBMOD
+            FREQPR = IPLVAR.PROG(IB200)
+            CALL W2FREQ ( FREQPR, W2, OMEGA2, FREQP1, LIMAGE )
+            IF ( IERR .NE. 0 ) RETURN
+            IPLVAR.PROG(IB200) = FREQP1
+ 200     CONTINUE
+
+*---- Cas d'un appel a sespaC (matrices nonsymetriques => mode Reel ou Complexe)
+      ELSE
+         SEGACT IPLVAI*MOD
+*         DO 400 IB400 = 1, NBMOD2
+         DO 400 IB400 = 1, NBMOD2
+            FREQPR = IPLVAR.PROG(IB400)
+            FREQPI = IPLVAI.PROG(IB400)
+            CALL W2FRQC ( FREQPR, FREQPI, W2,XRW2,XIW2, FREQP1, FREQP2)
+            IF ( IERR .NE. 0 ) RETURN
+*            IPLVAR.PROG(IB400) = FREQP1
+*            IPLVAI.PROG(IB400) = FREQP2
+*           on se débarasse des erreurs d'arrondis de W2FRQC
+            if (FREQPI .eq. 0.) then
+              if ( (FREQPR + W2) .lt. 0.) then
+                IPLVAR.PROG(IB400)= 0.D0
+                IPLVAI.PROG(IB400)= FREQP2
+              else
+                IPLVAR.PROG(IB400)= FREQP1
+                IPLVAI.PROG(IB400)= 0.D0
+              endif
+            else
+              IPLVAR.PROG(IB400)= FREQP1
+              IPLVAI.PROG(IB400)= FREQP2
+            endif
+*           WRITE(6,*) IB400,' FREQUENCE =',FREQP1,'+i',FREQP2,
+*     &     '  soit',(IPLVAR.PROG(IB400)),'+i',(IPLVAI.PROG(IB400))
+ 400     CONTINUE
+      END IF
+
+******
+*     -- ON GARDE LES NBMOD2 PREMIERS ELEMENTS PROPRES --
+*             -- ET ON DETRUIT LES AUTRES --
+***
+
+*     -- LES VALEURS PROPRES --
+
+*      JG = NBMOD
+      JG = NBMOD2
+      SEGADJ IPLVAR
+      SEGDES IPLVAR
+
+      IF (INSYM .NE. 0) THEN
+*         JG = NBMOD
+         JG = NBMOD2
+         SEGADJ IPLVAI
+         SEGDES IPLVAI
+      END IF
+
+*     -- LES MODES PROPRES --
+      SEGACT IPLVER
+*     si le dernier mode est complexe, alors il nous faut le (nbmod + 1)^ieme
+*     qui correspond a la partie imaginaire indissociable de la partie reelle,
+*     ce qui justifie l'introduction de nbmod2
+      DO 550 IB550 = (NBMOD2 + 1), NBVEC
+         IPCHPO = IPLVER.ICHPOI(IB550)
+         CALL DTCHPO ( IPCHPO )
+ 550  CONTINUE
+      N1 = NBMOD2
+      SEGADJ IPLVER
+      SEGDES IPLVER
+
+
+******
+*     --  CLASSEMENT DES MODES PROPRES --
+***
+      IF (INSYM .eq. 0) THEN
+         CALL ORDVEC ( IPLVAR, IPLVER )
+      END IF
+* rem: mode complexes deja classés par module de la val propre croissant
+
+
+******
+*     -- AFFICHAGE --
+***
+      IF ( IIMPI .EQ. 2 ) THEN
+         WRITE ( IOIMP, 1000 ) FREQ
+ 1000    FORMAT( /8X, 'SOLUTION POUR LA FREQUENCE:', E12.6,
+     1        /8X, '---------------------------',  /   )
+      ENDIF
+
+******
+*     -- CONSTRUCTION DE LA SOLUTION --
+***
+      IF (INSYM .EQ. 0) THEN
+*         CALL CRSOLU (FREQ,IPLVAR,IPLVER,NBMOD,IPKW2M,IPMASS
+*     &  ,IPMODE, INF0)
+         CALL CRSOLU (W2,IPLVAR,IPLVER,NBMOD,IPKW2M,IPMASS
+     &  ,IPMODE, INF0)
+      ELSE
+*         WRITE(6,*)'APPEL CRSOL1 ICOMP= ',ICOMP
+*         CALL CRSOL1(FREQ,IPLVAR,IPLVAI,IPLVER,IPLVEI,NBMOD,
+*     &   IPKW2M,IPMASS,MTAB3, ICOMP, I)
+         CALL CRSOL1(W2,IPLVAR,IPLVAI,IPLVER,NBMOD,NBMOD2,
+     &   IPKW2M,IPMASS,MTAB3,I,INF0)
+      END IF
+
+
+******
+*     -- SUPPRESSION DES OBJETS DE TRAVAIL --
+***
+      CALL DTRIGI ( IPKW2M )
+      IF ( IERR .NE. 0 ) RETURN
+      CALL DTLCHP ( IPLVER )
+      IF ( IERR .NE. 0 ) RETURN
+      CALL DTLREE ( IPLVAR )
+      IF ( IERR .NE. 0 ) RETURN
+      IF (INSYM .NE. 0) THEN
+*         CALL DTLCHP ( IPLVEI)
+         CALL DTLREE ( IPLVAI )
+      END IF
+
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

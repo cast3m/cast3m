@@ -1,0 +1,1104 @@
+C EXCFRO    SOURCE    MB234859  19/01/21    21:15:01     10049
+
+      SUBROUTINE EXCFRO
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+
+*  on lit un modele de contact qui contient des frottement
+*  un materiau de frottement, un chpoint
+*  de deplacement, la raideur de frottement et on ecrit un chpoint de
+*  forces de frottement
+
+-INC CCOPTIO
+-INC CCREEL
+
+-INC SMCHAML
+-INC SMCHPOI
+-INC SMCOORD
+-INC SMELEME
+-INC SMMODEL
+      POINTEUR mmode3.mmodel,mmode4.mmodel,mmode5.mmodel,mmode6.mmodel
+      POINTEUR mmode7.mmodel,mmode8.mmodel,imode6.imodel,imode7.imodel
+
+
+-INC SMRIGID
+
+*  icpr xcpr lx du deplacement
+*  jcpr ycpr flx du frottement
+      SEGMENT icpr(nbtpts)
+      SEGMENT xcpr(nbtpts)
+      SEGMENT jcpr(nbtpts)
+      SEGMENT ycpr(nbtpts)
+      SEGMENT kcpr(nbtpts)
+      SEGMENT zcpr(nbtpts)
+      SEGMENT icablr(nbtpts)
+*
+*  Segments pour le frottement cable
+*
+      SEGMENT siezo
+        INTEGER iezon(nszo)
+      ENDSEGMENT
+C
+      SEGMENT altrav
+C*NU*        REAL*8 ANG(NAM+1),ACUR(NAM+1)
+        REAL*8 DANG(NAM),DACUR1(NAM),DACUR2(NAM)
+      ENDSEGMENT
+C
+      SEGMENT mwrk3
+C*NU*        REAL*8 X1(3),X2(3),X3(3)
+        REAL*8 RL(3),RS(3)
+      ENDSEGMENT
+C
+      SEGMENT icprg(nbtpts)
+C*NU*      SEGMENT icprl(nbtpts)
+C
+      SEGMENT idmul(nbnds)
+C*NU*      SEGMENT idcp(nbnds)
+C*NU*      SEGMENT idcpl(nbndsl)
+
+C=======================================================================
+C= LECTURE DES DONNEES DE L'OPERATEUR
+C=======================================================================
+      call lirobj('MMODEL  ',modini,1,iretou)
+      if (ierr.ne.0) return
+      call lirobj('MCHAML  ',icham1,1,iretou)
+      if (ierr.ne.0) return
+      call lirobj('CHPOINT ',mchpin,1,iretou)
+      if (ierr.ne.0) return
+      call lirobj('RIGIDITE',mrigid,1,iretou)
+      if (ierr.ne.0) return
+
+      icham2 = 0
+      call lirobj('MCHAML  ',icham2,0,iretou)
+      if (ierr.ne.0) return
+      mchpi2 = 0
+      call lirobj('CHPOINT ',mchpi2,0,iretou)
+      if (ierr.ne.0) return
+
+C- Tri des MCHAML donnes en entree
+      CALL rngcha(icham1,icham2,'CARACTERISTIQUES','CONTRAINTES',
+     &            ipcar,ipcon)
+      if (ierr.ne.0) return
+C- Le champ de caracteristiques est toujours obligatoire !
+      if (ipcar.eq.0) then
+        moterr(1:16)='CARACTERISTIQUES'
+        call erreur(565)
+        return
+      endif
+
+C=======================================================================
+C= QUELQUES INITIALISATIONS
+C=======================================================================
+      idimp1 = IDIM + 1
+      nbtpts = XCOOR(/1) / idimp1
+*      write(ioimp,*) ' Entree dans excfro jcpr(/1) ',nbtpts
+
+      icablr = 0
+      mwrk3 = 0
+**    ymcrit1 = 0.d0
+
+C=======================================================================
+C= ANALYSE DU MODELE DU FROTTEMENT et DECOUPAGE EN MODELES DE MEME TYPE
+C=======================================================================
+      mmodel=modini
+      SEGACT,mmodel
+      nsoum = kmodel(/1)
+
+      n1 = nsoum
+      icable = 0
+      SEGINI,mmode1
+      mocabl = mmode1
+      icoulo = 0
+      SEGINI,mmode2
+      mocoul = mmode2
+
+      DO isoum = 1, nsoum
+        imodel = kmodel(isoum)
+        SEGACT,imodel
+*        write(ioimp,*) isoum,' formod(1) matmod(1)',formod(1),matmod(1)
+        IF (formod(1).ne.'CONTACT') then
+           moterr(1:16)='CONTACT'
+           call erreur(719)
+           goto 9999
+        ENDIF
+        icabl=0
+        icoul=0
+        do inma=1,matmod(/2)
+          if ( matmod(inma).eq.'FROCABLE' ) icabl=1
+          if ( matmod(inma).eq.'COULOMB') icoul=1
+        enddo
+        IF (icabl.eq.1) THEN
+*          IF (idim.eq.2.and.NEFMOD.NE.261) call erreur(16)
+*          IF (idim.eq.3.and.NEFMOD.NE.262) call erreur(16)
+*          IF (tymode(1).NE.'MMODEL') call erreur(975)
+          icable = icable + 1
+          mmode1.kmodel(icable) = imodel
+        ELSE IF (icoul.eq.1) THEN
+*          IF (idim.eq.2.and.NEFMOD.NE.107) call erreur(16)
+*          IF (idim.eq.3.and.NEFMOD.NE.165) call erreur(16)
+          icoulo = icoulo + 1
+          mmode2.kmodel(icoulo) = imodel
+        ELSE
+          write(ioimp,*) 'Modele de FROTTEMENT non implemente'
+          call erreur(21)
+        ENDIF
+        IF (ierr.ne.0) goto 9999
+      ENDDO
+**     write(6,*) ' icable  icoulo  ' , icable ,icoulo
+      n1 = icable
+      SEGADJ,mmode1
+      mocabl = mmode1
+      n1 = icoulo
+      SEGADJ,mmode2
+      mocoul = mmode2
+
+C- Le champ de contraintes est obligatoire pour les modeles FROCABLE !
+      if (icable.ne.0 .and. ipcon.eq.0) then
+        moterr(1:16)='CONTRAINTES     '
+        call erreur(565)
+        goto 9999
+      endif
+
+C=======================================================================
+*  noter les contacts actifs dans le champ de deplacement
+C=======================================================================
+      segact mcoord
+      segini icpr,xcpr,jcpr,ycpr
+      if (IDIM.eq.3) segini zcpr,kcpr
+      segini,icablr
+
+*      call ecchpo(mchpin,0)
+      mchpo1=mchpin
+      segact mchpo1
+      do 100 isoupo=1,mchpo1.ipchp(/1)
+        msoupo=mchpo1.ipchp(isoupo)
+        segact msoupo
+        do 110 ic=1,nocomp(/2)
+          if (nocomp(ic).ne.'LX  ') go to 110
+          ipt2=igeoc
+          mpoval=ipoval
+          segact ipt2,mpoval
+          nbel2 = ipt2.num(/2)
+          do 130 iel=1,nbel2
+            impt = ipt2.num(1,iel)
+            icpr(impt)=1
+            xcpr(impt)=xcpr(impt)+vpocha(iel,ic)
+ 130      continue
+          segdes ipt2,mpoval
+ 110    continue
+        segdes msoupo
+ 100  continue
+      segdes mchpo1
+
+C=======================================================================
+C= TRAITEMENT DES MODELES DE TYPE 'FROCABLE'
+C=======================================================================
+      IF (icable.EQ.0) GOTO 1000
+
+C --- Modèle global de frottement des cables
+*      write(ioimp,*) 'Modèle global: ',mocabl
+*      write(ioimp,*)'Excfro - Nbre de sous modèles: ',icable
+      mmode1 = mocabl
+
+C --- Renumerotation locale sur les noeuds du maillage
+      segini icprg,mwrk3
+C*NU*      segini,icprl
+
+      nbnds=0
+      segact mrigid
+      do 12 ir=1,irigel(/2)
+        if (irigel(6,ir).ne.2) goto 12
+        ipt3=irigel(1,ir)
+        segact ipt3
+        do ip=1,ipt3.num(/2)
+          impt=ipt3.num(2,ip)
+          if (icprg(impt).eq.0) then
+            nbnds=nbnds+1
+            icprg(impt)=nbnds
+          endif
+        enddo
+c*        segdes,ipt3
+ 12   continue
+c*      segdes,mrigid
+*      write(ioimp,*) ' nbnds ' , nbnds
+
+*C*NU*C --- Tableau inverse de ICPRG
+*C*NU*      segini idcp
+*C*NU*      do 20 i=1, nbtpts
+*C*NU*        if (icprg(i).ne.0) idcp(icprg(i))=i
+*C*NU* 20   continue
+*C*NU**      write(ioimp,*) ' idcp', (idcp(i),i=1,nbnds)
+*C*NU*
+C --- Tableau des multiplicateurs correspondants aux points des cables
+      segini idmul
+c*      segact mrigid
+      do 22 ir=1,irigel(/2)
+        if (irigel(6,ir).ne.2) go to 22
+        ipt3=irigel(1,ir)
+c*        segact,ipt3
+        do ip=1,ipt3.num(/2)
+          idmul(icprg(ipt3.num(2,ip)))=ipt3.num(1,ip)
+        enddo
+        segdes,ipt3
+ 22   continue
+c*      segdes,mrigid
+
+C*NU* Le CHPOINT mchpo2 n'est pas utilise actuellement :
+C*NU*C --- Préparation du champ par points de sortie (en norme)
+C*NU*      nsoupo=1
+C*NU*      nc=1
+C*NU*      nat=1
+C*NU*      segini mchpo2
+C*NU*      mchpo2.mochde='SEUILS DE FROTTEMENT AUX NOEUDS'
+C*NU*      mchpo2.mtypoi='FORCES'
+C*NU*      mchpo2.jattri(1)=2
+C*NU*      mchpo2.ifopoi=ifour
+C*NU**      write(ioimp,*)' Segini de MCHPO2',mchpo2
+C*NU*c
+C*NU*      segini msoupo
+C*NU*      mchpo2.ipchp(nsoupo)=msoupo
+C*NU*      nocomp(1)='LX'
+C*NU*      NOHARM(1)=nifour
+C*NU**      write(ioimp,*)' Segini de MSOUPO,mchpo2.ipchp(nsoupo)',msoupo
+C*NU*C --- Création du meleme support du chpoint
+C*NU*      nbsous=0
+C*NU*      nbref=0
+C*NU*      nbnn=1
+C*NU*      nbelem=nbnds
+C*NU*      segini meleme
+C*NU*      do i=1,nbnds
+C*NU*        num(1,i)=idmul(i)
+C*NU*      enddo
+C*NU**      write(ioimp,*)' num', (num(1,i),i=1,nbnds)
+C*NU*      segdes meleme
+C*NU*      igeoc= meleme
+C*NU*      n=nbnds
+C*NU*      segini mpoval
+C*NU*      ipoval=mpoval
+C*NU*      segdes msoupo
+C*NU*      segdes mchpo2
+
+C --- Création d'un modele élémentaire local (a supprimer a la fin)
+      n1=1
+      segini mmode3
+      mn3=0
+      nmat=0
+      nfor=0
+      nobmod=0
+      segact mmode1
+      segini,mmode6=mmode1
+      do isouf=1,icable
+        imodel=mmode6.kmodel(isouf)
+        segini,imode6=imodel
+        mmode6.kmodel(isouf)=imode6
+        segini mmode7
+        segini imode7
+        mmode7.kmodel(1)=imode7
+        imode7.imamod= imode6.ivamod(1)
+        imode6.ivamod(1)=mmode7
+        imode6.tymode(1)='MMODEL'
+      enddo
+      segdes mmode1
+      mmode1=mmode6
+      mchel5=ipcar
+      mchel6=ipcon
+      segact mchel5,mchel6
+      n35=mchel5.infche(/2)
+      n36=mchel6.infche(/2)
+
+C --- Boucle sur les sous modèles de frottement
+C      (uniquement les groupes de câbles)
+*
+*   magouille pour ce mettre dans la meme situation que cell que l'on avait
+*   avec les modeles frottements
+*
+
+C=======================================
+      DO 500 isouf = 1, icable
+C=======================================
+        imode1 = mmode1.kmodel(isouf)
+C*        segact imode1
+         ipt1   = imode1.imamod
+         mmode2 = imode1.ivamod(1)
+
+C --- On repère dans les sous modèles le modèle groupe de câble
+        segact mmode2
+        imode2 = mmode2.kmodel(1)
+        segact imode2
+        ipt2   = imode2.imamod
+
+*        write(ioimp,*)
+*        write(ioimp,*) '*** Travail sur le sous modele de frottement ***'
+*        write(ioimp,*) 'Sous modèle numero ',isouf,':',imode1
+*        write(ioimp,*) 'Sous modèle de type câble de ce modèle',mmode2
+
+C --- Création d'un matériau élémentaire
+        do iou=1,mchel5.imache(/1)
+          if ( mchel5.imache(iou).eq. ipt1 .or.
+     $         mchel5.imache(iou).eq. ipt2 ) goto 7755
+        enddo
+        call erreur (560)
+        GOTO 9100
+ 7755   continue
+        n1=1
+        l1=40
+        n3=n35
+        segini mchel3
+        mchel3.imache(1)=ipt1
+        mchel3.ichaml(1)=mchel5.ichaml(iou)
+        mchel3.conche(1)=mchel5.conche(iou)
+        do i=1,n3
+          mchel3.infche(1,i)=mchel5.infche(iou,i)
+        enddo
+
+C --- Creation des contraintes elementaires
+        do iou=1,mchel6.imache(/1)
+          if ( mchel6.imache(iou).eq.ipt1 .or.
+     $         mchel6.imache(iou).eq.ipt2 ) go to 7756
+        enddo
+        call erreur(560)
+        goto 9100
+ 7756   continue
+        n1=1
+        l1=40
+        n3=n36
+        segini mchel4
+        mchel4.imache(1)=ipt1
+        mchel4.ichaml(1)=mchel6.ichaml(iou)
+        mchel4.conche(1)=mchel6.conche(iou)
+        do i=1,n3
+          mchel4.infche(1,i)=mchel6.infche(iou,i)
+        enddo
+
+        segact,mmode3*mod
+        mmode3.kmodel(1)=imode2
+        siezo = 0
+        call splitag(mmode3,mchel3,mchel4,mmodel,mchel2,
+     &               mchel1,siezo)
+        segsup,siezo
+*        call zpmode(mmode3,0)
+*        call zpmode(mmodel,0)
+*        write(ioimp,*) ' lister de mchel1 contraintes splitées'
+*        call zpchel(mchel1,0)
+*        write(ioimp,*) ' lister de mchel2 materiaux splités'
+*        call zpchel(mchel2,0)
+
+        segact mmodel
+        nszo = kmodel(/1)
+        segact mchel1,mchel2
+
+C --- Boucle sur les sous zones du nouveau modèle, donc sur les cables
+C==============================
+        DO 900 isouc=1,nszo
+C==============================
+*          write(ioimp,*)'*** Travail sur le cable ',isouc,'***'
+
+C --- Recherche des noms de composantes des contraintes EFFX
+C --- et de coefficients de frottements FF et PHIF
+C --- (mchel1=contraintes et mchel2=materiau)
+C --- On s'occupe d'abord des contraintes
+          mcham1=mchel1.ichaml(isouc)
+          segact,mcham1
+C --- Il ne doit y avoir qu'une contrainte de nom EFFX
+          if (mcham1.nomche(1).ne.'EFFX') then
+            call erreur(976)
+            goto 9100
+          endif
+          melva1=mcham1.ielval(1)
+          segdes,mcham1
+
+C --- Au tour du materiau
+C --- On doit prendre FF puis PHIF
+          mcham2=mchel2.ichaml(isouc)
+          segact,mcham2
+          melva2 = 0
+          melva3 = 0
+          do i=1,mcham2.nomche(/2)
+*      write(ioimp,*)'Nom de la composante',i,'du mchaml materiau du cable',
+*     &              isouc,':',mcham2.nomche(i)
+            if (mcham2.nomche(i).eq.'FF' ) then
+              melva2=mcham2.ielval(i)
+              goto 901
+            endif
+          enddo
+*          write(ioimp,*) 'Composante FF non trouvee dans mchel2'
+          call erreur(977)
+          goto 9100
+  901     continue
+          do i=1,mcham2.nomche(/2)
+            if (mcham2.nomche(i).eq.'PHIF') then
+*      write(ioimp,*)'Nom de la composante',i,'du mchaml materiau du cable',
+*     &              isouc,':',mcham2.nomche(i)
+              melva3=mcham2.ielval(i)
+              go to 902
+            endif
+          enddo
+*          write(ioimp,*) 'Composante PHIF non trouvee dans mchel2'
+          call erreur(977)
+          goto 9100
+  902     continue
+          segdes,mcham2
+
+*          write(ioimp,*) 'Debut des calculs'
+C --- Début des calculs a proprement parler
+          imodel = mmodel.kmodel(isouc)
+          segact imodel
+          ipt2 = imodel.imamod
+          segact ipt2
+          nbelem = ipt2.num(/2)
+          nbnn   = ipt2.num(/1)
+
+C*NU*C --- Renumérotation locale sur les noeuds du maillage
+C*NU*          do i=1,icprl(/1)
+C*NU*            icprl(i)=0
+C*NU*          enddo
+C*NU*          nbndsl = 0
+C*NU*          do 25 iel=1,nbelem
+C*NU*            do 25 i=1,nbnn
+C*NU*              impt=ipt2.num(i,iel)
+C*NU*              if (icprl(impt).eq.0) then
+C*NU*                nbndsl=nbndsl+1
+C*NU*                icprl(impt)=nbndsl
+C*NU**                write(ioimp,*)'Ancien noeud : ',impt
+C*NU**                write(ioimp,*)'Nouveau noeud: ',icprl(impt)
+C*NU*              endif
+C*NU* 25       continue
+C*NU*C --- Tableau inverse de ICPRL
+C*NU*          segini idcpl
+C*NU*          do 26 i=1,icprl(/1)
+C*NU*            if (icprl(i).ne.0) idcpl(icprl(i))=i
+C*NU* 26       continue
+
+C --- 1-ere Boucle sur les éléments pour trouver les grandeurs géométriques
+          nam = nbelem
+          segini altrav
+C*          slon= 0.
+C*          fai = 0.
+          iam = 0
+          DO 5005 iel=1,nbelem
+*            write(ioimp,*)'Element n°',iel
+            NC2=ipt2.NUM(1,iel)
+            NC3=ipt2.NUM(2,iel)
+            JS2=(NC2-1)*IDIMP1
+            JS3=(NC3-1)*IDIMP1
+            IF (iel.EQ.1) THEN
+              NC1=NC2
+              JS1=JS2
+            ELSE
+              NC1=IPT2.NUM(1,iel-1)
+              JS1=(NC1-1)*IDIMP1
+            ENDIF
+*            PRINT *,'NC1=',NC1,' NC2=',NC2,' NC3=',NC3
+C --- Distance entre points
+            DS1=0.
+            DS2=0.
+            DO i=1,IDIM
+              X2 = XCOOR(JS2+i)
+              RL(i) = XCOOR(JS3+i) - X2
+              RS(i) = X2 - XCOOR(JS1+i)
+C*NU*              X1(i) = XCOOR(JS1+i)
+C*NU*              X2(i) = XCOOR(JS2+i)
+C*NU*              X3(i) = XCOOR(JS3+i)
+C*NU*              RL(i) = X3(i) - X2(i)
+C*NU*              RS(i) = X2(i) - X1(i)
+              DS1 = DS1 + RL(i)*RL(i)
+              DS2 = DS2 + RS(i)*RS(i)
+            ENDDO
+            DS1=SQRT(DS1)
+            IF (DS2.NE.0.) THEN
+              DS2=SQRT(DS2)
+              CS1=0.
+              DO i=1,IDIM
+                RL(i)=RL(i)/DS1
+                RS(i)=RS(i)/DS2
+                CS1=CS1+RL(i)*RS(i)
+              ENDDO
+              IF (CS1.GT.1.) CS1=1.
+              ALFA=ACOS(CS1)
+              if (abs(alfa).lt.xpetit) alfa=xpetit
+
+            ELSE
+              ALFA=0.d0
+            ENDIF
+            IAM=IAM+1
+C*NU*            ANG(IAM)=FAI
+C*NU*            ACUR(IAM)=SLON
+            DANG(IAM)=ALFA
+            DACUR1(IAM)=DS1
+            DACUR2(IAM)=DS2
+C*            SLON=SLON+DS1
+C*            FAI=FAI+ALFA
+ 5005     CONTINUE
+C*NU*          ANG(NAM+1) = SLON
+C*NU*          ACUR(NAM+1) = FAI
+*          write(ioimp,*)'Longueur du câble: ',slon
+*          write(ioimp,*)'Déviation du câble: ',fai
+* on cherche pour chaque element le Rayon du cercle et donc l'angle
+* que l'on met dans dang et on a la longueur dans dacur1
+          DO 5006 iel=2,NBELEM
+            dacur2(iel)=(dacur1(iel-1)+dacur1(iel))/(2.d0*dang(iel))
+ 5006     continue
+          dacur2(1)=dacur2(2)
+          do 5007 iel=nbelem-1,2,-1
+            dacur2(iel)= 0.5 * (dacur2(iel+1)+dacur2(iel))
+ 5007     continue
+          do 5008 iel=1,nbelem
+            dang(iel) =2. * asin( dacur1(iel)/ (2.*dacur2(iel)))
+ 5008     continue
+
+C --- 2-eme Boucle sur les noeuds pour trouver les forces
+C --- de frottement, et remplir le champ par points.
+          segact,melva1,melva2,melva3
+          icva1 = melva1.velche(/2)
+          icva2 = melva2.velche(/2)
+          icva3 = melva3.velche(/2)
+          jcva1 = min(2,melva1.velche(/1))
+          jcva2 = min(2,melva2.velche(/1))
+          jcva3 = min(2,melva3.velche(/1))
+
+          DO 4005 iel = 1,NBELEM
+
+C --- Grandeurs géométriques concernant l'élément
+            ALFA = DANG(iel)
+            DST  = DACUR1(iel)
+C*            write(ioimp,*)'DANG n°',iel,DANG(iel)
+C*            write(ioimp,*)'DACUR1 n°',iel,DACUR1(iel)
+
+C --- Calcul de la contrainte moyenne au noeud
+            i_z = min(iel,icva1)
+            SIGIC = 0.5 * ( melva1.velche(  1  ,i_z) +
+     &                      melva1.velche(jcva1,i_z) )
+
+C --- Récuperation des coefficient F1 et F2 moyens
+            i_z = min(iel,icva2)
+            F1  = 0.5 * ( melva2.velche(  1  ,i_z) +
+     &                    melva2.velche(jcva2,i_z) )
+            i_z = min(iel,icva3)
+            F2  = 0.5 * ( melva3.velche(  1  ,i_z) +
+     &                    melva3.velche(jcva3,i_z) )
+C --- Calcul des forces de frottement
+*            write(ioimp,*) ' f1  alfa  f2  dst ' ,f1,alfa,f2,dst
+*            write(ioimp,*) ' sigic ' , sigic
+            SP = F1*ALFA*2.1 + F2*DST
+            VALFRO = SIGIC * (1.D0-EXP(-SP))
+            FNORM = 0.5D0 * MAX(VALFRO,XZERO)
+
+C --- Numéros globaux des noeuds considérés
+            ip1 = ipt2.num(1,iel)
+            ip2 = ipt2.num(2,iel)
+            lip1 = idmul(icprg(ip1))
+            lip2 = idmul(icprg(ip2))
+            jcpr(lip1) = 1
+            jcpr(lip2) = 1
+            icablr(lip1) = 1
+            icablr(lip2) = 1
+            ycpr(lip1) = FNORM + ycpr(lip1)
+            ycpr(lip2) = FNORM + ycpr(lip2)
+ 4005     CONTINUE
+          segdes,melva1,melva2,melva3
+          SEGSUP altrav
+C*NU*          SEGSUP idcpl
+C====================
+ 900    CONTINUE
+        segdes,mchel1,mchel2
+C====================
+ 500  CONTINUE
+C====================
+ 9100 CONTINUE
+      segsup,icprg,idmul
+      segsup,mmode3
+      if (IERR.ne.0) goto 9900
+
+C=======================================================================
+C= TRAITEMENT DES MODELES DE TYPE 'COULOMB'
+C=======================================================================
+ 1000 CONTINUE
+      IF (icoulo.EQ.0) GOTO 2000
+      mmodel = mocoul
+      mchelm=ipcar
+      segact,mchelm
+      DO 200 m1 = 1, icoulo
+        segact,mmodel
+        imodel = kmodel(m1)
+        SEGACT,imodel
+        ipt1 = imamod
+*  recherche rapide d'un maillage correspondant dans le mchaml
+        DO 210 n2 = 1,imache(/1)
+*          write(ioimp,*) ' n2 imache(n2) ipt1 ',n2,imache(n2),ipt1
+          if (imache(n2).eq.ipt1) goto 220
+ 210    continue
+        call erreur(472)
+        goto 9200
+ 220    continue
+        mchaml=ichaml(n2)
+        segact,mchaml
+*  recherche des bonnes composantes dans le chamelem
+*  nouveau elem frot PV
+        imu=0
+        icohe=0
+***     iadhe=0
+        melva1=mmodel
+        melva2=mmodel
+        melva3=mmodel
+        do 225 iche=1,nomche(/2)
+          if (nomche(iche).eq.'MU  ') then
+            imu=iche
+            melva1=ielval(imu)
+            segact melva1
+            icva1 = melva1.velche(/2)
+          else if (nomche(iche).eq.'COHE') then
+            icohe=iche
+            melva2=ielval(icohe)
+            segact melva2
+            icva2 = melva2.velche(/2)
+***       else if (nomche(iche).eq.'ADHE') then
+***         iadhe = iche
+***         melva3=ielval(iadhe)
+***         segact melva3
+***         icva3 = melva3.velche(/2)
+          endif
+ 225    continue
+        segdes,mchaml
+        ipt7=ivamod(1)
+        SEGACT,ipt7
+*  attention ipt7 peut être compose
+        ipt1=ipt7
+        do 231 is=1,max(1,ipt7.lisous(/1))
+        if (ipt7.lisous(/1).ne.0) ipt1=ipt7.lisous(is)
+        segact ipt1
+        nbele1 = ipt1.num(/2)
+        nbnoe1 = ipt1.num(/1)
+        if (nbnoe1.eq.0) goto 231
+**      write (6,*) ' excfro ipt1  ',ipt1,nbele1,nbnoe1
+        do 230 iel=1, nbele1
+          impt = ipt1.num(1,iel)
+*         write (6,*) ' excfro impt icpr ',impt,icpr(impt)
+          if (icpr(impt).eq.0) goto 230
+          ipasp = 0
+          xpres = 0.
+          ypres = 0.
+*  bon on a un frottement actif. On a le multiplicateur de lagrange
+*  associe. Il faut le transformer en pression
+          if (idim.eq.2) then
+            xpres = xcpr(impt)
+*  cas de l'adherence
+***         if (iadhe.ne.0) then
+***           if (-xpres+xpetit.gt.
+***  >            melva3.velche(1,min(iel,icva3))*0.99999) then
+***             icpr(impt)=0
+***             jcpr(impt)=0
+***             goto 230
+***           endif
+***           if (xpres.lt.xpetit) then
+***             xpres=xpetit
+***             ipasp=1
+***           endif
+***         endif
+            if (imu.ne.0) then
+              ypres = ypres + xpres * melva1.velche(1,min(iel,icva1))
+            endif
+            if (icohe.ne.0) then
+              ypres = ypres + melva2.velche(1,min(iel,icva2))
+              ipasp = 0
+            endif
+            if (ipasp.eq.0) then
+              ip1 = ipt1.num(nbnoe1,iel)
+              jcpr(ip1) = 1
+              ycpr(ip1) = ypres
+*             write (6,*) ' excfro ip1 ypres ',ip1,ypres
+            endif
+*  traitement de l'adherence
+***         if (iadhe.ne.0) then
+***           jcpr(impt) = 2
+****            ycpr(impt) = melva3.velche(1,min(iel,icva3))*xlong
+***           ycpr(impt) = melva3.velche(1,min(iel,icva3))
+****          write (6,*) ' excfro 2d impt ycpr',impt, ycpr(impt)
+***         endif
+*  cas 3D
+          else
+*  on ne traite que mu pour le moment quelle que soit la formulation
+            xpres = xcpr(impt)
+            if (xpres.lt.xpetit) then
+              xpres = xpetit
+              ipasp = 1
+            endif
+*  cas de l'adherence
+***         if (iadhe.ne.0) then
+****           write (6,*)'excfro3d,iadhe,impt,xcpr',iadhe,impt
+****  >          ,xcpr(impt)
+***           if (-xpres+xpetit.gt.
+***  >            melva3.velche(1,min(iel,icva3))*0.99999) then
+***             icpr(impt)=0
+***             jcpr(impt)=0
+***             goto 230
+***           endif
+***         endif
+            if (imu.ne.0) then
+              ypres = xpres * melva1.velche(1,min(iel,icva1))
+            endif
+            if (icohe.ne.0) then
+              ypres = ypres + melva2.velche(1,min(iel,icva2))
+              ipasp = 0
+            endif
+* ypres est le multiplicateur donnant la force de frottement totale
+* on la repartira ultérieurement entre les deux conditions
+* elements de contact a nbnoe1 noeuds en 3D (les 2 derniers etant les
+* points supports du frottement)
+            if (ipasp.eq.0) then
+              ip1 = ipt1.num(nbnoe1-1,iel)
+              ip2 = ipt1.num(nbnoe1,iel)
+              jcpr(ip1) = ip2
+              ycpr(ip1) = ypres
+              jcpr(ip2) = ip1
+              ycpr(ip2) = ypres
+**            ymcrit1 = max(ymcrit1,abs(ypres))
+            endif
+*  traitement de l'adherence
+***         if (iadhe.ne.0) then
+***           jcpr(impt) = -2
+****           ycpr(impt) = melva3.velche(1,min(iel,icva3))*xlong
+***           ycpr(impt) = melva3.velche(1,min(iel,icva3))
+*              write (6,*)'excfro3d,impt,ycpr',impt,ycpr(impt)
+***         endif
+          endif
+ 230    continue
+        if (ipt7.lisous(/1).ne.0) segdes ipt1
+ 231    continue
+        segdes ipt7,melva1,melva2,melva3
+ 200  CONTINUE
+
+ 9200 CONTINUE
+      segdes mchelm
+      IF (ierr.ne.0) goto 9999
+
+C=======================================================================
+C= TRAITEMENT DES MODELES DE TYPE '........'
+C=======================================================================
+ 2000 CONTINUE
+
+C=======================================================================
+*  RECHERCHE DU SENS DU FROTTEMENT (TOUS MODELES)
+C=======================================================================
+* 1 - On applique la raideur de frottement sur le chpt de deplacement.
+*     On regarde le signe des multiplicateurs.
+* 2 - Si le blocage est actif, il faut maintenir la condition.
+*     On utilise le signe de la reaction.
+*
+C*NU*      xmcrit = 0.
+      ymcrit = xpetit
+*
+      mchpo1=mchpin
+*
+      call mucpri(mchpo1,mrigid,mchpoi)
+      segact mchpoi
+*  cas du blocage actif etudier les reactions
+      do 300 isoupo=1,ipchp(/1)
+        msoupo=ipchp(isoupo)
+        segact msoupo
+        mpoval=ipoval
+        do 310 ic=1,nocomp(/2)
+          if (nocomp(ic).eq.'FLX ') goto 320
+ 310    continue
+        goto 350
+ 320    continue
+        ipt2=igeoc
+        segact ipt2,mpoval
+        do 330 iel=1,ipt2.num(/2)
+C*NU*          xmcrit = max(xmcrit,abs(vpocha(iel,ic)))
+          impt = ipt2.num(1,iel)
+          if (jcpr(impt).eq.0) goto 330
+          if (idim.eq.2.or.icablr(impt).eq.1) then
+            if (jcpr(impt).eq.2) goto 330
+            jcpr(impt) =-sign(1.1D0,vpocha(iel,ic))
+          else
+            zcpr(impt) = vpocha(iel,ic)
+          endif
+ 330    continue
+        segdes,ipt2
+ 350    continue
+        segsup,mpoval
+        segsup,msoupo
+ 300  continue
+      segsup mchpoi
+C*NU*      xmcrit=xmcrit*1.D-10
+C*NU**      write(ioimp,*) '0 - xmcrit ymcrit dans excfro ',xmcrit
+
+*  etude des deplacements
+      segact mchpo1
+      do 450 isoupo=1,mchpo1.ipchp(/1)
+        msoupo=mchpo1.ipchp(isoupo)
+        segact msoupo
+        do 460 ic=1,nocomp(/2)
+          if (nocomp(ic).eq.'LX  ') goto 470
+ 460    continue
+        goto 450
+ 470    continue
+        ipt2=igeoc
+        mpoval=ipoval
+        segact ipt2,mpoval
+        do 480 iel=1,ipt2.num(/2)
+          ymcrit=max(ymcrit,abs(vpocha(iel,ic)))
+ 480    continue
+        segdes,ipt2,mpoval
+ 450  continue
+*     write(ioimp,*) ' 1 ymcrit1 ',ymcrit1
+*     write(ioimp,*) ' 2 ymcrit  ',ymcrit
+**    ymcrit=1.D-6 * max(ymcrit1,ymcrit)
+      ymcrit=1.D-6 * ymcrit
+*     write (ioimp,*) ' 3 ymcrit ',ymcrit
+C*NU**     write(ioimp,*) ' xmcrit ymcrit dans excfro ',xmcrit,ymcrit
+
+      do 400 isoupo=1,mchpo1.ipchp(/1)
+        msoupo=mchpo1.ipchp(isoupo)
+C*        segact msoupo
+        do 410 ic=1,nocomp(/2)
+          if (nocomp(ic).eq.'LX  ') goto 420
+ 410    continue
+        goto 440
+ 420    continue
+        ipt2=igeoc
+        mpoval=ipoval
+        segact ipt2,mpoval
+        do 430 iel=1,ipt2.num(/2)
+          impt = ipt2.num(1,iel)
+          if (jcpr(impt).eq.0) goto 430
+          if (idim.eq.2.or.icablr(impt).eq.1) then
+            if (jcpr(impt).eq.2) goto 430
+            if (abs(vpocha(iel,ic)).lt.ymcrit)  then
+              jcpr(impt)=0
+*              write(ioimp,*) ' on met a zero le point', impt
+            else
+              jcpr(impt)= -sign(1.1D0,vpocha(iel,ic))
+            endif
+          else
+            if (jcpr(impt).eq.-2) goto 430
+            kcpr(impt)=1
+            zcpr(impt)= vpocha(iel,ic)
+          endif
+ 430    continue
+        segdes,ipt2,mpoval
+ 440    continue
+        segdes,msoupo
+ 400  continue
+      segdes mchpo1
+*
+* On cree un CHPOINT de MULT de FROTTEMENT qui nous donnera les forces
+* de frottement en le multipliant par la raideur
+* CHPOINT s'appuyant sur un seul maillage (nsoupo = 1) avec une seule
+* composante (nc = 1) de nom 'LX'
+      jg=jcpr(/1)
+      nat=1
+      nsoupo=1
+      segini mchpoi
+      jattri(1)=2
+      mtypoi='LX'
+      mochde='créé par excfro'
+      ifopoi=ifomod
+      nc=1
+      segini msoupo
+      ipchp(1)=msoupo
+      nocomp(1)='LX  '
+      nbnn=1
+      nbelem=2*jg
+      nbref=0
+      nbsous=0
+      segini ipt7
+      ipt7.itypel=1
+      igeoc=ipt7
+      n=nbelem
+      segini mpoval
+      ipoval=mpoval
+      ip=0
+      do 600 ipr=1,jg
+        if (jcpr(ipr).eq.0) goto 600
+        if (idim.eq.2.and.jcpr(ipr).eq.2) jcpr(ipr)=1
+        ip=ip+1
+        ipt7.num(1,ip)=ipr
+        if (idim.eq.2.or.icablr(ipr).eq.1) then
+          vpocha(ip,1)= ycpr(ipr)*jcpr(ipr)
+*           write(6,*)'excfro 2D ip ipr vpocha(ip,1)'
+*     >        ,ip,ipr,vpocha(ip,1)
+* Si la force est trop petite la direction peut etre fausse
+          if (abs(vpocha(ip,1)).lt.ymcrit) then
+            ip=ip-1
+*            write(ioimp,*) ' non prise en compte du point i',ipr
+          endif
+        else
+        if (jcpr(ipr).eq.-2) then
+           vpocha(ip,1)= ycpr(ipr)
+*           write(6,*)'excfro 3DD ip ipr vpocha(ip,1)'
+*     >        ,ip,ipr,vpocha(ip,1)
+* Si la force est trop petite la direction peut etre fausse
+          if (abs(vpocha(ip,1)).lt.ymcrit) then
+            ip=ip-1
+*            write(ioimp,*) ' non prise en compte du point i',ipr
+          endif
+          else
+          ss=ycpr(ipr)
+          if (abs(ss).lt.ymcrit) then
+*           write(ioimp,*) ' pt elimine ',ipr,abs(ss),ymcrit
+            ip=ip-1
+            goto 600
+          endif
+* en 3d il faut corriger en fonction de la direction du depl ou des reac
+          idu=jcpr(ipr)
+          xx=zcpr(ipr)
+          yy=zcpr(idu)
+*          write(ioimp,*) ' xx yy ',xx,yy
+* condition sur une direction, pas sur l'autre
+          if (kcpr(ipr).eq.0.and.kcpr(idu).ne.0) then
+*            write(ioimp,*) 'prob ',ipr,kcpr(ipr),idu,kcpr(idu)
+            yy=sign(SQRT(MAX(ss*ss-xx*xx,xzero)),yy)
+          endif
+          if (kcpr(ipr).ne.0.and.kcpr(idu).eq.0) then
+*            write(ioimp,*) 'prob ',ipr,kcpr(ipr),idu,kcpr(idu)
+            xx=sign(sqrt(max(ss*ss-yy*yy,xzero)),xx)
+          endif
+          ss=sqrt(max(xx*xx+yy*yy,xzero))
+          if (ss.lt.xpetit) ss=1.
+*          write(ioimp,*) ' xx yy ss ',xx,yy,ss
+          if (ss.lt.ymcrit) then
+            if (kcpr(ipr).eq.1.or.kcpr(idu).eq.1) then
+*              write(ioimp,*) ' 2-pt elimine ',ipr,ss,abs(ycpr(ipr))
+              ip=ip-1
+              goto 600
+            endif
+          endif
+          xx=xx/ss
+*          yy=yy/ss
+*          write(ioimp,*) 'prim dual ',ipr,idu,xx,yy
+          vpocha(ip,1)= -ycpr(ipr)*xx
+*          write(ioimp,*) ' force ',vpocha(ip,1),ipr,idu
+          if (abs(vpocha(ip,1)).lt.ymcrit) then
+*            write(ioimp,*) ' condition eliminee ',ipr,kcpr(ipr),kcpr(idu),ss
+            ip=ip-1
+          endif
+         endif
+        endif
+ 600  continue
+      nbelem=ip
+      n=ip
+      segadj ipt7,mpoval
+      segdes,mpoval,ipt7,msoupo,mchpoi
+
+* En cas de presence d'un champ, mettre au minimum les valeurs d'icelui
+      if (mchpi2.eq.0) goto 9000
+*  on remet a zero icpr et xcpr
+      do impt=1,icpr(/1)
+        icpr(impt) = 0
+        xcpr(impt) = 0.
+      enddo
+      mchpo1=mchpi2
+      segact mchpo1
+      do 700 isoupo=1,mchpo1.ipchp(/1)
+        msoupo=mchpo1.ipchp(isoupo)
+        segact msoupo
+        do 710 ic=1,nocomp(/2)
+          if (nocomp(ic).eq.'LX  ') goto 720
+ 710    continue
+        goto 740
+ 720    continue
+        ipt2=igeoc
+        mpoval=ipoval
+        segact ipt2,mpoval
+        do 730 iel=1,ipt2.num(/2)
+          impt = ipt2.num(1,iel)
+          r_z = vpocha(iel,ic)
+          if (r_z.lt.-ymcrit) then
+            icpr(impt) = -1
+          else if (r_z.gt.ymcrit) then
+            icpr(impt) =  1
+          endif
+          xcpr(impt) = r_z
+  730   continue
+        segdes ipt2,mpoval
+  740   continue
+        segdes msoupo
+  700 continue
+      segdes mchpo1
+* Mise a jour du CHPOINT de MULT de FROTTEMENT (CHPOINT DE 'LX')
+* Rappel : nsoupo = ipchp(/1) = 1 et nc = nocomp(/2) = 1 'LX'
+      segact mchpoi
+      do 800 isoupo=1,ipchp(/1)
+        msoupo=ipchp(isoupo)
+        segact msoupo
+        do 810 ic=1,nocomp(/2)
+          if (nocomp(ic).eq.'LX  ') goto 820
+ 810    continue
+        goto 850
+ 820    continue
+        ipt2=igeoc
+        mpoval=ipoval
+        segact ipt2,mpoval*mod
+        nbelem=ipt2.num(/2)
+        do 830 iel=1,nbelem
+          impt=ipt2.num(1,iel)
+          if (icpr(impt).eq.-1) then
+*         write(ioimp,*) ' excfro ancien ',impt,vpocha(iel,ic),xcpr(impt)
+            vpocha(iel,ic)=min(vpocha(iel,ic),xcpr(impt))
+          else if (icpr(impt).eq. 1) then
+*         write(ioimp,*) ' excfro ancien ',impt,vpocha(iel,ic),xcpr(impt)
+            vpocha(iel,ic)=max(vpocha(iel,ic),xcpr(impt))
+          endif
+          icpr(impt)=0
+  830   continue
+*  on rajoute les autres valeurs du champ precedent
+        nbeleo=nbelem
+        do 835 impt=1,icpr(/1)
+          if (icpr(impt).ne.0) nbelem=nbelem+1
+ 835    continue
+        if (nbelem.ne.nbeleo) then
+          nbnn=1
+          nbsous=0
+          nbref=0
+          segadj ipt2
+          n=nbelem
+          nc=1
+          segadj mpoval
+          do 840 impt=1,icpr(/1)
+            if (icpr(impt).eq.0) goto 840
+            nbeleo=nbeleo+1
+            ipt2.num(1,nbeleo)=impt
+            vpocha(nbeleo,ic)=xcpr(impt)
+*            write(ioimp,*) ' excfro nouveau',impt,xcpr(impt)
+ 840      continue
+        endif
+        segdes ipt2,mpoval
+ 850    continue
+        segdes msoupo
+ 800  continue
+      segdes,mchpoi
+
+ 9000 CONTINUE
+      call ecrobj('CHPOINT',mchpoi)
+
+ 9900 CONTINUE
+      segsup icpr,jcpr,xcpr,ycpr
+      if (idim.eq.3) segsup zcpr,kcpr
+      SEGSUP,icablr
+      if (mwrk3.ne.0) SEGSUP,mwrk3
+
+ 9999 CONTINUE
+      mmodel = modini
+      DO isoum = 1, nsoum
+        imodel = kmodel(isoum)
+        SEGDES,imodel
+      ENDDO
+      SEGDES,mmodel
+
+      mmode1 = mocabl
+      mmode2 = mocoul
+      SEGSUP,mmode1,mmode2
+
+      RETURN
+      END
+
+
+
+
+
+
+
+
+

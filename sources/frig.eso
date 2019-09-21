@@ -1,0 +1,192 @@
+C FRIG      SOURCE    FANDEUR   11/10/07    21:15:27     7159
+
+      SUBROUTINE FRIG
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+
+*  Ce sous-programme calcule la raideur de frottement.
+*  Il a besoin pour cela du maillage de frottement et de la raideur
+*  de contact (ou la raideur totale si c'est plus simple)
+
+-INC CCOPTIO
+-INC CCREEL
+
+-INC SMCHPOI
+-INC SMCOORD
+-INC SMELEME
+-INC SMMODEL
+-INC SMRIGID
+
+      logical ltelq
+
+      idimp1 = IDIM + 1
+*
+* Test sur les options de calcul
+      if (idim .ne. 3) then
+        if (ifomod .ne. -1 .and. ifomod .ne. 0) then
+          call erreur(710)
+          return
+        endif
+      endif
+*
+* Lecture obligatoire du modele de frottement
+*
+      call LIROBJ('MMODEL' , modini,1,iretou)
+      if (ierr.ne.0) return
+*
+* Quelques initialisations
+*
+      mmodel = modini
+      segact mmodel
+      nsous = kmodel(/1)
+      n1 = nsous
+      segini,mmode1
+      segini,mmode2
+*
+* Travail préparatoire de separation des modeles de frottement
+*
+      icoulo = 0
+      icable = 0
+      ipp2 = 0
+      ltelq=.false.
+      do 700 imod = 1, nsous
+        imodel= kmodel(imod)
+        segact imodel
+        if (matmod(1).eq.'COULOMB') then
+          icoulo=icoulo+1
+          mmode1.kmodel(icoulo) = imodel
+*  modele(s) de Coulomb : on agglomere les maillages sous-jacents
+          if (icoulo.eq.1) then
+            ipp2 = imamod
+          else
+            meleme = ipp2
+            ipp1 = imamod
+            call fuse(meleme,ipp1,ipp2,ltelq)
+            if (icoulo.ge.3) segsup,meleme
+          endif
+        else if (matmod(1).eq.'FROCABLE') then
+          icable = icable+1
+          mmode2.kmodel(icable) = imodel
+        else
+          segdes,imodel
+        endif
+ 700  continue
+      segdes mmodel
+      n1 = icoulo
+      segadj,mmode1
+      modcou = mmode1
+      n1 = icable
+      segadj,mmode2
+      modcab = mmode2
+      if (icoulo.eq.0 .and. icable.eq.0) then
+        call erreur(21)
+        goto 9000
+      endif
+*
+* Lecture conditionnelle des arguments (selon les modeles de frottement)
+*
+      lecond = 0
+      if (icoulo.ne.0) lecond = 1
+*
+      iraidc = 0
+      ichjeu = 0
+*
+* Lecture de la raideur de contact
+      call lirobj('RIGIDITE',iraidc,lecond,iretou)
+      if (ierr.ne.0) GOTO 9000
+*
+* Lecture du champ de jeux
+      call lirobj('CHPOINT ',ichjeu,lecond,iretou)
+      if (ierr.ne.0) GOTO 9000
+*
+* Initialisation de la raideur (totale) de frottement
+*
+      mrigid = 0
+*
+* Traitement des modeles de Coulomb
+*
+      if (icoulo.ne.0) then
+        ri1 = 0
+        meleme = ipp2
+        if (idim .eq. 3) then
+          call frig3C(meleme,iraidc,ichjeu, ri1)
+        else
+          call frig2C(meleme,iraidc,ichjeu, ri1)
+        endif
+        if (icoulo.ge.2) segsup meleme
+        if (ierr.ne.0 .or. ri1.eq.0) goto 9000
+        mrigid = ri1
+      endif
+*
+* Traitement des modeles Frocable
+*
+      if (icable.ne.0) then
+        mmodel = modcab
+* Petit modele unitaire local (a detruire en fin de traitement)
+        n1=1
+        segini,mmode2
+* Option accro 'GLISS'
+        igliss=1
+        DO 500 imod=1,icable
+          imodel = kmodel(imod)
+C*        segact imodel
+          segact,mmode2*mod
+          mmode2.kmodel(1)=imodel
+          do io=1,ivamod(/1)
+            if (tymode(io).eq.'MAILLAGE') go to 510
+          enddo
+          call erreur(16)
+          goto 9000
+ 510      continue
+          ri2 = 0
+          meleme=ivamod(io)
+          call ecrobj('MAILLAGE',meleme)
+          call ecrobj('MMODEL  ',mmode2)
+          call accro(igliss)
+          if (ierr.ne.0) goto 9000
+          call lirobj('RIGIDITE',ri2,1,iretou)
+          if (ierr.ne.0) goto 9000
+c*        segdes imodel (desactive par accro)
+c* On fusionne ri2 dans la rigidite (totale) mrigid
+          if (mrigid.eq.0) then
+            mrigid = ri2
+          else
+            segact,mrigid*mod,ri2
+            nriav  = irigel(/2)
+            nrigel = nriav + ri2.irigel(/2)
+            segadj,mrigid
+            do io = 1, ri2.irigel(/2)
+              do iu = 1, ri2.irigel(/1)
+                irigel(iu,io+nriav) = ri2.irigel(iu,io)
+              enddo
+              coerig(io+nriav) = ri2.coerig(io)
+            enddo
+            segsup ri2
+          endif
+ 500    continue
+        segdes mrigid
+        segsup mmode2
+      endif
+*
+*  traitement des modeles ...
+*
+* ->  Brancher ici le traitement specifique a chaque autre modele de
+*     frottement qui doit fournir la rigidite de frottement associee
+*     qui sera fusionnee dans la rigidite mrigid (cf. modeles frocable)
+*
+*  Fin du traitement :
+*
+      call ecrobj('RIGIDITE',mrigid)
+*      call prrigi(mrigid)
+
+ 9000 CONTINUE
+      mmode1 = modcou
+      segsup,mmode1
+      mmode1 = modcab
+      segsup,mmode1
+*
+      return
+      end
+
+

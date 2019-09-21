@@ -1,0 +1,346 @@
+C MELIM     SOURCE    PV        16/11/17    22:00:43     9180
+      SUBROUTINE MELIM(MATRIK,KCLIM,
+     $     INCX,KS2B,
+     $     KMORS,KISA,
+     $     IMPR,IRET)
+      IMPLICIT REAL*8 (A-H,O-Z)
+      IMPLICIT INTEGER (I-N)
+C***********************************************************************
+C NOM         : MELIM
+C DESCRIPTION :
+C     Ce SP s'occupe de prendre en compte les  conditions
+C     aux limites de type Dirichlet pour un système linéaire
+C     du type Ax=b (avec A utilisant le stockage Morse.
+C     On procède en trois étapes :
+C     1 - on surcharge le second membre (b)
+C         et l'inconnue (x) avec le chpoint des conditions
+C         aux limites
+C     2 - on s'occupe de la matrice Morse (A)
+C         Aux degrés de libertés où il y a des
+C         conditions aux limites     : 1 sur la diagonale
+C                                      0 sur la ligne
+C                                      0 sur la colonne en reportant les
+C                                        produits dans le second membre
+C                                        (sinon perte de symétrie
+C                                         éventuelle de A)
+C     3 - On nettoie la matrice morse A des 0 qu'on vient de lui
+C         rajouter (sous-programme clmors).
+C
+C     2 et 3 peuvent sans doute etre regroupées au prix d'une
+C            perte de lisibilité
+C
+C
+C LANGAGE     : ESOPE
+C AUTEUR      : Stéphane GOUNAND (CEA/DRN/DMT/SEMT/TTMF)
+C               mél : gounand@semt2.smts.cea.fr
+C***********************************************************************
+C APPELES  : KRIPAD, CLMORS
+C***********************************************************************
+C ENTREES            : MATRIK, KCLIM, IMPR
+C ENTREES/SORTIES    : KS2B, INCX
+C SORTIES            : KMORS,KISA,IRET
+C CODE RETOUR (IRET) : 0 si ok
+C                     <0 si problème
+C     MATRIK : pointeur sur segment MATRIK de l'include SMMATRIK
+C              on pioche dedans les informations nécessaires
+C              (différents pointeurs, nb. de ddl...)
+C     KCLIM  : pointeur sur segment MCHPOI de l'include SMCHPOI
+C              chpoint contenant les conditions aux limites de
+C              Dirichlet (valeur imposée).
+C     IMPR   : niveau d'impression
+C     KS2B   : pointeur sur segment IZA de l'include SMMATRIK
+C              vecteur second membre
+C              (ie b dans la résolution de Ax=b).
+C     INCX   : pointeur sur segment IZA de l'include SMMATRIK
+C              vecteur des inconnues
+C              (ie x dans la résolution de Ax=b).
+C     KMORS  : pointeurs sur segment PMORS et IZA de l'include
+C     KISA     SMMATRIK : profil et valeurs de la matrice morse
+C              (ie A dans la résolution de Ax=b).
+C***********************************************************************
+C VERSION    : v1, 20/12/99
+C HISTORIQUE : v1, 01/04/98, création
+C HISTORIQUE :     20/12/99,
+C   Nouvelle signification de NUAN (renumérotation des ddl et non pas
+C   des points)
+C HISTORIQUE : 05/01/00 : non-duplication de la matrice assemblée
+C HISTORIQUE : 09/04/04 : idmatp idmatd,
+C                         la cl dirichlet n'est plus forcément sur la
+C                         diagonale
+C HISTORIQUE :
+C***********************************************************************
+C Prière de PRENDRE LE TEMPS de compléter les commentaires
+C en cas de modification de ce sous-programme afin de faciliter
+C la maintenance !
+C***********************************************************************
+-INC CCOPTIO
+-INC SMELEME
+      POINTEUR ISPGT.MELEME
+-INC SMLENTI
+      POINTEUR DDLPD.MLENTI
+      POINTEUR DDLDP.MLENTI
+*-INC SMLLOGI
+*      SEGMENT MLLOGI
+*      LOGICAL LOGI(JG)
+*      ENDSEGMENT
+*      INTEGER JG
+*      POINTEUR DDLCL.MLLOGI
+-INC SMCHPOI
+      POINTEUR KCLIM.MCHPOI
+-INC SMMATRIK
+      POINTEUR KMORS.PMORS
+      POINTEUR KISA.IZA
+      POINTEUR AMORS.PMORS
+      POINTEUR AISA.IZA
+      POINTEUR KS2B.IZA
+      POINTEUR INCX.IZA
+      POINTEUR IDMATP.IDMAT
+      POINTEUR IDMATD.IDMAT
+*
+      INTEGER IMPR,IRET
+*
+*     .. Variables locales
+*     .. Parameters
+      REAL*8 ZERO,ONE
+      PARAMETER (ZERO=0.0D0, ONE=1.0D0)
+*     ..
+      CHARACTER*8 NOMINC
+      LOGICAL FLINC
+      LOGICAL FLDIA
+*
+      INTEGER I1,IN,ISOUPO,INC,INBI,INBVA
+      INTEGER    N ,NSOUPO,NC ,NBI
+      INTEGER ICOL,INTTT,JNTTT
+      INTEGER      NTTT
+      REAL*8 TEMP
+      LOGICAL LINCX
+C***
+      LINCX=(INCX.NE.0)
+C     On récupère les segments utiles
+      IF (IMPR.GT.5) THEN
+         WRITE(IOIMP,*) 'melim.eso : CL de Dirichlet'
+      ENDIF
+      SEGACT MATRIK
+      MINC =KMINC
+      ISPGT=KISPGT
+      NTTT =KNTTT
+      IDMATP=KIDMAT(1)
+      IDMATD=KIDMAT(2)
+      AMORS=KIDMAT(4)
+      AISA =KIDMAT(5)
+      SEGDES MATRIK
+C     S'il n'y a pas de CL de Dirichlet, on n'a rien à faire
+      IF(KCLIM.EQ.0) THEN
+         SEGINI,KMORS=AMORS
+         SEGDES KMORS
+         SEGINI,KISA=AISA
+         SEGDES KISA
+      ELSE
+C   1) On s'occupe du second membre et de l'inconnue
+C      On parcourt le chpoint un peu comme dans ch2vec.eso
+C      Les DDL ou on applique une condition de Dirichlet
+C      ont un DDLCL(No DDL)=1 et 0 sinon
+         IF (IMPR.GT.6) THEN
+            WRITE(IOIMP,*)
+     $           'Dirichlet sur l''inconnue et le second membre'
+         ENDIF
+         JG=NTTT
+         SEGINI DDLPD
+         SEGINI DDLDP
+         SEGACT KS2B*MOD
+         IF (LINCX) SEGACT INCX*MOD
+         MCHPOI=KCLIM
+         SEGACT MINC
+         NBI=LISINC(/2)
+C In KRIPAD : SEGACT ISPGT
+C             SEGINI MLENTI
+         CALL KRIPAD(ISPGT,MLENTI)
+         SEGDES ISPGT
+         SEGACT IDMATP
+         SEGACT IDMATD
+         SEGACT MCHPOI
+         NSOUPO=IPCHP(/1)
+         DO 1 ISOUPO=1,NSOUPO
+            MSOUPO=IPCHP(ISOUPO)
+            SEGACT MSOUPO
+            NC=NOCOMP(/2)
+            MELEME=IGEOC
+            MPOVAL=IPOVAL
+            SEGACT MELEME
+            SEGACT MPOVAL
+C         NPTI=VPOCHA(/1)
+            DO 11 INC=1,NC
+               NOMINC=NOCOMP(INC)//'    '
+               FLINC=.FALSE.
+C  Repeat..until
+               INBI=1
+ 111           CONTINUE
+               IF (NOMINC.EQ.LISINC(INBI)) THEN
+                  FLINC=.TRUE.
+               ELSEIF (INBI.LT.NBI) THEN
+                  INBI=INBI+1
+                  GOTO 111
+               ENDIF
+               IF (.NOT.FLINC) THEN
+*                  WRITE(IOIMP,*) 'melim.eso : composante ',NOMINC
+*     $                 ,'unknown'
+                  WRITE(IOIMP,*) 'CLIM : component name ',NOMINC
+     $                 ,' not in the matrix'
+                  GOTO 9999
+               ELSE
+                  N=VPOCHA(/1)
+                  DO 112 IN=1,N
+                     I1=LECT(NUM(1,IN))
+                     IF(I1.EQ.0)THEN
+*                        WRITE(IOIMP,*) 'melim.eso : le point ',IN
+*     $                       ,' du ch.'
+*                        WRITE(IOIMP,*) 'n''appartient pas au vec.'
+                  WRITE(IOIMP,*) 'CLIM : point number ',(num(1,IN)),
+     $                       ' unknown ',NOMINC,' not in the matrix'
+                        GOTO 9999
+                     ELSE
+                        IF (MPOS(I1,INBI).EQ.0) THEN
+                     WRITE(IOIMP,*) 'CLIM : point number ',(num(1,IN)),
+     $                          ' unknown ',NOMINC,' not in the matrix'
+                           GOTO 9999
+                        ELSE
+                           IDIAGP=IDMATP.NUAN(NPOS(I1)+MPOS(I1,INBI)-1)
+                           IDIAGD=IDMATD.NUAN(NPOS(I1)+MPOS(I1,INBI)-1)
+C*                        INBVA=NUAN(NPOS(I1)+MPOS(I1,INBI)-1)
+C                     INPT=NUAN(I1)
+C                     INBVA=NPOS(INPT)+MPOS(INPT,INBI)-1
+C                    KVEC.A(INBVA)=KVEC.A(INBVA)+VPOCHA(IN,INC)
+C Je préfère surcharger
+C
+*                        KS2B.A(INBVA)=VPOCHA(IN,INC)
+*                        IF (LINCX) INCX.A(INBVA)=VPOCHA(IN,INC)
+                           KS2B.A(IDIAGD)=VPOCHA(IN,INC)
+                           IF (LINCX) INCX.A(IDIAGP)=VPOCHA(IN,INC)
+                           DDLPD.LECT(IDIAGP)=IDIAGD
+                           DDLDP.LECT(IDIAGD)=IDIAGP
+*                        DDLCL.LOGI(INBVA)=.TRUE.
+                        ENDIF
+                     ENDIF
+ 112              CONTINUE
+               ENDIF
+ 11         CONTINUE
+            SEGDES MSOUPO
+            SEGDES MELEME
+            SEGDES MPOVAL
+ 1       CONTINUE
+         SEGDES MCHPOI
+         SEGDES IDMATD
+         SEGDES IDMATP
+         SEGSUP MLENTI
+         SEGDES MINC
+         IF (IMPR.GT.7) THEN
+            SEGPRT,KS2B
+            IF (LINCX) SEGPRT,INCX
+         ENDIF
+         IF (LINCX) SEGDES,INCX
+C   2) On s'occupe de la matrice :
+C      pour les no de DDL ou on impose une CL dirichlet, il faut :
+C      annuler la ligne correspondante sauf la diagonale qui vaut 1
+C      reporter -colonne*clim sur le second membre
+C      On parcourt donc toute la matrice
+         IF (IMPR.GT.6) THEN
+            WRITE(IOIMP,*) 'Dirichlet sur la matrice'
+         ENDIF
+         SEGINI,KMORS=AMORS
+         SEGINI,KISA=AISA
+         DO 2 INTTT=1,NTTT
+*!            IF (DDLCL.LOGI(INTTT)) THEN
+            IDIAGP=DDLDP.LECT(INTTT)
+            IF (IDIAGP.NE.0) THEN
+C
+C     CL de dirichlet pour la ligne INTTT :
+C     On met 1 sur la diagonale et 0 ailleurs,
+C     le second membre ne change pas
+C
+               FLDIA=.FALSE.
+               DO 21 ICOL=KMORS.IA(INTTT),(KMORS.IA(INTTT+1)-1)
+*!                  IF (KMORS.JA(ICOL).NE.INTTT) THEN
+                  IF (KMORS.JA(ICOL).NE.IDIAGP) THEN
+                     KISA.A(ICOL)=ZERO
+                  ELSE
+                     KISA.A(ICOL)=ONE
+                     FLDIA=.TRUE.
+                  ENDIF
+ 21            CONTINUE
+               IF (.NOT.FLDIA) THEN
+*!                  WRITE(IOIMP,*) 'melim.eso : diag.',INTTT,'inexistante'
+                  WRITE(IOIMP,*) 'melim.eso : diag.',IDIAGP,
+     $                 'inexistante'
+                  GOTO 9999
+               ENDIF
+            ELSE
+C
+C     Ligne INTTT sans condition de dirichlet :
+C     On annule les termes des colonnes liées à une CL dirichlet,
+C     et on reporte le produit colonne*CL au second membre
+C
+               TEMP=ZERO
+               DO 22 ICOL=KMORS.IA(INTTT),(KMORS.IA(INTTT+1)-1)
+                  JNTTT=KMORS.JA(ICOL)
+                  IDIAGD=DDLPD.LECT(JNTTT)
+*!                  IF (DDLCL.LOGI(JNTTT)) THEN
+                  IF (IDIAGD.NE.0) THEN
+*!                     IF (KS2B.A(JNTTT).NE.ZERO) THEN
+*!                     TEMP=TEMP+(KISA.A(ICOL)*KS2B.A(JNTTT))
+                     TEMP=TEMP+(KISA.A(ICOL)*KS2B.A(IDIAGD))
+*!                     ENDIF
+                     KISA.A(ICOL)=ZERO
+                  ENDIF
+ 22            CONTINUE
+               IF (TEMP.NE.ZERO) THEN
+                  KS2B.A(INTTT)=KS2B.A(INTTT)-TEMP
+               ENDIF
+            ENDIF
+ 2       CONTINUE
+         SEGDES KISA
+         SEGDES KMORS
+         SEGDES KS2B
+         SEGSUP DDLPD
+         SEGSUP DDLDP
+      ENDIF
+*
+*     Terminaison normale
+*
+      IRET=0
+      RETURN
+*
+* Format handling
+*
+ 1002 FORMAT(10(1X,1PE11.4))
+*
+* Error handling
+*
+ 9999 CONTINUE
+      IRET=1
+      WRITE(IOIMP,*) 'An error was detected in melim.eso'
+      RETURN
+*
+*     End of MELIM
+*
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

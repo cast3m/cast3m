@@ -1,0 +1,396 @@
+C ITINVC    SOURCE    BP208322  15/06/22    21:19:35     8543
+      SUBROUTINE ITINVC (IPA,IPB,IPRX,IPIX,PROPRE,CONVRG,ITERMX,IPMX)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+************************************************************************
+*
+*                              I T I N V C
+*                              -----------
+*
+* FONCTION:
+* ---------
+*
+*     RESOUDRE, PAR ITERATIONS INVERSES, UN SYSTEME D'EQUATIONS:
+*        |A|.(X) = V.|B|.(X)
+*     |A| ET |B| ETANT 2 'RIGIDITE',
+*     (X) UN 'CHPOINT' A DETERMINER ET
+*     V  UN 'FLOTTANT' EGALEMENT A DETERMINER.
+*
+*     ("ITINVC" VAUT POUR IT-ERATIONS INV-ERSES C-OMPLEXES)
+*
+* MODE D'APPEL:
+* -------------
+*
+*     CALL ITINVC (IPA,IPB,IPRX,IPIX,PROPRE,CONVRG,ITERMX,IPMX)
+*
+* PARAMETRES:   (E)=ENTREE   (S)=SORTIE
+* -----------
+*
+*     IPA     ENTIER    (E)  POINTEUR DE L'OBJET 'RIGIDITE' |A|.
+*     IPB     ENTIER    (E)  POINTEUR DE L'OBJET 'RIGIDITE' |B|.
+*     IPRX    ENTIER    (E)  POINTEUR DE L'OBJET 'CHPOINT' DE DEPART.
+*                       (S)  PARTIE REELLE DEL'OBJET 'CHPOINT' SOLUTION.
+*     IPIX    ENTIER    (S)  PARTIE IMAGINAIRE DE L'OBJET SOLUTION
+*     PROPRE  REEL DP   (S)  TABLEAU CONTENANT DES CARACTERISTIQUES DU
+*                            MODE PROPRE CALCULE. ACTUELLEMENT,
+*                            PROPRE(1) = PARTIE REELLE DU MODE PRORPE,
+*                            PROPRE(2) = (X)T.|B|.(X) , (X) 'CHPOINT'
+*                            SOLUTION,
+*                            PROPRE(3,4,5) DEPL.GEN. REELS SELON X,Y,Z
+*                            PROPRE(6)= PARTIE IMAGINAIRE DU MODE PROPRE
+*                            PROPRE(7)=PARTIE IM. DE XT.|B|.X
+*                            PROPRE(8,9,10) PARTIE IM DES DEP. GEN.
+*     CONVRG  LOGIQUE   (S)  INDIQUE PAR .TRUE. OU .FALSE. SI LA
+*                            CONVERGENCE A EU LIEU OU NON.
+*     ITERMX  ENTIER    (E)  NOMBRE MAXIMUM D'ITERATIONS PERMIS.
+*
+* LEXIQUE: (ORDRE ALPHABETIQUE)
+* --------
+*
+*     DIFREL  REEL SP   VOIR LE S.P. "ITINV1".
+*     IACCEL  ENTIER    NOMBRE D'ITERATIONS CONSECUTIVES EFFECTUEES
+*                       SANS ACCELERATION DE CONVERGENCE.
+*     IPX0    ENTIER    VOIR LE S.P. "ITINV1".
+*     IPX1    ENTIER    VOIR LE S.P. "ITINV1".
+*     IPX2    ENTIER    VOIR LE S.P. "ITINV1".
+*     NBITER  ENTIER    NOMBRE D'ITERATIONS EFFECTUEES.
+*     NUMXBX  ENTIER    NUMERO DE LA DERNIERE ITERATION OU L'ON A
+*                       CALCULE "XT.B.X" POUR 2 'CHPOINT' ITERES
+*                       CONSECUTIFS.
+*     VALPP   REEL DP   VALEUR PROPRE REELLE ASSOCIEE AU 'CHPOINT' SOLUTION.
+*
+* MODE DE FONCTIONNEMENT:
+* -----------------------
+*
+*     METHODE DES ITERATIONS INVERSES:
+*
+*     LA SUITE "(X)I" TELLE QUE:
+*        |A| . (X)I+1 = |B| . (X)I
+*     TEND VERS LA (OU UNE DES) SOLUTION(S) DE:
+*        |A| . (X) = V . |B| . (X)
+*     CORRESPONDANT AU PLUS PETIT  V  SOLUTION (EN VALEUR ABSOLUE) SOUS
+*     RESERVE QUE LE (X)1 DE DEPART N'EST PAS B-ORTHOGONAL AU (X)
+*     SOLUTION.
+*
+* SOUS-PROGRAMMES APPELES:
+* ------------------------
+*
+*     DTCHPO, ITINV1, XTMX, YTX1, RAYLEI, (?), VRFMOD,DEPGE2 ,DTCHPM
+*
+* AUTEUR, DATE DE MODIFICATION:
+* -------------------------
+*
+*     C. LE BIDEAU     JUILLET 2001
+*     Benoit Prabel    mars  2009
+*
+* LANGAGE:
+* --------
+*
+*     FORTRAN77 + ESOPE
+*
+************************************************************************
+*
+-INC CCOPTIO
+-INC SMLMOTS
+-INC SMCHPOI
+-INC CCHAMP
+*
+      REAL*8 PROPRE(*), XRVP, XIVP
+      REAL*8 TRNW1(100),TREPS(100)
+*
+      COMMON/CITINV/ NBITER,IACCEL,NUMAC,IPX2,IPX0,IPX1,IPBX1,
+     C IBBX1,IBBX2,ITPRO,DIFREL
+*
+      LOGICAL CONVRG
+*
+      PARAMETER (INFINI = 9999)
+c     precision sur la norme 2
+*     (rem: pour matrices sym, la precision est de 1.D-5 sur la norme infinie => on est donc bcp + exigeant)
+      PARAMETER (XPREC1 = 1.D-8)
+      PARAMETER (XPREC2 = 1.D-8)
+*
+      IF (IIMPI .EQ. 747) THEN
+         CALL GIBTEM(XKT)
+         INTERR(1)=XKT
+         CALL ERREUR(-259)
+      ENDIF
+*
+*     PREPARATION DES ITERATIONS:
+      IBBX1=0
+      IBBX2 = IPMX
+      IPX2 = IPRX
+      NUMAC = 100
+* bp: on n'accelere pas la convergence pour l instant
+*     car avec des matrices non-sym, la direction du vecteur tourne
+*     => il faudra adapter l'acceleration au cas complexe
+*     car parfois cvge tres lente...
+      NBITER = 0
+      IACCEL = 0
+      NUMXBX = -10
+      X1BX1 = 1.D10
+      IPLMOX=0
+      IPLMOY=0
+      RNW1=1.
+      REPS=1.
+      DIFREL = 1.E10
+      CONVRG = .false.
+C
+C     PREPARATION DES TABLEAUX DONNANT LA CORRESPONDANCE DES NOMS
+C     D INCONNUE DANS X ET MX  STOCKE DANS UN LIST MOT
+C
+      CALL CORRSP(ipa,IPRX,IPMX,IPLMOX,IPLMOY)
+C
+*     -- DEBUT DES ITERATIONS INVERSES -------------------
+*
+      DO 5000 I = 1,ITERMX
+
+      IF (IBBX1.NE.0)  CALL DTCHPO(IBBX1)
+      IBBX1 = IBBX2
+
+      IF (I.GE.2)  CALL COPIE2 (IPX1,IPREC)
+***  réalisation d'une iteration inverse (avec une eventuelle acceleration)
+      CALL ITINV1 (IPA,IPB)
+      IF (IERR .NE. 0) RETURN
+
+***   on ne teste la convergence qu'apres 3 iterations
+      IF (I .GT. 3) THEN
+*
+*       ON RECUPERE DEUX VECTEURS IPREC ET IPX1
+*       1ER VECTEUR DE BASE
+        CALL XTY1 (IPREC,IPREC,IPLMOX,IPLMOX,RNNEC)
+        RNEC = SQRT( ABS(RNNEC))
+        CALL MUCHPO (IPREC, RNEC, IV, -1)
+*
+*       2EME VECTEUR DE BASE
+        CALL XTY1 (IPX1, IV, IPLMOX, IPLMOX, RNX1)
+        CALL ADCHPO (IPX1, IV, IW1, 1.D0, -RNX1)
+        CALL XTY1 (IW1, IW1, IPLMOX, IPLMOX, RNNW1)
+        RNW1 = SQRT( ABS(RNNW1))
+        TRNW1(I)=RNW1
+*
+*       SI 2E VECTEUR DE BASE NUL : 1 VP REELLE simple
+*        IF ((I .GE. 3) .AND. (RNW1 .LT. XPREC1)) THEN
+        IF ((I .GE. 3) .AND. (RNW1 .LT. (XPREC1*RNEC))) THEN
+           CONVRG = .TRUE.
+           GOTO 3001
+        END IF
+        CALL MUCHPO (IW1, RNW1, IW, -1)
+
+*       CRITERE DE CONVERGENCE vers 1 paire de vp complexes conjuguées
+        CALL XTY1 (IPX2, IV, IPLMOX, IPLMOX, P1)
+        CALL XTY1 (IPX2, IW, IPLMOX, IPLMOX, P2)
+        IF (IERR .NE. 0 ) RETURN
+        CALL ADCHPO (IV, IW, IPX4, P1, P2)
+        CALL ADCHPO (IPX2, IPX4, IEPS, 1.D0, -1.D0)
+        CALL XTY1 (IEPS, IEPS, IPLMOX, IPLMOX, RNEPS)
+        IF (IERR .NE. 0 ) RETURN
+        REPS = SQRT(ABS(RNEPS))
+        TREPS(I)=REPS
+*
+*       SI IPX2 appartient au s.e. engendré par (IV,IW) : RETOUR VALEURS PROPRES
+*        IF (RNEPS .LT. 1.E-6) THEN
+*        IF (REPS .LT. (XPREC2)) THEN
+        IF (REPS .LT. (XPREC1*RNEC)) THEN
+           CALL RAYLE2 (IPA,IPB,IV,IW,XRVP,XIVP,IPLMOX,IPLMOY,DELTA,
+     &          IPRX, IPIX, ICVG)
+*                IF ( ABS(DELTA) .GE. 1.D-14) THEN
+           IF ( ABS(DELTA) .GE. 1.D-10) THEN
+                   IF (DELTA .LT. 0.D0) THEN
+*                     cas d une paire de valeur propre Complexe
+                      CONVRG = .TRUE.
+                      GOTO 4000
+                   ELSE
+*                      cas d une valeur propre Réelle simple
+**                     chgt de stratégie concernant l'acceleration de cvgce
+*                      if(NUMAC .ne. 5) then
+*                        NUMAC = 5
+*                        IACCEL = NUMAC - 1
+*                      endif
+*                      GOTO 4900
+*          cas d une valeur propre Réelle simple pas encore assez bien calculée!
+                      if(ICVG .eq. 0)  goto 4900
+                      CONVRG = .TRUE.
+*         cas de 2 valeurs propre Réelle Double
+                      if(ICVG .eq. 2)  GOTO 3002
+*         cas de 2 valeurs propre Réelle simples de meme module!
+                      if(ICVG .eq. 3)  GOTO 3003
+                   END IF
+           ELSE
+*                  cas d une valeur propre Réelle double
+                   CONVRG = .TRUE.
+                   GOTO 3002
+           END IF
+        END IF
+
+
+ 4900 CONTINUE
+*       si l'acceleration de cvgce n'ameliore pas le taux de cvgce, alors on arrete
+*        IF((NUMAC .ne. 100) .and. (IACCEL .EQ. 0)) then
+*           XTAU2 = (LOG(TREPS(I))) - (LOG(TREPS(I-1)))
+*           XTAU1 = (LOG(TREPS(I-1))) - (LOG(TREPS(I-2)))
+*           if(XTAU2 .ge. XTAU1)  then
+*             NUMAC = 100
+*           endif
+*        ENDIF
+*        segdes,MPOVAL,MSOUPO,MCHPOI
+
+
+*       si on a atteint le nbre maxi d iterations on retourne ce que l 'on a
+        IF (NBITER .GE. ITERMX) THEN
+                CONVRG = .FALSE.
+*                GOTO 302
+            CALL RAYLE2 (IPA,IPB,IV,IW,XRVP,XIVP,IPLMOX,IPLMOY,DELTA,
+     &           IPRX, IPIX, ICVG)
+            IF ( ABS(DELTA) .GE. 1.D-10) THEN
+                   IF (DELTA .LT. 0.D0) THEN
+                      GOTO 4000
+                   ELSE
+                      if(XIVP .ne. 0.)  GOTO 3002
+                      GOTO 3001
+                   END IF
+            ELSE
+                   GOTO 3002
+            END IF
+
+        END IF
+
+      NBITER = I
+
+***   cas ou I < 3 iterations
+      ELSE
+        TRNW1(I)=RNW1
+        TREPS(I)=REPS
+
+      END IF
+***   fin des tests de convergence réalisés apres 3 iterations
+*
+*
+ 5000 CONTINUE
+*      write(*,*)'-- FIN DE LA BOUCLE DES ITERATIONS INVERSES --------'
+      CALL DTCHPO(IPX1)
+      GOTO 4000
+
+
+ 3001 CONTINUE
+*     cas d une valeur propre Réelle (simple?) '
+*    ----------------------------
+        TRNW1(I)=RNW1
+        TREPS(I)=1.
+*    -on n'est pas passé par Rayleigh : il faut faire le travail ici
+*     normalisation du vecteur propre IPX2
+      CALL MOTS1(IPLMOT,MOTCLE)
+      call NORMA1(IPX2,IPLMOT,MOTCLE,IPX2)
+*     vecteur propre
+      IPRX = IPX2
+      IPIX = 0
+*     produits
+      CALL MUCPRI(IPX2, IPA, IPAX2)
+      CALL XTY1(IPX2, IPAX2, IPLMOX, IPLMOY, X2AX2)
+      IF (IERR .NE. 0 ) RETURN
+      CALL MUCPRI(IPX2, IPB, IPBX2)
+      CALL XTY1(IPX2, IPBX2, IPLMOX, IPLMOY, X2BX2)
+      IF (IERR .NE. 0 ) RETURN
+*     valeur propre (simple)
+      XRVP = X2AX2 / X2BX2
+      XIVP = 0.D0
+      PROPRE(1) = XRVP
+      PROPRE(6) = XIVP
+*     MASSES GENERALISEES
+      PROPRE(2) = X2BX2
+      PROPRE(7) = 0.D0
+C     INTRODUCTION DES COEF. PI OU 2PI EVENTUELS + calcul DEPGEN
+      CALL MASGEN(IPX2,PROPRE)
+      CALL DEPGEN( IPB, IPX2,PROPRE,IBBX2,IPLMOX,IPLMOY)
+*      write(6,*) 'itinvc trouve lambda=',XRVP
+      GOTO 302
+
+ 3002 CONTINUE
+*     cas d une valeur propre Réelle double
+*    (calculée par Rayleigh) ----
+*     valeur propre (double)
+      PROPRE(1) = XRVP
+      PROPRE(6) = XIVP
+*     masse généralisée (2: 1er vecteur reel , 7: 2eme vecteur reel)
+      CALL MUCPRI(IPRX, IPB, IPBRX)
+      CALL XTY1(IPRX, IPBRX, IPLMOX, IPLMOY, XRBRX)
+      CALL MUCPRI(IPIX, IPB, IPBIX)
+      CALL XTY1(IPIX, IPBIX, IPLMOX, IPLMOY, XIBIX)
+      PROPRE(2) = XRBRX
+      PROPRE(7) = XIBIX
+*      write(6,*) 'itinvc trouve lambda=',XRVP,' et ',XIVP
+      GOTO 302
+*     ...-> reste a prevoir ce cas dans crebas.eso...
+
+ 3003 CONTINUE
+*     cas de 2 valeur propre Réelle simple de meme module
+*    (calculée par Rayleigh) ----
+      PROPRE(1) = XRVP
+      PROPRE(6) = 0.
+*     masse généralisée (2: 1er vecteur reel , 7: 2eme vecteur reel)
+      CALL MUCPRI(IPRX, IPB, IPBRX)
+      CALL XTY1(IPRX, IPBRX, IPLMOX, IPLMOY, XRBRX)
+      PROPRE(2) = XRBRX
+      PROPRE(7) = 0.
+C     INTRODUCTION DES COEF. PI OU 2PI EVENTUELS + calcul DEPGEN
+      CALL MASGEN(IPRX,PROPRE)
+*      CALL DEPGEN( IPB, IPRX,PROPRE,IBBX2,IPLMOX,IPLMOY)
+*      write(6,*) 'itinvc trouve lambda=',XRVP,' (et ',(-1.*XRVP),')'
+      GOTO 302
+
+ 4000 CONTINUE
+*     cas d une paire de valeur propre Complexe'
+*       (calculée par Rayleigh) ----
+*     valeur propre lamdba
+      PROPRE(1) = XRVP
+      PROPRE(6) = XIVP
+*     masse complexe générlaisée
+      CALL MUCPRI(IPRX, IPB, IPBRX)
+      CALL XTY1(IPRX, IPBRX, IPLMOX, IPLMOY, XRBRX)
+      CALL XTY1(IPIX, IPBRX, IPLMOX, IPLMOY, XIBRX)
+      CALL MUCPRI(IPIX, IPB, IPBIX)
+      CALL XTY1(IPRX, IPBIX, IPLMOX, IPLMOY, XRBIX)
+      CALL XTY1(IPIX, IPBIX, IPLMOX, IPLMOY, XIBIX)
+      PROPRE(2) = XRBRX - XIBIX
+      PROPRE(7) = XIBRX + XRBIX
+*      write(*,*) 'itinvc trouve lambda=',XRVP,' + i',XIVP
+      GOTO 302
+
+*
+*     IMPRESSIONS
+*
+  302 CONTINUE
+*
+      IF (IIMPI.EQ.2) WRITE (IOIMP,2000) NBITER
+ 2000 FORMAT (//,1X,I3,' ITERATIONS INVERSES ONT ETE EFFECTUEES.'///)
+      IF (IIMPI.EQ.30) WRITE(IOIMP,1000) (PROPRE(I),I=1,10)
+ 1000 FORMAT(/10X,'SBR  ITINVC',/10X,5(E12.5,1X))
+*
+*      write(6,*) 'i  Residu1  Residu2'
+*      do ii=1,I
+*        write(6,*) ii,(TRNW1(ii)),(TREPS(ii))
+*      enddo
+
+*
+*     SUPPRESSION DES 'CHPOINT' DE TRAVAIL:
+      IF ( (IACCEL + 1) .EQ. NUMAC) THEN
+         CALL DTCHPO (IPX0)
+      END IF
+      CALL DTCHPO (IBBX2)
+      MLMOTS =IPLMOX
+      MLMOT1 =IPLMOY
+      SEGSUP MLMOTS,MLMOT1
+*
+      IF (IIMPI .EQ. 30) THEN
+         CALL GIBTEM(XKT)
+         INTERR(1)=XKT
+         CALL ERREUR(-259)
+         CALL GIBTEM(XKT)
+         INTERR(1)=XKT
+         CALL ERREUR(-259)
+      END IF
+*
+      END
+
+
+
+

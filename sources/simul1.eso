@@ -1,0 +1,526 @@
+C SIMUL1    SOURCE    PV        16/11/17    22:01:29     9180
+      SUBROUTINE SIMUL1 (FREQ,NBMODE,IPRIGI,IPMASS,  IPSOLU, LIMAGE)
+
+************************************************************************
+*
+*                             S I M U L 1
+*                             -----------
+*
+* FONCTION:
+* ---------
+*
+*     APPELE PAR LE SOUS-PROGRAMME "SIMULT".
+*     DETERMINE UNE SERIE DE MODES PROPRES DONT LES FREQUENCES SONT
+*     VOISINES D'UNE VALEUR DONNEE.
+*
+* MODE D'APPEL:
+* -------------
+*
+*     CALL SIMUL1 (FREQ,NBMODE,IPRIGI,IPMASS,  IPSOLU)
+*
+* PARAMETRES:   (E)=ENTREE   (S)=SORTIE
+* -----------
+*
+*     FREQ    REEL DP   (E)  FREQUENCE AUTOUR DE LAQUELLE ON CHERCHE
+*                            DES FREQUENCES PROPRES.
+*     NBMODE  ENTIER    (E)  NOMBRE DE MODES PROPRES DEMANDES.
+*     IPRIGI  ENTIER    (E)  POINTEUR SUR L'OBJET 'RIGIDITE' DE
+*                            SOUS-TYPE "RIGIDITE".
+*     IPMASS  ENTIER    (E)  POINTEUR SUR L'OBJET 'RIGIDITE' DE
+*                            SOUS-TYPE "MASSE".
+*     IPSOLU  ENTIER    (S)  POINTEUR SUR L'OBJET 'SOLUTION' CONTENANT
+*                            LES MODES PROPRES CALCULES.
+*     LIMAGE  (E)  LOGICAL =vrai si on souhaite garder les eventuelles
+*                           valeurs propres negatives
+*                           (matrice K non definie positive par ex.)
+*
+* MODE DE FONCTIONNEMENT:
+* -----------------------
+*
+*   . SELON LA MEMOIRE, ON SE DONNE UN NOMBRE MAX DE VECTEURS X
+*   . PAR CYCLE, ON REALISE LES OPERATIONS SUIVANTES :
+*     1. (DECALE) DECALAGE DE LA MATRICE DE RIGIDITE K'= K -(2*pi*freq)^2*M
+*     2. (LANCZO) CALCUL DES VECTEURS K'-ORTHOGONAUX DE LANCZOS = X
+*                 (eventuellement M-orthogonaux a qq Z deja convergés)
+*     3. (SIMU21) CALCUL DES VALEURS et VECTEURS PROPRES DU PROBLEME REDUIT
+*     4. (SIMUL3) DEDUCTION DES FREQUENCES PROPRES DU PROBLEME PHYSIQUE,
+*                 RECOMBINAISON DES VECTEURS PROPRES Z=X*PHI,
+*                 CALCUL DU RESIDU,
+*                 ORTHOGONALISATION % MODES DEJA CONVERGES
+*     5. (SIMUL6) CREATION DE L'OBJET "SOLUTION" DE CE CYCLE
+*     6. (SIMUL7) CALCUL DES MASSE ET DEP GENERALISES ET NUMERO DE MODES
+*     7. (STRATE) ADJONCTION DES MODES A CEUX DES CYCLES PRECEDENTS,
+*                 CALCUL D'UN SHIFT A APPLIQUER AU PROCHAIN CYCLE,
+*                 VERIFICATION DE LA COMPLETUDE DU SPECTRE
+*
+* DESCRIPTION DES VARIABLES : cf. commentaires au cours du programme
+* --------------------------
+*
+* CREATION, MODIFICATIONS :
+* ------------------------
+*
+* CREATION : PASCAL MANIGOT        22 AVRIL 1985
+* REFONTE  : THIERRY CHARRAS, BENOIT PRABEL 2010
+*
+* LANGAGE : ESOPE (FORTRAN77)
+*
+************************************************************************
+*
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+-INC CCREEL
+-INC CCOPTIO
+-INC SMLMOTS
+-INC SMRIGID
+-INC SMTABLE
+-INC SMVECTD
+-INC SMCHPOI
+-INC SMLENTI
+c -INC SMLCHPO
+c -INC SMSOLUT
+-INC SMMATRI
+*
+*     REGOUPEMENT DE RENSEIGNEMENTS POUR "LANCZO" et "SIMUL.":
+      COMMON/CLANCZ/ IPV1,IPMV1,IPLMOX,IPLMOY
+      COMMON/CSIMUL/ W2SHIF,XPREC21,mvecri,IPVECX,IPVECZ,IPMZ,IPFREZ
+*
+      REAL*8  W2SHIF,FREQ,DEUXPI,XPREC21
+      LOGICAL LIMAGE,LIMAG2
+      LOGICAL lshift
+      INTEGER OOOVAL
+*
+      PARAMETER (DEUXPI = (2.D0*XPI))
+*
+*
+*     -- INITIALISATIONS --
+*
+*     du temps cpu passé dans SIMUL1 et les subroutines appelés
+      call gibtem(xkt)
+      xkt1 = 0.D0
+
+*     de la precision demandée a simu21 a simul3
+      XPREC21 = EPSLON(1.0D0)
+      XPREC21 = XPREC21**0.5
+      XPREC21 = max(XPREC21,1.D-8)
+
+*     liste des lambdas, des vect p, des permutations du cycle en cours
+      IPVALP = 0
+      IPHI = 0
+      IPERM = 0
+*     nombre de vect p converges pour le cycle / le shift en cours
+      nbonve = 0
+      nbonZ = 0
+*     solution du cycle en cours / cumul
+      IPSOLU = 0
+      idist  = 0
+*     cumul des vect p converges Z, et produit M*Z / |Z^T*M*Z|
+      IPVECZ = 0
+      IPMZ = 0
+*     nombre total de vect p ayant deja converges
+      nvecZ = 0
+      ifini  = 0
+
+*     decalage spectral initial =shifti  et courant=FREQ(->W2SHIF)
+      lshift = .false.
+      W2SHIF = (DEUXPI * FREQ) ** 2
+      IF (LIMAGE) THEN
+         W2SHIF = SIGN(W2SHIF,FREQ)
+      ENDIF
+      shifti = freq
+      frshif = shifti
+      CALL DECALE (IPRIGI,IPMASS,W2SHIF, IPKW2M)
+      IPKWM0= IPKW2M
+
+*     vecteur aleatoire V et M*V
+      call aleat1(IPKW2M,IPV1)
+      CALL MUCPRI(IPV1,IPMASS,IPMV1)
+      CALL CORRSP(IPKW2M,IPV1,IPMV1,IPLMOX,IPLMOY)
+      CALL INITFL(IPKW2M,IPMASS,IPMV1,IPV1,IFLU)
+
+*ajout bp 06/01/2012:
+*     M est symetriques, mais est elle définie positive?
+      CALL DIAGN1(IPMASS,nvp0M)
+*     correction pour elements fluides (inconnue PI mise à 0 via INITFL)
+c       nvp0M = nvp0M - IFLU
+*     bp 10/01/2012: nvp0M et NEMSM ne semblent pas bien calculés ...
+*     (resultats dependant machine -> cf. dyna7.dgibi)
+*     on propose la solution qui suppose que nvp0M si M est LIQUIDE
+      if(IFLU.gt.0) nvp0M=0
+*     M est elle singuliere ?
+      MRIGID=IPMASS
+      segact,MRIGID
+      MMATRI=ICHOLE
+      segdes,MRIGID
+      segact,MMATRI
+      NENSM = NENS
+      segdes,MMATRI
+*     K est symetriques, mais est elle définie positive?
+      CALL DIAGN1(IPRIGI,nvp0K)
+      if(iimpi.ge.5) write(6,*) 'nbre de vp<0 pour M (',IPMASS,') =',
+     &               nvp0M,' et K (',IPRIGI,') =',nvp0K
+      IF (nvp0M.ne.0.and.nvp0K.ne.0) THEN
+        write(6,*) 'AU MOINS L UNE DES 2 MATRICES (MASSE OU RIGIDITE)'
+        write(6,*) 'DOIT ETRE DEFINIE POSITIVE POUR GARANTIR UN BON '
+     &    ,'FONCTIONNEMENT DE VIBR SIMUL !'
+        write(6,*) 'L EXECUTION CONTINUE BIEN QUE '
+     &   ,'LA NUMEROTATION CORRECTE SOIT IMPOSSIBLE...'
+c       on aurait pu faire une erreur ici car la numerotation est vitale
+c       dans strate et le numero donné par simul7 est necessairement faux...
+c         call ERREUR(21)
+      ENDIF
+
+*ajout bp 13/05/2011: on laisse simul3 calculer toutes les val p >0 et <0.
+*     strate fera eventuellement le tri (si .not.limage)
+*     en fonction de nvp0 (= numero de la dernière val p negative)
+      LIMAG2=.true.
+      IF (LIMAGE) THEN
+        nvp0 = 0
+      ELSE
+        if (nvp0M.eq.0) then
+          nvp0 = nvp0K
+        elseif(nvp0K.eq.0) then
+          nvp0 = nvp0M
+        else
+c         dans ce cas on met nvp0 a 0
+          nvp0 = 0
+        endif
+*       => il y a donc nvp0 valeurs propres lambda < 0
+*       on inclut les mode de corps rigides (tq lambda=0)
+      ENDIF
+c       if(iimpi.ge.4) write(6,*) '=> nvp0=',nvp0
+
+*     besoin de M-orthogonaliser par rapport aux modes deja convergés ?
+      Northo = 0
+
+*     TCPU pour decomposer K^shift = LDL^T  et creer V aleat
+      xktale=0.D0
+      call gibtem(xktale)
+      xkt1 = xkt1 + xktale
+      xktal1 = xktale
+
+*     maxmem=taille memoire , inc=nombre d'inconnues du pb
+      maxmem=oooval(1,1)
+      mchpoi=IPV1
+      segact mchpoi
+      inc=0
+      do iou=1,ipchp(/1)
+        msoupo=ipchp(iou)
+        segact msoupo
+        mpoval=ipoval
+        segact mpoval
+         inc=inc + vpocha(/1)*vpocha(/2)
+        segdes mpoval,msoupo
+      enddo
+      segdes mchpoi
+
+*     incvrai = nombre d'inconnues du pb independantes
+*     (recopié depuis chole.eso et simplifié..?)
+      MRIGID=IPKW2M
+      segact,MRIGID
+      MMATRI=ICHOLE
+      segdes,MRIGID
+      segact,MMATRI
+      MILIGN=IILIGN
+      segdes,MMATRI
+      segact,MILIGN
+      NBLAG=0
+c     on espere qu'il faut bien regarder tout le tableau ITTR
+c     (boucle + compliqué dans chole.eso)
+      NITTR=ITTR(/1)
+      do II=1,NITTR
+        IF(ITTR(II).NE.0) NBLAG=NBLAG+1
+      enddo
+      segdes,MILIGN
+      incvrai = inc - (3*NBLAG/2)
+c     il faut egalement deduire le nombre d'inconnu PI
+      incvrai = incvrai - IFLU
+c     ainsi que le nombre NENSM de valeur propre infinie (M singuliere)
+c     (rem bp : cela ne semble pas suffire au calcul de incvrai
+c      NENSM n'est pas toujours exact...? ou mauvais raisonnement...?)
+      incvrai = incvrai - NENSM
+      if(iimpi.ge.5) write(6,*)'incvrai=inc-1.5*NBLAG-IFLU-NENSM'
+     &                         ,incvrai,inc,NBLAG,IFLU,NENSM
+
+*     Nbmode = nombre de modes recherchés au total
+c       Nbmode=min(Nbmode,incvrai)
+      if (incvrai.lt.Nbmode) then
+        write(6,*) ' simul1 : nombre de modes recherches ',
+     $             '> nombre d inconnues independantes'
+        Nbmode = incvrai
+        write(6,*) ' on reduit le nombre de modes recherches a ',Nbmode
+      endif
+*     nvecma = nombre de vecteurs X max. % memoire
+      Nvecma= maxmem /inc / 30
+*     nombre de cycle a réaliser
+      nfois= Nbmode / Nvecma +1
+      nfois4 = nfois * 1000
+cbp: 32*Nbmode car pb lorsque Nbmode=1 et mode multiple!
+      nfois4 = min(nfois4,32*Nbmode)
+      Nvecma= min(inc,Nvecma)
+*     Nmod = nombre de modes recherchés / cycle
+      Nmod= min(Nbmode,Nvecma/2)
+      Nbmode0=Nbmode
+*     Nmodopt = nombre de mode optimal % efficacité tcpu, Nmodma = limite
+      Nmodopt = Nmod
+      Nmodma = Nmod
+*     Nmodcyc = nombre de modes / cycle demandés par l utilisateur
+      CALL LIRENT(Nmodcyc,0,IRETOU)
+      if (IRETOU.ne.0) then
+        Nmod    = Nmodcyc
+        Nmodopt = Nmodcyc
+      endif
+
+      if (iimpi.ge.4) then
+        write(6,*) '============================================='
+        write(6,*) ' VIBR SIMUL : METHODE DE LANCZOS avec Cycles '
+        write(6,*) '============================================='
+        write(6,*) ' taille memoire , nb inconnues (vraies)',
+     $              maxmem,inc,' (',incvrai,')'
+        write(6,*) ' nbre maxi de vecteurs en simultanée ' , nvecma
+        write(6,*) ' nbre modes recherchés et /cycle ',Nbmode,Nmod
+        write(6,*) ' nbre de cycle mini , maxi ' , nfois,nfois4
+        write(6,*) '============================================='
+        write(6,*) ' icycle |  Nbre de modes   freq    ',
+     $             '  | Nbre de modes  | Nbre de modes '
+        write(6,*) ' icycle |  cherchés        shift   ',
+     $             '  | trouvés        | total'
+      endif
+      if(iimpi.ge.6) write(6,*) 'precision demandee a simu21=',XPREC21
+*
+*
+*-----Cycle de Lanczos------------------------------------------------*
+*
+      do icycle=1,nfois4
+
+      if (iimpi.ge.5) then
+        write(6,*) '__________________________________________________'
+        write(6,*) 'Simul1: icycle  nmod W2SHIF', icycle, Nmod, W2SHIF
+      endif
+
+*
+*     ------------------------------
+*     -- INITIALISATIONS DIVERSES --
+*
+*     decalage spectral + vecteur initial aleatoire
+      if (icycle.ne.1) then
+cbp10/2010 : ipsolu mis a 0 a tous les cycles (pas seulement si on shifte)
+c            mais nbonZ = nbre de mode pour ce shift (=plusieurs cycles)
+c         nbonZ = 0
+        IPSOLU = 0
+*       strate peut avoir changé Nbmode et  IPKW2M
+        Nbmode =  Nbmode0
+        if (lshift) then
+           CALL DECALE(IPRIGI,IPMASS,W2SHIF, IPKW2M)
+           IPKWM0= IPKW2M
+           lshift = .false.
+            nbonZ = 0
+c             IPSOLU = 0
+*          l utilisateur 'force' le nombre de modes / cycle
+           if (IRETOU.ne.0) then
+              Nmod    = Nmodcyc
+              Nmodopt = Nmodcyc
+           endif
+        endif
+        call aleat1(IPKW2M,IPV1)
+        CALL MUCPRI (IPV1,IPMASS,  IPMV1)
+        CALL CORRSP(IPKW2M,IPV1,IPMV1,IPLMOX,IPLMOY)
+        CALL INITFL(IPKW2M,IPMASS,IPMV1,IPV1,IFLU)
+      endif
+      IF(IERR.NE.0) RETURN
+*
+*     verrue pour le cas ou l utilisateur force le nombre de modes/cycle
+      icyc1  = icycle
+      if(IRETOU.ne.0) icyc1=1
+
+*
+*     ce sous programme na plus raison d etre: a supprimer prochainement
+*      CALL SIMUL0
+*
+
+*     ------------------------------------
+*     -- CALCUL DES VECTEURS DE LANCZOS --
+*
+      call gibtem(xkt)
+      xkt1 = xkt1 + xkt
+*     on cherche a obtenir Nmod modes Z sans depasser nvecma vecteurs X
+      CALL LANCZO(IPKW2M,IPMASS,Nbmode,Nmod,Nvecma,Nmodopt
+c      $     ,xktal1,iflu,nbonve,IPVALP,IPHI,IPERM,icyc1)
+     $     ,xktal1,iflu,nbonve,IPVALP,IPHI,IPERM,icyc1,Northo)
+*     on a obtenu nbonve candidats a devenir modes : IPVALP, X*PHI
+      xkt1 = xkt1 + xktal1
+      xktal1 = xktale
+      IF(IERR.NE.0) RETURN
+
+*
+*     ----------------------------------------------------
+*     -- W2FREQ POUR LES VALEURS PROPRES                --
+*     -- RECOMBINAISON DES VECTEURS PROPRES Z = [X].PHI --
+*     -- CALCUL DU RESIDU (et test de convergence associée) --
+*     -- eventuellement, raffinement, purge des Z
+*        et elimination des modes deja trouves          --
+*     -- CREATION DE IPSOLU de ce cycle                 --
+*
+      Nramax = Northo
+      CALL SIMUL3 (IPKW2M,IPMASS,IPVALP,IPHI,IPERM,Nmod,nbonve,
+     $             Nramax,IPSOLU,LIMAG2)
+*     on a retenu pour ce cycle nbonve modes
+*     soit pour ce shift nbonZ modes stockés dans IPSOLU
+*     et au total l ensemble des vecteurs modaux est stocké dans IPVECZ
+      nbonZ = nbonZ + nbonve
+      call gibtem(xkt3)
+      xkt1 = xkt1 + xkt3
+      if (iimpi.ge.6) then
+        write(6,*) ' temps passé dans simul3 ' , xkt3
+        write(6,*) ' Modes OK pour ce cycle, ce shift',nbonve,nbonZ
+     $       ,' / ',Nmod
+      endif
+      IF(IERR.NE.0) RETURN
+
+
+C
+C     ---------------------------------------------------------
+C     -- CALCULS MASSE GEN. ET DEPL. GEN. ET NUMERO DE MODES --
+c
+c     (seulement si on a trouvé des modes supplémentaires...)
+      if (nbonve.gt.0) then
+        CALL SIMUL7(IPSOLU,IPMASS,IPKW2M,W2SHIF,IPLMOX,IPLMOY,IFLU)
+        call gibtem(xkt7)
+        xkt1 = xkt1 + xkt7
+        if(iimpi.ge.6)  write(6,*) ' temps passé dans simul7 ' , xkt7
+        IF(IERR.NE.0) RETURN
+      endif
+
+c     petit message
+      if (iimpi.ge.4)  then
+           WRITE(6,605) icycle,Nmod,frshif,nbonZ,(nvecZ + nbonZ)
+ 605       FORMAT(2X,I5,2X,'|',2X,I5,8X,F12.3,3X,I5,10X,I5)
+      endif
+
+c
+C     ---------------------------------------------------------
+c     -- faut-t-il cycler ? quel shift appliquer? --
+c
+c     --on a trouvé tous les modes necessaires pour ce shift :
+c       on recommence un autre cycle avec un shift determine par strate
+c       et pour Nmod modes (estime optimum % temps cpu) < Nmodma
+        Nmod = min(Nmodopt,Nvecma/2)
+        Nmodma = int(1.05*Nmod)+1
+c
+c     -- strate :
+c        -ajoute les modes de ce cycle (ipsolu) aux precedents (idist),
+c        +si besoin,
+c        -definit la direction de recherche de modes manquants,
+c        -calcule un shift a appliquer au prochain cycle,
+c        -verifie la completude du spectre
+c
+         frtmp = frshif
+c
+      call strate(IPSOLU,Nmodma,Nbmode,frtmp,Nmod,ifini
+     $                  ,shifti,idist,nbonZ,icycle,Northo
+     $                  ,IPRIGI,IPMASS,IPKW2M,nvp0,IFLU,incvrai)
+      IF(IERR.NE.0) RETURN
+c
+*     on a trouvé nbonZ modes pour ce shift qui s'ajoutent aux autres
+      nvecZ = nvecZ + nbonZ
+
+c       msolut = ipsolu
+*     si strate decide qu on shifte...
+c       if (frtmp.ne.frshif) then
+      if ((frtmp.ne.frshif).and.(ifini.ne.1)) then
+         frshif = frtmp
+         W2SHIF= deuxpi * frshif
+         W2SHIF= W2SHIF * W2SHIF
+         lshift = .true.
+c        il est possible que strate ait modifié tout seul IPKW2M
+c        dans ce cas pas besoin de re-shifter (evite une factorisation)
+         if (IPKWM0.ne.IPKW2M) then
+            IPKWM0= IPKW2M
+cbp10/2010 : ipsolu mis a 0 a tous les cycles (pas seulement si on shifte)
+c            mais nbonZ = nbre de mode pour ce shift (=plusieurs cycles)
+            nbonZ = 0
+c             IPSOLU = 0
+            lshift = .false.
+         endif
+      endif
+
+      call gibtem(xktstr)
+      xkt1 = xkt1 + xktstr
+      if(iimpi.ge.6) write(6,*) ' temps passé dans strate ' , xktstr
+
+c
+C     ---------------------------------------------------
+c     --       UN PEU DE MENAGE  et SORTIE ?           --
+*
+*     -- DESTRUCTION DES OBJETS DE TRAVAIL de ce shift --
+*
+*     on detruit les rigidites de ce cycle
+      if(lshift.or.(ifini.eq.1))  CALL DTRIGI(IPKW2M)
+      MLMOTS=IPLMOX
+      MLMOT1=IPLMOY
+      SEGSUP,MLMOTS,MLMOT1
+*
+*     -- DESTRUCTION DES OBJETS DE TRAVAIL de ce cycle --
+*
+*     on detruit les vecteurs de Lanczos X de ce cycle
+      mlent1=IPVECX
+      segact mlent1
+      do iou=1,mlent1.lect(/1)
+        mvect1=mlent1.lect(iou)
+        segsup,mvect1
+      enddo
+      segsup mlent1
+*
+*     ---ON PENSE AVOIR GAGNÉ : ON QUITTE ---
+*
+         if(ifini.eq.1) goto 999
+
+
+      enddo
+*-----fin de la boucle des Cycles de Lanczos--------------------------*
+
+
+ 999  continue
+*
+*     -- DESTRUCTION DES OBJETS DE TRAVAIL communs a tous les cycles --
+*
+*     on detruit les modes convergés Z contenus dans IPVECZ
+      mlent1=IPVECZ
+      segact,mlent1
+      do iou=1,mlent1.lect(/1)
+        mvect1=mlent1.lect(iou)
+        segsup,mvect1
+      enddo
+      segsup,mlent1
+      IPVECZ = 0
+*     on detruit les produits convergés M*Z/ZTMT contenus dans IPMZ
+      mlent1=IPMZ
+      segact,mlent1
+      do iou=1,mlent1.lect(/1)
+        mvect1=mlent1.lect(iou)
+        segsup,mvect1
+      enddo
+      segsup,mlent1
+
+      call gibtem(xkt)
+      xkt1 = xkt1 + xkt
+      write(6,*) ' temps passe dans VIBR SIMUL =',xkt1,' cs'
+      if(iimpi.ge.4)
+     &   write(6,*) '============================================='
+
+      return
+*
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+

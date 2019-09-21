@@ -1,0 +1,2217 @@
+C YTCLSF    SOURCE    GF238795  18/02/01    21:16:43     9724
+      SUBROUTINE YTCLSF(CHHH,NOMPR)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+C***********************************************************************
+C
+C  CET OPERATEUR DISCRETISE TOUT
+C
+C  SYNTAXE :
+C  ---------
+C
+C  s m = OPER $mod LSMOT1 LSMOT2 <OPTION>
+C             <TRANS>  DT  SCHT TN <UN>  <TN-1 <UN-2>>
+C             <PERM>            TN <UN>
+C             <PROJ>   DT  SCHT TN <UN>  <TN-1 <UN-2>>
+C             <COEF1 <COEF2 <COEF3>>>
+C
+C
+C   OPTIONs  LINE     MACRO    QUAF     LINB     ISOQ
+C            CENTREP0 CENTREP1 CENTRE   MSOMMET  RIGIDITE MDIA
+C            CENTREE  SUPG     SUPGDC   CMD a    CONS     STABP
+C            xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx
+C
+C   SCHT     EUL_EXPL EUL_IMPL CN       CNG      BDF2     SEMI b
+C
+C
+C
+C  COEFFICIENTS :
+C  --------------
+C
+C
+C  ALF  (SCAL DOMA)  DIFFUSIVITE THERMIQUE
+C       (SCAL ELEM)
+C       (SCAL NOEU)
+C
+C  INCONNUES :
+C  -----------
+C
+C   TN                 CHAMP DE TEMPERATURE
+C   UN                 CHAMP DE VITESSE
+C   PN                 CHAMP DE PRESSION
+C
+C   INCOD Type inconnue duale : VITEsse TEMPerature ou PRESsion
+C   MPRE  Type pression       : CENTRE CENTREP1 CENTREP0 MSOMMET
+C
+C   IHV=0 SCALAIRE
+C   IHV=1 VITESSE
+C
+C   IKAS = 1   KMAB  calcul B   (Div U)
+C   IKAS = 2   KMBT  calcul Bt  (Grad p)
+C   IKAS = 3   KBBT  calcul B assemble B et Bt
+C
+C   TTRAN Transitoire/permanent VRAI/FAUX
+C   TDFDT on discretise dfdt => TTRAN vrai sinon erreur
+C         (en permanent pour NS TDFDT faux)
+C         (en transitoire pour LAPN TDFDT faux)
+C   TPROJ Projection => TTRAN vrai
+C
+C
+C************************************************************************
+
+-INC CCOPTIO
+-INC CCREEL
+-INC CCGEOME
+-INC SMCOORD
+-INC SMLENTI
+      POINTEUR MLENT4.MLENTI
+-INC SMLMOTS
+-INC SMMODEL
+-INC SMELEME
+      POINTEUR IGEOM.MELEME,MELEMS.MELEME,MELEMC.MELEME,MELEMP.MELEME
+      POINTEUR MELEM2.MELEME
+      POINTEUR MELEMA.MELEME,MELSTB.MELEME
+-INC SMCHPOI
+      POINTEUR MTETA1.MPOVAL,MTETA2.MPOVAL,MTETA3.MPOVAL,MTETA4.MPOVAL
+-INC SMTABLE
+      POINTEUR MTABZ.MTABLE
+-INC SIZFFB
+      POINTEUR IZF1.IZFFM,IZH2.IZHR,IZW.IZFFM,IZWH.IZHR
+      SEGMENT SAJT
+      REAL*8 AJT(IDIM,IDIM,NPG),RF1(NP,MP,IDIM),SM1(NP,IDIM)
+      REAL*8 TN1(NP,IDIM),TN2(NP,IDIM)
+      REAL*8 WT(NP,NPG),WS(NP,NPG)
+      ENDSEGMENT
+-INC SMRIGID
+C-INC SMMATRIK
+C*******************************************************************
+C
+      SEGMENT MATRIK
+      REAL*8  COEMTK(NMATRI)
+      INTEGER JRIGEL(NRIGE,NMATRI)
+      INTEGER KSYM,KMINC,KMINCP,KMINCD,KIZM
+      INTEGER KISPGT,KISPGP,KISPGD
+      INTEGER KNTTT,KNTTP,KNTTD
+      INTEGER KIDMAT(NKID)
+      INTEGER KKMMT(NKMT)
+      ENDSEGMENT
+
+      SEGMENT JMATRI
+      CHARACTER*8 LISPRI(NBMF),LJSDUA(NBMF)
+      INTEGER LIZAFM(NBSOUS,NBMF)
+      INTEGER KSPGP,KSPGD
+      ENDSEGMENT
+      POINTEUR JMATRS.JMATRI,JMATR1.JMATRI,JMATR2.JMATRI,JMATR3.JMATRI
+
+C Stokage matrices elementaires non assemblees (valeurs)
+      SEGMENT IZAFM
+      REAL*8  AM(NBEL,NP,MP)
+      ENDSEGMENT
+      POINTEUR IPM1.IZAFM,IPM2.IZAFM,IPM3.IZAFM,IPM4.IZAFM
+
+C*******************************************************************
+      POINTEUR IPM.IZAFM
+-INC SMCHAML
+
+      LOGICAL TLAPN,TDFDT,TCONV,TSOUR,TECHI,TMDIA,TMASS,TKBBT,TVNIP
+      LOGICAL ICAL2,ICAL3,TVITP,TTRAN,TPROJ,TLINCO
+      LOGICAL XDIAG,XPG,XTV,XTG,XBDF
+      LOGICAL XRIG,XCONS
+      CHARACTER*8 CHHH,TYPE,NOM,NOM0,CHAI,SCHT,NOMPER,NOMPR,MPRE
+      CHARACTER*4 INCOD
+      CHARACTER*4 NOMI(3),NOMA(3),NOMP(3),NOMD(3)
+      PARAMETER (NBH=7,NBO=24)
+      CHARACTER*8 LSCHE(NBH),LSOPT(NBO)
+      DATA LSOPT /'LINE    ','MACRO   ','QUAF    ','LINB    ',
+     & 'ISOQ    ','MMDIAGO ','RGDT    ','CONS    ','TRANS   ',
+     & 'PERM    ','PROJ    ','STABP   ','        ','        ',
+     & 'CENTRE  ','CENTREP0','CENTREP1','MSOMMET ','        ',
+     & '        ','CMD     ','CENTREE ','SUPGDC  ','SUPG    '/
+      DATA LSCHE /'EUL_EXPL','EUL_IMPL','TVISQ   ','SEMI    ',
+     &            'CN      ','CNG     ','BDF2    '/
+      DIMENSION ICOEF(4),SU(3)
+      REAL*8 CMD
+C*****************************************************************************
+CTCLSF
+      NOMPER=NOMPR
+c     write(6,*)' DEBUT YTCLSF appele par ',NOMPER
+      NBMF=1
+      IDCEN=1
+
+C KPOIN = 0->SOMMET 1-> FACE     2-> CENTRE  3-> CENTREP0 4-> CENTREP1 5-> MSOMMET
+C KPOIND support dual du schéma d'intégration
+      KPOIND=0
+
+      TVNIP=.FALSE.
+      TPROJ=.FALSE.
+      TTRAN=.FALSE.
+      TLAPN=.FALSE.
+      TDFDT=.FALSE.
+      TCONV=.FALSE.
+      TSOUR=.FALSE.
+      TECHI=.FALSE.
+      TMDIA=.FALSE.
+      TMASS=.FALSE.
+      TKBBT=.FALSE.
+      TVITP=.FALSE.
+      CMD=0.D0
+
+      L=0
+ 21   CONTINUE
+      L=L+1
+      IF(CHHH(L:L).EQ.'T')TDFDT=.TRUE.
+      IF(CHHH(L:L).EQ.'L')TLAPN=.TRUE.
+      IF(CHHH(L:L).EQ.'C')TCONV=.TRUE.
+      IF(CHHH(L:L).EQ.'S')TSOUR=.TRUE.
+      IF(CHHH(L:L).EQ.'V')TVNIP=.TRUE.
+      IF(CHHH(L:L).EQ.'K')THEN
+      TKBBT=.TRUE.
+      L=L+1
+      IKAS=0
+      IF(CHHH(L:L).EQ.'1')IKAS=1
+      IF(CHHH(L:L).EQ.'2')IKAS=2
+      IF(CHHH(L:L).EQ.'3')IKAS=3
+      ENDIF
+C E et M sont exclusifs
+      IF(CHHH(L:L).EQ.'E')TECHI=.TRUE.
+      IF(CHHH(L:L).EQ.'M')TMDIA=.TRUE.
+      IF(L.LT.8)GO TO 21
+
+      IF(TECHI)THEN
+       IF(TDFDT.OR.TLAPN.OR.TCONV.OR.TSOUR.OR.TMDIA)THEN
+C         Données incompatibles
+       WRITE(IOIMP,*)'Operateur : ',NOMPER
+       CALL ERREUR(21)
+       RETURN
+       ENDIF
+       TMASS=.TRUE.
+       TSOUR=.TRUE.
+      ENDIF
+
+      IF(TMDIA)THEN
+       IF(TDFDT.OR.TLAPN.OR.TCONV.OR.TSOUR.OR.TECHI)THEN
+C         Données incompatibles
+       WRITE(IOIMP,*)'Operateur : ',NOMPER
+       CALL ERREUR(21)
+       RETURN
+       ENDIF
+       TMASS=.TRUE.
+      ENDIF
+
+      IF(TKBBT.OR.TVNIP)TVITP=.TRUE.
+      IF(TVNIP)NOMPER='VNIMP'
+
+C
+C Lecture du model et verification OK NAVIER_STOKES
+C
+      TYPE='MMODEL'
+      CALL LIROBJ(TYPE,MMODEL,1,IRET)
+
+      IF(IRET.EQ.0)THEN
+C On ne trouve pas d'objet de type %m1:8
+      MOTERR( 1: 8) = 'MMODEL  '
+      WRITE(IOIMP,*)'Operateur : ',NOMPER
+      CALL ERREUR(37)
+      RETURN
+      ENDIF
+
+      CALL LEKMOD(MMODEL,MTABZ,INEFMD)
+      IF(MTABZ.EQ.0)THEN
+C% Le modele %m1:8 %m9:16 est obligatoire.
+      MOTERR( 1: 8) = 'NAVIER_S'
+      MOTERR( 9:16) = 'TOKES   '
+      WRITE(IOIMP,*)'Operateur : ',NOMPER
+      CALL ERREUR(935)
+      RETURN
+      ENDIF
+      INEFM0=INEFMD
+
+C  /S INEFMD : Type formulation
+C              INEFMD = 1 LINE,
+C                     = 2 MACRO,
+C                     = 3 QUADRATIQUE,
+C                     = 4 LINB.
+C                     = 5 ISOQ.
+        IF(INEFMD.NE.1.AND.INEFMD.NE.2.AND.INEFMD.NE.3.AND.
+     &     INEFMD.NE.4.AND.INEFMD.NE.5)THEN
+*         Le type d'élément fini ne convient pas
+          MOTERR( 1: 8) =' '
+          WRITE(IOIMP,*)'Operateur : ',NOMPER
+          CALL ERREUR(926)
+          RETURN
+        ENDIF
+C*************************************************************************
+C Lecture des Noms d'Inco(s) et type d'Inco(s)
+      TYPE='LISTMOTS'
+      CALL LIROBJ(TYPE,MLMOT3,1,IRET)
+        IF(IRET.EQ.0)THEN
+C On ne trouve pas d'objet de type %m1:8
+        MOTERR( 1: 8) = 'LISTMOTS'
+        WRITE(IOIMP,*)'Operateur : ',NOMPER
+        CALL ERREUR(37)
+        RETURN
+        ENDIF
+
+      TYPE='LISTMOTS'
+      CALL LIROBJ(TYPE,MLMOT4,1,IRET)
+        IF(IRET.EQ.0)THEN
+C On ne trouve pas d'objet de type %m1:8
+        MOTERR( 1: 8) = 'LISTMOTS'
+        WRITE(IOIMP,*)'Operateur : ',NOMPER
+        CALL ERREUR(37)
+        RETURN
+        ENDIF
+
+      SEGACT MLMOT3,MLMOT4
+      NINKO=MLMOT3.MOTS(/2)
+c      write(6,*)'MLMOT3=',MLMOT3.MOTS(1),MLMOT3.MOTS(/2)
+c      write(6,*)'MLMOT4=',MLMOT4.MOTS(1),MLMOT4.MOTS(/2)
+
+        IHV=-1
+        IF(MLMOT4.MOTS(1)(1:4).EQ.'PRES')IHV=0
+        IF(MLMOT4.MOTS(1)(1:4).EQ.'TEMP')IHV=0
+        IF(MLMOT4.MOTS(1)(1:4).EQ.'VITE')IHV=1
+        INCOD=MLMOT4.MOTS(1)
+        IF(NINKO.EQ.2)INCOD=MLMOT4.MOTS(2)
+        IF(IHV.EQ.-1)THEN
+C Le type d'inconnue %m1:8 ne convient pas.
+        MOTERR( 1: 8) = MLMOT4.MOTS(1)
+        WRITE(IOIMP,*)'Operateur : ',NOMPER
+        CALL ERREUR(927)
+        RETURN
+        ENDIF
+
+        IHP=0
+
+        IF(IHV.EQ.0.AND.NINKO.NE.1)THEN
+C% Le nombre d'inconnue %i1 ne convient pas.
+        INTERR(1) = NINKO
+        WRITE(IOIMP,*)'Operateur : ',NOMPER
+        CALL ERREUR(928)
+        RETURN
+        ENDIF
+
+        IF (TKBBT) THEN
+         IF (NINKO.NE.2) THEN
+C% Le nombre d'inconnues %i1 ne convient pas.
+          INTERR(1) = NINKO
+          WRITE(IOIMP,*)'Operateur : ',NOMPER
+          CALL ERREUR(928)
+          RETURN
+         ENDIF
+         IF ((MLMOT4.MOTS(1).NE.'VITESSE').OR.
+     &       (MLMOT4.MOTS(2).NE.'PRESSION')) THEN
+C% Les types d'inconnue ne conviennent pas %m1:8 %m9:16 %m17:24 .
+          MOTERR( 1: 8) = MLMOT4.MOTS(1)
+          MOTERR( 9:16) = MLMOT4.MOTS(2)
+          WRITE(IOIMP,*)'Operateur : ',NOMPER
+          CALL ERREUR(932)
+          RETURN
+         ENDIF
+        ENDIF
+
+        DO 48 N=1,NINKO
+        NOMI(N)=MLMOT3.MOTS(N)
+        NOMA(N)=MLMOT3.MOTS(N)
+ 48     CONTINUE
+
+      SEGDES MLMOT3,MLMOT4
+c       write(6,*)' INCOD=',INCOD
+
+C*****************************************************************************
+C OPTIONS
+
+      IKOMP=0
+      IAXI=0
+      IF(IFOMOD.EQ.0)IAXI=2
+      DEUPI=1.D0
+      IF(IAXI.NE.0)DEUPI=2.D0*XPI
+
+C Initialisation par defaut de quelques options
+      CSTAB=1.D-2
+      MPRE ='????????'
+      XCONS=.FALSE.
+      XRIG =.FALSE.
+      XDIAG=.FALSE.
+
+ 1950 CONTINUE
+      CALL QUETYP(TYPE,0,IRET)
+       IF(IRET.EQ.0)THEN
+C% Il manque une donnée
+        CALL ERREUR(641)
+        RETURN
+       ENDIF
+c      write(6,*)' TYPE=',type
+       IF(TYPE.NE.'MOT     ')GO TO 1949
+      CALL LIRCHA(CHAI,1,LCHAR)
+c     write(6,*)' OPtion lue ',CHAI
+
+       IF(LCHAR.EQ.0)THEN
+C% Directive %m1:8 on ne trouve pas d'objet de type  %m9:16 .
+        MOTERR( 1: 8) = 'OPTION  '
+        MOTERR( 9:16) = 'MOT     '
+        WRITE(IOIMP,*)'Operateur : ',NOMPER
+        CALL ERREUR(928)
+        RETURN
+       ENDIF
+
+      NOM=' '
+      NOM(1:LCHAR)=CHAI
+
+      CALL OPTLI(IP,LSOPT,NOM,NBO)
+       IF(IP.EQ.0)THEN
+C% On a lu : %m1:8 : , alors qu'on attend un des mots clés suivant :
+C% %m9:16  %m17:24  %m25:32  %m33:40 Consulter la notice
+        MOTERR( 1: 8) = NOM
+        MOTERR( 9:16) = LSOPT(1)
+        MOTERR(17:24) = LSOPT(3)
+        MOTERR(25:32) = LSOPT(5)
+        MOTERR(33:40) = '... etc '
+        WRITE(IOIMP,*)'Operateur : ',NOMPER
+        CALL ERREUR(930)
+        RETURN
+       ENDIF
+
+      GO TO (1951,1952,1953,1954,1955,1956,1957,1958,1959,1960,
+     &       1961,1962,1963,1964,1965,1966,1967,1968,1969,1970,
+     &       1971,1972,1973,1974),IP
+
+C LINE
+ 1951 CONTINUE
+      INEFMD=1
+      GO TO 1950
+
+C MACRO
+ 1952 CONTINUE
+      INEFMD=2
+      GO TO 1950
+
+C QUAF
+ 1953 CONTINUE
+      INEFMD=3
+      GO TO 1950
+
+C LINB
+ 1954 CONTINUE
+      INEFMD=4
+      GO TO 1950
+
+C ISOQ
+ 1955 CONTINUE
+      INEFMD=5
+      GO TO 1950
+
+C MMDIAGO
+ 1956 CONTINUE
+      XDIAG=.TRUE.
+      GO TO 1950
+
+C RGDT
+ 1957 CONTINUE
+      XRIG=.TRUE.
+c     write(6,*)' XRIG=',XRIG
+      GO TO 1950
+
+C CONS
+ 1958 CONTINUE
+      XCONS=.TRUE.
+      GO TO 1950
+
+C TRANS
+ 1959 CONTINUE
+      TTRAN=.TRUE.
+      GO TO 1949
+
+C PERM
+ 1960 CONTINUE
+      TTRAN=.FALSE.
+      TDFDT=.FALSE.
+       IF(NOMPER.EQ.'DFDT')THEN
+C% L'operateur %m1:8 ne peut etre appele dans un algorithme Permanent
+        MOTERR( 1: 8) = NOMPER
+        CALL ERREUR(936)
+        RETURN
+       ENDIF
+      GO TO 1949
+
+C PROJ
+ 1961 CONTINUE
+      TPROJ=.TRUE.
+      TTRAN=.TRUE.
+      GO TO 1949
+
+C STABP
+ 1962 CONTINUE
+      CALL LIRREE(CSTAB,1,IRET)
+        IF(IRET.EQ.0)THEN
+C On ne trouve pas d'objet de type %m1:8
+          MOTERR( 1: 8) = 'FLOTTANT'
+          WRITE(IOIMP,*)'Operateur : ',NOMPER
+          CALL ERREUR(37)
+          RETURN
+        ENDIF
+      GO TO 1950
+
+C Emplacements libres
+ 1963 CONTINUE
+ 1964 CONTINUE
+      GO TO 1950
+
+C CENTRE
+ 1965 CONTINUE
+C CENTREP0
+ 1966 CONTINUE
+C CENTREP1
+ 1967 CONTINUE
+C MSOMMET
+ 1968 CONTINUE
+      MPRE=LSOPT(IP)
+      GO TO 1950
+
+C Emplacements libres
+ 1969 CONTINUE
+ 1970 CONTINUE
+      GO TO 1950
+
+C CMD
+ 1971 CONTINUE
+      CALL LIRREE(CMD,1,IRET)
+        IF(IRET.EQ.0)THEN
+C On ne trouve pas d'objet de type %m1:8
+          MOTERR( 1: 8) = 'FLOTTANT'
+          WRITE(IOIMP,*)'Operateur : ',NOMPER
+          CALL ERREUR(37)
+          RETURN
+        ENDIF
+      GO TO 1950
+
+C IDCEN 1-> CENTREE  2-> SUPGDC  3-> SUPG  4-> TVISQUEU  5-> CNG
+C CENTREE
+ 1972 CONTINUE
+      IDCEN=1
+c     write(6,*)'LSOPT 1972 ',LSOPT(IP),IP,' IDCEN=',IDCEN
+      GO TO 1950
+
+C SUPGDC
+ 1973 CONTINUE
+      IDCEN=2
+c     write(6,*)'LSOPT 1973 ',LSOPT(IP),IP,' IDCEN=',IDCEN
+      GO TO 1950
+
+C SUPG
+ 1974 CONTINUE
+      IDCEN=3
+c     write(6,*)'LSOPT 1974 ',LSOPT(IP),IP,' IDCEN=',IDCEN
+      GO TO 1950
+
+
+C*********** Fin Lecture des options ***********************************
+
+ 1949   CONTINUE
+
+        IF(TKBBT.AND.MPRE.EQ.'????????')THEN
+C% L'option %m1:8 n'a pas ete defini, elle est necessaire dans ce contexte.
+         MOTERR( 1: 8) = 'Pression'
+         CALL ERREUR(934)
+         RETURN
+        ENDIF
+
+
+        IF(XRIG)THEN
+         IF(IHV.EQ.0)THEN
+          NOMP(1)='T   '
+          NOMD(1)='Q   '
+         ELSEIF(IHV.EQ.1)THEN
+          NOMP(1)='UX  '
+          NOMP(2)='UY  '
+          NOMP(3)='UZ  '
+          NOMD(1)='FX  '
+          NOMD(2)='FY  '
+          NOMD(3)='FZ  '
+         ENDIF
+        ELSE
+         IF(IHV.EQ.0)THEN
+          NOMP(1)=NOMI(1)
+          NOMD(1)=NOMI(1)
+         ELSEIF(IHV.EQ.1)THEN
+          WRITE(NOMP(1),FMT='(I1,A3)')1,NOMI(1)(1:3)
+          WRITE(NOMD(1),FMT='(I1,A3)')1,NOMI(1)(1:3)
+          WRITE(NOMP(2),FMT='(I1,A3)')2,NOMI(1)(1:3)
+          WRITE(NOMD(2),FMT='(I1,A3)')2,NOMI(1)(1:3)
+          WRITE(NOMP(3),FMT='(I1,A3)')3,NOMI(1)(1:3)
+          WRITE(NOMD(3),FMT='(I1,A3)')3,NOMI(1)(1:3)
+          IF(TVITP)THEN
+           DO 1948 I=1,IDIM
+           NOMD(I)=NOMI(2)(1:4)
+ 1948      CONTINUE
+          ENDIF
+         ENDIF
+        ENDIF
+c       write(6,*)' NOMP=',nomp
+c       write(6,*)' NOMD=',nomd
+
+
+c       write(6,*)'DECENTREMENT',IDCEN,CMD
+
+      AIMPL=1.D0
+
+         CMT=CMD
+         XPG=.FALSE.
+         XTG=.FALSE.
+         XTV=.FALSE.
+         XBDF=.FALSE.
+C***********************************************************************
+C*************** Lecture des caracteristiques du schema en temps *******
+C***********************************************************************
+
+c     write(6,*)' TTRAN,TPROJ=',TTRAN,TPROJ
+      IF(TTRAN)THEN
+
+C On lit le pas de temps
+c      write(6,*)'On lit le pas de temps'
+       CALL LIRREE(DELTAT,1,IRET)
+        IF(IRET.EQ.0)THEN
+C On ne trouve pas d'objet de type %m1:8
+        MOTERR( 1: 8) = 'FLOTTANT'
+        WRITE(IOIMP,*)'Operateur : ',NOMPER
+        CALL ERREUR(37)
+        RETURN
+        ENDIF
+
+C On lit le schema en temps
+c      write(6,*)'On lit le schema en temps '
+       CALL LIRCHA(SCHT,1,LCHAR)
+        IF(LCHAR.EQ.0)THEN
+C On ne trouve pas d'objet de type %m1:8
+        MOTERR( 1: 8) = 'MOT     '
+        WRITE(IOIMP,*)'Operateur : ',NOMPER
+        CALL ERREUR(37)
+        RETURN
+        ENDIF
+c       write(6,*)'SCHEMA en TEMPS ',SCHT
+        CALL OPTLI(IPST,LSCHE,SCHT,NBH)
+        IF(IPST.EQ.0)THEN
+C% On a lu : %m1:8 : , alors qu'on attend un des mots clés suivant :
+C%  %m9:16  %m17:24  %m25:32  %m33:40 Consulter la notice
+        MOTERR( 1: 8) = 'SCHT    '
+        MOTERR( 9:16) = LSCHE(2)
+        MOTERR(17:24) = LSCHE(4)
+        MOTERR(25:32) = LSCHE(7)
+        MOTERR(33:40) = '... etc '
+        WRITE(IOIMP,*)'Operateur : ',NOMPER
+        CALL ERREUR(930)
+        RETURN
+        ENDIF
+
+         IF(SCHT.EQ.'SEMI')THEN
+         CALL LIRREE(XVAL,1,IRET)
+           IF(IRET.EQ.0)THEN
+C On ne trouve pas d'objet de type %m1:8
+            MOTERR( 1: 8) = 'FLOTTANT'
+            WRITE(IOIMP,*)'Operateur : ',NOMPER
+            CALL ERREUR(37)
+            RETURN
+           ENDIF
+         AIMPL=XVAL
+         ENDIF
+
+         IF(SCHT.EQ.'EUL_EXPL')AIMPL=0.D0
+         IF(SCHT.EQ.'EUL_IMPL')AIMPL=1.D0
+         IF(SCHT.EQ.'CN      ')AIMPL=0.5D0
+
+         IF(SCHT.EQ.'EUL_EXPL'.OR.
+     &      SCHT.EQ.'EUL_IMPL'.OR.
+     &      SCHT.EQ.'CN      '.OR.
+     &      SCHT.EQ.'BDF2    '.OR.
+     &      SCHT.EQ.'SEMI    ')XPG=.TRUE.
+      IF(.NOT.TCONV)XPG=.FALSE.
+
+      IF(XPG.AND.IDCEN.NE.1.AND.IDCEN.NE.2.AND.IDCEN.NE.3)THEN
+C% L'option PETROV-GALERKIN est incompatible ce schema en temps
+       CALL ERREUR (937)
+       RETURN
+      ENDIF
+
+      IF(.NOT.TCONV)IDCEN=1
+
+         IF(SCHT.EQ.'BDF2    ')THEN
+         AIMPL=1.D0
+         XBDF=.TRUE.
+         CMT=CMD
+         ENDIF
+
+         IF(SCHT.EQ.'CNG     ')THEN
+         AIMPL=0.5D0
+         XTG=.TRUE.
+         CMT=DELTAT
+         ENDIF
+
+         IF(SCHT.EQ.'TVISQ')THEN
+         AIMPL=0.5D0
+         XTV=.TRUE.
+         CMT=DELTAT
+         ENDIF
+      ENDIF
+
+C*********** Fin Lecture des caracteristiques du schema en temps *******
+
+c     write(6,*)'TCLSF appele par ',NOMPER,' AIMPL=',AIMPL,' IHV=',IHV
+c     write(6,*)'XBDF =',XBDF
+c     write(6,*)' TLAPN=',TLAPN,' TTRAN=',TTRAN,' TCONV=',TCONV
+c     write(6,*)' TSOUR=',TSOUR,' TMASS=',TMASS,' TECHI=',TECHI
+c     write(6,*)' TMDIA=',TMDIA,' XDIAG=',XDIAG,' TKBBT=',TKBBT
+
+C*****************************************************************************
+C
+       CALL MEKTAB(MTABZ,INEFMD,'MAILLAGE',MELEME)
+        IF(TKBBT.AND.(MPRE.NE.'CENTRE').AND.(INEFMD.EQ.2))THEN
+        CALL MEKTAB(MTABZ,INEFMD,'MACRO1',MELEME)
+        ENDIF
+
+       CALL MEKTAB(MTABZ,INEFMD,'SOMMET',MELEMS)
+        IF(MPRE.NE.'????????')THEN
+         CALL MEKTAB(MTABZ,INEFMD,MPRE,MELEMP)
+        ENDIF
+       CALL MEKTAB(MTABZ,INEFMD,'CENTRE',MELEMC)
+          IF (IERR.NE.0) RETURN
+
+c      write(6,*)'INCOD=',INCOD,' MPRE=',MPRE
+      IF(INCOD.EQ.'VITE'.OR.INCOD.EQ.'TEMP')THEN
+       MELEM2=MELEME
+      ELSE
+       IF(MPRE.EQ.'CENTREP1')CALL MEKTAB(MTABZ,INEFMD,'ELTP1NC ',MELEM2)
+       IF(MPRE.EQ.'MSOMMET ')CALL MEKTAB(MTABZ,INEFMD,'MMAIL   ',MELEM2)
+       IF(MPRE.EQ.'CENTRE  ')CALL MEKTAB(MTABZ,INEFMD,'CENTRE  ',MELEM2)
+       IF(MPRE.EQ.'CENTREP0')CALL MEKTAB(MTABZ,INEFMD,'CENTREP0',MELEM2)
+
+C  /S INEFMD : Type formulation
+C              INEFMD = 1 LINE,
+C                     = 2 MACRO,
+C                     = 3 QUADRATIQUE,
+C                     = 4 LINB,
+C                     = 5 ISOQ.
+       NOM0='????????'
+       IF(INEFMD.EQ.1)THEN
+        IF(MPRE.EQ.'CENTRE  ')NOM0='OK'
+        IF(MPRE.EQ.'MSOMMET ')NOM0='OK'
+       ELSEIF(INEFMD.EQ.2)THEN
+        IF(MPRE.EQ.'CENTRE  ')NOM0='OK'
+c ces elements ne marchent pas
+        IF(MPRE.EQ.'CENTREP0')NOM0='OK'
+        IF(MPRE.EQ.'CENTREP1')NOM0='OK'
+        IF(MPRE.EQ.'MSOMMET ')NOM0='OK'
+       ELSEIF(INEFMD.EQ.3)THEN
+        IF(MPRE.EQ.'CENTREP0')NOM0='OK'
+        IF(MPRE.EQ.'CENTREP1')NOM0='OK'
+        IF(MPRE.EQ.'MSOMMET ')NOM0='OK'
+       ELSEIF(INEFMD.EQ.4)THEN
+        IF(MPRE.EQ.'MSOMMET ')NOM0='OK'
+       ENDIF
+       IF(NOM0.EQ.'????????')THEN
+C% Le type d'element fini Vitesse/pression ne convient pas : %m1:8 %m9:16 .
+          MOTERR( 1: 8) =LSOPT(INEFMD)
+          MOTERR( 9:16) =MPRE
+          WRITE(IOIMP,*)'Operateur : ',NOMPER
+          CALL ERREUR(933)
+          RETURN
+       ENDIF
+
+      ENDIF
+
+C*************************************************************************
+
+      SEGACT MELEME,MELEM2
+c     write(6,*)'MELEME=',MELEME,'MELEM2=',MELEM2
+      SEGDES MTABZ
+
+C*************************************************************************
+C Lecture des Inco(s) aux temps precedents si Transitoire
+C Lecture des Inco(s) a l'iteration precedente si Permanent
+c     write(6,*)' Lecture des Inco(s)'
+
+      CALL QUETYP(TYPE,0,IRET)
+       IF(IRET.EQ.0)THEN
+C% Il manque une donnée
+        CALL ERREUR(641)
+        RETURN
+       ENDIF
+
+        TLINCO=.FALSE.
+        IF(IDCEN.EQ.2)TLINCO=.TRUE.
+       IF(TYPE.EQ.'MOT     ')THEN
+        TLINCO=.TRUE.
+        CALL LIRCHA(CHAI,1,LCHAR)
+         IF(CHAI.NE.'INCO') THEN
+C% On a lu : %m1:8 : , alors qu'on attend un des mots clés suivant :
+C% %m9:16  %m17:24  %m25:32  %m33:40 Consulter la notice
+         MOTERR( 1: 8) = CHAI
+         MOTERR( 9:16) = 'INCO'
+         MOTERR(17:24) = ' '
+         MOTERR(25:32) = ' '
+         MOTERR(33:40) = ' '
+         WRITE(IOIMP,*)'Operateur : ',NOMPER
+         CALL ERREUR(930)
+         RETURN
+        ENDIF
+       ENDIF
+       IF(.NOT.TLINCO.AND.TTRAN)THEN
+C% Opération illicite dans ce contexte
+        WRITE(IOIMP,*)'Operateur : ',NOMPER,' On attend des inconnues'
+        CALL ERREUR(153)
+        RETURN
+       ENDIF
+
+C 1ere inconnue
+      IF(NINKO.GE.1.AND.TLINCO)THEN
+        TYPE='CHPOINT'
+        CALL LIROBJ(TYPE,MCHPOI,1,IRET)
+
+        IF(IRET.EQ.0)THEN
+C% Rubrique %m1:8 on ne trouve pas d'objet de type  %m9:16 .
+         MOTERR( 1: 8) = 'INCO    '
+         MOTERR( 9:16) = 'CHPOINT '
+         WRITE(IOIMP,*)'Operateur : ',NOMPER
+         CALL ERREUR(929)
+         RETURN
+        ENDIF
+
+        CALL LRCHT(MCHPOI,MTETA1,TYPE,IGEOM)
+        MTETA2=MTETA1
+        CALL KRIPAD(IGEOM,MLENT1)
+        CALL VERPAD(MLENT1,MELEMS,IRET)
+         IF(IRET.NE.0)THEN
+C%    Indice %m1:8 : L'objet %m9:16 n'a pas le bon support géométrique
+          MOTERR(1: 8) = 'TETA1'
+          MOTERR(9:16) = 'CHPOINT '
+          WRITE(IOIMP,*)'Operateur : ',NOMPER
+          CALL ERREUR(788)
+          RETURN
+         ENDIF
+
+        NC=MTETA1.VPOCHA(/2)
+
+        IF((IHV.EQ.0.AND.NC.NE.1).OR.
+     &     (IHV.EQ.1.AND.NC.NE.IDIM))THEN
+C% Indice %m1:8 : L'objet %m9:16 n'a pas le bon nombre de composantes
+         MOTERR( 1: 8) = 'Inconnue'
+         MOTERR( 9:16) = 'CHPOINT'
+         WRITE(IOIMP,*)'Operateur : ',NOMPER
+         CALL ERREUR(784)
+         RETURN
+        ENDIF
+
+        SEGDES IGEOM,MELEMS
+
+        IF(XBDF)THEN
+         TYPE='CHPOINT'
+         CALL LIROBJ(TYPE,MCHPOI,1,IRET)
+
+          IF(IRET.EQ.0)THEN
+C% On ne trouve pas d'objet de type %m1:8
+           MOTERR( 1: 8) = 'CHPOINT '
+           WRITE(IOIMP,*)'Operateur : ',NOMPER
+           CALL ERREUR(37)
+           RETURN
+          ENDIF
+
+         CALL LRCHT(MCHPOI,MTETA2,TYPE,IGEOM)
+         CALL KRIPAD(IGEOM,MLENT2)
+         CALL VERPAD(MLENT2,MELEMS,IRET)
+          IF(IRET.NE.0)THEN
+C%    Indice %m1:8 : L'objet %m9:16 n'a pas le bon support géométrique
+           MOTERR(1: 8) = 'TETA2'
+           MOTERR(9:16) = 'CHPOINT '
+           WRITE(IOIMP,*)'Operateur : ',NOMPER
+           CALL ERREUR(788)
+           RETURN
+          ENDIF
+
+         NC=MTETA2.VPOCHA(/2)
+
+          IF((IHV.EQ.0.AND.NC.NE.1).OR.
+     &      (IHV.EQ.1.AND.NC.NE.IDIM))THEN
+C% Indice %m1:8 : L'objet %m9:16 n'a pas le bon nombre de composantes
+           MOTERR( 1: 8) = 'Inconnue'
+           MOTERR( 9:16) = 'CHPOINT'
+           WRITE(IOIMP,*)'Operateur : ',NOMPER
+           CALL ERREUR(785)
+           RETURN
+          ENDIF
+
+         SEGDES IGEOM,MELEMS
+
+        ENDIF
+      ENDIF
+
+C 2eme inconnue
+      IF(NINKO.GE.2.AND.TLINCO)THEN
+        TYPE='CHPOINT'
+        CALL LIROBJ(TYPE,MCHPOI,1,IRET)
+
+        IF(IRET.EQ.0)THEN
+C% Rubrique %m1:8 on ne trouve pas d'objet de type  %m9:16 .
+         MOTERR( 1: 8) = 'INCO2   '
+         MOTERR( 9:16) = 'CHPOINT '
+         WRITE(IOIMP,*)'Operateur : ',NOMPER
+         CALL ERREUR(929)
+         RETURN
+        ENDIF
+
+        CALL LRCHT(MCHPOI,MTETA3,TYPE,IGEOM)
+        MTETA4=MTETA3
+        CALL KRIPAD(IGEOM,MLENT3)
+        IRET=0
+        IF(.NOT.TVNIP)CALL VERPAD(MLENT3,MELEMP,IRET)
+         IF(IRET.NE.0)THEN
+C%    Indice %m1:8 : L'objet %m9:16 n'a pas le bon support géométrique
+          MOTERR(1: 8) = 'TETA3'
+          MOTERR(9:16) = 'CHPOINT '
+          WRITE(IOIMP,*)'Operateur : ',NOMPER
+          CALL ERREUR(788)
+          RETURN
+         ENDIF
+
+        NC=MTETA3.VPOCHA(/2)
+
+        IF(IHP.EQ.0.AND.NC.NE.1)THEN
+C% Indice %m1:8 : L'objet %m9:16 n'a pas le bon nombre de composantes
+         MOTERR( 1: 8) = 'Inconnue'
+         MOTERR( 9:16) = 'CHPOINT'
+         WRITE(IOIMP,*)'Operateur : ',NOMPER
+         CALL ERREUR(784)
+         RETURN
+        ENDIF
+
+        SEGDES IGEOM,MELEMP
+
+        IF(XBDF)THEN
+         TYPE='CHPOINT'
+         CALL LIROBJ(TYPE,MCHPOI,1,IRET)
+
+          IF(IRET.EQ.0)THEN
+C% On ne trouve pas d'objet de type %m1:8
+           MOTERR( 1: 8) = 'CHPOINT '
+           WRITE(IOIMP,*)'Operateur : ',NOMPER
+           CALL ERREUR(37)
+           RETURN
+          ENDIF
+
+         CALL LRCHT(MCHPOI,MTETA4,TYPE,IGEOM)
+         CALL KRIPAD(IGEOM,MLENT4)
+         IRET=0
+         IF(.NOT.TVNIP)CALL VERPAD(MLENT4,MELEMP,IRET)
+          IF(IRET.NE.0)THEN
+C%     Indice %m1:8 : L'objet %m9:16 n'a pas le bon support géométrique
+           MOTERR(1: 8) = 'TETA4'
+           MOTERR(9:16) = 'CHPOINT '
+           WRITE(IOIMP,*)'Operateur : ',NOMPER
+           CALL ERREUR(788)
+           RETURN
+          ENDIF
+
+         NC=MTETA4.VPOCHA(/2)
+
+          IF(IHP.EQ.0.AND.NC.NE.1)THEN
+C% Indice %m1:8 : L'objet %m9:16 n'a pas le bon nombre de composantes
+           MOTERR( 1: 8) = 'Inconnue'
+           MOTERR( 9:16) = 'CHPOINT'
+           WRITE(IOIMP,*)'Operateur : ',NOMPER
+           CALL ERREUR(785)
+           RETURN
+          ENDIF
+
+         SEGDES IGEOM,MELEMP
+
+        ENDIF
+      ENDIF
+C  On cree un second membre non vide
+            SEGACT MELEMS
+            N=MELEMS.NUM(/2)
+            IF(IHV.EQ.0)NC=1
+            IF(IHV.EQ.1)NC=IDIM
+            IF(TVITP)NC=1
+            SEGDES MELEMS
+            NSOUPO=1
+            NAT=2
+            SEGINI MCHPO1,MSOUP1,MPOVA1
+            MCHPO1.JATTRI(1)=2
+            MCHPO1.IFOPOI=IFOMOD
+            MCHPO1.MTYPOI='    '
+            MCHPO1.MOCHDE='                                            '
+            MCHPO1.IPCHP(1)=MSOUP1
+            MSOUP1.IGEOC=MELEMS
+            MSOUP1.IPOVAL=MPOVA1
+             IF(IHV.EQ.0.OR.TVITP)THEN
+              MSOUP1.NOCOMP(1)=NOMD(1)
+             ELSE
+              DO 91 N=1,NC
+              MSOUP1.NOCOMP(N)=NOMD(N)
+ 91           CONTINUE
+             ENDIF
+            SEGDES MSOUP1,MCHPO1
+
+C*****************************************************************************
+C Lecture du coefficient
+
+      CALL LIRENT(IARG,1,IRET)
+
+      IF(IRET.EQ.0)THEN
+      WRITE(IOIMP,*)'Operateur : ',NOMPER
+      CALL ERREUR(766)
+      RETURN
+      ENDIF
+c     write(6,*)' IARG=',iarg,' TDFDT=',TDFDT
+
+      CALL INITI(ICOEF,4,0)
+      IF(TDFDT)ICOEF(1)=1
+      IF(TMASS)ICOEF(1)=1
+      IF(TCONV)THEN
+      ICOEF(1)=1
+      ICOEF(2)=1
+      ENDIF
+      IF(TLAPN)ICOEF(3)=1
+      IF(TSOUR)ICOEF(4)=1
+      IF(TKBBT)ICOEF(1)=1
+      ICT=ICOEF(1)+ICOEF(2)+ICOEF(3)+ICOEF(4)
+      IF(ICT.NE.IARG)THEN
+C% Données incompatibles
+      WRITE(6,*)'Nombre d arguments incorrect'
+      WRITE(IOIMP,*)'Operateur : ',NOMPER
+      CALL ERREUR(22)
+      RETURN
+      ENDIF
+
+      NUCOEF=0
+
+      IF(TDFDT.OR.TMASS.OR.TCONV)THEN
+       NUCOEF=NUCOEF+1
+       CALL LEKMIF(NUCOEF,MTABZ,0,MCHEL1,KPOIND)
+       IF (IERR.NE.0) RETURN
+      ENDIF
+
+c     write(6,*)' Avt TLAPN LEKMIF '
+      IF(TLAPN)THEN
+       NUCOEF=NUCOEF+1
+       CALL LEKMIF(NUCOEF,MTABZ,0,MCHEL2,KPOIND)
+       IF (IERR.NE.0) RETURN
+      ELSEIF(TCONV)THEN
+c      write(6,*)'Cas decentrement'
+       SEGACT MELEME
+       L1=72
+       N1=MAX(1,LISOUS(/1))
+       N2=1
+       N3=6
+       SEGINI MCHEL2
+       SEGACT MCHEL1
+       DO 71 L=1,N1
+       MCHAM1=MCHEL1.ICHAML(L)
+       SEGACT MCHAM1
+       MELVA1=MCHAM1.IELVAL(1)
+       SEGACT MELVA1
+       N1PTEL=MELVA1.VELCHE(/1)
+       N1EL=1
+       N2PTEL=0
+       N2EL=0
+c fauteDO 71 L=1,N1
+       SEGINI MCHAM2,MELVA2
+       MCHEL2.ICHAML(L)=MCHAM2
+       MCHAM2.IELVAL(1)=MELVA2
+       DO 72 LG=1,N1PTEL
+       MELVA2.VELCHE(LG,1)=1.D-30
+ 72    CONTINUE
+ 71    CONTINUE
+      ENDIF
+
+c     write(6,*)' Avt TCONV LEKMIF XPG,XTV,XTG,N.TDFDT=',
+c    &                             XPG,XTV,XTG,(.NOT.TDFDT)
+      IF(TCONV)THEN
+c?      IF(XPG)THEN
+         NUCOEF=NUCOEF+1
+         CALL LEKMIF(NUCOEF,MTABZ,1,MCHEL3,KPOIND)
+         IF (IERR.NE.0) RETURN
+c?      ELSEIF(XTV)THEN
+c?       NUCOEF=NUCOEF+1
+c?       CALL LEKMIF(NUCOEF,MTABZ,1,MCHEL3,KPOIND)
+c?   &               4 ,DELTAT,MCHEL1,MCHEL1)
+c?       IF (IERR.NE.0) RETURN
+c?      ELSEIF(XTG)THEN
+c?       NUCOEF=NUCOEF+1
+c?       CALL LEKMIF(NUCOEF,MTABZ,1,MCHEL3,KPOIND)
+c?   &               5 ,DELTAT,MCHEL1,MCHEL1)
+c?       IF (IERR.NE.0) RETURN
+C       ELSEIF(.NOT.TDFDT)THEN
+c?      ELSE
+c      write(6,*)' On est bien ds ce cas'
+c?       NUCOEF=NUCOEF+1
+c?       CALL LEKMIF(NUCOEF,MTABZ,1,MCHEL3,KPOIND)
+c?       IF (IERR.NE.0) RETURN
+c?       ENDIF
+      ENDIF
+
+c     write(6,*)' Avt LEKMIF TSOUR'
+      IF(TSOUR)THEN
+       NUCOEF=NUCOEF+1
+       CALL LEKMIF(NUCOEF,MTABZ,IHV,MCHEL4,KPOIND)
+c     write(6,*)' Apr LEKMIF TSOUR'
+       IF (IERR.NE.0) RETURN
+      ENDIF
+
+      IF(TKBBT.OR.TVNIP)THEN
+       NUCOEF=NUCOEF+1
+       CALL LEKMIF(NUCOEF,MTABZ,0,MCHEL1,KPOIND)
+c      write(6,*)' meleme,melem2=',meleme,melem2
+       IF (IERR.NE.0) RETURN
+      ENDIF
+
+C*************************************************************************
+C******* CALCUL **********************************************************
+C*************************************************************************
+
+C Initialisation RIGIDITE Vide
+       IF(XRIG)THEN
+         NRIGE=8
+         NRIGEL=0
+         SEGINI MRIGID
+
+       ELSE
+C Initialisation MATRIK Vide
+         NRIGE=7
+         NKID =9
+         NKMT =7
+         NMATRI=0
+         SEGINI MATRIK
+       ENDIF
+C"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+C"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+C"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+      IF(.NOT.TVITP)THEN
+
+      CALL KRIPAD(MELEMS,MLENTI)
+      SEGDES MELEMS
+
+      NUTOEL=0
+      SEGACT MELEME,MELEM2
+      NBSOUS=LISOUS(/1)
+      IF(NBSOUS.EQ.0)NBSOUS=1
+
+      IF(TDFDT.OR.TMASS.OR.TCONV.OR.TLAPN)THEN
+C Cas RIGIDITE
+       IF(XRIG)THEN
+         NRIGE=8
+         NRI=IRIGEL(/2)
+         NRIGEL=NBSOUS+NRI
+         SEGADJ MRIGID
+c     write(6,*)' NRIGE,NRIGEL,MRIGID=',NRIGE,NRIGEL,MRIGID
+
+       ELSE
+C Cas MATRIK Pleine
+         NRIGE=7
+         NKID =9
+         NKMT =7
+         NMATR0=JRIGEL(/2)
+
+         NBME=1
+         IF(IHV.EQ.1)NBME=IDIM
+         NMATRI=NMATR0+NBME
+         SEGADJ MATRIK
+
+         DO 41 M=1,NBME
+         JRIGEL(1,NMATR0+M)=MELEME
+         JRIGEL(2,NMATR0+M)=MELEM2
+         JRIGEL(7,NMATR0+M)=0
+         IF(TCONV)JRIGEL(7,NMATR0+M)=2
+         SEGINI JMATRI
+         JRIGEL(4,NMATR0+M)=JMATRI
+         KSPGP=MELEMS
+         KSPGD=MELEMS
+         LISPRI(1)=NOMP(M)//'    '
+         LJSDUA(1)=NOMD(M)//'    '
+ 41      CONTINUE
+       ENDIF
+      ENDIF
+
+      IF(TDFDT.OR.TMASS.OR.TCONV)SEGACT MCHEL1
+      IF(TLAPN)SEGACT MCHEL2
+      IF(TCONV)SEGACT MCHEL3
+      IF(TSOUR)SEGACT MCHEL4
+        IF(TLINCO)THEN
+         SEGACT MTETA1
+         IF(XBDF)SEGACT MTETA2
+        ENDIF
+
+       IF(MAX(1,MELEM2.LISOUS(/1)).NE.MAX(1,LISOUS(/1)))THEN
+        WRITE(6,*)' Geometries incompatibles dans ',nomper
+C% Données incompatibles
+        CALL ERREUR(22)
+        RETURN
+        ENDIF
+
+      DO 101 L=1,MAX(1,LISOUS(/1))
+      IPT1=MELEME
+      IPT2=MELEM2
+      IF(LISOUS(/1).NE.0)IPT1=LISOUS(L)
+      IF(MELEM2.LISOUS(/1).NE.0)IPT2=MELEM2.LISOUS(L)
+      SEGACT IPT1,IPT2
+
+      NOM0 = NOMS(IPT1.ITYPEL)//'    '
+c     write(6,*)' 1er KALPBG NOM0=',NOM0,IPT1
+      CALL KALPBG(NOM0,'FONFORM ',IZFFM)
+      IF(IZFFM.EQ.0)RETURN
+      SEGACT IZFFM*MOD
+      IZHR=KZHR(1)
+      SEGACT IZHR*MOD
+      IZF1 = KTP(1)
+      IZH2 = KZHR(2)
+      IZW  = IZFFM
+      IZWH = IZHR
+
+      IF(INCOD.EQ.'PRES')THEN
+        IZW  = IZF1
+        IZWH = IZH2
+        IF(IPT2.NUM(/1).NE.IZF1.FN(/1))THEN
+*         Le type d'élément fini ne convient pas
+          MOTERR( 1: 8) =' '
+          WRITE(IOIMP,*)'Operateur : ',NOMPER
+          CALL ERREUR(926)
+          RETURN
+        ENDIF
+      ENDIF
+
+      NES=GR(/1)
+      NPG=GR(/3)
+
+      NP = IPT1.NUM(/1)
+      MP = IPT2.NUM(/1)
+C?    MP = IZW.FN(/1) ceci doit etre identique
+
+      NBEL=IPT1.NUM(/2)
+
+      SEGINI SAJT
+
+      IF(TDFDT.OR.TMASS.OR.TCONV.OR.TLAPN)THEN
+C Cas RIGIDITE
+      IF(XRIG)THEN
+        IRIGEL(1,NRI+L)=MELEME
+        COERIG(L)=1.D0
+
+        IRIGEL(7,NRI+L)=0
+        IF(TCONV)IRIGEL(7,NRI+L)=2
+
+        NBME=1
+        IF(IHV.EQ.1)NBME=IDIM
+        NLIGRP=NP
+        NLIGRD=MP
+        SEGINI DESCR
+        IRIGEL(3,NRI+L)=DESCR
+       IF(NBME.EQ.1)THEN
+         DO 102 I=1,NLIGRP
+        LISINC(I)=NOMP(1)//'    '
+        NOELEP(I)=I
+ 102     CONTINUE
+         DO 103 I=1,NLIGRD
+        LISDUA(I)=NOMD(1)//'    '
+        NOELED(I)=I
+ 103     CONTINUE
+       ELSE
+       ENDIF
+        SEGDES DESCR
+
+        NELRIG=NBEL
+        SEGINI xMATRI
+        IRIGEL(4,NRI+L)=xMATRI
+        xmatri.symre=irigel(7,nri+l)
+c       write(6,*)'NELRIG,IMATRI=',NELRIG,IMATRI
+
+*        DO 104 K=1,NELRIG
+*        SEGINI XMATRI
+c       write(6,*)'NLIGRD,NLIGRP,XMATRI=',NLIGRD,NLIGRP,XMATRI
+*        IMATTT(K)=XMATRI
+* 104    CONTINUE
+
+      ELSE
+C Cas MATRIK
+        SEGINI IPM1
+        JMATR1=JRIGEL(4,NMATR0+1)
+        JMATR1.LIZAFM(L,1)=IPM1
+        IPM2=IPM1
+        IPM3=IPM1
+         IF(NBME.GE.2)THEN
+          JMATR2=JRIGEL(4,NMATR0+2)
+
+          IF(IAXI.NE.0)THEN
+           SEGINI IPM2
+           JMATR2.LIZAFM(L,1)=IPM2
+           ICAL2=.TRUE.
+          ELSE
+           IPM2=IPM1
+           JMATR2.LIZAFM(L,1)=IPM2
+           ICAL2=.FALSE.
+          ENDIF
+
+         ENDIF
+         IF(NBME.GE.3)THEN
+          JMATR3=JRIGEL(4,NMATR0+3)
+
+           IPM3=IPM1
+           JMATR3.LIZAFM(L,1)=IPM3
+           ICAL3=.FALSE.
+
+         ENDIF
+      ENDIF
+      ENDIF
+
+C----Ro
+      IK1=1
+      IF(TDFDT.OR.TMASS.OR.TCONV)THEN
+      MCHAM1=MCHEL1.ICHAML(L)
+      SEGACT MCHAM1
+
+      MELVA1=MCHAM1.IELVAL(1)
+      SEGACT MELVA1
+      N1PTEL=MELVA1.VELCHE(/1)
+      N1EL=MELVA1.VELCHE(/2)
+        IF(N1EL.EQ.1)THEN
+        IK1=1
+        ELSEIF(N1EL.EQ.NBEL)THEN
+        IK1=0
+        ENDIF
+      ENDIF
+
+C----Lambda
+      IK2=1
+      IF(TLAPN)THEN
+      MCHAM2=MCHEL2.ICHAML(L)
+      SEGACT MCHAM2
+
+      MELVA2=MCHAM2.IELVAL(1)
+      SEGACT MELVA2
+      N1PTEL=MELVA2.VELCHE(/1)
+      N1EL=MELVA2.VELCHE(/2)
+        IF(N1EL.EQ.1)THEN
+        IK2=1
+        ELSEIF(N1EL.EQ.NBEL)THEN
+        IK2=0
+        ENDIF
+      ENDIF
+
+C----U
+      IK3=1
+      IF(TCONV)THEN
+      MCHAM3=MCHEL3.ICHAML(L)
+      SEGACT MCHAM3
+
+      MELVA3=MCHAM3.IELVAL(1)
+      SEGACT MELVA3
+      N1PTEL=MELVA3.VELCHE(/1)
+      N1EL=MELVA3.VELCHE(/2)
+        IF(N1EL.EQ.1)THEN
+        IK3=1
+        ELSEIF(N1EL.EQ.NBEL)THEN
+        IK3=0
+        ENDIF
+      ENDIF
+
+C----source
+      IK4=1
+      IF(TSOUR)THEN
+      MCHAM4=MCHEL4.ICHAML(L)
+      SEGACT MCHAM4
+
+      MELVA4=MCHAM4.IELVAL(1)
+      SEGACT MELVA4
+      N1PTEL=MELVA4.VELCHE(/1)
+      N1EL=MELVA4.VELCHE(/2)
+        IF(N1EL.EQ.1)THEN
+        IK4=1
+        ELSEIF(N1EL.EQ.NBEL)THEN
+        IK4=0
+        ENDIF
+      ENDIF
+
+c      write(6,*)' AVANT 108 NC=',NC,' NBEL=',NBEL,MP,NP,NC
+C===============================================
+        DO 108 KE=1,NBEL
+
+        NK1=KE + IK1*(1 - KE)
+        NK2=KE + IK2*(1 - KE)
+        NK3=KE + IK3*(1 - KE)
+        NK4=KE + IK4*(1 - KE)
+
+        DO 109 I=1,NP
+        J=IPT1.NUM(I,KE)
+        DO 109 N=1,IDIM
+        XYZ(N,I)=XCOOR((J-1)*(IDIM+1)+N)
+ 109    CONTINUE
+
+       IF(TLINCO)THEN
+        DO 107 I=1,NP
+         I1=MLENT1.LECT(IPT1.NUM(I,KE))
+        DO 107 N=1,NC
+         TN1(I,N)=MTETA1.VPOCHA(I1,N)
+ 107    CONTINUE
+       ENDIF
+
+        IF(XBDF)THEN
+         DO 106 I=1,NP
+          I2=MLENT2.LECT(IPT1.NUM(I,KE))
+         DO 106 N=1,NC
+          TN2(I,N)=MTETA2.VPOCHA(I2,N)
+ 106     CONTINUE
+        ENDIF
+
+        CALL CALJBR(FN,GR,PG,XYZ,HR,PGSQ,RPG,NES,
+     *  IDIM,NP,NPG,IAXI,AIRE,AJ,SGN)
+
+        IF (IDCEN.EQ.0.OR.IDCEN.EQ.1) THEN
+        CALL RSETD(WT,FN,(NP*NPG))
+        CALL RSETD(WS,FN,(NP*NPG))
+        ELSE
+        CALL CALDEC(WT,WS,XYZ,GR,HR,FN,NES,IDIM,NP,NPG,AJT,
+     &  IDCEN,CMT,MELVA1.VELCHE(1,NK1),MELVA2.VELCHE(1,NK2),
+     &  MELVA3.VELCHE(1,NK3),TN1,NC,IKOMP,XREF,AIRE,KE)
+        ENDIF
+
+        CALL INITD(RF1,(NP*MP*IDIM),0.D0)
+        CALL INITD(SM1,(MP*IDIM),0.D0)
+
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+        IF(TDFDT) THEN
+C...... Terme Transitoire
+
+c?      write(6,*)' IDCEN TRAN=',IDCEN,CMD,DELTAT,' NC=',nc
+c?      write(6,*)' XBDF=',XBDF,' XDIAG=',XDIAG,' MP=',mp
+        DO 110 I=1,MP
+         CALL INITD(SU,NC,0.D0)
+         UD=0.D0
+
+        DO 111 J=1,NP
+        U1=0.D0
+        TV=0.D0
+        DO 112 LG=1,NPG
+
+          C1=MELVA1.VELCHE(LG,NK1)
+
+c?        DO 114 N=1,IDIM
+c?        IF(XTV)THEN
+c?        C3=MELVA3.VELCHE((N-1)*NPG+LG,NK3)
+c?        TV=TV+MELVA3.VELCHE((IDIM+I-1)*NPG+LG,NK3)*HR(N,J,LG)
+c?   &         *PGSQ(LG)*C3*C1*DEUPI*RPG(LG)
+c?        ELSEIF(XTG)THEN
+c?        C3=MELVA3.VELCHE((N-1)*NPG+LG,NK3)
+c?        TV=TV+MELVA3.VELCHE((IDIM+I-1)*NPG+LG,NK3)*HR(N,J,LG)
+c?   &         *PGSQ(LG)*C3*C1*DEUPI*RPG(LG)
+c?        ENDIF
+c? 114      CONTINUE
+
+          U1=U1+WT(I,LG)*FN(J,LG)*PGSQ(LG)*C1*DEUPI*RPG(LG)
+
+ 112      CONTINUE
+
+           IF(XDIAG)THEN
+            UD=UD+U1
+            U1=0.D0
+           ENDIF
+
+           IF(XBDF.AND.(.NOT.XDIAG))THEN
+            U1=U1/DELTAT
+         DO 116 N=1,NC
+            SU(N) = SU(N) + (2.D0*TN1(J,N) - 0.5D0*TN2(J,N))*U1
+ 116     continue
+            U1=U1*1.5D0
+           ELSEIF(.NOT.XBDF)THEN
+            U1=U1/DELTAT
+            do 1161 n=1,nc
+            SU(N) = SU(N) + (U1 + (AIMPL-1.D0)*(-TV))*TN1(J,N)
+ 1161       CONTINUE
+           ENDIF
+
+          RF1(J,I,1)=RF1(J,I,1)+U1+(AIMPL*TV)
+
+ 111    CONTINUE
+
+          IF(XDIAG)THEN
+            UD=UD/DELTAT
+            IF(XBDF)THEN
+             do 119 n=1,nc
+             SU(N) = SU(N) + (2.D0*TN1(I,N) - 0.5D0*TN2(I,N))*UD
+ 119         continue
+             UD=UD*1.5D0
+            ELSE
+             do 118 n=1,nc
+             SU(N) = SU(N) + UD*TN1(I,N)
+ 118         continue
+            ENDIF
+             RF1(I,I,1)=RF1(I,I,1)+UD
+          ENDIF
+
+         DO 117 N=1,NC
+          SM1(I,N)=SM1(I,N)+ SU(N)
+ 117     CONTINUE
+
+ 110    CONTINUE
+c        write(6,*)' apres SM1(I,N)='
+c        write(6,1002)(SM1(I,1),I=1,np)
+c        write(6,1002)(SM1(I,2),I=1,np)
+C...... Transitoire Fin
+        ENDIF
+C=======================================================================
+
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+        IF(TCONV) THEN
+C...... Convection
+        DO 410 I=1,MP
+         CALL INITD(SU,NC,0.D0)
+
+        DO 411 J=1,NP
+         U3=0.D0
+        DO 412 LG=1,NPG
+
+          C1=MELVA1.VELCHE(LG,NK1)
+          DO 414 N=1,IDIM
+          C3=MELVA3.VELCHE((N-1)*NPG+LG,NK3)
+          U3=U3+WT(I,LG)*HR(N,J,LG)*PGSQ(LG)*C3*C1*DEUPI*RPG(LG)
+ 414      CONTINUE
+
+ 412      CONTINUE
+
+        DO 416 N=1,NC
+          SU(N) = SU(N) + (AIMPL-1.D0)*U3*TN1(J,N)
+ 416    CONTINUE
+
+          RF1(J,I,1)=RF1(J,I,1)+(AIMPL*U3)
+
+ 411    CONTINUE
+
+        DO 417 N=1,NC
+          SM1(I,N)=SM1(I,N)+ SU(N)
+ 417    CONTINUE
+
+ 410    CONTINUE
+C...... Convection Fin
+        ENDIF
+C=======================================================================
+
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+        IF(TLAPN) THEN
+C...... Laplacien
+        DO 310 I=1,MP
+         CALL INITD(SU,NC,0.D0)
+        DO 311 J=1,NP
+        U2=0.D0
+        UR=0.D0
+        DO 312 LG=1,NPG
+
+          C2=MELVA2.VELCHE(LG,NK2)
+
+          DO 313 N=1,IDIM
+          U2=U2+IZWH.HR(N,I,LG)*HR(N,J,LG)*PGSQ(LG)*C2*DEUPI*RPG(LG)
+ 313      CONTINUE
+
+          IF(IHV.EQ.1.AND.IAXI.EQ.2)THEN
+C cas 2D axi Laplacien Champ vitesse
+          UR=UR+WT(I,LG)*FN(J,LG)/RPG(LG)*PGSQ(LG)*C2*DEUPI
+C cas 2D axi Laplacien Champ vitesse Fin
+          ENDIF
+
+ 312      CONTINUE
+
+         DO 316 N=1,NC
+          SU(N) = SU(N) + (AIMPL-1.D0)*(U2+UR)*TN1(J,N)
+ 316     CONTINUE
+
+          RF1(J,I,1)=RF1(J,I,1)+(AIMPL*(U2+UR))
+
+ 311    CONTINUE
+
+         DO 317 N=1,NC
+          SM1(I,N)=SM1(I,N) + SU(N)
+ 317     CONTINUE
+
+ 310    CONTINUE
+C...... Laplacien Fin
+        ENDIF
+C=======================================================================
+
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+        IF(TMASS) THEN
+C...... Masse
+        DO 210 I=1,MP
+         CALL INITD(SU,NC,0.D0)
+         UD=0.D0
+        DO 211 J=1,NP
+        U1=0.D0
+        DO 212 LG=1,NPG
+
+          C1=MELVA1.VELCHE(LG,NK1)
+          U1=U1+WT(I,LG)*FN(J,LG)*PGSQ(LG)*C1*DEUPI*RPG(LG)
+
+
+ 212      CONTINUE
+
+           IF(XDIAG)THEN
+            UD=UD+U1
+            U1=0.D0
+           ELSE
+            DO 216 N=1,NC
+            SU(N) = SU(N) + (AIMPL-1.D0)*U1*TN1(J,N)
+ 216        CONTINUE
+            RF1(J,I,1)=RF1(J,I,1)+AIMPL*U1
+           ENDIF
+
+ 211    CONTINUE
+
+          IF(XDIAG)THEN
+           RF1(I,I,1)=RF1(I,I,1)+AIMPL*UD
+           DO 218 N=1,NC
+            SM1(I,N)=SM1(I,N)+ (AIMPL-1.D0)*UD*TN1(I,N)
+ 218       CONTINUE
+          ELSE
+           DO 217 N=1,NC
+            SM1(I,N)=SM1(I,N)+ SU(N)
+ 217       CONTINUE
+          ENDIF
+
+ 210    CONTINUE
+C...... Masse Fin
+        ENDIF
+C=======================================================================
+
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+        IF(TSOUR) THEN
+C...... Source
+        DO 610 I=1,MP
+          C1=1.D0
+         DO 617 N=1,NC
+          U4=0.D0
+          DO 615 LG=1,NPG
+          IF(TECHI)THEN
+          C1=MELVA1.VELCHE(LG,NK1)
+          ENDIF
+          C4=MELVA4.VELCHE((N-1)*NPG+LG,NK4)
+          U4=U4+WS(I,LG)*PGSQ(LG)*C4*C1*DEUPI*RPG(LG)
+ 615      CONTINUE
+          SM1(I,N)=SM1(I,N)+ U4
+ 617     CONTINUE
+ 610    CONTINUE
+C...... Source Fin
+        ENDIF
+C=======================================================================
+
+
+C>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+C ...... Chargement Rigidite ou Matrik
+      IF(TDFDT.OR.TMASS.OR.TCONV.OR.TLAPN)THEN
+C Cas RIGIDITE
+         IF(XRIG)THEN
+*          XMATRI=IMATTT(KE)
+          DO 901 I=1,MP
+          DO 901 J=1,NP
+          RE(I,J,ke)=RF1(J,I,1)
+ 901      CONTINUE
+*          SEGDES XMATRI
+         ELSE
+C Cas MATRIK
+          DO 902 N=1,NBME
+          JMATR1=JRIGEL(4,NMATR0+N)
+          IPM4=JMATR1.LIZAFM(L,1)
+          DO 902 I=1,NP
+          DO 902 J=1,NP
+          IPM4.AM(KE,J,I)=RF1(J,I,1)
+ 902      CONTINUE
+         ENDIF
+      ENDIF
+C ...... Chargement Second membre
+        DO 910 I=1,NP
+         I1=LECT(IPT1.NUM(I,KE))
+        DO 910 N=1,NC
+         MPOVA1.VPOCHA(I1,N)=MPOVA1.VPOCHA(I1,N)+SM1(I,N)
+ 910    CONTINUE
+C<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+ 108    CONTINUE
+
+      IF(TDFDT.OR.TMASS.OR.TCONV)THEN
+         SEGSUP MCHAM1,MELVA1
+      ENDIF
+
+      IF(TSOUR)THEN
+         SEGSUP MCHAM4,MELVA4
+      ENDIF
+
+      IF(TLAPN.OR.TCONV)THEN
+         SEGSUP MCHAM2,MELVA2
+      ENDIF
+
+      IF(TCONV)THEN
+         SEGSUP MCHAM3,MELVA3
+      ENDIF
+
+      NUTOEL=NUTOEL+NBEL
+
+      SEGDES IPT1,IPT2
+
+      IF(TDFDT.OR.TMASS.OR.TCONV.OR.TLAPN.OR.TKBBT)THEN
+C Cas RIGIDITE
+      IF(XRIG)THEN
+       SEGDES xMATRI
+      ELSE
+C Cas MATRIK
+       SEGDES IPM1
+       IF(NBME.GE.2)SEGDES IPM2
+       IF(NBME.GE.3)SEGDES IPM3
+      ENDIF
+      ENDIF
+
+      SEGSUP IZFFM,IZHR,IZF1,IZH2
+      SEGSUP SAJT
+
+ 101  CONTINUE
+
+      IF(TDFDT.OR.TMASS.OR.TCONV.OR.TLAPN)THEN
+      IF(.NOT.XRIG)THEN
+      DO 141 M=1,NBME
+      JMATRI=JRIGEL(4,NMATR0+M)
+      SEGDES JMATRI
+ 141  CONTINUE
+      ENDIF
+      ENDIF
+
+C"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+C"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+C"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+      ELSEIF(TVITP)THEN
+
+      CALL KRIPAD(MELEMS,MLENTI)
+      SEGDES MELEMS
+
+      NUTOEL=0
+      SEGACT MELEME,MELEM2
+      NBSOUS=LISOUS(/1)
+      IF(NBSOUS.EQ.0)NBSOUS=1
+
+C Cas RIGIDITE Pleine
+       IF(XRIG)THEN
+         NRIGE=8
+         NRI=IRIGEL(/2)
+         NRIGEL=NBSOUS+NRI
+         SEGADJ MRIGID
+c     write(6,*)' NRIGE,NRIGEL,MRIGID=',NRIGE,NRIGEL,MRIGID
+
+       ELSE
+C Cas MATRIK Pleine
+         NRIGE=7
+         NKID =9
+         NKMT =7
+         NMATR0=JRIGEL(/2)
+         NMATRI=NMATR0+1
+         SEGADJ MATRIK
+
+         NBMF=1
+         IF(IHV.EQ.1)NBMF=IDIM
+         SEGINI JMATRI
+c        write(6,*)' KBBT JMATRI=',JMATRI,MELEMS,MELEMP
+         JRIGEL(4,NMATR0+1)=JMATRI
+
+        IF(IKAS.EQ.1.OR.IKAS.EQ.3)THEN
+          JRIGEL(7,NMATR0+1)=-3
+          IF(IKAS.EQ.3)JRIGEL(7,NMATR0+1)=4
+          JRIGEL(1,NMATR0+1)=MELEME
+          JRIGEL(2,NMATR0+1)=MELEM2
+          KSPGP=MELEMS
+          KSPGD=MELEMP
+         IF(NBMF.EQ.1)THEN
+          LISPRI(1)=NOMP(1)//'    '
+          LJSDUA(1)=NOMD(1)//'    '
+         ELSE
+          DO 42 I=1,NBMF
+          LISPRI(I)=NOMP(I)//'    '
+          LJSDUA(I)=NOMD(I)//'    '
+ 42       CONTINUE
+         ENDIF
+        ELSEIF(IKAS.EQ.2)THEN
+          JRIGEL(7,NMATR0+1)=3
+          JRIGEL(1,NMATR0+1)=MELEM2
+          JRIGEL(2,NMATR0+1)=MELEME
+          KSPGP=MELEMP
+          KSPGD=MELEMS
+         IF(NBMF.EQ.1)THEN
+          LISPRI(1)=NOMD(1)//'    '
+          LJSDUA(1)=NOMP(1)//'    '
+         ELSE
+          DO 43 I=1,NBMF
+          LISPRI(I)=NOMD(I)//'    '
+          LJSDUA(I)=NOMP(I)//'    '
+ 43       CONTINUE
+         ENDIF
+        ELSE
+         RETURN
+        ENDIF
+       ENDIF
+
+         IF(TPROJ)JRIGEL(7,NMATR0+1)=4
+
+      IF(TKBBT)SEGACT MCHEL1
+        IF(TLINCO)THEN
+         SEGACT MTETA1
+         IF(XBDF)SEGACT MTETA2
+        ENDIF
+
+        IF(MAX(1,MELEM2.LISOUS(/1)).NE.MAX(1,LISOUS(/1)))THEN
+        WRITE(6,*)' Geometries incompatibles dans ',nomper
+C% Données incompatibles
+        CALL ERREUR(22)
+        RETURN
+        ENDIF
+
+      IF(INEFMD.EQ.2.AND.MPRE.EQ.'CENTRE'.AND.IKAS.NE.2)THEN
+C CAS Stabilisation via MACRO CENTRE
+c     write(6,*)' CAS Stabilisation via MACRO CENTRE '
+
+       TYPE=' '
+       CALL ACMO(MTABZ,'MELSTB',TYPE,MELSTB)
+       TYPE=' '
+       CALL ACMO(MTABZ,'MCHPOC',TYPE,MCHPOC)
+
+      SEGACT MELSTB
+      IF(IDIM.EQ.2)NBELEM=MELSTB.NUM(/2)/4
+      IF(IDIM.EQ.3)NBELEM=MELSTB.NUM(/2)/8
+      NBNN=MELSTB.NUM(/1)
+      NBSOUS=0
+      NBREF=0
+      SEGINI MELEMA
+      MELEMA.ITYPEL=MELSTB.ITYPEL
+
+      NKPE=4
+      IF(IDIM.EQ.3)NKPE=8
+      DO 4878 k=1,NBELEM
+      MI=(K-1)*NKPE+1
+      DO 4879 I=1,NBNN
+      MELEMA.NUM(I,K)=MELSTB.NUM(I,MI)
+ 4879 CONTINUE
+ 4878 CONTINUE
+
+      BETA0=-ABS(CSTAB)
+      IF(TPROJ)BETA0=ABS(CSTAB)
+c     write(6,*)'TPROJ BETA0=',TPROJ,BETA0
+      NK=0
+      NMATR0=JRIGEL(/2)
+      NMATRI=NMATR0+1
+      SEGADJ MATRIK
+      NBMF=1
+      NBSOUS=1
+      SEGINI JMATRS
+      JRIGEL(4,NMATR0+1)=JMATRS
+      JMATRS.KSPGP=MELEMC
+      JMATRS.KSPGD=MELEMC
+      JRIGEL(1,NMATR0+1)=MELEMA
+      JRIGEL(2,NMATR0+1)=MELEMA
+      JRIGEL(7,NMATR0+1)=0
+      CALL LRCHT(MCHPOC,MPOVAL,TYPE,IGEOM)
+
+
+      NBSOUS=MELSTB.LISOUS(/1)
+      IF(NBSOUS.NE.0)THEN
+      CALL ERREUR(5)
+      ENDIF
+
+      NBEL=MELEMA.NUM(/2)
+      NBCI=MELSTB.NUM(/2)
+      NP  =MELSTB.NUM(/1)
+      MP  =NP
+
+      SEGINI IZAFM
+      JMATRS.LIZAFM(1,1)=IZAFM
+      JMATRS.LISPRI(1)=NOMD(1)
+      JMATRS.LJSDUA(1)=NOMD(1)
+
+      CALL KRIPAD(MELEMC,MLENT1)
+
+      DO 33 K=1,NBEL
+
+      NK=NK+1
+
+      DO 32 J=1,NP
+      K1=MLENT1.LECT(MELEMA.NUM(J,K))
+      II=J
+      DO 34  I=1,NP
+      U=VPOCHA(K1,I)*BETA0
+      IF(I.EQ.1)U=ABS(VPOCHA(K1,I))*BETA0
+      IF(II.LE.NP)THEN
+      AM(K,II,J)=U
+      ELSE
+      AM(K,II-NP,J)=U
+      ENDIF
+      II=II+1
+ 34   CONTINUE
+ 32   CONTINUE
+ 33   CONTINUE
+
+      SEGDES MELEMA,MELSTB,MELEMC,IZAFM,MPOVAL
+      SEGSUP MLENT1
+
+c     write(6,*)' Fin Stab '
+      ENDIF
+      SEGACT MELEME,MELEM2
+
+      DO 201 L=1,MAX(1,LISOUS(/1))
+      IPT1=MELEME
+      IPT2=MELEM2
+      IF(LISOUS(/1).NE.0)IPT1=LISOUS(L)
+      IF(MELEM2.LISOUS(/1).NE.0)IPT2=MELEM2.LISOUS(L)
+      SEGACT IPT1,IPT2
+
+C  /S INEFMD : Type formulation
+C              INEFMD = 1 LINE,
+C                     = 2 MACRO,
+C                     = 3 QUADRATIQUE,
+C                     = 4 LINB.
+       NOM0='????????'
+       IF(INEFMD.EQ.1)THEN
+        IF(MPRE.EQ.'CENTRE  ')NOM0=NOMS(IPT1.ITYPEL)//'    '
+        IF(MPRE.EQ.'MSOMMET ')NOM0=NOMS(IPT1.ITYPEL)//'P1P1'
+       ELSEIF(INEFMD.EQ.2)THEN
+        IF(MPRE.EQ.'CENTRE  ')NOM0=NOMS(IPT1.ITYPEL)//'    '
+
+c ces elements ne marchent pas
+        IF(MPRE.EQ.'CENTREP0')NOM0=NOMS(IPT1.ITYPEL)//'MCP0'
+        IF(MPRE.EQ.'CENTREP1')NOM0=NOMS(IPT1.ITYPEL)//'MCP1'
+
+        IF(MPRE.EQ.'MSOMMET ')NOM0=NOMS(IPT1.ITYPEL)//'MCF1'
+       ELSEIF(INEFMD.EQ.3)THEN
+        IF(MPRE.EQ.'CENTREP0')NOM0=NOMS(IPT1.ITYPEL)//'PRP0'
+        IF(MPRE.EQ.'CENTREP1')NOM0=NOMS(IPT1.ITYPEL)//'PRP1'
+        IF(MPRE.EQ.'MSOMMET ')NOM0=NOMS(IPT1.ITYPEL)//'PFP1'
+       ELSEIF(INEFMD.EQ.4)THEN
+        IF(MPRE.EQ.'MSOMMET ')NOM0=NOMS(IPT1.ITYPEL)//'    '
+       ENDIF
+       IF(NOM0.EQ.'????????')THEN
+C% Le type d'element fini Vitesse/pression ne convient pas : %m1:8 %m9:16 .
+          MOTERR( 1: 8) =LSOPT(INEFMD)
+          MOTERR( 9:16) =MPRE
+          WRITE(IOIMP,*)'Operateur : ',NOMPER
+          CALL ERREUR(933)
+          RETURN
+        ENDIF
+
+c      write(6,*)nomper,' NOM0=',nom0,
+c     write(6,*)' 2eme KALPBG NOM0=',NOM0,IPT1
+       CALL KALPBG(NOM0,'FONFORM ',IZFFM)
+       if(IZFFM.eq.0)return
+
+      SEGACT IZFFM*MOD
+      IZHR=KZHR(1)
+      IZH2=KZHR(2)
+
+      SEGACT IZHR*MOD,IZH2*MOD
+
+      NES=GR(/1)
+      NPG=GR(/3)
+      IZF1=KTP(1)
+      SEGACT IZF1*MOD
+      NP = IPT1.NUM(/1)
+      MP = IPT2.NUM(/1)
+       IF(IKAS.EQ.2)THEN
+        MP = IPT1.NUM(/1)
+        NP = IPT2.NUM(/1)
+       ENDIF
+
+      NBEL=IPT1.NUM(/2)
+
+      SEGINI SAJT
+
+C Cas RIGIDITE
+      IF(XRIG)THEN
+        IRIGEL(1,NRI+L)=MELEME
+        COERIG(L)=1.D0
+
+        IRIGEL(7,NRI+L)=0
+        IF(TCONV)IRIGEL(7,NRI+L)=2
+
+        NBME=1
+        IF(IHV.EQ.1)NBME=IDIM
+        NLIGRP=NP
+        NLIGRD=MP
+        SEGINI DESCR
+        IRIGEL(3,NRI+L)=DESCR
+       IF(NBME.EQ.1)THEN
+         DO 202 I=1,NLIGRP
+        LISINC(I)=NOMP(1)//'    '
+        NOELEP(I)=I
+ 202     CONTINUE
+         DO 203 I=1,NLIGRD
+        LISDUA(I)=NOMD(1)//'    '
+        NOELED(I)=I
+ 203     CONTINUE
+       ELSE
+       ENDIF
+        SEGDES DESCR
+
+        NELRIG=NBEL
+        SEGINI xMATRI
+        IRIGEL(4,NRI+L)=xMATRI
+        xmatri.symre=irigel(7,nri+l)
+c       write(6,*)'NELRIG,IMATRI=',NELRIG,IMATRI
+
+*        DO 204 K=1,NELRIG
+*        SEGINI XMATRI
+c       write(6,*)'NLIGRD,NLIGRP,XMATRI=',NLIGRD,NLIGRP,XMATRI
+*        IMATTT(K)=XMATRI
+* 204    CONTINUE
+
+      ELSE
+C Cas MATRIK
+        NBMF=LIZAFM(/2)
+        SEGINI IPM1
+        LIZAFM(L,1)=IPM1
+        IPM2=IPM1
+        IPM3=IPM1
+         IF(NBMF.GE.2)THEN
+           SEGINI IPM2
+           LIZAFM(L,2)=IPM2
+         ENDIF
+         IF(NBMF.GE.3)THEN
+           SEGINI IPM3
+           LIZAFM(L,3)=IPM3
+         ENDIF
+      ENDIF
+
+C----Ro
+      IK1=1
+      IF(TKBBT)THEN
+      MCHAM1=MCHEL1.ICHAML(L)
+      SEGACT MCHAM1
+
+      MELVA1=MCHAM1.IELVAL(1)
+      SEGACT MELVA1
+      N1PTEL=MELVA1.VELCHE(/1)
+      N1EL=MELVA1.VELCHE(/2)
+        IF(N1EL.EQ.1)THEN
+        IK1=1
+        ELSEIF(N1EL.EQ.NBEL)THEN
+        IK1=0
+        ENDIF
+      ENDIF
+
+c      write(6,*)'AVT208 NC=',NC,'IK1=',IK1,'NP=',NP,'MP=',MP,'MP1=',MP1
+C===============================================
+        DO 208 KE=1,NBEL
+
+        NK1=KE + IK1*(1 - KE)
+
+        DO 209 I=1,NP
+        J=IPT1.NUM(I,KE)
+        DO 209 N=1,IDIM
+        XYZ(N,I)=XCOOR((J-1)*(IDIM+1)+N)
+ 209    CONTINUE
+
+        CALL CALJBR(FN,GR,PG,XYZ,HR,PGSQ,RPG,NES,
+     *  IDIM,NP,NPG,IAXI,AIRE,AJ,SGN)
+
+        CALL INITD(RF1,(NP*MP*IDIM),0.D0)
+c       CALL INITD(SM1,NP,0.D0)
+
+c       DO 207 I=1,NP
+c        I1=MLENT1.LECT(IPT1.NUM(I,KE))
+c       DO 207 N=1,NC
+c        TN1(I,N)=MTETA1.VPOCHA(I1,N)
+c207    CONTINUE
+
+c       IF(XBDF)THEN
+c        DO 206 I=1,NP
+c         I2=MLENT2.LECT(IPT1.NUM(I,KE))
+c        DO 206 N=1,NC
+c         TN2(I,N)=MTETA2.VPOCHA(I2,N)
+c206     CONTINUE
+c       ENDIF
+
+
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+        IF(TKBBT) THEN
+C...... Matrice C Ct
+
+c       write(6,*)' Calcul C Ct'
+        DO 510 N=1,IDIM
+        DO 510 I=1,MP
+        DO 511 J=1,NP
+         U1=0.D0
+        DO 512 LG=1,NPG
+          C1=MELVA1.VELCHE(LG,NK1)
+          U1=U1+IZF1.FN(I,LG)*HR(N,J,LG)*PGSQ(LG)*DEUPI*RPG(LG)*C1
+ 512    CONTINUE
+          RF1(J,I,N)=RF1(J,I,N)+U1
+ 511    CONTINUE
+ 510    CONTINUE
+C...... Matrice C Ct Fin
+        ENDIF
+C=======================================================================
+
+C>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+C ...... Chargement Rigidite ou Matrik
+c          write(6,*)' Chargement Rigidite ou Matrik'
+C Cas RIGIDITE
+         IF(XRIG)THEN
+*          XMATRI=IMATTT(KE)
+          DO 921 I=1,MP
+          DO 921 J=1,NP
+          RE(I,J,ke)=RF1(J,I,1)
+ 921      CONTINUE
+*          SEGDES XMATRI
+         ELSE
+C Cas MATRIK
+          DO 923 N=1,NBMF
+          IPM4=LIZAFM(L,N)
+c         write(6,*)'IPM4=',IPM4
+          DO 922 I=1,MP
+          DO 922 J=1,NP
+          IPM4.AM(KE,J,I)=RF1(J,I,N)
+ 922      CONTINUE
+ 923      CONTINUE
+c         write(6,*)' Fin Chargement'
+         ENDIF
+C ...... Chargement Second membre
+c       DO 920 I=1,NP
+c        I1=LECT(IPT1.NUM(I,KE))
+c       DO 920 N=1,NC
+c        MPOVA1.VPOCHA(I1,N)=MPOVA1.VPOCHA(I1,N)+SM1(I,N)
+c920    CONTINUE
+C<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+
+
+ 208    CONTINUE
+
+      IF(TKBBT)THEN
+         SEGSUP MCHAM1,MELVA1
+      ENDIF
+
+      NUTOEL=NUTOEL+NBEL
+
+      SEGDES IPT1,IPT2
+
+      IF(TDFDT.OR.TMASS.OR.TCONV.OR.TLAPN.OR.TKBBT)THEN
+C Cas RIGIDITE
+      IF(XRIG)THEN
+       SEGDES xMATRI
+      ELSE
+C Cas MATRIK
+       SEGDES IPM1
+       IF(NBMF.GE.2)SEGDES IPM2
+       IF(NBMF.GE.3)SEGDES IPM3
+      ENDIF
+      ENDIF
+
+      SEGSUP IZFFM,IZHR,IZF1,IZH2
+      SEGSUP SAJT
+
+ 201  CONTINUE
+
+C Cas RIGIDITE
+       IF(XRIG)THEN
+       ELSE
+C Cas MATRIK
+        NMATRI=JRIGEL(/2)
+        DO 205 I=1,NMATRI
+        JMATRI=JRIGEL(4,I)
+        SEGDES JMATRI
+ 205    CONTINUE
+       ENDIF
+
+C"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+C"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+C"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+      ENDIF
+
+
+      IF(TDFDT)THEN
+         SEGSUP MCHEL1
+      ENDIF
+
+      IF(TSOUR)THEN
+         SEGSUP MCHEL4
+      ENDIF
+
+      IF(TLAPN.OR.TCONV)THEN
+         SEGSUP MCHEL2
+      ENDIF
+
+      IF(TCONV)THEN
+         SEGSUP MCHEL3
+      ENDIF
+
+
+      SEGDES MCHPO1,MPOVA1
+      SEGDES MELEME,MELEM2
+
+      SEGSUP MLENTI
+      IF(TLINCO)THEN
+      SEGSUP MLENT1
+       SEGDES MTETA1
+       IF(XBDF)THEN
+        SEGSUP MLENT2
+        SEGDES MTETA2
+       ENDIF
+      ENDIF
+
+c      write(6,*)' NINKO=',NINKO
+      IF(NINKO.GE.2.AND.TLINCO)THEN
+       SEGSUP MLENT3
+       SEGDES MTETA3
+        IF(XBDF)THEN
+         SEGSUP MLENT4
+         SEGDES MTETA4
+        ENDIF
+      ENDIF
+
+C Cas RIGIDITE
+      IF(XRIG)THEN
+c      write(6,*)' On ecrit bien une rigidite ',MRIGID
+       SEGDES MRIGID
+       CALL ECROBJ('RIGIDITE',MRIGID)
+      ELSE
+C Cas MATRIK
+c      write(6,*)' On ecrit bien un MATRIK ',MATRIK
+       SEGDES MATRIK
+       CALL ECROBJ('MATRIK',MATRIK)
+      ENDIF
+
+c     write(6,*)'On ecrit bien un CHPOINT',MCHPO1
+      CALL ECROBJ('CHPOINT',MCHPO1)
+C*************************************************************************
+
+c     write(6,*)' FIN YTCLSF'
+      RETURN
+ 1001 FORMAT(20(1X,I5))
+ 1002 FORMAT(10(1X,1PE11.4))
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

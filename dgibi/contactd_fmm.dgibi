@@ -1,0 +1,1362 @@
+* fichier :  contactd_fmm.dgibi
+*********************************************************************
+*                                                                   *
+* Propagatrion d'une discontinuité de contact.                      *
+*                                                                   *
+* Methode implicite sans matrice                                    *
+*                                                                   *
+* BECCANTINI A., SFME/LTMF,  Fevrier 2003                           *
+*                                                                   *
+* Boundary conditions imposed on the border without using ghost     *
+* cells.                                                            *
+* Boundary conditions correctly taken into account into the         *
+* explicit part.                                                    *
+* They are not recomputed at each Jacobi iteration.                 *
+* Dual time step strategy.                                          *
+* Automatic time step strategy                                      *
+* BDF2                                                              *
+*                                                                   *
+* Juin 2006 : - changement des conditions aux limites pour NS       *
+*               (elle peuvent venir de la partie convective)        *
+*             - possibilité de utiliser SGS                         *
+*                                                                   *
+*********************************************************************
+
+
+*************************************************************************
+*************************************************************************
+* I) PROCEDURES *********************************************************
+*************************************************************************
+*************************************************************************
+
+*************************************************************************
+******PROCEDURE PROCPT **************************************************
+*************************************************************************
+*
+*
+ 'DEBPROC' PROCPT ;
+ 'FINPROC' ;
+
+*************************************************************************
+*********** PROCEDURE PNSSM :                        ********************
+*********** SOLUTION OF THE NAVIER-STOKES EQUATIONS  ********************
+*********** FMM                                      ********************
+*************************************************************************
+*
+* RVX . 'RESULTS'         : table containing the results
+*
+* RVX . 'FREQI'           : frequency of presenting the results
+*
+* RVX . 'MODEL'           : model object
+* RVX . 'RN0'             : density
+* RVX . 'GN0'             : qdm
+* RVX . 'RET0'            : total energy
+*
+* RVX . 'PGAS'            : table containing the gas model
+* RVX . 'PGAS' . 'GAMN'   : gamma
+* RVX . 'PGAS' . 'MU'     : dynamic viscosity (kg/m^3 x m^2/s)
+* RVX . 'PGAS' . 'LAMBDA' : heat diffusion (W/K/m)
+*
+*
+* RVX . 'GRAVITY'         : gravity
+*
+* RVX . 'LISTCONS'        : name of the conservative variables
+* RVX . 'LISTPRIM'        : name of the primitive variables
+*
+* RVX . 'LISTERR'         : name of the error variables
+*
+* RVX . 'METHOD'          : numerical scheme
+* RVX . 'CUTOFF'          : cut off speed
+*
+* RVX . 'SPACEA'          : space accuracy
+* RVX . 'LIMITER'         : limiter type
+* RVX . 'TIMEA'           : time accuracy
+*
+* RVX . 'T0'              : initial time
+* RVX . 'TFINAL'          : final time
+* RVX . 'DTPS' ('CFL')    : time step or CFL number
+*
+* RVX . 'DCFL'            : CFL number for dual time
+*
+*                          Error criteria for dual time loop:
+* RVX . 'NDTITER'         : number of iterations
+* RVX . 'RELERR'          : Logical (Relative error or absolute error)
+* RVX . 'EPSDT'           : error at which dual time iterations are stopped
+*
+* RVX . 'NJAC'            : Jacobi iterations
+*
+* RVX . 'PROLIM'          : table called by the procedure PROLIM,
+*                           procedure to compute boundary conditions
+*
+* RVX . 'DIFTIMP'         : boundary condition on temperature
+* RVX . 'DIFGTIMP'        : boundary condition on gradient of temperature
+* RVX . 'MDIFCT'          : mesh in which we impose the temperature
+*                           arising from the convective BC
+* RVX . 'DIFVIMP'         : boundary condition on speed
+* RVX . 'DIFGVIMP'        : boundary condition on gradient of speed
+* RVX . 'MDIFCV'          : mesh in which we impose the velocity
+*                           arising from the convective BC
+* RVX . 'DIFTAUI'         : boundary condition on constraint tensor
+* RVX . 'DIFQIMP'         : boundary condition on heat flux
+*
+*
+
+ 'DEBPROC' PNSSM ;
+ 'ARGUMENT' RVX*TABLE ;
+*
+*
+ 'SI' ('EXISTE' RVX 'RESULTS') ;
+    'MESS' 'Table RESULTS already exists' ;
+ 'SINON' ;
+    RVX . 'RESULTS' = 'TABLE' ;
+    RVX . 'RESULTS' . 'TPS' = RVX . 'T0' ;
+    RVX . 'RESULTS' . 'RN'  = 'COPIER' (RVX . 'RN0') ;
+    RVX . 'RESULTS' . 'GN'  = 'COPIER' (RVX . 'GN0') ;
+    RVX . 'RESULTS' . 'RET' = 'COPIER' (RVX . 'RET0') ;
+    RVX . 'RESULTS' . 'LISTLINF' = 'PROG' ;
+    RVX . 'RESULTS' . 'LISTITDT' = 'LECT' ;
+    RVX . 'RESULTS' . 'LISTITER' = 'LECT' ;
+    RVX . 'RESULTS' . 'NITER' = 0 ;
+ 'FINSI' ;
+
+ MDOMINT = RVX . 'MODEL' ;
+ NELT = 'NBEL' ('DOMA' MDOMINT 'CENTRE') ;
+*
+***** Physical properties
+*
+ GAMN    = RVX . 'PGAS' . 'GAMN' ;
+ GAMSCA1 = 'MAXIMUM' GAMN ;
+ GAMSCA2 = 'MINIMUM' GAMN ;
+ 'SI' ('EGA' GAMSCA2 GAMSCA1 0.0001) ;
+    GAMSCAL = GAMSCA1 ;
+ 'SINON' ;
+    'MESSAGE' ;
+    'MESSAGE' 'Gamma is not constant' ;
+    'ERREUR' 21 ;
+ 'FINSI' ;
+*
+ MU     = (RVX . 'PGAS' . 'MU') ;
+ LAMBDA = (RVX . 'PGAS' . 'LAMBDA') ;
+ R      = (RVX . 'PGAS' . 'R') ;
+ CV     = R '/' (GAMSCAL '-' 1.) ;
+
+*
+ LISTINCO = RVX . 'LISTCONS' ;
+ LISTPRIM = RVX . 'LISTPRIM' ;
+ LISTERR  = RVX . 'LISTERR'  ;
+* Names of the gradient of temperature
+ LMGTEMP = 'MOTS' 'P1DX' 'P1DY' ;
+* Names of the gradient of speed
+ LMGVIT  = 'MOTS' 'P1DX' 'P1DY' 'P2DX' 'P2DY' ;
+
+*
+* Upwind scheme
+*
+ METO = RVX . 'METHOD' ;
+
+* Space accuracy (1 or 2) and limiter
+* Time accuracy (1 or 2)
+
+ ORDESP  = RVX . 'SPACEA' ;
+ TYPELIM = RVX . 'LIMITER' ;
+ ORDTPS  = RVX . 'TIMEA' ;
+
+* Initial/final time
+* Deltat or CFL
+ TPS     = RVX . 'RESULTS' . 'TPS' ;
+ TFINAL  = RVX . 'TFINAL' ;
+ 'SI' ('EXISTE' RVX 'DTPS') ;
+    'SI' ('EXISTE' RVX 'CFL') ;
+        'MESSAGE' 'DTPS or CFL ???' ;
+        'ERREUR' 21 ;
+    'FINSI' ;
+    DTPS = RVX . 'DTPS' ;
+ 'SINON' ;
+    CFL = RVX . 'CFL' ;
+ 'FINSI' ;
+
+* Dual time iterations
+ NDT = RVX . 'NDTITER' ;
+* Relative error
+ EPSDT = RVX . 'EPSDT' ;
+* Jacobi iterations
+* NJAC = RVX . 'NJAC' ;
+* Cut off speed
+ ICO = RVX . 'CUTOFF' ;
+* To compute the diffusive cut-off
+ DELTAX = 'DOMA' MDOMINT 'XXDIEMIN' ;
+ USDELTAX = 'INVERSE' DELTAX ;
+*
+**** Conservative variables
+*
+*
+ MOT1 = 'EXTRAIRE' LISTINCO 1 ;
+ 'SI' ('EGA' ('VALE' 'DIME') 2) ;
+    NOMMOM = 'EXTRAIRE' LISTINCO
+       ('LECT' 2 3 ) ;
+    NOMVEL = 'MOTS' 'UX' 'UY' ;
+    MOT2 = 'EXTRAIRE' LISTINCO 4 ;
+ 'SINON' ;
+    NOMMOM = 'EXTRAIRE' LISTINCO
+      ('LECT' 2 3 4) ;
+    NOMVEL = 'MOTS' 'UX' 'UY' 'UZ' ;
+    MOT2 = 'EXTRAIRE' LISTINCO 5 ;
+ 'FINSI' ;
+
+ RN0   = 'REDU' (RVX . 'RESULTS' . 'RN')  ('DOMA' MDOMINT 'CENTRE') ;
+ GN0   = 'REDU' (RVX . 'RESULTS' . 'GN')  ('DOMA' MDOMINT 'CENTRE') ;
+ RET0  = 'REDU' (RVX . 'RESULTS' . 'RET') ('DOMA' MDOMINT 'CENTRE') ;
+*
+**** Primitive variables
+*
+ VN0 PN0 = 'PRIM' 'PERFMONO' RN0 GN0 RET0 GAMN ;
+ TN0 = PN0 '/' (R '*' RN0) ;
+
+ MOTRN = 'EXTRAIRE' LISTPRIM 1 ;
+ 'SI' ('EGA' ('VALE' 'DIME') 2) ;
+    MOTVN = 'EXTRAIRE' LISTPRIM
+       ('LECT' 2 3 ) ;
+    MOTPN = 'EXTRAIRE' LISTPRIM 4 ;
+ 'SINON' ;
+    MOTVN = 'EXTRAIRE' LISTPRIM
+       ('LECT' 2 3 4) ;
+    MOTPN = 'EXTRAIRE' LISTPRIM 5 ;
+ 'FINSI' ;
+*
+********************************************************************
+**** Coeff to compute gradients for convective term (MCHSCA, MCHVEC)
+**** and for diffusive terms (MCHDIT, MCHVEC)
+********************************************************************
+*
+*    Boundary conditions have to be taken into account
+*
+
+ RCHLIM RESLIM = PROLIM (RVX . 'PROLIM') MDOMINT LISTINCO LISTPRIM
+    RN0 VN0 PN0 GAMN  ;
+
+ MAILLIM = 'EXTRAIRE' RCHLIM 'MAILLAGE' ;
+
+*
+* If only wall conditions (Maillim is then empty)
+*
+
+ 'SI' (MAILLIM 'EGA' 0) ;
+
+    CHPVID PIPI = 'KOPS' 'MATRIK' ;
+        MAILLIM = 'DIFF' ('DOMA' MDOMINT 'CENTRE')
+                         ('DOMA' MDOMINT 'CENTRE') ;
+
+* Convective geometric coefficients
+
+    GRADRN ALRN MCHSCA = 'PENT' MDOMINT 'CENTRE' 'EULESCAL' 'NOLIMITE'
+                         ('MOTS' 'SCAL') RN0 ;
+
+    GRADVN ALVN MCHVEC = 'PENT' MDOMINT 'CENTRE' 'EULEVECT' 'NOLIMITE'
+                         NOMVEL GN0 'CLIM' (RVX . 'DIFVIMP') ;
+
+* Diffusive geometric coefficients
+
+    GRADTN MCHDIT = 'PENT' MDOMINT 'FACE' 'DIAMAN2' ('MOTS' 'SCAL')
+                    LMGTEMP TN0  (RVX . 'DIFTIMP') (RVX . 'DIFGTIMP') ;
+
+    GRADVN MCHDIV = 'PENT' MDOMINT 'FACE' 'DIAMAN2' NOMVEL LMGVIT
+                    VN0 (RVX . 'DIFVIMP') (RVX . 'DIFGVIMP') ;
+
+*
+* If other imposed Boudary conditions we create false Chpoints
+*
+
+ 'SINON' ;
+
+* Convective false champoints
+
+    SCALBC = 'MANUEL' 'CHPO' MAILLIM 1 'SCAL' 1.0
+             'NATU' 'DISCRET' ;
+
+    'SI' (('VALEUR' 'DIME') 'EGA' 2) ;
+        VECTBC = 'MANUEL' 'CHPO' MAILLIM
+                 2 'UX' 0.0 'UY' 0.0 'NATU' 'DISCRET' ;
+*       Same name as NOMVEL
+    'SINON' ;
+        VECTBC = 'MANUEL' 'CHPO' MAILLIM
+                 3 'UX' 0.0 'UY' 0.0 'UZ' 0.0 'NATU' 'DISCRET' ;
+    'FINSI' ;
+
+    VECTBC = VECTBC '+' (RVX . 'DIFVIMP') ;
+
+* Convective geometric coefficients
+
+    GRADRN ALRN MCHSCA = 'PENT' MDOMINT 'CENTRE' 'EULESCAL' 'NOLIMITE'
+                         ('MOTS' 'SCAL') RN0 'CLIM' SCALBC ;
+
+    GRADVN ALVN MCHVEC = 'PENT' MDOMINT 'CENTRE' 'EULEVECT' 'NOLIMITE'
+                         NOMVEL VN0 'CLIM' VECTBC ;
+ 'FINSI' ;
+
+*
+* Diffusive false champoints
+*
+* We have several possibility
+* We decide to impose the temperature given by the convective boundary
+* condition on (RVX . 'MDIFCT') and the velocity given by the
+* convective boundary condition on (RVX . 'MDIFCV')
+*
+* We check that (RVX . 'MDIFCT') belongs to MAILLIM
+*
+ NN1 = 'NBEL' MAILLIM ;
+ NN2 = 'NBEL' (RVX . 'MDIFCT') ;
+ 'SI' (('NEG' NN1 0) 'ET' ('NEG' NN2 0)) ;
+*
+*** If both meshes contain at least one element NN1 is equal
+*   to the number of elements belonging to the intersection.
+*   Otherwise NN1 = 0
+*
+    NN1 = 'NBEL' ('INTERSECTION' (RVX . 'MDIFCT') MAILLIM) ;
+ 'FINSI' ;
+ 'SI' ('NEG' NN1 NN2) ;
+    'MESSAGE' 'Problem in MDIFCT' ;
+    'ERREUR' 21 ;
+ 'FINSI' ;
+ SCALBC = 'MANUEL' 'CHPO' (RVX . 'MDIFCT') 1 'SCAL' 1.0
+    'NATU' 'DISCRET' ;
+ SCALBC = SCALBC '+' (RVX . 'DIFTIMP') ;
+
+ NN2 = 'NBEL' (RVX . 'MDIFCV') ;
+ 'SI' (('NEG' NN1 0) 'ET' ('NEG' NN2 0)) ;
+    NN1 = 'NBEL' ('INTERSECTION' (RVX . 'MDIFCV') MAILLIM) ;
+ 'FINSI' ;
+ 'SI' ('NEG' NN1 NN2) ;
+    'MESSAGE' 'Problem in MDIFCV' ;
+    'ERREUR' 21 ;
+ 'FINSI' ;
+ 'SI' (('VALEUR' 'DIME') 'EGA' 2) ;
+    VECTBC = 'MANUEL' 'CHPO' (RVX . 'MDIFCV')
+                 2 'UX' 0.0 'UY' 0.0 'NATU' 'DISCRET' ;
+ 'SINON' ;
+    VECTBC = 'MANUEL' 'CHPO' (RVX . 'MDIFCV')
+                 3 'UX' 0.0 'UY' 0.0 'UZ' 0.0 'NATU' 'DISCRET' ;
+ 'FINSI' ;
+*
+ VECTBC = VECTBC '+' (RVX . 'DIFVIMP') ;
+*
+* Diffusive geometric coefficients
+
+ GRADTN MCHDIT = 'PENT' MDOMINT 'FACE' 'DIAMAN2' ('MOTS' 'SCAL')
+                    LMGTEMP TN0  SCALBC (RVX . 'DIFGTIMP') ;
+*
+ GRADVN MCHDIV = 'PENT' MDOMINT 'FACE' 'DIAMAN2' NOMVEL LMGVIT
+                    VN0 VECTBC (RVX . 'DIFGVIMP') ;
+*
+***************************************************************
+*** After each dual time loop, we could display
+*   the evolution of the error in the dual time loop
+*   the evolution of the dual time step (the safety factor)
+***************************************************************
+*
+
+ LISTLINF = RVX . 'RESULTS' . 'LISTLINF' ;
+ LISTITDT = RVX . 'RESULTS' . 'LISTITDT' ;
+ LISTITER = RVX . 'RESULTS' . 'LISTITER' ;
+*
+ 'MESSAGE' ;
+ 'MESSAGE' ('CHAINE' 'Methode = ' METO) ;
+ 'MESSAGE' ;
+*
+ 'TEMPS' 'ZERO' ;
+*
+************************************************************************
+************************************************************************
+**** Temporal loop *****************************************************
+************************************************************************
+************************************************************************
+
+ RN_N1M1  = 'COPIER' RN0 ;
+ GN_N1M1  = 'COPIER' GN0 ;
+ RET_N1M1 = 'COPIER' RET0 ;
+
+ AA = 'DIME' LISTITER ;
+ 'SI' (AA > 0) ;
+    PTITER = 'EXTRAIRE' LISTITER AA ;
+ 'SINON' ;
+    PTITER = 0 ;
+ 'FINSI' ;
+
+ DUSDT = 0.0D0 ;
+
+ 'REPETER' BLITER (RVX . 'NITER') ;
+
+    PTITER = PTITER '+' 1 ;
+*
+**** Personal procedure
+*
+    PROCPT RVX ;
+*
+*
+****  _N1M  = (t^n,\tau^m)
+*     _N1M1 = (t^n,\tau^{m+1})
+*
+*
+************************************************************************
+****** Loop on dual time***********************************************
+************************************************************************
+*
+*
+*** DUSDT0 is the increment of DUSDT in the previous (physical) time
+*   iteration.
+*
+    DUSDT0 = DUSDT ;
+    DUSDT = 0.0D0 ;
+
+    'REPETER' BLDT NDT ;
+
+       RN_N1M  = RN_N1M1 ;
+       GN_N1M  = GN_N1M1 ;
+       RET_N1M = RET_N1M1 ;
+*
+**** Primitive variables
+*
+
+       VN_N1M PN_N1M = 'PRIM' 'PERFMONO' RN_N1M GN_N1M RET_N1M GAMN ;
+*
+*** Boundary conditions
+*
+
+       RCHLIM RESLIM = PROLIM (RVX . 'PROLIM') MDOMINT LISTINCO LISTPRIM
+                       RN_N1M VN_N1M PN_N1M GAMN  ;
+
+*
+****** First/second order reconstruction
+*
+       'SI' (ORDESP 'EGA' 2) ;
+*
+          NNLIM = 'NBNO' MAILLIM ;
+          'SI' (NNLIM 'EGA' 0) ;
+             RNLIM = CHPVID ;
+             PNLIM = CHPVID ;
+             VNLIM = RVX . 'DIFVIMP' ;
+          'SINON' ;
+             RNLIM = ('EXCO' MOTRN RCHLIM 'SCAL') ;
+             PNLIM = ('EXCO' MOTPN RCHLIM 'SCAL') ;
+             VNLIM = ('EXCO' MOTVN RCHLIM MOTVN)
+                     '+'  (RVX . 'DIFVIMP') ;
+          'FINSI' ;
+          GRADRN ALRN0  = 'PENT' MDOMINT 'CENTRE' 'EULESCAL' TYPELIM
+              ('MOTS' 'SCAL')  RN_N1M
+             'CLIM' RNLIM 'GRADGEO' MCHSCA ;
+          GRADPN ALPN0  = 'PENT' MDOMINT 'CENTRE' 'EULESCAL' TYPELIM
+              ('MOTS' 'SCAL')  PN_N1M
+             'CLIM' PNLIM 'GRADGEO' MCHSCA ;
+          GRADVN ALVN0  = 'PENT' MDOMINT 'CENTRE' 'EULEVECT' TYPELIM
+              ('MOTS' 'UX' 'UY') VN_N1M
+             'CLIM' VNLIM  'GRADGEO' MCHVEC ;
+
+*          'SI' (&BLDT < NLCB) ;
+*              ALRN0  =  'COPIER' ALRN ;
+*              ALPN0  =  'COPIER' ALPN ;
+*              ALVN0  =  'COPIER' ALVN ;
+*          'SINON' ;
+*             'SI' (&BLDT 'EGA' NLCB) ;
+*                'MESSAGE' ;
+*                'MESSAGE' 'On gele les limiteurs!!!' ;
+*                'MESSAGE' ;
+*             'FINSI' ;
+*          'FINSI' ;
+
+          ROF VITF PF GAMF = 'PRET' 'PERFMONO'  2 1
+                              MDOMINT
+                              RN_N1M  GRADRN ALRN0
+                              VN_N1M  GRADVN ALVN0
+                              PN_N1M   GRADPN ALPN0
+                              GAMN  ;
+       'SINON' ;
+          ROF VITF PF GAMF = 'PRET' 'PERFMONO'  1 1
+                              MDOMINT
+                              RN_N1M VN_N1M PN_N1M GAMN  ;
+       'FINSI' ;
+
+       RESIDU DELTAT =  'KONV' 'VF' 'PERFMONO' 'RESI' METO
+            MDOMINT LISTINCO  ROF VITF PF GAMF MAILLIM
+*            ICO (MU '*' ('INVERSE' RN_N1M) '*' USDELTAX) ;
+            ICO ICO ;
+       RESIDU = RESIDU '+' RESLIM ;
+
+*
+**** La gravite
+*
+
+       RESGRA = 'FIMP' 'VF' 'GRAVMONO' 'RESI' LISTINCO
+                 RN_N1M GN_N1M1 (RVX . 'GRAVITY') ;
+
+       RESIDU = RESIDU '+' RESGRA ;
+*
+**************************************
+**** Diffusive terms *****************
+**************************************
+*
+      TN_N1M = PN_N1M '/' (R '*' RN_N1M) ;
+*
+* Computation of the CHPOINTS at the boundary of the domain
+*
+      NN1 = 'NBEL' MAILLIM ;
+      'SI' (NN1 > 0) ;
+         RNLIM = 'EXCO' MOTRN RCHLIM 'SCAL' 'NATU' 'DISCRET'  ;
+         PNLIM = 'EXCO' MOTPN RCHLIM 'SCAL' 'NATU' 'DISCRET'  ;
+         VNLIM = ('EXCO' MOTVN RCHLIM MOTVN 'NATU' 'DISCRET') ;
+         TNLIM = (PNLIM '/' (RNLIM '*' R) ) ;
+         VNLIM = ('REDU' VNLIM (RVX . 'MDIFCV')) '+'
+            (RVX . 'DIFVIMP') ;
+         TNLIM = ('REDU' TNLIM (RVX . 'MDIFCV')) '+'
+            (RVX . 'DIFTIMP') ;
+      'SINON' ;
+         VNLIM = (RVX . 'DIFVIMP') ;
+         TNLIM = (RVX . 'DIFVIMP') ;
+      'FINSI' ;
+*
+      GRADTN = 'PENT' MDOMINT 'FACE' 'DIAMAN2' ('MOTS' 'SCAL')
+               LMGTEMP TN_N1M  TNLIM (RVX . 'DIFGTIMP')
+               'GRADGEO' MCHDIT ;
+*
+* 'LIST' (RVX . 'DIFGVIMP') ;
+      GRADVN = 'PENT' MDOMINT 'FACE' 'DIAMAN2' NOMVEL
+               LMGVIT VN_N1M VNLIM (RVX . 'DIFGVIMP')
+               'GRADGEO' MCHDIV ;
+*
+*      NOMVEL = 'MOTS' 'UX' 'UY' ;
+*
+*
+       ICACCA RESIDI DTCACCA = 'LAPN' 'VF' 'PROPCOST' 'RESI' 'EXPL'
+          MDOMINT  MU LAMBDA CV RN_N1M VN_N1M TN_N1M GRADVN  GRADTN
+          LISTINCO 'VIMP'  VNLIM  'TAUI' (RVX . 'DIFTAUI')
+          'QIMP' (RVX . 'DIFQIMP')  ;
+
+       RESIDU = RESIDU '+' RESIDI ;
+*
+*****  Spectral radious of the viscosity matrix
+*
+       COEFV1 = (0.0 '*' RN_N1M) '+' 1.0 ;
+       COEFV1 = COEFV1 '*' (lambda '*' (gamscal '-' 1.)) ;
+       COEFV1 = COEFV1 '/' (R '*' RN_N1M) ;
+       COEFV2 = (0.0 '*' RN_N1M) '+' ((4.0 '/' 3.0) '*' MU) ;
+       COEFV2 = COEFV2 '/' RN_N1M ;
+       COEFV  = 0.5 '*' (COEFV1 '+' COEFV2) ;
+       COEFV  = COEFV '+' (0.5 '*' ((COEFV1 '-' COEFV2) 'ABS')) ;
+*       'MESSAGE' ;
+*       'MESSAGE' 'Je fais n importe' ;
+*       COEFV = COEFV '*' 0.25 ;
+*
+****** Residuum for dual tims stepping also involved the
+*      variation of the conserved variables with respect
+*      to time
+
+       'SI' ((&BLITER 'EGA' 1) 'OU' (ORDTPS 'EGA' 1)) ;
+           RESIDU = RESIDU '-' DUSDT ;
+       'SINON' ;
+           RESIDU = RESIDU '-' ((1.5 '*' DUSDT) '-' (0.5 '*' DUSDT0)) ;
+       'FINSI' ;
+
+*
+*** Time step at the first iteration/jacobi iteration
+*
+
+       'SI' (&BLDT 'EGA' 1) ;
+          'SI' ('EXISTE' RVX 'CFL') ;
+             DTPS = (RVX . 'CFL') '*' 2.0D0 '*' DELTAT ;
+          'SINON' ;
+             DTPS = RVX . 'DTPS' ;
+          'FINSI' ;
+          DTPS = 'MINIMUM' ('PROG' DTPS ((TFINAL '-' TPS) '*' 1.001)) ;
+          TPS = TPS '+' DTPS ;
+*
+          NJAC = 'ENTIER' ('MINIMUM' (RVX . 'NJACITER')) ;
+          NJAC0 = NJAC ;
+       'SINON' ;
+          NJAC = 'IPOL' (('LOG' ERRINF) '/' ('LOG' 10))
+                 (RVX . 'NJACLERR') (RVX . 'NJACITER') ;
+          NJAC = 'MAXIMUM' ('PROG' NJAC0 NJAC) ;
+          NJAC = 'ENTIER' NJAC ;
+          NJAC0 = NJAC ;
+       'FINSI' ;
+
+*
+*** JACOBI
+*
+
+*
+**** CFL dual
+*
+         'SI' (&BLDT 'EGA' 1) ;
+             SAFFACD = ('MINIMUM' (RVX . 'DCFL')) '*' 2 ;
+         'SINON' ;
+             SAFFACD = ('IPOL' (('LOG' ERRINF) '/' ('LOG' 10))
+                 (RVX . 'DCFLERR') (RVX . 'DCFL')) '*' 2 ;
+         'FINSI' ;
+
+          'SI' ((&BLITER 'EGA' 1) 'OU' (ORDTPS 'EGA' 1)) ;
+*              DUN IPRO = 'DETO'  (RVX . 'TYPEJAC')
+              DUN IPRO = 'KONV' 'VF' 'PMON1FMM'  (RVX . 'TYPEJAC')
+                 LISTINCO MDOMINT  RESIDU RN_N1M GN_N1M RET_N1M GAMN ICO
+                 DTPS SAFFACD
+                 NJAC 'CLIM' LISTPRIM RCHLIM COEFV ;
+          'SINON' ;
+*              DUN IPRO = 'DETO'  (RVX . 'TYPEJAC')
+              DUN IPRO = 'KONV' 'VF' 'PMON1FMM'  (RVX . 'TYPEJAC')
+                 LISTINCO MDOMINT  RESIDU RN_N1M GN_N1M RET_N1M GAMN ICO
+                 (DTPS '/' 1.5)
+                 SAFFACD NJAC 'CLIM' LISTPRIM RCHLIM COEFV ;
+          'FINSI' ;
+*       'FINSI' ;
+
+       'SI' (IPRO 'NEG' 0) ;
+          'MESSAGE' ;
+          'MESSAGE' 'Probleme dans FMM' ;
+          'MESSAGE' ;
+          'ERREUR' 21 ;
+       'FINSI' ;
+
+*
+**** We compute DUSDT for the future loop
+*
+
+       DUSDT = DUSDT '+' (DUN '/' DTPS) ;
+
+*
+**** We evaluate the conservative variables at t^{n+1}, \tau^{m+1}
+*
+
+       DRN = 'EXCO' MOT1 DUN 'SCAL' ;
+       DGN = 'EXCO' NOMMOM DUN NOMVEL ;
+       DRET = 'EXCO' MOT2 DUN 'SCAL' ;
+
+       RN_N1M1   = RN_N1M '+' DRN ;
+       GN_N1M1   = GN_N1M '+' DGN ;
+       RET_N1M1  = RET_N1M '+' DRET ;
+
+       ERRINF   = 'MAXIMUM' DUN 'ABS' LISTERR ;
+       LISTLINF = LISTLINF 'ET' ('PROG' ERRINF) ;
+       LISTITDT = LISTITDT 'ET' ('LECT'  &BLDT) ;
+       LISTITER = LISTITER 'ET' ('LECT' PTITER) ;
+
+       'SI' ((&BLDT 'EGA' 1) 'OU'
+             (((&BLDT '/' (RVX . 'FREQI')) '*' (RVX . 'FREQI'))
+              'EGA' &BLDT)) ;
+          'MESSAGE' ;
+          'MESSAGE'
+          ('CHAINE' 'ITER =' PTITER ' TPS =' TPS
+           ' DTITER ='  &BLDT  ' LINF =' ERRINF
+           ' DCFL =' SAFFACD ' NJAC =' NJAC) ;
+          'MESSAGE' ;
+       'FINSI' ;
+*
+*
+*** Update of RVX . 'RESULTS'
+*
+       RVX . 'RESULTS' . 'RN'   = RN_N1M1 ;
+       RVX . 'RESULTS' . 'GN'   = GN_N1M1 ;
+       RVX . 'RESULTS' . 'RET'  = RET_N1M1 ;
+       RVX . 'RESULTS' . 'LISTITDT' = LISTITDT ;
+       RVX . 'RESULTS' . 'LISTITER' = LISTITER ;
+       RVX . 'RESULTS' . 'LISTLINF' = LISTLINF ;
+*
+       'SI' (RVX . 'RELERR') ;
+*         Relative error
+          'SI' (&BLDT 'EGA' 1) ;
+             ERRINF0 = ERRINF ;
+          'SINON' ;
+             'SI' (ERRINF < (EPSDT '*' ERRINF0)) ;
+                'QUITTER' BLDT ;
+             'FINSI' ;
+          'FINSI' ;
+       'SINON' ;
+          'SI' (ERRINF < EPSDT) ;
+             'QUITTER' BLDT ;
+          'FINSI' ;
+       'FINSI' ;
+
+
+    'FIN' BLDT ;
+
+************************************************************************
+****** End of the loop on dual time*************************************
+************************************************************************
+*
+*** Update of RVX . 'RESULTS'
+*
+    RVX . 'RESULTS' . 'TPS' = TPS ;
+    RVX . 'RESULTS' . 'NITER' = (RVX . 'RESULTS' . 'NITER') '+' 1 ;
+*
+    'SI' (TPS '>EG' TFINAL) ;
+       'QUITTER' BLITER ;
+    'FINSI' ;
+
+ 'FIN' BLITER ;
+
+ TCPU = 'TEMPS' 'NOEC' ;
+ RVX . 'RESULTS' . 'TCPU' = TCPU ;
+
+ 'FINPROC' ;
+
+*************************************************************************
+****** FIN PROCEDURE PNSSM **********************************************
+*************************************************************************
+
+*************************************************************************
+******PROCEDURE PROLIM **************************************************
+*************************************************************************
+*
+ 'DEBPROC' PROLIM ;
+
+ 'ARGUMENT' RVX*'TABLE' MDOMINT*'MMODEL' LISTINCO*'LISTMOTS'
+            LISTPRIM*'LISTMOTS'
+            RN*'CHPOINT' VN*'CHPOINT' PN*'CHPOINT' GAMN*'CHPOINT' ;
+
+*
+* Récupération du nombres de CL imposées
+*
+
+ NCL = RVX . 'N' ;
+
+*
+* Initialisation de RESLIM et de RCHLIM
+*
+
+ RESLIM VIDE = 'KOPS' MATRIK ;
+ RCHLIM VIDE = 'KOPS' MATRIK ;
+
+*
+* Boucle d'évaluation des résidus et des CHPOINTS aux limites
+*
+
+ 'REPETER' BCLIM NCL ;
+
+   MOTCLI = 'EXTRAIRE' (RVX . 'CLN' . &BCLIM) 1 ;
+   MODELI = RVX . 'MODELN' . &BCLIM  ;
+   CHPOLI = RVX . 'CHPOLN' . &BCLIM  ;
+
+   RCHLI RESLI = 'KONV' 'VF' 'PERFMONO' 'CLIM'  'RESI'
+                 MDOMINT MODELI LISTINCO LISTPRIM
+                 RN VN PN GAMN
+                 CHPOLI MOTCLI ;
+
+   RCHLIM = RCHLIM '+' RCHLI ;
+   RESLIM = RESLIM '+' RESLI ;
+
+ 'FIN' BCLIM ;
+
+ 'RESPRO' RCHLIM RESLIM ;
+ 'FINPROC' ;
+
+*************************************************************************
+****** FIN PROCEDURE PROLIM *********************************************
+*************************************************************************
+
+*************************************************************************
+***** PROCEDURE POUR CALCULER LES VARIABLES CONSERVATIVES ***************
+*************************************************************************
+
+ 'DEBPROC' CONS ;
+ 'ARGUMENT' RN*'CHPOINT' VN*'CHPOINT' PN*'CHPOINT' GAMN*'CHPOINT' ;
+
+ RVN  =  RN '*' VN ('MOTS' 'SCAL' 'SCAL') ('MOTS' 'UX' 'UY')
+    ('MOTS' 'UX' 'UY') ;
+ CELL = 'PSCAL' RVN VN ('MOTS' 'UX' 'UY') ('MOTS' 'UX' 'UY') ;
+ RECIN = 0.5 '*' CELL ;
+ REIN = PN '/' (GAMN '-' 1.0) ;
+ RET = RECIN '+' REIN ;
+
+ DETR CELL ;
+ DETR RECIN ;
+ DETR REIN ;
+ 'RESPRO' RVN RET ;
+
+ 'FINPROC' ;
+
+*************************************************************************
+*************************************************************************
+****************** FIN  PROCEDURES **************************************
+*************************************************************************
+*************************************************************************
+
+
+*************************************************************************
+*************************************************************************
+****************** MAILLAGE  ********************************************
+*************************************************************************
+*************************************************************************
+
+ TYEL = 'QUA4' ;
+
+ 'OPTION'  'DIME' 2  'ELEM' TYEL  'ISOV' 'SULI'
+    'ECHO' 1 'TRAC' 'X' ;
+
+* GRAPH = VRAI ;
+ GRAPH = FAUX ;
+*
+
+ RAF = 1 ;
+ L = 1. ;
+
+ NX = 50 '*' RAF ;
+ DX = L '/' NX ;
+* NY = 4 ;
+ 'MESSAGE' ;
+ 'MESSAGE' 'MODIF' ;
+ 'MESSAGE' ;
+ NY = 1 ;
+
+ LIGM = (0.0 0.0) 'DROIT' NY (0.0 (NY '*' DX)) ;
+ LIGG = LIGM 'PLUS' ((-1 '*' NX '*' DX) 0.0) ;
+ LIGD = LIGM 'PLUS' ((NX '*' DX) 0.0) ;
+ DOM1 = LIGG 'REGLER' NX LIGM ;
+ DOM2 = LIGM 'REGLER' NX LIGD ;
+ DOMINT = DOM1 'ET' DOM2 ;
+ CDOM = 'DIFF' ('CONTOUR' DOMINT) (LIGG 'ET' LIGD) ;
+*
+**** Creation of MODELS
+*
+
+ MDOMINT  = 'MODELISER' DOMINT 'EULER' ;
+ MDOM1  = 'MODELISER' DOM1 'EULER' ;
+ MDOM2  = 'MODELISER' DOM2 'EULER' ;
+ MLIGG    = 'MODELISER' LIGG   'EULER' ;
+ MLIGD    = 'MODELISER' LIGD   'EULER' ;
+ MCDOM    = 'MODELISER' CDOM   'EULER' ;
+
+ TDOMINT  = 'DOMA' MDOMINT 'VF' ;
+ TDOM1  = 'DOMA' MDOM1 'VF' ;
+ TDOM2  = 'DOMA' MDOM2 'VF' ;
+ TLIGG    = 'DOMA' MLIGG   'VF' ;
+ TLIGD    = 'DOMA' MLIGD   'VF' ;
+ TCDOM    = 'DOMA' MCDOM   'VF' ;
+
+ QDOMINT = TDOMINT . 'QUAF' ;
+ QDOM1 = TDOM1 . 'QUAF' ;
+ QDOM2 = TDOM2 . 'QUAF' ;
+ QLIGD = TLIGD . 'QUAF' ;
+ QLIGG = TLIGG . 'QUAF' ;
+ QCDOM = TCDOM . 'QUAF' ;
+
+ 'ELIMINATION' QDOMINT (1.0D-3 '/' RAF)  QDOM1 ;
+ 'ELIMINATION' QDOMINT (1.0D-3 '/' RAF)  QDOM2 ;
+ 'ELIMINATION' QDOMINT (1.0D-3 '/' RAF)  QLIGG ;
+ 'ELIMINATION' QDOMINT (1.0D-3 '/' RAF)  QLIGD ;
+ 'ELIMINATION' QDOMINT (1.0D-3 '/' RAF)  QCDOM ;
+
+ 'SI' GRAPH ;
+    'TRACER' DOMINT  'TITRE'
+       ('CHAINE' 'Domaine, nbel=' ('NBEL' DOMINT)) ;
+ 'FINSI' ;
+
+*************************************************************************
+*************************************************************************
+**************** FIN MAILLAGE  ******************************************
+*************************************************************************
+*************************************************************************
+
+*************************************************************************
+*************************************************************************
+**************** INITIAL CONDITIONS *************************************
+*************************************************************************
+*************************************************************************
+
+* Noms des variables
+
+ MOTRN   = 'RN' ;
+ MOTGNX  = 'RUX' ;
+ MOTGNY  = 'RUY' ;
+ MOTGN   = 'MOTS' MOTGNX MOTGNY ;
+ MOTVNX  = 'UX' ;
+ MOTVNY  = 'UY' ;
+ MOTVN   = 'MOTS' MOTVNX MOTVNY ;
+ MOTRET = 'RETN' ;
+ MOTPN   = 'PN' ;
+
+ LISTINCO = 'MOTS' MOTRN MOTGNX MOTGNY MOTRET ;
+ LISTPRIM = 'MOTS' MOTRN MOTVNX MOTVNY MOTPN   ;
+
+ GAMAIR = 1.4 ;
+
+*
+***** Left state
+*
+
+ ROL = 1.4 ;
+ PL  = 1.0 ;
+ UL  = 0.01 ;
+
+ HTL = ((GAMAIR '/' (GAMAIR '-' 1.0)) '*' (PL '/' ROL)) '+'
+       (0.5 '*' UL '*' UL) ;
+ SL = PL '/' (ROL '**' GAMAIR) ;
+
+*
+***** Right state
+*
+
+ ROR = 1.4 '/' 10. ;
+ PR  = PL ;
+ UR  = UL ;
+
+*
+*** Boundary Conditions
+*
+*
+*
+* Subsonic inlet.
+* We impose the total enthalpy and the entropy.
+* The velocity direction is supposed to be 90 degrees
+*
+*
+  CHPINL = 'MANUEL' 'CHPO' ('DOMA' MLIGG 'CENTRE') 2 'HT' HTL
+           'S' SL ;
+*
+* Subsonic outlet
+* We impose the pressure
+*
+  CHPOUT = 'MANUEL' 'CHPO' ('DOMA' MLIGD 'CENTRE') 1 'PN' PR ;
+*
+* Point where we directly compute the boundary conditions
+*
+ MAILLIM = ('DOMA' MLIGG 'CENTRE') 'ET' ('DOMA' MLIGD 'CENTRE') ;
+*
+ RN0  = ('MANU' 'CHPO' ('DOMA' MDOM1 'CENTRE') 1 'SCAL' ROL
+        'NATURE' 'DISCRET') '+'
+        ('MANU' 'CHPO' ('DOMA' MDOM2 'CENTRE') 1 'SCAL' ROR
+        'NATURE' 'DISCRET')  ;
+
+ VN0  = ('MANU' 'CHPO' ('DOMA' MDOM1 'CENTRE') 2 'UX'  UL
+         'UY' 0.0  'NATURE' 'DISCRET') 'ET'
+        ('MANU' 'CHPO' ('DOMA' MDOM2 'CENTRE') 2 'UX'  UR
+        'UY' 0.0  'NATURE' 'DISCRET') ;
+
+ PN0  = ('MANU' 'CHPO' ('DOMA' MDOM1 'CENTRE') 1 'SCAL' PL
+         'NATURE' 'DISCRET') 'ET'
+        ('MANU' 'CHPO' ('DOMA' MDOM2 'CENTRE') 1 'SCAL' PR
+         'NATURE' 'DISCRET')  ;
+
+ GAMN =  'MANU' 'CHPO' ('DOMA' MDOMINT 'CENTRE') 1 'SCAL' GAMAIR
+        'NATURE' 'DISCRET' ;
+
+ CSON = GAMN '*' (PN0 '/' RN0) ;
+ CSON = CSON '**' 0.5 ;
+
+ GN0 RET0 = CONS RN0 VN0 PN0 GAMN  ;
+
+ VN1 PN1 = 'PRIM' 'PERFMONO' RN0 GN0 RET0 GAMN ;
+
+ ERRO = 'MAXIMUM' (PN1 '-' PN0) 'ABS' ;
+
+ 'SI' (ERRO > 1.0D-6) ;
+    'MESSAGE' 'Problem in the ic file!!!'
+    'ERREUR' 5 ;
+ 'FINSI' ;
+*
+**** Plot of IC
+*
+ GRAVITE = 'MANUEL' 'CHPO' (TDOMINT . 'CENTRE') 2 'UX' 0.0 'UY' 0.0 ;
+* 'SI' (FAUX 'ET' GRAPH) ;
+ 'SI' (GRAPH) ;
+    CHM_RN   =  'KCHA' MDOMINT 'CHAM' RN0 ;
+    CHM_PN   =  'KCHA' MDOMINT 'CHAM' PN0 ;
+    CHM_VN   =  'KCHA' MDOMINT 'CHAM'  VN0 ;
+    CHM_MN   =  'KCHA' MDOMINT 'CHAM'
+      ((('PSCAL' VN0 VN0 MOTVN MOTVN) '**' 0.5) '/' CSON) ;
+
+    'TRACER'  CHM_RN  MDOMINT
+       'TITR'  ('CHAINE'  'RN at t='  0.0);
+    'TRACER'  CHM_PN  MDOMINT
+       'TITR'  ('CHAINE'  'PN at t='  0.0);
+    'TRACER'  CHM_VN MDOMINT
+       'TITR'  ('CHAINE'  'VN at t='  0.0);
+    'TRACER'  CHM_MN MDOMINT
+       'TITR'  ('CHAINE'  'Mach at t='  0.0);
+
+ 'FINSI' ;
+
+*************************************************************************
+*************************************************************************
+**************** FIN INITIAL CONDITIONS *********************************
+*************************************************************************
+*************************************************************************
+
+*************************************************************************
+*************************************************************************
+************** COMPUTATION OF THE SOLUTION ******************************
+*************************************************************************
+*************************************************************************
+
+ RV = 'TABLE' ;
+ RV . 'FREQI' = 1 ;
+ RV . 'MODEL' = MDOMINT ;
+*
+**** Conservative variables / primitive variables
+*
+*
+ RV . 'LISTCONS' = 'MOTS' MOTRN MOTGNX MOTGNY MOTRET ;
+ RV . 'LISTPRIM' = 'MOTS' MOTRN MOTVNX MOTVNY MOTPN  ;
+*
+ RV . 'RN0'  = RN0 ;
+ RV . 'GN0'  = GN0 ;
+ RV . 'RET0' = RET0 ;
+*
+**** Gas property/gravity
+*
+ RV . 'PGAS' = 'TABLE' ;
+ RV . 'PGAS' . 'GAMN'   = GAMN ;
+ RV . 'PGAS' . 'MU'     =  0.0D0 ;
+ RV . 'PGAS' . 'R'      =  1.0D0 ;
+ RV . 'PGAS' . 'LAMBDA' =  0.0D0 ;
+ RV . 'GRAVITY' = (GRAVITE '*' 0.0) ;
+*
+* Table for BC (injection part)
+*
+ RV . 'PROLIM' = 'TABLE' ;
+ RV . 'PROLIM' . 'N' = 2 ;
+ RV . 'PROLIM' . 'CLN' = 'TABLE' ;
+ RV . 'PROLIM' . 'CLN' . 1 = 'MOTS' INSU ;
+ RV . 'PROLIM' . 'CLN' . 2 = 'MOTS' OUTP ;
+ RV . 'PROLIM' . 'MODELN' = 'TABLE' ;
+ RV . 'PROLIM' . 'MODELN' . 1 = MLIGG ;
+ RV . 'PROLIM' . 'MODELN' . 2 = MLIGD ;
+ RV . 'PROLIM' . 'CHPOLN' = 'TABLE' ;
+ RV . 'PROLIM' . 'CHPOLN' . 1 = CHPINL ;
+ RV . 'PROLIM' . 'CHPOLN' . 2 = CHPOUT ;
+*
+* Table for BC
+*
+* RVX . 'DIFTIMP'         : boundary condition on temperature
+* RVX . 'MDIFCT'          : mesh in which we impose the temperature
+*                           arising from the convective BC
+* RVX . 'DIFGTIMP'        : boundary condition on gradient of temperature
+* RVX . 'DIFVIMP'         : boundary condition on speed
+* RVX . 'MDIFCV'          : mesh in which we impose the velocity
+*                           arising from the convective BC
+* RVX . 'DIFGVIMP'        : boundary condition on gradient of speed
+* RVX . 'DIFTAUI'         : boundary condition on constraint tensor
+* RVX . 'DIFQIMP'         : boundary condition on heat flux
+*
+ CHPVID MATVID = 'KOPS' 'MATRIK' ;
+ RV . 'DIFTIMP'  = CHPVID ;
+ RV . 'DIFGTIMP' = 'MANUEL' 'CHPO' (TCDOM . 'CENTRE') 2 'P1DX' 0.0
+   'P1DY' 0.0 ;
+ RV . 'DIFQIMP'  = 'MANUEL' 'CHPO' (TCDOM . 'CENTRE') 2 'UX' 0.0
+   'UY' 0.0 ;
+ RV . 'MDIFCT'   =  ('DOMA' MLIGG 'CENTRE') 'ET'
+                    ('DOMA' MLIGD 'CENTRE') ;
+ RV . 'DIFVIMP'  = CHPVID ;
+ RV . 'DIFGVIMP' = 'MANUEL' 'CHPO' (TCDOM . 'CENTRE') 4 'P1DX' 0.0
+   'P1DY' 0.0  'P2DX' 0.0  'P2DY' 0.0 ;
+ RV . 'DIFTAUI'  = 'MANUEL' 'CHPO' (TCDOM . 'CENTRE') 3 'TXX' 0.0
+   'TXY' 0.0  'TYY' 0.0 ;
+ RV . 'MDIFCV'   =  ('DOMA' MLIGG 'CENTRE') 'ET'
+                    ('DOMA' MLIGD 'CENTRE') ;
+*
+**** Numerical parameters
+*
+*
+* Variable to compute L2 error
+*
+ RV . 'LISTERR' = 'MOTS' MOTGNX MOTGNY  ;
+ RV . 'LISTRHO' = 'MOTS' MOTRN  ;
+* RV . 'LISTERR' = 'MOTS' MOTRET ;
+*
+* Upwind scheme
+*
+* RV . 'METHOD' = 'RUSANOLM' ;
+ RV . 'METHOD' = 'AUSMPLM' ;
+* RV . 'METHOD' = 'HLLCLM' ;
+*
+* Low-Mach Cut off
+*
+ CO = UL '*' 10.D-2 ;
+ RV . 'CUTOFF' = 'MANU' 'CHPO' ('DOMA' MDOMINT 'CENTRE') 1 'SCAL' CO
+        'NATURE' 'DISCRET' ;
+*
+* Reconstruction/limiter
+* Time accuracy (1 or 2)
+* Iterations
+* Final time
+ RV . 'SPACEA' = 2 ;
+* RV . 'LIMITER' = 'NOLIMITE' ;
+ RV . 'LIMITER' = 'LIMITEUR' ;
+ RV . 'TIMEA' = 2 ;
+*
+**** Physical time
+*
+ RV . 'T0' = 0 ;
+* RV . 'CFL' = 20. ;
+ RV . 'TFINAL' = L '/' (2 '*' UL) ;
+* RV . 'CFL' = 20. ;
+ RV . 'DTPS' =  0.5 '*' (DX '/' UL) ;
+ RV . 'NITER' = -1 ;
+*
+**** Dual time
+*
+*    Safety factor for the dual time step
+*    Max. Dual time iterations
+*    Relative error
+*
+ RV . 'DCFLERR' = 'PROG' 16. -16.  ;
+ RV . 'DCFL' = 'PROG' 1.d6 1.d6  ;
+ RV . 'NDTITER' = 100 ;
+ RV . 'RELERR' = FAUX ;
+ RV . 'EPSDT' = 1.0D-10 ;
+*
+**** Jacobi iterations
+*
+* RV . 'TYPEJAC' = 'PJACO' ;
+ RV . 'TYPEJAC' = 'LJACOFB' ;
+ RV . 'NJACLERR' = 'PROG' 16  -16 ;
+ RV . 'NJACITER' = 'PROG' 15   15 ;
+*
+**** Parameters for PROCPT
+*
+ RV . 'PROCPT' = 'TABLE' ;
+ RV . 'PROCPT' . 'RMAX' = 'PROG' ;
+ RV . 'PROCPT' . 'RMIN' = 'PROG' ;
+ RV . 'PROCPT' . 'RMED' = 'PROG' ;
+ RV . 'PROCPT' . 'PMAX' = 'PROG' ;
+ RV . 'PROCPT' . 'PMIN' = 'PROG' ;
+ RV . 'PROCPT' . 'PMED' = 'PROG' ;
+ RV . 'PROCPT' . 'TPS'  = 'PROG' ;
+*
+ PNSSM RV ;
+
+*************************************************************************
+*************************************************************************
+************** FIN COMPUTATION OF THE SOLUTION **************************
+*************************************************************************
+*************************************************************************
+
+*************************************************************************
+*************************************************************************
+************** POST TREATMENT *******************************************
+*************************************************************************
+*************************************************************************
+
+*
+ RN = RV . 'RESULTS' . 'RN' ;
+ GN = RV . 'RESULTS' . 'GN' ;
+ RET = RV . 'RESULTS' . 'RET' ;
+ GAMN = RV . 'PGAS' . 'GAMN' ;
+
+*
+*** Convergence evolution inside of each iteration
+*
+
+ LISTITER =  RV . 'RESULTS' . 'LISTITER' ;
+ LISTITDT =  RV . 'RESULTS' . 'LISTITDT' ;
+ LISTLINF =  RV . 'RESULTS' . 'LISTLINF' ;
+
+ 'SI' GRAPH ;
+    NITERE = 'DIME' LISTITER ;
+    I1 = 1 ;
+    AA = 'PROG' ;
+    BB = 'PROG' ;
+    CC = 'PROG' ;
+    DD = 'PROG' ;
+    'REPETER' BLITER NITERE ;
+       I0 = I1 ;
+       I1 = 'EXTRAIRE' LISTITER &BLITER ;
+       'SI' (I1 'EGA' I0) ;
+          AA = AA 'ET' ('PROG' ('EXTRAIRE' LISTITDT &BLITER)) ;
+          BB = BB 'ET' ('PROG' ('EXTRAIRE' LISTLINF &BLITER)) ;
+       'SINON' ;
+          everr = 'EVOL' 'MANU' 'niter' AA 'Log(Linf)'
+            (('LOG' (BB '+' ('PROG' ('DIME' BB) '*' 1.0D-20))) '/'
+             ('LOG' 10.)) ;
+          'DESSIN' everr 'TITRE' ('CHAINE' 'Convergence at iter '
+          (I1 '-' 1)) 'NCLK' ;
+          AA = 'PROG' ;
+          BB = 'PROG' ;
+          CC = 'PROG' ;
+          DD = 'PROG' ;
+       'FINSI' ;
+    'FIN' BLITER ;
+       everr = 'EVOL' 'MANU' 'niter' AA 'Log(Linf)'
+            (('LOG' (BB '+' ('PROG' ('DIME' BB) '*' 1.0D-20))) '/'
+             ('LOG' 10.)) ;
+       'DESSIN' everr 'TITRE' ('CHAINE' 'Convergence at iter '
+          (I1)) 'NCLK' ;
+  'FINSI' ;
+*
+*
+**** The mesh
+*
+
+ 'SI' GRAPH ;
+    'TRACER' DOMINT 'TITR' 'Maillage' ;
+ 'FINSI' ;
+
+*
+**** Initial conditions
+*
+
+ 'SI' GRAPH ;
+
+    RN0  = RV . 'RN0'  ;
+    GN0  = RV . 'GN0'  ;
+    RET0 = RV . 'RET0' ;
+    VN PN0 = 'PRIM' 'PERFMONO'
+       RN0 GN0 RET0 GAMN 'TRICHE'  ;
+
+    CHM_RN  =  'KCHA'  MDOMINT  'CHAM'  RN0  ;
+    CHM_VN  =  'KCHA'  MDOMINT  'CHAM'  VN  ;
+    CHM_PN  =  'KCHA'  MDOMINT  'CHAM'  PN0  ;
+
+    'TRAC' CHM_RN  MDOMINT ('CONTOUR' DOMINT)
+       'TITR' ('CHAINE' 'rho at t=' 0.0)   ;
+    'TRAC' CHM_VN  MDOMINT ('CONTOUR' DOMINT)
+       'TITR' ('CHAINE' 'v at t= '  0.0)   ;
+    'TRAC' CHM_PN  MDOMINT ('CONTOUR' DOMINT)
+       'TITR' ('CHAINE' 'p at t= '  0.0)   ;
+
+ 'FINSI' ;
+
+*
+**** The 2D graphics
+*
+
+  NOMVEL = 'MOTS' 'UX' 'UY' ;
+  VN PN = 'PRIM' 'PERFMONO' RN GN RET GAMN 'TRICHE' ;
+  CN2 = GAMN '*' (PN '/' RN) ;
+  VN2 = 'PSCAL' VN VN NOMVEL NOMVEL ;
+  MACHN2 = VN2 '/' CN2 ;
+  MACHN = MACHN2 '**' 0.5 ;
+
+  HTN = (GAMN '/' (GAMN '-' 1.0)) '*' (PN '/' RN) ;
+  ECIN = 0.5 '*' ('PSCAL' VN VN NOMVEL NOMVEL) ;
+  HTN = HTN '+' ECIN ;
+
+  SN = PN '/' (RN '**' 1.4) ;
+
+  TPS = RV . 'RESULTS' . 'TPS' ;
+  'SI' ('EGA' ('TYPE' TPS) 'CHPOINT') ;
+      TPS = 'MINIMUM' TPS ;
+  'FINSI' ;
+
+ 'SI' GRAPH ;
+
+    CHM_RN  =  'KCHA'  MDOMINT  'CHAM'  RN  ;
+    CHM_VN  =  'KCHA'  MDOMINT  'CHAM'  VN  ;
+    CHM_PN  =  'KCHA'  MDOMINT  'CHAM'  PN  ;
+    CHM_MN  =  'KCHA'  MDOMINT  'CHAM'  MACHN  ;
+    CHM_HTN =  'KCHA'  MDOMINT  'CHAM'  HTN  ;
+    CHM_SN  =  'KCHA'  MDOMINT  'CHAM'  SN  ;
+
+    'TRAC' CHM_RN  MDOMINT ('CONTOUR' DOMINT)
+       'TITR' ('CHAINE' 'rho at t=' TPS)   ;
+    'TRAC' CHM_VN  MDOMINT  ('CONTOUR' DOMINT)
+       'TITR' ('CHAINE' 'v at t= '  TPS)   ;
+    'TRAC' CHM_PN  MDOMINT ('CONTOUR' DOMINT)
+       'TITR' ('CHAINE' 'p at t= '  TPS)   ;
+    'TRAC' CHM_MN  MDOMINT ('CONTOUR' DOMINT)
+       'TITR' ('CHAINE' 'Mach at t= '  TPS)   ;
+    'TRAC' CHM_HTN  MDOMINT ('CONTOUR' DOMINT)
+       'TITR' ('CHAINE' 'ht at t= '  TPS ' hl =' HTL) ;
+    'TRAC' CHM_SN  MDOMINT ('CONTOUR' DOMINT)
+       'TITR' ('CHAINE' 'sn at t= '  TPS ' hl =' SL) ;
+
+    VECN = 'VECTEUR' VN (1. '/' RAF) 'UX' 'UY' 'JAUNE' ;
+    'TRACER' DOMINT VECN ('CONTOUR' DOMINT) 'TITR'
+       ('CHAINE' 'v at t= '  TPS)   ;
+
+    'OPTION' 'ISOV' 'LIGN' ;
+    RNV = 'ELNO' TDOMINT ('KCHT' TDOMINT 'SCAL' 'CENTRE' RN) ;
+    'TRACER' DOMINT RNV ('CONTOUR' DOMINT) 15 'TITRE' 'ro';
+    PNV = 'ELNO' TDOMINT ('KCHT' TDOMINT 'SCAL' 'CENTRE' PN) ;
+    'TRACER' DOMINT PNV ('CONTOUR' DOMINT) 15 'TITRE' 'p' ;
+
+ 'FINSI' ;
+
+*
+**** Evolution objects
+*
+*
+* Position of the contact
+*
+
+ TYPELIM = RV . 'LIMITER' ;
+
+ POS = TPS '*' UL ;
+ LISTPOS = 'PROG' (POS '-' (DX '/' 2)) (POS '+' (DX '/' 2))  ;
+
+ TITOLO = 'CHAINE' 'Nbel = ' ('NBEL' DOMINT) ', OT = '
+ (RV . 'TIMEA')  ', ' RV . 'METHOD' ;
+ 'SI' VRAI ;
+    TITOLO = 'CHAINE' TITOLO ', OE = 2, ' TYPELIM ;
+ 'SINON' ;
+    TITOLO = 'CHAINE' TITOLO ', OE = 1 ' ;
+ 'FINSI' ;
+
+ 'OPTION' 'ELEM' QUA4 ;
+
+ AA = 'POIN' ('COORDONNEE' 1 (TDOMINT . 'CENTRE')) 'MINI' ;
+ DCEN = AA 'ET' ('DIFF' (TDOMINT . 'CENTRE') AA) ;
+ 'ORDONNER' DCEN ;
+ LIGEVOL = 'QUELCONQUE' DCEN 'SEG2' ;
+
+ LISTX = 'EXTRAIRE' ('EVOL' 'CHPO' ('COORDONNEE' 1 LIGEVOL) 'SCAL'
+   LIGEVOL)  'ORDO' ;
+
+ RNEX = (ROL * (('COORDONNEE' 1 (TDOMINT . 'CENTRE')) 'MASQUE'
+    'INFERIEUR' POS)) '+'
+    (ROR * (('COORDONNEE' 1 (TDOMINT . 'CENTRE')) 'MASQUE'
+    'SUPERIEUR' POS)) ;
+ 'SI' GRAPH ;
+    EVR =  'EVOL' 'CHPO' RN 'SCAL' LIGEVOL ;
+    LISTR = 'EXTRAIRE' EVR 'ORDO' ;
+    EVR = 'EVOL' 'MANU' 'x' LISTX 'Density' LISTR ;
+    EVPOS = 'EVOL'  'ROUG' 'MANU' 'x' LISTPOS ' ' ('PROG'
+       ('MINI' LISTR) ('MAXIMUM' LISTR)) ;
+    EVREX =  'EVOL' 'CHPO' RNEX 'SCAL' LIGEVOL ;
+    LISTR = 'EXTRAIRE' EVREX 'ORDO' ;
+    EVREX = 'EVOL' 'VERT' 'MANU' 'x' LISTX 'Density' LISTR ;
+    'DESSIN' (EVR 'ET' EVPOS 'ET' EVREX) 'MIMA' 'TITRE' TITOLO 'GRILL'
+       'YBOR' 0.0 1.6  ;
+
+    EVP =  'EVOL' 'CHPO' PN 'SCAL' LIGEVOL ;
+    LISTP = 'EXTRAIRE' EVP 'ORDO' ;
+    EVP = 'EVOL' 'MANU' 'x' LISTX 'Pressure' LISTP ;
+    EVPOS = 'EVOL'  'ROUG' 'MANU' 'x' LISTPOS ' ' ('PROG'
+       ('MINI' LISTP) ('MAXIMUM' LISTP)) ;
+    'DESSIN' (EVP 'ET' EVPOS) 'MIMA' 'TITRE' TITOLO 'GRILL' ;
+
+    EVH =  'EVOL' 'CHPO' HTN 'SCAL' LIGEVOL ;
+    LISTH = 'EXTRAIRE' EVH 'ORDO' ;
+    EVH = 'EVOL' 'MANU' 'x' LISTX 'Total enthalpie' LISTH ;
+    EVPOS = 'EVOL'  'ROUG' 'MANU' 'x' LISTPOS ' ' ('PROG'
+       ('MINI' LISTH) ('MAXIMUM' LISTH)) ;
+    'DESSIN' (EVH 'ET' EVPOS) 'MIMA' 'TITRE'
+       ('CHAINE' TITOLO ', hl =' HTL) 'GRILL' ;
+
+    EVS =  'EVOL' 'CHPO' SN 'SCAL' LIGEVOL ;
+    LISTS = 'EXTRAIRE' EVS 'ORDO' ;
+    EVS = 'EVOL' 'MANU' 'x' LISTX 'Entropie' LISTS ;
+    EVPOS = 'EVOL'  'ROUG' 'MANU' 'x' LISTPOS ' ' ('PROG'
+       ('MINI' LISTS) ('MAXIMUM' LISTS)) ;
+    'DESSIN' (EVS 'ET' EVPOS) 'MIMA' 'TITRE'
+       ('CHAINE' TITOLO ', sl =' SL) 'GRILL' ;
+
+ 'FINSI' ;
+
+*
+**** Test de convergence
+*
+ AA = 'EXTRAIRE' LISTLINF ('DIME' LISTLINF) ;
+ 'SI'  (AA > 1.0D-8) ;
+    'ERRE' 'Probleme en KONV' ;
+ 'FINSI' ;
+
+ ERRO = 'ABS' (RN '-' RNEX) ;
+ ERRO = 'EVOL' 'CHPO' ERRO LIGEVOL ;
+ ERRO = 'PRIM' ERRO ;
+ ERRO = 'EXTRAIRE' ERRO 'ORDO' ;
+ ERRO = 'EXTRAIRE' ERRO ('DIME' ERRO) ;
+ 'SI' (ERRO > 1.0D-1) ;
+    'ERRE' 'Probleme en KONV' ;
+ 'FINSI' ;
+
+ 'FIN' ;
+
+
+
+

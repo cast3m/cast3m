@@ -1,0 +1,431 @@
+C UMAPOL    SOURCE    CHAT      06/07/13    21:16:14     5488
+      SUBROUTINE UMAPOL ( STRESS, STATEV, DDSDDE,
+     &                  STRAN, DSTRAN, DTIME,
+     &                  TEMP, DTEMP, PREDEF, DPRED,
+     &                  NTENS, NSTATV,
+     &                  PROPS, NPROPS, COORDS,
+     &                  NOEL, NPT, KINC )
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+C-----------------------------------------------------------------------
+C
+C     DESCRIPTION FONCTIONNELLE :
+C     -------------------------
+C
+C     Dependance du module Utilisateur UMAT
+C     Appelee dans le cas suivant :
+C
+C     ILOI = 21 : Modele 'FLUAGE' 'POLYNOMIAL' de CAST3M, INPLAS=21
+C                 RESTRICTION A LA FORMULATION MASSIVE
+C
+C     Composantes de materiau
+C     -----------------------
+C     PROPS ( 1) : 'YOUN'        PROPS ( 5) : 'SMAX'
+C     PROPS ( 2) : 'NU  '        PROPS ( 6) : 'AF0 '
+C     PROPS ( 3) : 'RHO '        PROPS ( 7) : 'AF1 '
+C     PROPS ( 4) : 'ALPH'        PROPS ( 8) : 'AF2 '
+C                                PROPS ( 9) : 'AF3 '
+C                                PROPS (10) : 'AF4 '
+C                                PROPS (11) : 'AF5 '
+C                                PROPS (12) : 'AF6 '
+C     Variables internes
+C     ------------------
+C     STATEV( 1) : 'PXX '        STATEV(17) : 'ENXX'
+C     STATEV( 2) : 'PYY '        STATEV(18) : 'ENYY'
+C     STATEV( 3) : 'PZZ '        STATEV(19) : 'ENZZ'
+C     STATEV( 4) : 'PXY '        STATEV(20) : 'GNXY'
+C     STATEV( 5) : 'PYZ '        STATEV(21) : 'GNXZ'
+C     STATEV( 6) : 'PZX '        STATEV(22) : 'GNYZ'
+C     STATEV( 7) : 'VNXX'
+C     STATEV( 8) : 'VNYY'
+C     STATEV( 9) : 'VNZZ'
+C     STATEV(10) : 'VNXY'
+C     STATEV(11) : 'VNYZ'
+C     STATEV(12) : 'VNZX'
+C     STATEV(13) : 'EPCE'
+C     STATEV(14) : 'EPSH'
+C     STATEV(15) : 'LL  '
+C     STATEV(16) : 'EPSE'
+C
+C-----------------------------------------------------------------------
+C     Arguments de l'interface
+C
+      INTEGER       NTENS, NSTATV, NPROPS,
+     &              NOEL, NPT, KINC
+C
+      REAL*8        STRESS(NTENS), STATEV(*),
+     &              DDSDDE(NTENS,NTENS),
+     &              STRAN(NTENS), DSTRAN(NTENS),
+     &              DTIME,
+     &              TEMP, DTEMP, PREDEF(*), DPRED(*),
+     &              PROPS(NPROPS),
+     &              COORDS(3)
+C
+C     Variables locales
+C
+      INTEGER    NVARI
+      PARAMETER (NVARI=16)
+C
+C     Tableaux de travail
+C
+      REAL*8     VAR(NVARI),VAR1(NVARI),VARP1(NVARI),VARP2(NVARI),
+     &           VAR12(NVARI),VARP3(NVARI),VARP4(NVARI),VAR13(NVARI),
+     &           SIG(8),SIG1(8),SIG12(8),SIG13(8),
+     &           DSPT(8),XX(8),
+     &           EVP1(8),EVP2(8),EVP3(8),EVP4(8),
+     &           EPSV(8),EPSV1(8),EPSV12(8),EPSV13(8)
+C
+      REAL*8     EPIN0(8),DSIGT(8),VARF(NVARI),SIGF(8),EPINF(8)
+C
+C     Variables scalaires
+C
+      LOGICAL    DTLIBR
+      REAL*8     DT, DTLEFT, BORNE, RMAX, RMIN, DIV, FAC,
+     &           YOU, XNU, AUX0, AUX, AUX1, GEGE,
+     &           XMAX,
+CCCCC&           TI0, TI1, TPOINT, DELTAT, TI12, FII0, FII1, FII12,
+     &           TI1, TI12, FII0, FII1, FII12,
+     &           TAU, ASIG, ERRABS, TAU2, RA, SQRA, RA1
+      INTEGER    MSOUPA, I, J, ITERO, NSSINC, NITERA,
+     &           INPLAS, MFR1, IFOURB
+C
+      REAL*8     UN, DEUX, UNDEMI
+      PARAMETER (UN=1.D0,DEUX=2.D0,UNDEMI=.5D0)
+C
+      REAL*8     PRECIS
+C
+      REAL*8     PROCON
+      EXTERNAL   PROCON
+C
+C------------------- Debut du code executable --------------------------
+C
+C=======================================================================
+C 1 - INITIALISATIONS
+C     Pas de temps et parametres de pilotage des iterations internes
+C=======================================================================
+C
+      PRECIS=1.d-8
+      DTLIBR=.TRUE.
+C
+      DT = DTIME
+      IF (DT.LT.0.0) THEN
+         KINC = -211
+         RETURN
+      ENDIF
+      IF (DT.EQ.0.0) DT = 1.e-20
+C
+      DTLEFT = DT
+      BORNE  = 2.0
+      RMAX   = 1.3
+      RMIN   = 0.7
+      DIV    = 7.0
+      FAC    = 3.0
+C
+      MSOUPA = 200
+C
+      INPLAS = 21
+      MFR1   = 1
+      IFOURB = 2
+      FII0   = 0.0D0
+      FII1   = 0.0D0
+      FII12  = 0.0D0
+      TI1    = 0.0D0
+      TI12   = 0.0D0
+C
+C=======================================================================
+C 2 - Prediction elastique de l'increment de contraintes
+C     La sequence ci-dessous se substitue a l'appel a CALSIG
+C     Le calcul des coefficients de la matrice de Hooke reprend la
+C     sequence d'operations de HOOKIS
+C=======================================================================
+C
+      YOU = PROPS(1)
+      XNU = PROPS(2)
+C
+      AUX0 = UN/((UN+XNU)*(UN-DEUX*XNU))
+      AUX  = YOU*AUX0*(UN-XNU)
+      AUX1 = YOU*AUX0*XNU
+      GEGE = YOU*UNDEMI/(UN+XNU)
+C
+      DO 10 J=1,NTENS
+         DO 11 I=1,NTENS
+            DDSDDE(I,J)=0.0D0
+  11     CONTINUE
+  10  CONTINUE
+C
+      DDSDDE(1,1) = AUX
+      DDSDDE(1,2) = AUX1
+      DDSDDE(1,3) = AUX1
+C
+      DDSDDE(2,1) = AUX1
+      DDSDDE(2,2) = AUX
+      DDSDDE(2,3) = AUX1
+C
+      DDSDDE(3,1) = AUX1
+      DDSDDE(3,2) = AUX1
+      DDSDDE(3,3) = AUX
+C
+      DDSDDE(4,4) = GEGE
+      DDSDDE(5,5) = GEGE
+      DDSDDE(6,6) = GEGE
+C
+      DO 20 I=1,NTENS
+         DSIGT(I)=0.0D0
+  20  CONTINUE
+      DO 21 J=1,NTENS
+         DO 22 I=1,NTENS
+            DSIGT(I)=DSIGT(I)+DDSDDE(I,J)*DSTRAN(J)
+  22     CONTINUE
+  21  CONTINUE
+C
+C=======================================================================
+C 3 - Pre-traitement des deformations inelastiques au debut du pas
+C     Passage gamma -> epsilon pour les termes extradiagonaux
+C=======================================================================
+C
+      DO 34 J=1,3
+         EPIN0(J)=STATEV(NVARI+J)
+  34  CONTINUE
+      DO 35 J=4,6
+         EPIN0(J)=0.5D0*STATEV(NVARI+J)
+  35  CONTINUE
+C
+C=======================================================================
+C 4 - TEST SUR XMAX          MILL  8/3/91
+C=======================================================================
+C
+      XMAX=PROPS(5)
+      IF (XMAX.EQ.0.D0) XMAX=PROPS(1)*1.D-3
+C
+C=======================================================================
+C 5 - INITIALISATIONS AVANT ITERATIONS EN SOUS-INCREMENTS
+C=======================================================================
+C
+      ITERO = 0
+ 6543 CONTINUE
+C
+      ITERO = 1 + ITERO
+      IF ( ITERO.NE.1) THEN
+         DTLIBR = .TRUE.
+         PRECIS = PRECIS * 7.D0
+         IF (ITERO.GT.3) THEN
+            KINC = -212
+            RETURN
+         ENDIF
+      ENDIF
+C
+      DTLEFT = DT
+      TAU    = DTLEFT
+CCCCC TI0=TEMP
+CCCCC TI1=TEMP+DTEMP
+CCCCC TPOINT=DTEMP/DT
+      ASIG = SQRT(PROCON(STRESS,STRESS,NTENS))
+      ERRABS = PRECIS*ASIG
+      IF (XMAX.GT.ASIG) ERRABS = PRECIS*XMAX
+C
+      DO 40 I=1,NTENS
+         SIG(I) = STRESS(I)
+         EPSV(I) = EPIN0(I)
+         DSPT(I) = DSIGT(I)/DT
+  40  CONTINUE
+C
+      DO 50 I=1,NVARI
+         VAR(I)=STATEV(I)
+  50  CONTINUE
+C
+C=======================================================================
+C 6 - ITERATIONS EN SSINCREMENTS  /FIN SI DTLEFT = 0
+C=======================================================================
+C
+      NSSINC = 0
+      NITERA = 0
+  60  CONTINUE
+C
+         NSSINC = NSSINC + 1
+         IF (NSSINC.GT.MSOUPA) THEN
+            DTLIBR=.FALSE.
+            GOTO 6543
+         ENDIF
+C
+CCCCC    DELTAT=TPOINT*TAU
+CCCCC    TI1=TI0+DELTAT
+         CALL INCRE1(TAU,SIG,EPSV,VAR,EVP1,VARP1,PROPS,NTENS,NVARI,
+     &               INPLAS,NPROPS,MFR1,FII0,FII1,TI1)
+C
+C        ---------------------------------------------------------------
+C        DEBUT DES ITERATIONS SUR TAU OPTIMAL /FIN SI RA PETIT
+C
+         NITERA  = 0
+  70     CONTINUE
+C
+            NITERA  = NITERA + 1
+C
+C           ____________________________________________________________
+            TAU2=TAU*0.5D0
+            CALL ADVAN1(TAU2,SIG,EPSV,VAR,SIG1,EPSV1,VAR1,DSPT,EVP1,
+     &                  VARP1,PROPS,NTENS,NVARI,IFOURB,INPLAS,MFR1)
+C
+C           ____________________________________________________________
+CCCCC       DELTAT=TPOINT*TAU
+CCCCC       TI1=TI0+DELTAT
+            CALL INCRE1(TAU,SIG1,EPSV1,VAR1,EVP2,VARP2,PROPS,NTENS,
+     &                  NVARI,INPLAS,NPROPS,MFR1,FII0,FII1,TI1)
+            DO 701 I=1,NTENS
+               EVP2(I) = 0.5D0*(EVP1(I)+EVP2(I))
+ 701        CONTINUE
+            DO 702 I=1,2*NTENS+2
+               VARP2(I)= 0.5D0*(VARP1(I) + VARP2(I))
+ 702        CONTINUE
+            DO 703 I=2*NTENS+4,NVARI
+               VARP2(I)= 0.5D0*(VARP1(I) + VARP2(I))
+ 703        CONTINUE
+C
+C           ____________________________________________________________
+CCCCC       DELTAT=TPOINT*TAU2
+CCCCC       TI12=TI0+DELTAT
+            CALL ADVAN1(TAU2,SIG,EPSV,VAR,SIG12,EPSV12,VAR12,DSPT,EVP2,
+     &                  VARP2,PROPS,NTENS,NVARI,IFOURB,INPLAS,MFR1)
+            CALL INCRE1(TAU2,SIG12,EPSV12,VAR12,EVP3,VARP3,PROPS,NTENS,
+     &                  NVARI,INPLAS,NPROPS,MFR1,FII0,FII12,TI12)
+C
+C           ____________________________________________________________
+CCCCC       TI1=TI12+DELTAT
+            CALL ADVAN1(TAU2,SIG12,EPSV12,VAR12,SIG13,EPSV13,VAR13,DSPT,
+     &                  EVP3,VARP3,PROPS,NTENS,NVARI,IFOURB,INPLAS,MFR1)
+            CALL INCRE1(TAU2,SIG13,EPSV13,VAR13,EVP4,VARP4,PROPS,NTENS,
+     &                  NVARI,INPLAS,NPROPS,MFR1,FII12,FII1,TI1)
+            DO 711 I=1,NTENS
+               EVP4(I) = 0.5D0*(EVP3(I)+EVP4(I))
+ 711        CONTINUE
+            DO 712 I=1,2*NTENS+2
+               VARP4(I)= 0.5D0*(VARP3(I) + VARP4(I))
+ 712        CONTINUE
+            DO 713 I=2*NTENS+4,NVARI
+               VARP4(I)= 0.5D0*(VARP3(I) + VARP4(I))
+ 713        CONTINUE
+            CALL ADVAN1(TAU2,SIG12,EPSV12,VAR12,SIGF,EPINF,VARF,DSPT,
+     &                  EVP4,VARP4,PROPS,NTENS,NVARI,IFOURB,INPLAS,MFR1)
+C
+C           ____________________________________________________________
+CCCCC       DELTAT=TPOINT*TAU2
+CCCCC       TI12=TI0+DELTAT
+            CALL INCRE1(TAU2,SIGF,EPINF,VARF,EVP4,VARP4,PROPS,NTENS,
+     &                  NVARI,INPLAS,NPROPS,MFR1,FII0,FII12,TI12)
+            DO 721 I=1,NTENS
+               EVP2(I) = (EVP1(I)+EVP4(I))/6.D0+EVP3(I)*2.D0/3.D0
+ 721        CONTINUE
+            DO 722 I=1,2*NTENS+2
+               VARP2(I)=(VARP1(I) + VARP4(I))/6.D0+VARP3(I)*2.D0/3.D0
+ 722        CONTINUE
+            DO 723 I=2*NTENS+4,NVARI
+               VARP2(I)= (VARP1(I) + VARP4(I))/6.D0+VARP3(I)*2.D0/3.D0
+ 723        CONTINUE
+            CALL ADVAN1(TAU,SIG,EPSV,VAR,SIG1,EPSV1,VAR1,DSPT,EVP2,
+     &                  VARP2,PROPS,NTENS,NVARI,IFOURB,INPLAS,MFR1)
+C
+C           ____________________________________________________________
+C           CALCUL DU RAPPORT : ERREUR CALCULEE / ERREUR ADMISE
+C
+            DO 730 I=1,NTENS
+               XX(I) = SIGF(I)-SIG1(I)
+ 730        CONTINUE
+            RA = SQRT(PROCON(XX,XX,NTENS))/(ERRABS)
+            SQRA = SQRT(RA)
+C
+C           ____________________________________________________________
+C           TEST DE FIN D'ITERATIONS /  MISE A JOUR DE TAU
+C           DIV =7   BORNE = 2
+C           SI   SQRA>7   TAU = TAU/7    ET NOUVEL ESSAI
+C           SI 2<RA<7*7   ON VISE RA = 1  ET NOUVEL ESSAI
+C
+            IF (DTLIBR) THEN
+C
+C               Petite ruse pour dejouer l'optimisation
+                RA1=RA*1.D0
+C
+                IF ((RA.GT.DIV*DIV).OR.(RA.NE.RA1)) THEN
+                   TAU = TAU/DIV
+CCCCC              DELTAT=TPOINT*TAU
+CCCCC              TI1=TI0+DELTAT
+                  GOTO 70
+                ELSE IF ( RA.GT.(BORNE)) THEN
+                   TAU = TAU/SQRA
+CCCCC              DELTAT=TPOINT*TAU
+CCCCC              TI1=TI0+DELTAT
+                  GOTO 70
+               ENDIF
+            ENDIF
+C           ____________________________________________________________
+C
+C        FIN D'ITERATIONS SUR TAU OPTIMAL / MISE A JOUR DES VARIABLES
+C        Ici RA < BORNE
+C        On avance en temps
+C
+         DO 80 I=1,NTENS,1
+            SIG(I)  = SIGF(I)
+            EPSV(I) = EPINF(I)
+  80     CONTINUE
+         DO 90 I=1,NVARI,1
+            VAR(I)  = VARF(I)
+  90     CONTINUE
+C        ---------------------------------------------------------------
+C
+C     TEST DE FIN DES ITERATIONS EN SSINCREMENTS / MISE A JOUR DE TAU
+C     * si   SQRA<1/3        TAU = TAU*3
+C     * si   1/3<SQRA<RMIN   on vise RA = 1
+C     * si   RMIN<SQRA<RMAX  TAU inchang{
+C     * si   SQRA>RMAX       on vise RA = 1
+C     Fin des boucles en ss increments  si tau = DTLEFT
+C
+      IF ( TAU.LT.DTLEFT ) THEN
+         DTLEFT = DTLEFT - TAU
+         IF ( FAC*SQRA.LT.1.D0) THEN
+            TAU=TAU*FAC
+         ELSE IF ( (SQRA.LT.RMIN).OR.(SQRA.GT.RMAX) ) THEN
+            TAU=TAU/SQRA
+         ENDIF
+         IF (TAU.GT.DTLEFT) TAU = DTLEFT
+CCCCC    TI0=TI1
+CCCCC    DELTAT=TPOINT*TAU
+CCCCC    TI1=TI0+DELTAT
+         GOTO 60
+      ENDIF
+C
+      IF (ABS(TAU-DTLEFT).GT.(TAU/1000.)) THEN
+         KINC = -213
+         RETURN
+      ENDIF
+C
+C=======================================================================
+C 7 - STOCKAGE DES RESULTATS AVANT SORTIE
+C=======================================================================
+C
+C     Contraintes
+C
+      DO 100 J=1,NTENS
+         STRESS(J)=SIGF(J)
+ 100  CONTINUE
+C
+C     Variables internes
+C
+      DO 110 J=1,NVARI
+         STATEV(J)=VARF(J)
+ 110  CONTINUE
+C
+C     Deformations inelastiques
+C     Passage epsilon -> gamma pour les termes extradiagonaux
+C
+      DO 120 J=1,3
+         STATEV(NVARI+J)=EPINF(J)
+ 120  CONTINUE
+      DO 121 J=4,6
+         STATEV(NVARI+J)=2.0D0*EPINF(J)
+ 121  CONTINUE
+C
+      RETURN
+      END
+
+
+
+
+

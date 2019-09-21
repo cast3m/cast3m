@@ -1,0 +1,553 @@
+C ECHIMP    SOURCE    MAGN      18/04/18    21:15:07     9807
+      SUBROUTINE ECHIMP
+C=======================================================================
+C L'opérateur ECHIMP discrétise un échange surfacique ou volumique
+C avec un milieu exterieur. Le terme d'échange est de la forme
+* h(T-T0) où h est un coefficient d'échange, T une des inconnues du
+C problème traité et T0 "un champ exterieur connu".
+C-----------------------------------------------------------------------
+C La convention de signe associée à ce terme est la suivante : lorsque
+C h est positif et T0<T, le terme d'échange tant à faire diminuer la
+C quantité T présente dans le domaine.
+C D'un point de vue numérique, ce terme est dans l'équation traitée du
+C meme coté que le terme de dérivée en temps.
+C-----------------------------------------------------------------------
+C
+C-------------------------
+C Phrase d'appel GIBIANE :
+C-------------------------
+C
+C 'ECHI' KIZX ;
+C
+C KIZX  : Table de sous-type KIZX associée à l'opérateur ECHI
+C
+C--------------------------------
+C Construction de KIZX via EQEX :
+C--------------------------------
+C
+C 'ZONE' TAB1 'OPER' 'ECHI' CHPO1 CHPO2 'INCO' MOT1 (MOT2) ;
+C
+C TAB1  : TABLE DOMAINE associée à la zone d'échange. On trouvera
+C         à l'indice MAILLAGE de cette table la surface ou le volume
+C         sur lequel à lieu l'échange avec le milieu exterieur.
+C CHPO1 : Coefficient d'échange (par unité de surface ou de volume
+C         suivant le type d'échange traité) (CHPO, FLOTTANT ou MOT).
+C         (spg du CHPO : CENTRE)
+C CHPO2 : Champ scalaire exterieur connu (CHPO, FLOTTANT ou MOT)
+C         (spg du CHPO : CENTRE ou SOMMET)
+C MOT1  : Nom de l'inconnue scalaire primale sur laquelle porte
+C         l'échange surfacique ou volumique (MOT).
+C MOT2  : Nom de l'inconnue scalaire duale (facultatif - MOT).
+C         Indique l'équation dans laquelle le terme d'échange est à
+C         considérer. Si MOT2 est omis, les inconnues primales et
+C         duale sont identiques (obligatoire en explicite).
+C
+C------------
+C Résultats :
+C------------
+C   On crée une partie implicite correspondant à la linéarisation
+C   du terme h*T et un second membre correspondant au terme h*T0.
+C
+C
+C-> En explicite :
+C
+C   On suppose que les inconnues primales et duales sont identiques
+C   afin de pouvoir impliciter l'échange avec le milieu exterieur.
+C   Pour cela, on condense la matrice masse, quelle que soit la
+C   formulation utilisée (donc EF -> EFM1).
+C   1) La matrice diagonale est stockée dans un CHPO et rangée dans la
+C   table KIZG1 à l'indice de type MOT MOT1 (nom de l'inconnue).
+C   2) Le second membre est stocké dans un CHPO et rangé dans la
+C   table KIZG à l'indice de type MOT MOT1 (nom de l'inconnue).
+C
+C-> En implicite
+C
+C   Les inconnues primales et duales peuvent etre différentes et de
+C   spg CENTRE ou SOMMET. En implicite, on ne condense pas les matrices
+C   masse (donc EFM1 -> EF).
+C   1) La matrice "masse" est stockée dans un MATRIK et rangée dans la
+C   table KIZX à l'indice de type MOT MATELM.
+C   2) Le second membre est stocké dans un CHPO et assemblé dans la
+C   table EQEX à l'indice de type MOT SMBR. Le nom de l'inconnue
+C   duale MOT2 étant le nom de la composante du CHPO créé.
+C
+C-------------------------
+C Formulations acceptées :
+C-------------------------
+C   0) Défaut : EFM1 explicite.
+C   1) EFM1 en explicite (en implicite, assimilé à EF)
+C   2) EF   en implicite (en explicite, assimilé à EFM1)
+C   3) VF   en explicite et en implicite.
+C
+C----------------------
+C Support des données :
+C----------------------
+C   H  : SCAL ou CHPO SCAL CENTRE
+C   T0 : SCAL ou CHPO SCAL CENTRE ou CHPO SCAL SOMMET
+C
+C------------------------------------------
+C Indices de table utilisés (racine KIZX) :
+C------------------------------------------
+C    'DOMZ'     : Table domaine associé à l'opérateur (domaine local)
+C E/ 'MAILLAGE' -> Maillage du domaine local
+C E/   'CENTRE' -> Points centre du domaine local
+C E/  'XXPSOML' -> Intégrale des fonctions de base par élément (MCHAML)
+C E/ 'IARG'     : Nombre d'arguments de l'opérateur
+C E/ 'ARG1'     : Premier argument (coefficient d'échange)
+C E/ 'ARG2'     : Deuxième argument (champ exterieur)
+C E/ 'LISTINCO' : Listmot contenant le nom de l'inconnue
+C    'KOPT'     : Table des options
+C E/    'KFORM' -> Formulation spatiale
+C E/    'KIMPL' -> Formulation temporelle
+C    'EQEX'     : Table décrivant la modélisation (modèle fluide)
+C E/     'INCO' -> Table des inconnues et des données
+C  /S    'KIZG' -> Table des seconds membres (cas explicite)
+C  /S   'KIZG1' -> Table des matrices diagonales (cas explicite)
+C-----------------------------------------------------------------------
+C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+C
+-INC CCOPTIO
+-INC SMCHPOI
+-INC SMLENTI
+-INC SMELEME
+      POINTEUR MELEMC.MELEME
+-INC SMLMOTS
+C
+      CHARACTER*8 NOMD,NOMP,TYPE,TYPC,MTYP,CHAI
+      PARAMETER (NTB=1)
+      CHARACTER*8 LTAB(NTB)
+      DIMENSION KTAB(NTB),IXV(4)
+      DATA LTAB/'KIZX    '/
+
+
+C Nouvelle directive EQUA de EQEX
+      MTYP=' '
+      CALL QUETYP(MTYP,0,IRET)
+      IF(IRET.EQ.0)THEN
+C% On attend un des objets : %m1:8 %m9:16 %m17:24 %m25:32 %m33:40
+      MOTERR( 1: 8) = 'CHAI    '
+      MOTERR( 9:16) = 'MMODEL  '
+      MOTERR(17:24) = 'TABLE   '
+      CALL ERREUR(472)
+      RETURN
+      ENDIF
+
+      IF(MTYP.EQ.'MMODEL')THEN
+        CALL YTCLSF('E       ','ECHI    ')
+        RETURN
+      ELSEIF(MTYP.EQ.'MOT     ')THEN
+        CALL LIRCHA(CHAI,1,IRET)
+        CALL YTCLSF(CHAI,'ECHI    ')
+        RETURN
+      ENDIF
+C Fin Nouvelle directive EQUA de EQEX
+
+C
+C- Lecture de la table KIZX (pointeur MTABX) associée à ECHIMP
+C
+      CALL LITABS(LTAB,KTAB,NTB,1,IRET)
+      IF (IERR.NE.0) RETURN
+      MTABX = KTAB(1)
+C
+C- Récupération de la table EQEX (pointeur MTAB1)
+C
+      CALL LEKTAB(MTABX,'EQEX',MTAB1)
+      IF (MTAB1.EQ.0)THEN
+C Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  EQEX  '
+         MOTERR( 9:16) = '  EQEX  '
+         MOTERR(17:24) = '  KIZX  '
+         CALL ERREUR(786)
+         RETURN
+      ENDIF
+      CALL ACME(MTAB1,'NAVISTOK',NASTOK)
+      IF(NASTOK.EQ.0)THEN
+      CALL ZCHIMP(MTABX,MTAB1)
+      RETURN
+      ENDIF
+C
+C- Récupération de la table DOMAINE associée au domaine local
+C
+      CALL LEKTAB(MTABX,'DOMZ',MTABZ)
+      IF (MTABZ.EQ.0) THEN
+C Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  DOMZ  '
+         MOTERR( 9:16) = '  DOMZ  '
+         MOTERR(17:24) = '  KIZX  '
+         CALL ERREUR(786)
+         RETURN
+      ENDIF
+C
+C- Récupération de la table INCO (pointeur KINC)
+C
+      CALL LEKTAB(MTAB1,'INCO',KINC)
+      IF (KINC.EQ.0) THEN
+C Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  INCO  '
+         MOTERR( 9:16) = '  INCO  '
+         MOTERR(17:24) = '  EQEX  '
+         CALL ERREUR(786)
+         RETURN
+      ENDIF
+C
+C- Récupération de la table des options KOPT (pointeur KOPTI)
+C- et initialisations des options (par défaut SI et EXPL)
+C-    KFORM = 0 -> SI    1 -> EF    2 -> VF
+C-    KIMPL = 0 -> EXPL  1 -> IMPL  2 -> CN
+C
+      KFORM = 0
+      KIMPL = 0
+      TYPE  = ' '
+      CALL ACMO(MTABX,'KOPT',TYPE,KOPTI)
+      IF (TYPE.EQ.'TABLE') THEN
+         TYPE  = ' '
+         CALL ACMO(KOPTI,'KFORM',TYPE,IENT)
+         IF (TYPE.EQ.'ENTIER') CALL ACME(KOPTI,'KFORM',KFORM)
+         TYPE  = ' '
+         CALL ACMO(KOPTI,'KIMPL',TYPE,IENT)
+         IF (TYPE.EQ.'ENTIER') CALL ACME(KOPTI,'KIMPL',KIMPL)
+      ENDIF
+C
+C- Identification du type d'échange :
+C- Surfacique (ISURF1=1) ou volumique (IVOL1=1).
+C
+      ISURF1 = 0
+      IVOL1  = 0
+      CALL LEKTAB(MTABZ,'MAILLAGE',MELEME)
+      IF (IERR.NE.0) RETURN
+      SEGACT MELEME
+      NBSOUS = LISOUS(/1)
+      IF (NBSOUS.EQ.0) NBSOUS=1
+      DO 10 I=1,NBSOUS
+         IPT1=MELEME
+         IF (NBSOUS.NE.1) IPT1=LISOUS(I)
+         SEGACT IPT1
+         ITYPL=IPT1.ITYPEL
+c        write(6,*) '***************************',itypl
+         IF (IDIM.EQ.2) THEN
+*   - L'échange est surfacique (un flux est échangé) si
+*        en 2D, les éléments sont de type SEG2 ou SEG3,
+            IF (ITYPL.EQ.2.OR.ITYPL.EQ.3) THEN
+               ISURF1 = 1
+*   - L'échange est volumique (une source volumique est échangée) si
+*        en 2D, les éléments sont de type TRI3, QUA4, TRI6, TRI7
+*                                         ou QUA9.
+            ELSEIF (ITYPL.EQ.4.OR.ITYPL.EQ.8.OR.
+     $              ITYPL.EQ.6.OR.ITYPL.EQ.7.OR.
+     $              ITYPL.EQ.11) THEN
+               IVOL1  = 1
+            ELSE
+C Type d'élément incorrect
+               CALL ERREUR(16)
+               RETURN
+            ENDIF
+         ELSEIF (IDIM.EQ.3) THEN
+*   - L'échange est surfacique (un flux est échangé) si
+*        en 3D, les éléments sont de type TRI3, QUA4, TRI6, TRI7
+*                                         ou QUA9.
+            IF (ITYPL.EQ.4.OR.ITYPL.EQ.8.OR.
+     $              ITYPL.EQ.6.OR.ITYPL.EQ.7.OR.
+     $              ITYPL.EQ.11) THEN
+               ISURF1 = 1
+*   - L'échange est volumique (une source volumique est échangée) si
+*        en 3D, les éléments sont de type CUB8, PRI6, TET4,
+*                                         CU27, PR21, TE15,
+*                                               PR18 ou TE10.
+            ELSEIF (ITYPL.EQ.14.OR.ITYPL.EQ.16.OR.
+     $              ITYPL.EQ.23.OR.ITYPL.EQ.33.OR.
+     $              ITYPL.EQ.34.OR.ITYPL.EQ.35.OR.
+     $              ITYPL.EQ.40.OR.ITYPL.EQ.24) THEN
+               IVOL1  = 1
+            ELSE
+C Type d'élément incorrect
+               CALL ERREUR(16)
+               RETURN
+            ENDIF
+         ENDIF
+         SEGDES IPT1
+ 10   CONTINUE
+      IF (IVOL1.EQ.1.AND.ISURF1.EQ.1) THEN
+C Maillage incorrect : contient des éléments 1D et 2D
+         CALL ERREUR(798)
+         RETURN
+      ENDIF
+      IF (NBSOUS.NE.1) SEGDES MELEME
+C
+C- Récupération du nom des inconnues (primale et duale)
+C
+      TYPE = 'LISTMOTS'
+      CALL ACMO(MTABX,'LISTINCO',TYPE,MLMOTS)
+      IF (IERR.NE.0) RETURN
+      SEGACT MLMOTS
+      NBINC = MOTS(/2)
+      IF (NBINC.LE.0.OR.NBINC.GE.3) THEN
+C Indice %m1:8 : contient plus de %i1 %m9:16
+         MOTERR( 1:8) = 'LISTINCO'
+         INTERR(1) = 2
+         MOTERR(9:16) = ' MOTS   '
+         CALL ERREUR(799)
+         RETURN
+      ENDIF
+      NOMP = MOTS(1)
+      IF (NBINC.EQ.1) THEN
+         NOMD = MOTS(1)
+      ELSE
+         NOMD = MOTS(2)
+      ENDIF
+      SEGDES MLMOTS
+C
+C- Informations géométriques locales associées à l'opérateur
+C
+      CALL LEKTAB(MTABZ,'CENTRE',MELEMC)
+      IF (IERR.NE.0) RETURN
+      CALL LEKTAB(MTABZ,'SOMMET',MELEMS)
+      IF (IERR.NE.0) RETURN
+C
+C- Identification du spg de l'inconnue duale
+C- Trois cas sont possible (identifier par IKAS)
+C-  1) spg contenant melems -> formulation EF
+C-  2) spg contenant melemc -> formulation VF si IVOL1=1; ERREUR sinon
+C-  3) ni 2) ni 3)          -> formulation VF si IVOL1=0; ERREUR sinon
+C
+      TYPE = ' '
+      IKAS = 0
+      CALL ACMO(KINC,NOMD,TYPE,MCHPOI)
+      IF (TYPE.NE.'CHPOINT ') THEN
+C Indice %m1:8 : ne contient pas un objet de type %m9:16
+         MOTERR(1: 8) = 'INCO'//NOMD(1:4)
+         MOTERR(9:16) = 'CHPOINT '
+         CALL ERREUR(800)
+         RETURN
+      ELSE
+         CALL LICHT(MCHPOI,MPOVAL,TYPC,MELEMD)
+         NC = VPOCHA(/2)
+         SEGDES MPOVAL
+         IF (NC.NE.1) THEN
+C Indice %m1:8 : L'objet %m9:16 n'a pas le bon nombre de composantes
+            MOTERR(1: 8) = 'INCO'//NOMD(1:4)
+            MOTERR(9:16) = 'CHPOINT '
+            CALL ERREUR(784)
+            RETURN
+         ENDIF
+      ENDIF
+      CALL KRIPAD(MELEMD,MLENTI)
+      CALL VERPAD(MLENTI,MELEMS,IRET1)
+      CALL VERPAD(MLENTI,MELEMC,IRET2)
+      IF (IRET1.EQ.0.AND.IRET2.EQ.1) THEN
+         IKAS = 1
+      ELSEIF (IRET1.EQ.1.AND.IRET2.EQ.0) THEN
+         IKAS = 2
+         IF (IVOL1.EQ.0) THEN
+C Indice %m1:8 : L'objet %m9:16 n'a pas le bon support géométrique
+            MOTERR(1: 8) = 'INCO'//NOMD(1:4)
+            MOTERR(9:16) = 'CHPOINT '
+            CALL ERREUR(788)
+            RETURN
+         ENDIF
+      ELSEIF (IRET1.EQ.1.AND.IRET2.EQ.1) THEN
+         IKAS = 3
+         IF (IVOL1.EQ.1) THEN
+C Indice %m1:8 : L'objet %m9:16 n'a pas le bon support géométrique
+            MOTERR(1: 8) = 'INCO'//NOMD(1:4)
+            MOTERR(9:16) = 'CHPOINT '
+            CALL ERREUR(788)
+            RETURN
+         ENDIF
+         SEGINI,IPT4=MELEMC
+      ELSEIF (IRET1.EQ.0.AND.IRET2.EQ.0) THEN
+         IKAS = 1
+      ELSE
+C Indice %m1:8 : L'objet %m9:16 n'a pas le bon support géométrique
+         MOTERR(1: 8) = 'INCO'//NOMD(1:4)
+         MOTERR(9:16) = 'CHPOINT '
+         CALL ERREUR(788)
+         RETURN
+      ENDIF
+C
+C- Identification du spg de l'inconnue primale
+C- Deux cas sont possibles (identifier par IKP)
+C-  1) spg contenant melemc -> IKP=0
+C-  2) spg contenant melems -> IKP=4
+C
+      IF (NBINC.EQ.1) THEN
+         IF (IKAS.EQ.1) THEN
+            IKP = 4
+         ELSE
+            IKP = 0
+         ENDIF
+      ELSE
+         TYPE = ' '
+         CALL ACMO(KINC,NOMP,TYPE,MCHPOI)
+         IF (TYPE.NE.'CHPOINT ') THEN
+C Indice %m1:8 : ne contient pas un objet de type %m9:16
+            MOTERR(1: 8) = 'INCO'//NOMP(1:4)
+            MOTERR(9:16) = 'CHPOINT '
+            CALL ERREUR(800)
+            RETURN
+         ELSE
+            CALL LICHT(MCHPOI,MPOVAL,TYPC,MELEMP)
+            NC = VPOCHA(/2)
+            SEGDES MPOVAL
+            IF (NC.NE.1) THEN
+C Indice %m1:8 : L'objet %m9:16 n'a pas le bon nombre de composantes
+               MOTERR(1: 8) = 'INCO'//NOMP(1:4)
+               MOTERR(9:16) = 'CHPOINT '
+               CALL ERREUR(784)
+               RETURN
+            ENDIF
+         ENDIF
+         CALL KRIPAD(MELEMP,MLENT3)
+         CALL VERPAD(MLENT3,MELEMS,IRET1)
+         CALL VERPAD(MLENT3,MELEMC,IRET2)
+         SEGSUP MLENT3
+         IF (IRET1.EQ.0.AND.IRET2.EQ.1) THEN
+            IKP = 4
+         ELSEIF (IRET1.EQ.1.AND.IRET2.EQ.0) THEN
+            IKP = 0
+         ELSEIF (IRET1.EQ.0.AND.IRET2.EQ.0) THEN
+            IKP = 4
+         ELSE
+C Indice %m1:8 : L'objet %m9:16 n'a pas le bon support géométrique
+            MOTERR(1: 8) = 'INCO'//NOMP(1:4)
+            MOTERR(9:16) = 'CHPOINT '
+            CALL ERREUR(788)
+            RETURN
+         ENDIF
+      ENDIF
+C
+C- On vérifie dans le cas surfacique que la surface est une frontière
+C- du domaine global dont la table DOMAINE est à l'indice 'PERE' de
+C- la table domaine locale.
+C
+C- Si IKAS=3, récupération des points CENTREs du maillage volumique
+C- associés aux points CENTREs du maillage surfacique.
+C
+      IF (IVOL1.EQ.0.AND.KFORM.EQ.2) THEN
+         TYPE = 'TABLE   '
+         CALL ACMO(MTABZ,'PERE',TYPE,KPERE)
+         IF (IERR.NE.0) RETURN
+         CALL LEKTAB(KPERE,'FACE    ',IPT2)
+         CALL KRIPAD(IPT2,MLENT2)
+         CALL VERPAD(MLENT2,MELEMC,IRET)
+         IF (IRET.EQ.1) THEN
+C Indice %m1:8 : L'objet %m9:16 n'a pas le bon support géométrique
+            MOTERR(1: 8) = 'INCO'//NOMD(1:4)
+            MOTERR(9:16) = 'CHPOINT '
+            CALL ERREUR(788)
+            RETURN
+         ENDIF
+         CALL LEKTAB(KPERE,'FACEL   ',IPT3)
+         IF (IERR.NE.0) RETURN
+         SEGACT MELEMC
+         SEGACT IPT3
+         SEGACT MLENT2
+         NBC = MELEMC.NUM(/2)
+         DO 20 I=1,NBC
+            J = MLENT2.LECT(MELEMC.NUM(1,I))
+            IF (IPT3.NUM(2,J) .NE. MELEMC.NUM(1,I)) THEN
+C Incohérence entre tables DOMAINE
+               CALL ERREUR(801)
+               RETURN
+            ELSE
+               IF ( IPT3.NUM(1,J) .NE. IPT3.NUM(3,J)) THEN
+C La face %i1 n'est pas une frontière
+                  INTERR(1) = IPT3.NUM(2,J)
+                  CALL ERREUR(802)
+                  RETURN
+               ENDIF
+               IF (IKAS.EQ.3) THEN
+                  IPT4.NUM(1,I) = IPT3.NUM(1,J)
+               ENDIF
+            ENDIF
+ 20      CONTINUE
+         SEGDES MELEMC
+         SEGDES IPT3
+         IF (IVOL1.EQ.0 .AND. IKAS.EQ.3) SEGDES IPT4
+         SEGDES MLENT2
+      ENDIF
+C
+C- Cohérance des options avec le support de l'inconnue duale et IKAS
+C  Option %m1:8 incompatible avec les données
+      IF (IKAS.EQ.1 .AND. KFORM.EQ.2) THEN
+         MOTERR(1:8) = '   VF   '
+         CALL ERREUR(803)
+         RETURN
+      ENDIF
+      IF (IKAS.NE.1 .AND. KFORM.NE.2) THEN
+         MOTERR(1:8) = '   EF   '
+         CALL ERREUR(803)
+         RETURN
+      ENDIF
+      IF (NBINC.NE.1 .AND. KIMPL.EQ.0) THEN
+         MOTERR(1:8) = '  EXPL  '
+         CALL ERREUR(803)
+         RETURN
+      ENDIF
+C
+C- Récupération des arguments (2 arguments attendus) :
+C-    1) Coefficient d'échange
+C-    2) Champ exterieur connu
+C
+      CALL ACME(MTABX,'IARG',IARG)
+      IF (IERR.NE.0) RETURN
+      IF (IARG.NE.2) THEN
+C Indice %m1:8 : nombre d'arguments incorrect
+         MOTERR(1:8) = 'IARG    '
+         CALL ERREUR(804)
+         RETURN
+      ENDIF
+      IXV(1) = MELEMC
+      IXV(2) = 1
+      IXV(3) = 0
+      IXV(4) = MELEMS
+      IRET   = 4
+      CALL LEKCOF('Opérateur ECHI :',
+     &           MTABX,KINC,1,IXV,MCHPO1,MPOVA1,NPT1,NC1,IKH,IRET)
+      IF (IRET.EQ.0) RETURN
+      IXV(1) = MELEMC
+      IXV(2) = 1
+      IXV(3) = 0
+      IXV(4) = MELEMS
+      IRET   = 4
+      CALL LEKCOF('Opérateur ECHI :',
+     &           MTABX,KINC,2,IXV,MCHPO2,MPOVA2,NPT2,NC2,IKT,IRET)
+      IF (IRET.EQ.0) RETURN
+      IF (IKT.EQ.0) THEN
+          MELEME = MELEMC
+      ELSE
+          MELEME = MELEMS
+      ENDIF
+      CALL KRIPAD(MELEME,MLENT1)
+C
+C- Calcul de la discrétisation du terme d'échange
+C
+      IF(IKAS.EQ.1)THEN
+      MELEMD=MELEMS
+      ELSEIF(IKAS.EQ.2)THEN
+      MELEMD=MELEMC
+      ELSEIF(IKAS.EQ.3)THEN
+      MELEMD=IPT4
+      SEGDES IPT4
+      ENDIF
+      SEGSUP MLENTI
+      CALL KRIPAD(MELEMD,MLENTI)
+
+      IF (KIMPL.EQ.0) THEN
+         CALL ECHI1(IKAS,IVOL1,MTAB1,MTABZ,MPOVA1,MPOVA2,IKH,IKT,
+     &              MELEMD,IPT4,MLENTI,MLENT1,NOMD)
+      ELSE
+         CALL ECHI2(IKAS,IVOL1,MTAB1,MTABZ,MTABX,MPOVA1,MPOVA2,
+     &              IKH,IKT,IKP,IPT4,MLENT1,NOMP,NOMD)
+      ENDIF
+      RETURN
+      END
+
+
+
+
+
+
+
+

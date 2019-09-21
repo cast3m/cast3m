@@ -1,0 +1,757 @@
+C DOHOTA    SOURCE    FANDEUR   09/09/23    21:15:09     6374
+      SUBROUTINE DOHOTA(IVAMAT,NMATT,IVACON,NSTRS,IVARI,NVART,TRAC,
+     &                  LTRAC,ALPHA,EP1,IGAU,IB,MATE,MAPL,XPREC,DTPS,
+     &                  IFOU,LHOOK,DDHOOK,IRET)
+*_______________________________________________________________________
+*
+*  entrees :
+*  --------
+*
+*     ivamat  pointeur sur un segment mptval contenant les materiaux
+*     nmatt   nombre de composantes du materiau
+*     ivacon  pointeur sur un segment mptval contenant les contraintes
+*     nstrs   nombre de composantes de contraintes
+*     ivari   pointeur sur un segment mptval contenant les variables
+*             internes
+*     nvart   nombre de composantes de variables internes
+*     trac    courbe de traction
+*     ltrac   taille du tableau trac
+*     alpha   coefficient alpha pour les coques minces
+*     ep1     epaisseur pour les coques minces
+*     igau    numero du point de gauss ou l'on veut le mat. de hooke
+*     il      numero de l'element ou l'on veut le mat. de hooke
+*     mate    numeror du materiau lineaire
+*     mapl    numero du materiau plastique
+*     xprec   flottant precision
+*     dtps    flottant pas de temps pour les modeles visqueux
+*     ifou    option ifour de ccoptio
+*     lhook   taille de la matrice de hooke
+*
+*  sorties :
+*  --------
+*
+*     ddhook  matrice de hooke tangente pour l'element ib
+*     iret    = 1 si ok
+*             = 0 si formulation indisponible
+*             = -1 si hors courbe
+*
+*     passage aux nouveaux chamelem par jm campenon le 05/91
+*_______________________________________________________________________
+*
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*
+-INC CCOPTIO
+-INC SMCHAML
+*
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS)    ,NSOF(NS)
+        INTEGER      IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+*
+      SEGMENT WRK5
+         INTEGER NTRAT,NTRAC
+      ENDSEGMENT
+*
+      SEGMENT WTRAV
+         REAL*8 TXR(IDIM,IDIM)
+      ENDSEGMENT
+*
+      PARAMETER(XZER=0.D0,UN=1.D0,DEUX=2.D0,TROIS=3.D0)
+      PARAMETER(CINQ=5.D0,SIX=6.D0,HUIT=8.D0,XNEUF=9.D0,DOUZE=12.D0)
+      PARAMETER(UNTIER=.33333 33333 33333D0,TRDEMI=1.5D0)
+      PARAMETER(DETIER=.66666 66666 66666D0,UNDEMI=0.5D0)
+      PARAMETER(UNQU=.25D0)
+*
+      DIMENSION DDHOOK(LHOOK,*)
+      DIMENSION TRAC(*)
+
+      DIMENSION XSTRS(12),XVARI(12)
+      DIMENSION DDF(8),DDG(8),DHDF(8),DHDG(8)
+      DIMENSION PMATRIC(6,6),GMATRIC(6,6),GDMATR(6,6),GINV(6,6),COEF3(6)
+*     matrice P pour le modele viscoplastique parfait
+*     la matrice sert a passer de la contrainte a la contrainte deviatorique
+      DATA PMATRIC /2.D0,-1.D0,-1.D0,0.D0,0.D0,0.D0,
+     &              -1.D0,2.D0,-1.D0,0.D0,0.D0,0.D0,
+     &              -1.D0,-1.D0,2.D0,0.D0,0.D0,0.D0,
+     &               0.D0, 0.D0,0.D0,6.D0,0.D0,0.D0,
+     &               0.D0, 0.D0,0.D0,0.D0,6.D0,0.D0,
+     &               0.D0, 0.D0,0.D0,0.D0,0.D0,6.D0/
+*
+      DATA COEF3 /1.D0,1.D0,1.D0,2.D0,2.D0,2.D0/
+*_______________________________________________________________________
+*
+*       formulation coques minces
+*       (formulation massive dans dohot1.eso)
+*_______________________________________________________________________
+*
+      ENTRY DOHOT3(IVAMAT,NMATT,IVACON,NSTRS,IVARI,NVART,
+     &                 TRAC,LTRAC,ALPHA,EP1,IGAU,IB,MATE,MAPL,
+     &                 XPREC,DTPS,IFOU,LHOOK,DDHOOK,IRET)
+*
+* Transformation des efforts generalises en contraintes :
+*
+      MFR=3
+      XXHH=XZER
+      SIGY=XZER
+      ALP =XZER
+*
+      IRET=1
+      ALPHAP=ALPHA*SIX/EP1
+      ALPH2=ALPHAP*ALPHAP
+      ALPH4=ALPH2*ALPH2
+      CALL ZERO(DDHOOK,LHOOK,LHOOK)
+*
+*     materiau elastique isotrope plastique parfait et bilineaire
+*
+      IF(MATE.EQ.1) THEN
+         MPTVAL=IVAMAT
+         MELVAL=IVAL(1)
+         IGMN=MIN(IGAU,VELCHE(/1))
+         IBMN=MIN(IB  ,VELCHE(/2))
+         YOU =VELCHE(IGMN,IBMN)
+*
+         MELVAL=IVAL(2)
+         IGMN=MIN(IGAU,VELCHE(/1))
+         IBMN=MIN(IB  ,VELCHE(/2))
+         XNU =VELCHE(IGMN,IBMN)
+*
+         IF (MAPL.EQ.1.OR.MAPL.EQ.3.OR.MAPL.EQ.4) THEN
+           MELVAL=IVAL(3)
+           IGMN=MIN(IGAU,VELCHE(/1))
+           IBMN=MIN(IB  ,VELCHE(/2))
+           SIGY = VELCHE(IGMN,IBMN)
+*
+           IF (MAPL.EQ.3) THEN
+             MELVAL=IVAL(4)
+             IGMN=MIN(IGAU,VELCHE(/1))
+             IBMN=MIN(IB  ,VELCHE(/2))
+             ALP = VELCHE(IGMN,IBMN)
+           ELSE IF (MAPL.EQ.4) THEN
+             MELVAL=IVAL(4)
+             IGMN=MIN(IGAU,VELCHE(/1))
+             IBMN=MIN(IB  ,VELCHE(/2))
+             XXHH = VELCHE(IGMN,IBMN)
+           ENDIF
+         ENDIF
+*
+* Transformation des efforts generalises en contraintes :
+*
+         MPTVAL=IVACON
+         DO 70 ICOMP=1,NSTRS
+           MELVAL=IVAL(ICOMP)
+           IGMN=MIN(IGAU,VELCHE(/1))
+           IBMN=MIN(IB  ,VELCHE(/2))
+           XSTRS(ICOMP) = VELCHE(IGMN,IBMN)
+  70     CONTINUE
+         CALL EFCONT(EP1,0.D0,NSTRS,XSTRS)
+*
+         MPTVAL=IVARI
+         MELVAL=IVAL(1)
+         IGMN=MIN(IGAU,VELCHE(/1))
+         IBMN=MIN(IB  ,VELCHE(/2))
+         EPS = VELCHE(IGMN,IBMN)
+*
+* Transformation des vints generalisees en vints :
+*
+         IF (NVART.EQ.NSTRS+1) THEN
+            DO 80 ICOMP=1,NSTRS
+               MELVAL=IVAL(1+ICOMP)
+               IGMN=MIN(IGAU,VELCHE(/1))
+               IBMN=MIN(IB  ,VELCHE(/2))
+               XVARI(ICOMP) = VELCHE(IGMN,IBMN)
+  80        CONTINUE
+            CALL EFCONT(EP1,0.D0,NSTRS,XVARI)
+* Calcul des contraintes effectives
+            DO ICOMP=1,NSTRS
+              XSTRS(ICOMP) = XSTRS(ICOMP) - XVARI(ICOMP)
+            ENDDO
+         ENDIF
+*
+         CALL PENTE(EPS,YOU,SIGY,XXHH,ALPHA,ALP,TRAC,LTRAC,XSTRS,
+     &              NSTRS,MAPL,MFR,XPREC,YOUTA,ILOGEL)
+*
+         IF(ILOGEL.EQ.-1) THEN
+            IRET=-1
+            RETURN
+         ENDIF
+*
+*        matrice tangente
+*
+         AUX1=YOU/(UN - XNU* XNU)
+         AUX2=XNU*AUX1
+         AUX3=YOU*UNDEMI/(UN+XNU)
+         AUX4=UNTIER/(UN-XNU*XNU)
+         EP2=EP1*EP1/SIX
+         EP3=EP1*EP1*EP1/DOUZE
+         EP4=EP3/TROIS
+*
+         IF (IFOU.EQ.2.OR.IFOU.EQ.1) THEN
+*
+            DDHOOK(1,1)=AUX1*EP1
+            DDHOOK(2,2)=AUX1*EP1
+            DDHOOK(1,2)=AUX2*EP1
+            DDHOOK(2,1)=AUX2*EP1
+            DDHOOK(3,3)=AUX3*EP1
+*
+            DDHOOK(4,4)=AUX1*EP3
+            DDHOOK(5,5)=AUX1*EP3
+            DDHOOK(4,5)=AUX2*EP3
+            DDHOOK(5,4)=AUX2*EP3
+            DDHOOK(6,6)=AUX3*EP3
+*
+*           on retranche le partie deviateur
+*
+            IF (ILOGEL.EQ.1) THEN
+               XSTRS(1)=XSTRS(1)*EP1
+               XSTRS(2)=XSTRS(2)*EP1
+               XSTRS(3)=XSTRS(3)*EP1
+               XSTRS(4)=XSTRS(4)*EP2
+               XSTRS(5)=XSTRS(5)*EP2
+               XSTRS(6)=XSTRS(6)*EP2
+*
+               UM=(DEUX*XSTRS(1)-XSTRS(2)+XNU*(DEUX*XSTRS(2)-
+     &              XSTRS(1)))*AUX4
+               VM=(DEUX*XSTRS(2)-XSTRS(1)+XNU*(DEUX*XSTRS(1)-
+     &              XSTRS(2)))*AUX4
+               WM=XSTRS(3)/(UN+XNU)
+*
+               UF=(DEUX*XSTRS(4)-XSTRS(5)+XNU*(DEUX*XSTRS(5)-
+     &            XSTRS(4)))*AUX4
+               VF=(DEUX*XSTRS(5)-XSTRS(4)+XNU*(DEUX*XSTRS(4)-
+     &            XSTRS(5)))*AUX4
+               WF=XSTRS(6)/(UN+XNU)
+*
+               UM=UM*EP1
+               VM=VM*EP1
+               WM=WM*EP1
+*
+               UF=UF*EP3*ALPH2
+               VF=VF*EP3*ALPH2
+               WF=WF*EP3*ALPH2
+*
+               XXXX=XSTRS(1)*XSTRS(1)+XSTRS(2)*XSTRS(2)
+               XXX1=XSTRS(4)*XSTRS(4)+XSTRS(5)*XSTRS(5)
+               XXXA=XXXX*EP1+XXX1*ALPH4*EP3
+               XXXB=XXXX*EP1+XXX1*ALPH2*EP4
+*
+               YYYY=XSTRS(1)*XSTRS(2)
+               YYY1=XSTRS(4)*XSTRS(5)
+               YYYA=YYYY*EP1+YYY1*ALPH4*EP3
+               YYYB=YYYY*EP1+YYY1*ALPH2*EP4
+*
+               ZZZZ=XSTRS(3)*XSTRS(3)
+               ZZZ1=XSTRS(6)*XSTRS(6)
+               ZZZA=ZZZZ*EP1+ZZZ1*ALPH4*EP3
+               ZZZB=ZZZZ*EP1+ZZZ1*ALPH2*EP4
+*
+               A= CINQ*XXXA - HUIT*YYYA
+               B= CINQ*YYYA - DEUX*XXXA
+               C= DETIER*(XXXA-YYYA)+DEUX*ZZZA
+               D= (A+DEUX*XNU*B)*AUX4  +  SIX*ZZZA/(UN+XNU)
+*
+               XNUM=TROIS*YOU*(YOU-YOUTA)
+               DENOM=DEUX*YOUTA*C  + ( YOU - YOUTA ) * D
+               BETA=XNUM/DENOM
+*
+               DDHOOK(1,1)=DDHOOK(1,1)-BETA*UM*UM
+               DDHOOK(2,1)=DDHOOK(2,1)-BETA*VM*UM
+               DDHOOK(3,1)=DDHOOK(3,1)-BETA*WM*UM
+*
+               DDHOOK(4,1)=           -BETA*UF*UM
+               DDHOOK(5,1)=           -BETA*VF*UM
+               DDHOOK(6,1)=           -BETA*WF*UM
+*
+               DDHOOK(1,2)=DDHOOK(1,2)-BETA*UM*VM
+               DDHOOK(2,2)=DDHOOK(2,2)-BETA*VM*VM
+               DDHOOK(3,2)=DDHOOK(3,2)-BETA*WM*VM
+*
+               DDHOOK(4,2)=           -BETA*UF*VM
+               DDHOOK(5,2)=           -BETA*VF*VM
+               DDHOOK(6,2)=           -BETA*WF*VM
+*
+               DDHOOK(1,3)=DDHOOK(1,3)-BETA*UM*WM
+               DDHOOK(2,3)=DDHOOK(2,3)-BETA*VM*WM
+               DDHOOK(3,3)=DDHOOK(3,3)-BETA*WM*WM
+*
+               DDHOOK(4,3)=           -BETA*UF*WM
+               DDHOOK(5,3)=           -BETA*VF*WM
+               DDHOOK(6,3)=           -BETA*WF*WM
+*
+               DDHOOK(1,4)=           -BETA*UM*UF
+               DDHOOK(2,4)=           -BETA*VM*UF
+               DDHOOK(3,4)=           -BETA*WM*UF
+*
+               DDHOOK(4,4)=DDHOOK(4,4)-BETA*UF*UF
+               DDHOOK(5,4)=DDHOOK(5,4)-BETA*VF*UF
+               DDHOOK(6,4)=DDHOOK(6,4)-BETA*WF*UF
+*
+               DDHOOK(1,5)=           -BETA*UM*VF
+               DDHOOK(2,5)=           -BETA*VM*VF
+               DDHOOK(3,5)=           -BETA*WM*VF
+*
+               DDHOOK(4,5)=DDHOOK(4,5)-BETA*UF*VF
+               DDHOOK(5,5)=DDHOOK(5,5)-BETA*VF*VF
+               DDHOOK(6,5)=DDHOOK(6,5)-BETA*WF*VF
+*
+               DDHOOK(1,6)=           -BETA*UM*WF
+               DDHOOK(2,6)=           -BETA*VM*WF
+               DDHOOK(3,6)=           -BETA*WM*WF
+*
+               DDHOOK(4,6)=DDHOOK(4,6)-BETA*UF*WF
+               DDHOOK(5,6)=DDHOOK(5,6)-BETA*VF*WF
+               DDHOOK(6,6)=DDHOOK(6,6)-BETA*WF*WF
+            ENDIF
+*
+         ELSE IF(IFOU.EQ.0.OR.IFOU.EQ.-1) THEN
+*
+            DDHOOK(1,1)=AUX1*EP1
+            DDHOOK(2,2)=AUX1*EP1
+            DDHOOK(1,2)=AUX2*EP1
+            DDHOOK(2,1)=AUX2*EP1
+*
+            DDHOOK(3,3)=AUX1*EP3
+            DDHOOK(4,4)=AUX1*EP3
+            DDHOOK(3,4)=AUX2*EP3
+            DDHOOK(4,3)=AUX2*EP3
+*
+*           on retranche la partie deviateur
+*
+            IF(ILOGEL.EQ.1) THEN
+               XSTRS(1)=XSTRS(1)*EP1
+               XSTRS(2)=XSTRS(2)*EP1
+               XSTRS(3)=XSTRS(3)*EP2
+               XSTRS(4)=XSTRS(4)*EP2
+*
+               UM=(DEUX*XSTRS(1)-XSTRS(2)+XNU*(DEUX*XSTRS(2)-
+     &             XSTRS(1)))*AUX4
+               VM=(DEUX*XSTRS(2)-XSTRS(1)+XNU*(DEUX*XSTRS(1)-
+     &             XSTRS(2)))*AUX4
+*
+               UF=(DEUX*XSTRS(3)-XSTRS(4)+XNU*(DEUX*XSTRS(4)-
+     &             XSTRS(3)))*AUX4
+               VF=(DEUX*XSTRS(4)-XSTRS(3)+XNU*(DEUX*XSTRS(3)-
+     &             XSTRS(4)))*AUX4
+*
+               UM=UM*EP1
+               VM=VM*EP1
+*
+               UF=UF*EP3*ALPH2
+               VF=VF*EP3*ALPH2
+*
+               XXXX=XSTRS(1)*XSTRS(1)+XSTRS(2)*XSTRS(2)
+               XXX1=XSTRS(3)*XSTRS(3)+XSTRS(4)*XSTRS(4)
+               XXXA=XXXX*EP1+XXX1*ALPH4*EP3
+               XXXB=XXXX*EP1+XXX1*ALPH2*EP4
+*
+               YYYY=XSTRS(1)*XSTRS(2)
+               YYY1=XSTRS(3)*XSTRS(4)
+               YYYA=YYYY*EP1+YYY1*ALPH4*EP3
+               YYYB=YYYY*EP1+YYY1*ALPH2*EP4
+*
+               A= CINQ*XXXA - HUIT*YYYA
+               B= CINQ*YYYA - DEUX*XXXA
+               C= DETIER*(XXXA-YYYA)
+               D= (A+DEUX*XNU*B)*AUX4
+*
+               XNUM=TROIS*YOU*(YOU-YOUTA)
+               DENOM=DEUX*YOUTA*C  + ( YOU - YOUTA ) * D
+               BETA=XNUM/DENOM
+*
+               DDHOOK(1,1)=DDHOOK(1,1)-BETA*UM*UM
+               DDHOOK(2,1)=DDHOOK(2,1)-BETA*VM*UM
+*
+               DDHOOK(3,1)=           -BETA*UF*UM
+               DDHOOK(4,1)=           -BETA*VF*UM
+*
+               DDHOOK(1,2)=DDHOOK(1,2)-BETA*UM*VM
+               DDHOOK(2,2)=DDHOOK(2,2)-BETA*VM*VM
+*
+               DDHOOK(3,2)=           -BETA*UF*VM
+               DDHOOK(4,2)=           -BETA*VF*VM
+*
+               DDHOOK(1,3)=           -BETA*UM*UF
+               DDHOOK(2,3)=           -BETA*VM*UF
+*
+               DDHOOK(3,3)=DDHOOK(3,3)-BETA*UF*UF
+               DDHOOK(4,3)=DDHOOK(4,3)-BETA*VF*UF
+*
+               DDHOOK(1,4)=           -BETA*UM*VF
+               DDHOOK(2,4)=           -BETA*VM*VF
+*
+               DDHOOK(3,4)=DDHOOK(3,4)-BETA*UF*VF
+               DDHOOK(4,4)=DDHOOK(4,4)-BETA*VF*VF
+*
+            ENDIF
+         ELSE
+            IRET=0
+         ENDIF
+      ELSE
+         IRET=0
+      ENDIF
+*
+      RETURN
+*_______________________________________________________________________
+*
+* formulation coques epaisses
+*_______________________________________________________________________
+*
+      ENTRY DOHOT5(IVAMAT,NMATT,IVACON,NSTRS,IVARI,NVART,TRAC,LTRAC,
+     &             IGAU,IB,MATE,MAPL,XPREC,DTPS,IFOU,LHOOK,DDHOOK,IRET)
+*
+      MFR=5
+      XXHH =XZER
+      ALPSS=XZER
+      SIGY =XZER
+      ALP  =XZER
+*
+      IRET=1
+      CALL ZERO(DDHOOK,LHOOK,LHOOK)
+*
+*     materiau elastique isotrope plastique parfait
+*
+      IF(MATE.EQ.1) THEN
+         MPTVAL=IVAMAT
+         MELVAL=IVAL(1)
+         IGMN=MIN(IGAU,VELCHE(/1))
+         IBMN=MIN(IB  ,VELCHE(/2))
+         YOU =VELCHE(IGMN,IBMN)
+*
+         MELVAL=IVAL(2)
+         IGMN=MIN(IGAU,VELCHE(/1))
+         IBMN=MIN(IB  ,VELCHE(/2))
+         XNU =VELCHE(IGMN,IBMN)
+*
+         IF (MAPL.EQ.1.OR.MAPL.EQ.3.OR.MAPL.EQ.4) THEN
+            MELVAL=IVAL(3)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            SIGY = VELCHE(IGMN,IBMN)
+*
+            IF (MAPL.EQ.3) THEN
+              MELVAL=IVAL(4)
+              IGMN=MIN(IGAU,VELCHE(/1))
+              IBMN=MIN(IB  ,VELCHE(/2))
+              ALP = VELCHE(IGMN,IBMN)
+            ELSE IF (MAPL.EQ.4) THEN
+              MELVAL=IVAL(4)
+              IGMN=MIN(IGAU,VELCHE(/1))
+              IBMN=MIN(IB  ,VELCHE(/2))
+              XXHH = VELCHE(IGMN,IBMN)
+            ENDIF
+         ENDIF
+*
+         MPTVAL=IVACON
+         DO 90 ICOMP=1,NSTRS
+            MELVAL=IVAL(ICOMP)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            XSTRS(ICOMP) = VELCHE(IGMN,IBMN)
+  90     CONTINUE
+*
+         MPTVAL=IVARI
+         MELVAL=IVAL(1)
+         IGMN=MIN(IGAU,VELCHE(/1))
+         IBMN=MIN(IB  ,VELCHE(/2))
+         EPS = VELCHE(IGMN,IBMN)
+*
+         IF(NVART.EQ.NSTRS+1) THEN
+            DO 100 ICOMP=1,NSTRS
+               MELVAL=IVAL(1+ICOMP)
+               IGMN=MIN(IGAU,VELCHE(/1))
+               IBMN=MIN(IB  ,VELCHE(/2))
+               XSTRS(ICOMP)= XSTRS(ICOMP) - VELCHE(IGMN,IBMN)
+ 100        CONTINUE
+         ENDIF
+*
+         CALL PENTE(EPS,YOU,SIGY,XXHH,ALPSS,ALP,TRAC,LTRAC,XSTRS,
+     &              NSTRS,MAPL,MFR,XPREC,YOUTA,ILOGEL)
+*
+         IF(ILOGEL.EQ.-1) THEN
+            IRET=-1
+            RETURN
+         ENDIF
+*
+*        matrice tangente / contraintes planes
+*
+         IF(IFOU.EQ.2) THEN
+            AUX1=YOU/(UN - XNU* XNU)
+            AUX2=XNU*AUX1
+            AUX3=YOU*UNDEMI/(UN+XNU)
+            AUX31=YOU*UNDEMI/(UN+XNU)/1.2D0
+            AUX4=UNTIER/(UN-XNU*XNU)
+*
+            DDHOOK(1,1)=AUX1
+            DDHOOK(2,2)=AUX1
+            DDHOOK(1,2)=AUX2
+            DDHOOK(2,1)=AUX2
+            DDHOOK(3,3)=AUX3
+*
+            DDHOOK(4,4)=AUX31
+            DDHOOK(5,5)=AUX31
+*
+*           on retranche la partie deviateur
+*
+            IF(ILOGEL.EQ.1) THEN
+               U =(DEUX*XSTRS(1)-XSTRS(2)+XNU*(DEUX*XSTRS(2)-
+     &             XSTRS(1)))*AUX4
+               V =(DEUX*XSTRS(2)-XSTRS(1)+XNU*(DEUX*XSTRS(1)-
+     &             XSTRS(2)))*AUX4
+               W =XSTRS(3)/(UN+XNU)
+*
+               XXXX=XSTRS(1)*XSTRS(1)+XSTRS(2)*XSTRS(2)
+               YYYY=XSTRS(1)*XSTRS(2)
+               ZZZZ=XSTRS(3)*XSTRS(3)
+*
+               A= CINQ*XXXX - HUIT*YYYY
+               B= CINQ*YYYY - DEUX*XXXX
+               C= DETIER*(XXXX-YYYY)+DEUX*ZZZZ
+               D= (A+DEUX*XNU*B)*AUX4  +  SIX*ZZZZ/(UN+XNU)
+*
+               XNUM=TROIS*YOU*(YOU-YOUTA)
+               DENOM=DEUX*YOUTA*C + ( YOU - YOUTA ) * D
+               BETA=XNUM/DENOM
+*
+               DDHOOK(1,1)=DDHOOK(1,1)-BETA*U*U
+               DDHOOK(2,1)=DDHOOK(2,1)-BETA*V*U
+               DDHOOK(3,1)=DDHOOK(3,1)-BETA*W*U
+*
+               DDHOOK(1,2)=DDHOOK(1,2)-BETA*U*V
+               DDHOOK(2,2)=DDHOOK(2,2)-BETA*V*V
+               DDHOOK(3,2)=DDHOOK(3,2)-BETA*W*V
+*
+               DDHOOK(1,3)=DDHOOK(1,3)-BETA*U*W
+               DDHOOK(2,3)=DDHOOK(2,3)-BETA*V*W
+               DDHOOK(3,3)=DDHOOK(3,3)-BETA*W*W
+            ENDIF
+         ELSE
+            IRET=0
+         ENDIF
+      ELSE
+         IRET=0
+      ENDIF
+*
+      RETURN
+*_______________________________________________________________________
+*
+* formulation coques cisaillement transverse
+*_______________________________________________________________________
+*
+      ENTRY DOHOT9(IVAMAT,NMATT,IVACON,NSTRS,IVARI,NVART,
+     &                 TRAC,LTRAC,ALPHA,EP1,IGAU,IB,MATE,MAPL,
+     &                 XPREC,DTPS,IFOU,LHOOK,DDHOOK,IRET)
+*
+      MFR=9
+      XXHH=XZER
+      SIGY=XZER
+      ALP =XZER
+      ALPHAP=ALPHA*SIX/EP1
+      ALPH2=ALPHAP*ALPHAP
+      ALPH4=ALPH2*ALPH2
+*
+      CALL ZERO(DDHOOK,LHOOK,LHOOK)
+*
+*     materiau elastique isotrope plastique parfait et bilineaire
+*
+      IF(MATE.EQ.1) THEN
+         MPTVAL=IVAMAT
+         MELVAL=IVAL(1)
+         IGMN=MIN(IGAU,VELCHE(/1))
+         IBMN=MIN(IB  ,VELCHE(/2))
+         YOU =VELCHE(IGMN,IBMN)
+*
+         MELVAL=IVAL(2)
+         IGMN=MIN(IGAU,VELCHE(/1))
+         IBMN=MIN(IB  ,VELCHE(/2))
+         XNU =VELCHE(IGMN,IBMN)
+*
+         IF (MAPL.EQ.1.OR.MAPL.EQ.3.OR.MAPL.EQ.4) THEN
+            MELVAL=IVAL(3)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            SIGY = VELCHE(IGMN,IBMN)
+*
+            IF (MAPL.EQ.3) THEN
+              MELVAL=IVAL(4)
+              IGMN=MIN(IGAU,VELCHE(/1))
+              IBMN=MIN(IB  ,VELCHE(/2))
+              ALP = VELCHE(IGMN,IBMN)
+            ELSE IF (MAPL.EQ.4) THEN
+              MELVAL=IVAL(4)
+              IGMN=MIN(IGAU,VELCHE(/1))
+              IBMN=MIN(IB  ,VELCHE(/2))
+              XXHH = VELCHE(IGMN,IBMN)
+            ENDIF
+         ENDIF
+*
+         MPTVAL=IVACON
+         DO 180 ICOMP=1,NSTRS
+            MELVAL=IVAL(ICOMP)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            XSTRS(ICOMP) = VELCHE(IGMN,IBMN)
+ 180     CONTINUE
+*
+         MPTVAL=IVARI
+         MELVAL=IVAL(1)
+         IGMN=MIN(IGAU,VELCHE(/1))
+         IBMN=MIN(IB  ,VELCHE(/2))
+         EPS = VELCHE(IGMN,IBMN)
+*
+         IF (NVART.EQ.NSTRS+1) THEN
+            DO 190 ICOMP=1,NSTRS
+               MELVAL=IVAL(1+ICOMP)
+               IGMN=MIN(IGAU,VELCHE(/1))
+               IBMN=MIN(IB  ,VELCHE(/2))
+               XSTRS(ICOMP)= XSTRS(ICOMP) - VELCHE(IGMN,IBMN)
+ 190        CONTINUE
+         ENDIF
+*
+         CALL PENTE(EPS,YOU,SIGY,XXHH,ALPHA,ALP,TRAC,LTRAC,XSTRS,
+     &              NSTRS,MAPL,MFR,XPREC,YOUTA,ILOGEL)
+*
+         IF(ILOGEL.EQ.-1) THEN
+            IRET=-1
+            RETURN
+         ENDIF
+*
+*        matrice tangente / tridimensionnel
+*
+         IF(IFOU.EQ.2) THEN
+            AUX1=YOU/(UN - XNU* XNU)
+            AUX2=XNU*AUX1
+            AUX3=YOU*UNDEMI/(UN+XNU)
+            AUX4=UNTIER/(UN-XNU*XNU)
+            EP2=EP1*EP1/SIX
+            EP3=EP1*EP1*EP1/DOUZE
+            EP4=EP3/TROIS
+*
+            DDHOOK(1,1)=AUX1*EP1
+            DDHOOK(2,2)=AUX1*EP1
+            DDHOOK(1,2)=AUX2*EP1
+            DDHOOK(2,1)=AUX2*EP1
+            DDHOOK(3,3)=AUX3*EP1
+*
+            DDHOOK(4,4)=AUX1*EP3
+            DDHOOK(5,5)=AUX1*EP3
+            DDHOOK(4,5)=AUX2*EP3
+            DDHOOK(5,4)=AUX2*EP3
+            DDHOOK(6,6)=AUX3*EP3
+*
+            DDHOOK(7,7)=AUX3*EP1/1.2D0
+            DDHOOK(8,8)=AUX3*EP1/1.2D0
+*
+*           on retranche la partie deviateur
+*
+            IF(ILOGEL.EQ.1) THEN
+               XSTRS(1)=XSTRS(1)*EP1
+               XSTRS(2)=XSTRS(2)*EP1
+               XSTRS(3)=XSTRS(3)*EP1
+               XSTRS(4)=XSTRS(4)*EP2
+               XSTRS(5)=XSTRS(5)*EP2
+               XSTRS(6)=XSTRS(6)*EP2
+*
+               UM=(DEUX*XSTRS(1)-XSTRS(2)+XNU*(DEUX*XSTRS(2)-
+     &             XSTRS(1)))*AUX4
+               VM=(DEUX*XSTRS(2)-XSTRS(1)+XNU*(DEUX*XSTRS(1)-
+     &             XSTRS(2)))*AUX4
+               WM=XSTRS(3)/(UN+XNU)
+*
+               UF=(DEUX*XSTRS(4)-XSTRS(5)+XNU*(DEUX*XSTRS(5)-
+     &            XSTRS(4)))*AUX4
+               VF=(DEUX*XSTRS(5)-XSTRS(4)+XNU*(DEUX*XSTRS(4)-
+     &            XSTRS(5)))*AUX4
+               WF=XSTRS(6)/(UN+XNU)
+*
+               UM=UM*EP1
+               VM=VM*EP1
+               WM=WM*EP1
+*
+               UF=UF*EP3*ALPH2
+               VF=VF*EP3*ALPH2
+               WF=WF*EP3*ALPH2
+*
+               XXXX=XSTRS(1)*XSTRS(1)+XSTRS(2)*XSTRS(2)
+               XXX1=XSTRS(4)*XSTRS(4)+XSTRS(5)*XSTRS(5)
+               XXXA=XXXX*EP1+XXX1*ALPH4*EP3
+               XXXB=XXXX*EP1+XXX1*ALPH2*EP4
+*
+               YYYY=XSTRS(1)*XSTRS(2)
+               YYY1=XSTRS(4)*XSTRS(5)
+               YYYA=YYYY*EP1+YYY1*ALPH4*EP3
+               YYYB=YYYY*EP1+YYY1*ALPH2*EP4
+*
+               ZZZZ=XSTRS(3)*XSTRS(3)
+               ZZZ1=XSTRS(6)*XSTRS(6)
+               ZZZA=ZZZZ*EP1+ZZZ1*ALPH4*EP3
+               ZZZB=ZZZZ*EP1+ZZZ1*ALPH2*EP4
+*
+               A= CINQ*XXXA - HUIT*YYYA
+               B= CINQ*YYYA - DEUX*XXXA
+               C= DETIER*(XXXA-YYYA)+DEUX*ZZZA
+               D= (A+DEUX*XNU*B)*AUX4  +  SIX*ZZZA/(UN+XNU)
+*
+               XNUM=TROIS*YOU*(YOU-YOUTA)
+               DENOM=DEUX*YOUTA*C  + ( YOU - YOUTA ) * D
+               BETA=XNUM/DENOM
+*
+               DDHOOK(1,1)=DDHOOK(1,1)-BETA*UM*UM
+               DDHOOK(2,1)=DDHOOK(2,1)-BETA*VM*UM
+               DDHOOK(3,1)=DDHOOK(3,1)-BETA*WM*UM
+*
+               DDHOOK(4,1)=           -BETA*UF*UM
+               DDHOOK(5,1)=           -BETA*VF*UM
+               DDHOOK(6,1)=           -BETA*WF*UM
+*
+               DDHOOK(1,2)=DDHOOK(1,2)-BETA*UM*VM
+               DDHOOK(2,2)=DDHOOK(2,2)-BETA*VM*VM
+               DDHOOK(3,2)=DDHOOK(3,2)-BETA*WM*VM
+*
+               DDHOOK(4,2)=           -BETA*UF*VM
+               DDHOOK(5,2)=           -BETA*VF*VM
+               DDHOOK(6,2)=           -BETA*WF*VM
+*
+               DDHOOK(1,3)=DDHOOK(1,3)-BETA*UM*WM
+               DDHOOK(2,3)=DDHOOK(2,3)-BETA*VM*WM
+               DDHOOK(3,3)=DDHOOK(3,3)-BETA*WM*WM
+*
+               DDHOOK(4,3)=           -BETA*UF*WM
+               DDHOOK(5,3)=           -BETA*VF*WM
+               DDHOOK(6,3)=           -BETA*WF*WM
+*
+               DDHOOK(1,4)=           -BETA*UM*UF
+               DDHOOK(2,4)=           -BETA*VM*UF
+               DDHOOK(3,4)=           -BETA*WM*UF
+*
+               DDHOOK(4,4)=DDHOOK(4,4)-BETA*UF*UF
+               DDHOOK(5,4)=DDHOOK(5,4)-BETA*VF*UF
+               DDHOOK(6,4)=DDHOOK(6,4)-BETA*WF*UF
+*
+               DDHOOK(1,5)=           -BETA*UM*VF
+               DDHOOK(2,5)=           -BETA*VM*VF
+               DDHOOK(3,5)=           -BETA*WM*VF
+*
+               DDHOOK(4,5)=DDHOOK(4,5)-BETA*UF*VF
+               DDHOOK(5,5)=DDHOOK(5,5)-BETA*VF*VF
+               DDHOOK(6,5)=DDHOOK(6,5)-BETA*WF*VF
+*
+               DDHOOK(1,6)=           -BETA*UM*WF
+               DDHOOK(2,6)=           -BETA*VM*WF
+               DDHOOK(3,6)=           -BETA*WM*WF
+*
+               DDHOOK(4,6)=DDHOOK(4,6)-BETA*UF*WF
+               DDHOOK(5,6)=DDHOOK(5,6)-BETA*VF*WF
+               DDHOOK(6,6)=DDHOOK(6,6)-BETA*WF*WF
+            ENDIF
+         ELSE
+            IRET=0
+         ENDIF
+      ELSE
+         IRET=0
+      ENDIF
+*
+      RETURN
+      END
+
+

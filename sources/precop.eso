@@ -1,0 +1,1104 @@
+C PRECOP    SOURCE    BP208322  15/06/22    21:21:23     8543
+      SUBROUTINE PRECOP(IPMODL,IPCHA1,IPTAB,IPSTRS,IRAN,
+     &                  PS1,IPCHC1,IRET)
+C======================================================================C
+C                                                                      C
+C     ENTREES :                                                        C
+C                                                                      C
+C       IPMODL: POINTEUR SUR UN MMODEL                                 C
+C       IPCHA1: Pointeur sur le MCHAML de CARACTERISTIQUES             C
+C       PS1   : Force sous vérin
+C       IRAN  :  Pointeur sur maillage des points d application
+C       IPCHC1: POINTEUR SUR le MCHAML DE PRECONTRAINTE INITIALE
+C       IPTAB : pointeur sur la table des parametres frottement ....   C
+C                                                                      C
+C     SORTIES :                                                        C
+C                                                                      C
+C       IPSTRS:  MCHAML CONTENANT LES PRECONTAINTES ET LES FORCES      C
+C                DU CABLE SUR LE BETON                                 C
+C       IRET  :  1   cela c est bien passe
+C                0   probleme dans le traitement                       C
+C                                                                      C
+C======================================================================C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+C
+-INC CCOPTIO
+-INC SMCHAML
+-INC SMELEME
+-INC SMINTE
+-INC SMMODEL
+-INC CCHAMP
+-INC SMCOORD
+-INC SMTABLE
+C
+      REAL*8 XVALIN,XVALRE
+      LOGICAL LOGRE,LOGIN
+      CHARACTER*8 TAPIND,TYPOBJ,CHARIN,CHARRE
+      CHARACTER*4 MOPAR(6)
+*
+      DATA MOPAR/'F1  ','F2  ','GANC','RMU0','FPRG','RH10'/
+      SEGMENT INFO
+         INTEGER INFELL(JG)
+      ENDSEGMENT
+* stockage  de pointeurs sur des segment sielc  crees dans splitag
+      segment siezo
+      integer iezon(*)
+      endsegment
+      segment sielc
+      integer ideb(*),ifin(*),nbcz,isens(2,*),idejvu(*)
+      endsegment
+C
+      SEGMENT ALTRAV
+         REAL*8 ANG(NAM+1),DANG(NAM),ACUR(NAM+1),DACUR(NAM)
+      ENDSEGMENT
+C
+      SEGMENT NOTYPE
+        CHARACTER*16 TYPE(NBTYPE)
+      ENDSEGMENT
+C
+      SEGMENT MPTVAL
+         INTEGER IPOS(NS)    ,NSOF(NS)
+         INTEGER      IVAL(NCOSOU)
+         CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+C
+      SEGMENT WRK3
+         REAL*8 X1(3),X2(3),X3(3),RL(3),RS(3)
+      ENDSEGMENT
+
+C
+      CHARACTER*8 CMATE,LNOM
+      CHARACTER*(NCONCH) CONM
+      PARAMETER ( NINF=3 )
+      PARAMETER ( ITEMAX=50 )
+      INTEGER INFOS(NINF)
+      DIMENSION FGG(ITEMAX),XLAM(ITEMAX)
+      logical ivers,lsupco
+
+cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+
+      if (ipchc1.ne.0) then
+      MCHELM  = ipchc1
+      segact MCHELM
+C   actuellement  un cable n a qu une zone de maillage
+      imail = imache(1)
+      segdes MCHELM
+      endif
+
+      IRET=0
+C     verification on doit avoir des elements soit BARR soit  CERC
+      MMODEL = ipmodl
+      segact mmodel
+      do i = 1,kmodel(/1)
+      imodel = kmodel(i)
+      segact imodel
+      if(ipchc1.ne.0.and.imail.ne.imamod) then
+      call erreur(21)
+      return
+      endif
+      meleme = imamod
+      segact meleme
+      if(ifomod.eq.0.and.itypel.ne.1) then
+      segdes imodel,meleme,mmodel
+      call erreur(21)
+      return
+      endif
+      segdes imodel,meleme
+      enddo
+      segdes mmodel
+
+C --- Vérification du support des MCHAML --------------
+
+      if(ipchc1.gt.0) then
+         call quesup(ipmodl,ipchc1,5,0,iresig,iret2)
+         if(iresig.eq.9999) then
+            moterr(1:8)='CONTRAIN'
+            call erreur(124)
+            return
+         endif
+       endif
+
+      call quesup(ipmodl,ipcha1,5,0,irecar,iret2)
+      if(irecar.eq.9999) then
+         moterr(1:8)='CARACTER'
+         call erreur(124)
+         return
+      endif
+      if(irecar.eq.1) then
+         ipcara = 0
+         iret = 0
+         call chasup(ipmodl,ipcha1,ipcara,iret,5)
+         if(iret.ne.0) return
+      else
+         ipcara = ipcha1
+      endif
+*---------------------------------------------------------
+      ipmod0 = ipmodl
+*---------------------------------------------------------
+      if(ifomod.ne.0.and.ifomod.ne.1) then
+      ipcar0 = ipcara
+      ipchc0 = ipchc1
+      call splitag(ipmodl,ipcara,ipchc1,ipmod2,ipcar2,
+     &      ipchc2,siezo)
+      ipmodl = ipmod2
+      ipcara = ipcar2
+      ipchc1 = ipchc2
+      else
+C  pas elegant mais on duplique  le modele
+      MMODEL = ipmodl
+      segini , mmode2=MMODEL
+      ipmodl = mmode2
+      endif
+C
+      ipmodt = ipmodl
+      MMODEL = IPMODL
+C
+      SEGACT MMODEL
+      NSOUS=KMODEL(/1)
+C
+C ----PREPARATION DU CHAMP DE SORTIE----------------
+C
+      mmode2 = ipmod0
+      segact mmode2
+      N1=mmode2.kmodel(/1)
+      L1=11
+      N3=6
+      segini mchel5
+      mchel5.titche='CONTRAINTES'
+      mchel5.ifoche=ifour
+
+      do isous=1,n1
+      imodel=mmode2.kmodel(isous)
+      segact imodel
+      mchel5.imache(isous)=imamod
+      mchel5.conche(isous)=conmod
+      mele= nefmod
+C====
+      CALL ELQUOI(MELE,0,5,INFO,IMODEL)
+         IF (IERR.NE.0) THEN
+            SEGDES IMODEL*NOMOD,MMODEL*NOMOD
+            SEGSUP MCHEL5
+            IRET=0
+            RETURN
+      ENDIF
+       MINTE= INFELL(11)
+C====
+         MCHEL5.INFCHE(ISOUS,1)=0
+         MCHEL5.INFCHE(ISOUS,2)=0
+         MCHEL5.INFCHE(ISOUS,3)=NIFOUR
+         MCHEL5.INFCHE(ISOUS,4)=MINTE
+         MCHEL5.INFCHE(ISOUS,5)=0
+         MCHEL5.INFCHE(ISOUS,6)=5
+C
+      N2=1
+      segini MCHAML
+      mchel5.ichaml(isous)=mchaml
+      nomche(1)='EFFX'
+      typche(1)='REAL*8'
+      meleme = imamod
+      segact meleme
+      N1PTEL=2
+      N1EL= NUM(/2)
+      N2PTEL=0
+      N2EL=0
+      segini melval
+      ielval(1)=melval
+      segdes melval,mchaml,meleme,imodel
+      segsup info
+      enddo
+
+       segdes mmode2
+C
+C ----FIN    PREPARATION DU CHAMP DE SORTIE----------------
+C
+
+C   preparation de la recherche du sens d application des tensions
+       if(iran.ne.0)  then
+       ipt3=iran
+         segact ipt3
+         segini , ipt5=ipt3
+         segdes ipt3
+         ity=ipt5.itypel
+           if(ity.ne.1) then
+          segdes ipt5
+          call change(iran,1)
+          ipt5=iran
+          segact ipt5
+           endif
+       else
+       ipt5=0
+       endif
+
+C
+C --- CREATION DU MCHELM  DE CALCUL  ( TEMPORAIRE )
+C
+      N1=NSOUS
+C
+      L1=11
+      N3=6
+      SEGINI MCHELM
+      TITCHE='CONTRAINTES'
+      IFOCHE=IFOUR
+      IPSTRS=MCHELM
+C
+C --- DEBUT DE LA BOUCLE SUR LES DIFFERENTES ZONES
+C
+      DO 500 ISOUS=1,NSOUS
+C
+C --- INITIALISATION
+C
+         MOCARA=0
+         MOMATR=0
+         MOSTRS=0
+         IVAMAT=0
+         IVACAR=0
+         IVASTR=0
+         ivasi0=0
+c
+         ipeffx = 0
+         ipyoun = 0
+         ipff   = 0
+         ipphif = 0
+         ipganc = 0
+         iprmu0 = 0
+         ipfprg = 0
+         iprh10 = 0
+         ipsect = 0
+         IMODEL=KMODEL(ISOUS)
+         SEGACT IMODEL
+         IPMAIL=IMAMOD
+         CONM  =CONMOD
+         IMACHE(ISOUS)=IPMAIL
+         CONCHE(ISOUS)=CONMOD
+C ...... TRAITEMENT DU MODELE ......................
+
+         MELE=NEFMOD
+         MELEME=IPMAIL
+C
+         segact meleme
+         itpdel=itypel
+
+         NFOR=FORMOD(/2)
+         NMAT=MATMOD(/2)
+C
+C    ... on ordonne le nouveau maillage (si on en a besoin) ...
+
+         NBELEM = NUM(/2)
+C=====================================================
+         if(itypel.eq.1) then
+
+c    ... dans le cas des POI1 on n'a rien a orienter ...
+C=====================================================
+         elseif(itypel.eq.2) then
+
+           ipt2 = meleme
+            NOD1=NUM(1,1)
+            NOD2=NUM(2,num(/2))
+C           write(6,*)' noeuds extremites ' ,nod1,nod2
+         if(iran.eq.0)  then
+         ivers=.false.
+         else
+            do ino=1,ipt5.num(/2)
+            inodi=ipt5.num(1,ino)
+            if(inodi.eq.nod1) then
+            ivers=.false.
+            goto  364
+            elseif(inodi.eq.nod2) then
+            ivers=.true.
+            goto  364
+            endif
+            enddo
+C     aucune des extremites n'est  dans la liste
+C           on applique au point final
+            call erreur(833)
+C  attention aux desactivations
+            SEGDES IMODEL*NOMOD,MMODEL*NOMOD ,meleme
+            SEGSUP MCHELM
+            IRET=0
+            RETURN
+364      continue
+         endif
+C=====================================================
+c    ... si ITYPEL différent de 1 et 2 ...
+         else
+
+c       ... Type d''élément support inconnu !!!!!!!!!!! ............
+           SEGDES IMODEL*NOMOD,MMODEL*NOMOD ,meleme
+            SEGSUP MCHELM
+            IRET=0
+            RETURN
+            call erreur(19)
+            return
+         endif
+C=====================================================
+C
+C ------ NATURE DU MATERIAU
+C
+         CALL NOMATE(FORMOD,NFOR,MATMOD,NMAT,CMATE,MATE,INAT)
+         IF (CMATE.EQ.' ') THEN
+          CALL ERREUR(251)
+            SEGDES IMODEL*NOMOD,MMODEL*NOMOD ,meleme
+            SEGSUP MCHELM
+            IRET=0
+            RETURN
+          ENDIF
+C
+C ------ INFORMATION SUR L'ELEMENT FINI
+C
+         CALL ELQUOI(MELE,0,5,IPINF,IMODEL)
+         IF (IERR.NE.0) THEN
+            SEGDES IMODEL*NOMOD,MMODEL*NOMOD,meleme
+            SEGSUP MCHELM
+            IRET=0
+            RETURN
+         ENDIF
+C
+         INFO=IPINF
+         MELE =INFELL(1)
+         MFR  =INFELL(13)
+         MINTE=INFELL(11)
+         NSTRS=INFELL(16)
+
+         SEGINI WRK3
+C
+C ------ CREATION DU TABLEAU INFOS
+C
+         IPCHE1=0
+         IPCHE2=0
+c ... ATTENTION !!! A quoi ca sert ????????????? .......
+        CALL IDENT(IPMAIL,CONM,IPCHE1,IPCHE2,INFOS,IRTD)
+         IF (IRTD.EQ.0) THEN
+            SEGDES IMODEL*NOMOD,MMODEL*NOMOD,meleme
+            SEGSUP MCHELM
+            SEGSUP INFO
+             IRET=0
+            RETURN
+         ENDIF
+
+c    ... Remplissage du tableau INFCHE du MCHELM ...
+
+         INFCHE(ISOUS,1)=0
+         INFCHE(ISOUS,2)=0
+         INFCHE(ISOUS,3)=NIFOUR
+         INFCHE(ISOUS,4)=MINTE
+         INFCHE(ISOUS,5)=0
+         INFCHE(ISOUS,6)=5
+C
+C ------ LECTURE de NBPGAU dans
+C
+         SEGACT MINTE
+         NBPGAU=POIGAU(/1)
+         SEGDES MINTE
+C
+C ------ RECHERCHE DES NOMS DE COMPOSANTES des contraintes ...
+C
+         if(lnomid(4).ne.0) then
+          nomid=lnomid(4)
+          segact nomid
+          mostrs=nomid
+          nstr=lesobl(/2)
+          nfac=lesfac(/2)
+          lsupco=.false.
+        else
+         lsupco=.true.
+         CALL IDCONT(IMODEL,IFOUR,MOSTRS,NSTR,NFAC)
+        endif
+         nomid = mostrs
+         segact,nomid
+         call place(lesobl,nstr,ipeffx,'EFFX')
+         segdes,nomid
+C
+C ------ VERIFICATION DE LEUR PRESENCE et ...
+C ------ RECUPERATION DES CONTRAINTES INITIALES (s'il le faut) ...
+C
+         if(IPCHC1.gt.0) then
+
+            NBTYPE=INFELL(16)
+            SEGINI NOTYPE
+            MOTYPE=NOTYPE
+            TYPE(1)='REAL*8'
+
+            call komcha(ipchc1,ipmail,conm,mostrs,motype,1,infos,3,
+     &                  ivasi0)
+
+            IF (IERR.NE.0) THEN
+               NSTRS=0
+               GOTO 9990
+            ENDIF
+
+            SEGSUP NOTYPE
+         endif
+
+C
+C ------ CREATION DU MCHAML DE LA SOUS ZONE
+C
+         N2=NSTRS
+         SEGINI MCHAML
+         ICHAML(ISOUS)=MCHAML
+
+         NS=1
+         NCOSOU=NSTRS
+         SEGINI MPTVAL
+         IVASTR=MPTVAL
+
+C
+C ------ RECHERCHE DE LA TAILLE DES MELVAL A ALLOUER
+C
+         N1PTEL=nbpgau
+         N1EL=NBELEM
+         N2PTEL=0
+         N2EL=0
+C
+         NOMID=MOSTRS
+         SEGACT NOMID
+C    initialisation   des melvals  des precontaintes
+         DO 100 ICOMP=1,NSTRS
+            NOMCHE(ICOMP)=LESOBL(ICOMP)
+            TYPCHE(ICOMP)='REAL*8'
+            SEGINI MELVAL
+            IELVAL(ICOMP)=MELVAL
+            IVAL(ICOMP)=MELVAL
+ 100     CONTINUE
+         SEGDES NOMID
+C            ipacara  preparé dans splitag
+C  recuperation du module de young  dans ivamat ( position 1 )
+C  recuperation de la section       dans ivacar ( position 2 )
+         mchel6=ipcara
+         segact mchel6
+         mcham6=mchel6.ichaml(isous)
+         segact mcham6
+         melval= mcham6.ielval(1)
+         segact melval
+         ivamat=melval
+         melval= mcham6.ielval(2)
+         segact melval
+         ivacar=melval
+
+C
+C ------ CALCUL lui même --------------------------
+C
+C ... cas du CERC ...
+C
+
+      IF(MELE.EQ.95) THEN
+         DO 2004 IB=1,NBELEM
+            MPTVAL=IVASTR
+            DO 1701 I=1,NSTRS
+               MELVAL=IVAL(I)
+               VELCHE(1,IB)=PS1
+ 1701       CONTINUE
+         iret=1
+ 2004    CONTINUE
+
+       ELSE
+C  ----------------valeurs par defaut ----------------------
+
+      f1 = 0.18d0
+      f2 = 0.002d0
+      ganc = 0.d0
+      rmu0 = 0.43d0
+      fprg = 1.7d9
+      rh10 = 2.5d0
+
+      if(iptab.ne.0) then
+      MTABLE = iptab
+      segact mtable
+      nbind= mlotab
+          IVALIN = 0
+         XVALIN = 0.D0
+         LOGIN  = .TRUE.
+         IOBIN  = 0
+         TAPIND = 'MOT'
+C
+      TYPOBJ = '        '
+      Call acctab(MTABLE,'MOT',IVALIN,XVALIN,'FF',LOGIN,0,
+     &             TYPOBJ,IVELRE,XVALRE,CHARRE,LOGRE,IOBRE)
+      IF(TYPOBJ.EQ.'FLOTTANT') F1 = XVALRE
+      IF(TYPOBJ.EQ.'ENTIER  ') F1 = IVELRE
+      TYPOBJ = '        '
+      Call acctab(MTABLE,'MOT',IVALIN,XVALIN,'PHIF',LOGIN,0,
+     &             TYPOBJ,IVELRE,XVALRE,CHARRE,LOGRE,IOBRE)
+      IF(TYPOBJ.EQ.'FLOTTANT') F2 = XVALRE
+      IF(TYPOBJ.EQ.'ENTIER  ') F2 = IVELRE
+      TYPOBJ = '        '
+      Call acctab(MTABLE,'MOT',IVALIN,XVALIN,'GANC',LOGIN,0,
+     &             TYPOBJ,IVELRE,XVALRE,CHARRE,LOGRE,IOBRE)
+      IF(TYPOBJ.EQ.'FLOTTANT') GANC = XVALRE
+      IF(TYPOBJ.EQ.'ENTIER  ') GANC = IVELRE
+      TYPOBJ = '        '
+      Call acctab(MTABLE,'MOT',IVALIN,XVALIN,'RMU0',LOGIN,0,
+     &             TYPOBJ,IVELRE,XVALRE,CHARRE,LOGRE,IOBRE)
+      IF(TYPOBJ.EQ.'FLOTTANT') RMU0 = XVALRE
+      IF(TYPOBJ.EQ.'ENTIER  ') RMU0 = IVELRE
+      TYPOBJ = '        '
+      Call acctab(MTABLE,'MOT',IVALIN,XVALIN,'FPRG',LOGIN,0,
+     &             TYPOBJ,IVELRE,XVALRE,CHARRE,LOGRE,IOBRE)
+      IF(TYPOBJ.EQ.'FLOTTANT') FPRG = XVALRE
+      IF(TYPOBJ.EQ.'ENTIER  ') RPRG = IVELRE
+      TYPOBJ = '        '
+      Call acctab(MTABLE,'MOT',IVALIN,XVALIN,'RH10',LOGIN,0,
+     &             TYPOBJ,IVELRE,XVALRE,CHARRE,LOGRE,IOBRE)
+      IF(TYPOBJ.EQ.'FLOTTANT') RH10 = XVALRE
+      IF(TYPOBJ.EQ.'ENTIER  ') RH10 = IVELRE
+      segdes MTABLE
+
+4321  format(6E12.5)
+       endif
+C----------------------------------------------------------
+C       write(6,4321) f1,f2,ganc,rmu0,fprg,rh10
+C
+C ... Boucle sur les éléments dans lesquels on fait le calcul ...
+C
+
+         SLON=0.0D0
+         FAI=0.0D0
+         ids= idim+1
+            segact,minte
+            if(nbpgau.ne.2) then
+               call erreur(5)
+               return
+            endif
+*
+*    NEW   1-ERE BOUCLE SUR LES ELEMENTS POUR TROUVER
+*     LA LONGUEUR D'INFLUENCE DU RECUL D'ANCRAGE
+*
+            NAM =NBELEM
+            SEGINI ALTRAV
+            IAM=0
+            SUM =0.D0
+*****       PRINT *,'IVERS=',IVERS
+*
+            DO 5005 IC=1,NBELEM
+
+            if(ivers) then
+C    ordre inverse
+               JC= NBELEM+1-IC
+               NC3=ipt2.NUM(1,JC)
+               NC2=ipt2.NUM(2,JC)
+              IF(JC.EQ.NBELEM) THEN
+                 NC1=NC2
+              ELSE
+                 NC1=IPT2.NUM(2,JC+1)
+              ENDIF
+            else
+C    ordre normal
+               JC=IC
+               NC3=ipt2.NUM(2,JC)
+               NC2=ipt2.NUM(1,JC)
+               IF(JC.EQ.1) THEN
+                  NC1=NC2
+               ELSE
+                  NC1=IPT2.NUM(1,JC-1)
+               ENDIF
+            endif
+*****         PRINT *,'NC1=',NC1,' NC2=',NC2,' NC3=',NC3
+              JS1=(NC1-1)*IDS
+              JS2=(NC2-1)*IDS
+              JS3=(NC3-1)*IDS
+
+               DO 511 IW=1,IDIM
+                  X1(IW)=XCOOR(JS1+IW)
+                  X2(IW)=XCOOR(JS2+IW)
+ 511              X3(IW)=XCOOR(JS3+IW)
+C          --- Distance entre points
+               DS1=0.0D0
+               DS2=0.0D0
+               DO 512 IW=1,IDIM
+                  RL(IW)=X3(IW)-X2(IW)
+                  RS(IW)=X2(IW)-X1(IW)
+                  DS1=DS1+RL(IW)*RL(IW)
+ 512              DS2=DS2+RS(IW)*RS(IW)
+               DS1=SQRT(DS1)
+               DS2=SQRT(DS2)
+               CS1=0.0D0
+               IF(DS2.NE.0.D0) THEN
+                  DO 513 IW=1,IDIM
+                     RL(IW)=RL(IW)/DS1
+                     RS(IW)=RS(IW)/DS2
+ 513                 CS1=CS1+RL(IW)*RS(IW)
+               ELSE
+                     CS1=1.D0
+               ENDIF
+               IF(CS1.GT.1.0) CS1=1.0D0
+               ALFA=ACOS(CS1)
+               IAM=IAM+1
+               ANG(IAM)=FAI
+               DANG(IAM)=ALFA
+               ACUR(IAM)=SLON
+               DACUR(IAM)=DS1
+               SLON=SLON+DS1
+               FAI=FAI+ALFA
+
+*          PRINT *,'IAM=',IAM, ' ACUR =',ACUR(IAM),
+*     &    ' ANG=',ANG(IAM),' DACUR=',DACUR(IAM),' DANG=',DANG(IAM)
+*
+               IF(SLON.NE.0.D0) THEN
+                SUM = SUM + FAI/SLON
+               ENDIF
+*
+ 5005       CONTINUE
+            ANG(NAM+1)=FAI
+            ACUR(NAM+1)=SLON
+*
+            SLONT=SLON
+            FAIT=FAI
+            XLMBDA=0.D0
+*
+            IF(GANC.EQ.0.D0) GO TO 7999
+*
+*------------------------------------------------------------
+*    CALCUL DE LA LONGUEUR D'INFLUENCE DU RECUL D'ANCRAGE
+*              LE CAS ECHEANT  ( GANC > 0 )
+*------------------------------------------------------------
+*
+*      ON PREND LES MODULE ET SECTION DU 1-ER ELEMENT
+*      POUR LA 1-ERE APPROXIMATION DE XLAMBDA
+*
+            MELVAL =IVAMAT
+            EA = VELCHE(1,1)
+            MELVAL =IVACAR
+            SECT1 = VELCHE(1,1)
+*        write(6,*) ' f1, f2, slont, ps1, sect1, ea,ganc,sum,nbelem,fai'
+*       write(6,*)  f1, f2, slont, ps1, sect1, ea,ganc,sum,nbelem,fai
+            IF(F1.EQ.0.D0.OR.FAI.LE.1.D-4) THEN
+              IF(F2.EQ.0.D0) THEN
+                XLMBDA=SLONT
+              ELSE
+                aaa= F2*GANC*EA*SECT1/PS1
+                 bbb = aaa ** 0.5
+                 ccc = 1.-bbb
+                 if( ccc .le.0.) then
+                     call erreur(768)
+                     return
+                 else
+*               write(6,*) ' aaa,bbb,ccc',aaa,bbb,ccc
+                    XLMBDA = -(LOG(1.D0-
+     &                     (F2*GANC*EA*SECT1/PS1)**0.5))/F2
+                 endif
+              ENDIF
+            ELSE
+              ALSURL=SUM/FLOAT(NBELEM)
+              PP= F1*ALSURL + F2
+              IF(PP.EQ.0.D0) THEN
+                XLMBDA=SLONT
+              ELSE
+                XLMBDA = SQRT( (GANC*EA*SECT1)/(PS1*PP) )
+              ENDIF
+*          PRINT *,'ALSURL=',ALSURL
+*          PRINT *,'F2=',F2, 'PP=',PP
+            ENDIF
+*
+*    TEST SI XLAMBBDA > SLON
+*
+            IF(XLMBDA.GT.SLONT) XLMBDA=SLONT
+
+*       PRINT *,'INITIALISATION DE XLMBDA=',XLMBDA
+*
+            IF(XLMBDA.LT.0.D0) THEN
+*****           PRINT *,' ATTENTION XLAMBDA INITIAL EST < 0 '
+                CALL ERREUR(460)
+                SEGSUP ALTRAV
+                GO TO 9990
+            ENDIF
+*
+            ITER=0
+            LAST=0
+            IDICH=0
+*
+*         ITERATIONS
+*
+ 8000       CONTINUE
+            ITER=ITER+1
+*       PRINT *,'ITER = ',ITER
+            IF(ITER.GT.ITEMAX) THEN
+                CALL ERREUR(460)
+                SEGSUP ALTRAV
+                GO TO 9990
+            ENDIF
+            PSL=0.D0
+            SLON=0.0D0
+            FAI=0.0D0
+            IAM=0
+*
+            IF(LAST.EQ.0) THEN
+*         write(6,*) ' nam + 1',nam+1
+*         write(6,*) ' xlmbda acur(1)  acur(2) ang(1) ang(2) '
+*          write(6,*)  xlmbda,acur(1), acur(2) ,ang(1),ang(2)
+*             CALCUL DE L'ANGLE XALFA ASSOCIE A XLMBDA
+              CALL PRECN0(XLMBDA,ACUR,ANG,NAM+1,ANGBDA,ISUC)
+              IF(ISUC.EQ.NAM+1) ISUC=NAM
+*
+*****         PRINT *,'ISUC=',ISUC
+              IF(ISUC.LT.0) THEN
+                 CALL ERREUR(-ISUC)
+                 SEGSUP ALTRAV
+                 GO TO 9990
+              ENDIF
+
+              SD=F1*ANGBDA + F2*XLMBDA
+              DSDDD=F1*DANG(ISUC)/DACUR(ISUC)+F2
+*
+            ELSE
+              SD=F1*FAIT + F2 * SLONT
+            ENDIF
+*
+            GG=0.D0
+            DGDD=0.D0
+            DO 8005 IC=1,NBELEM
+               if(ivers) then
+                  JC= NBELEM+1-IC
+               else
+                 JC=IC
+               endif
+*
+               IAM=IAM+1
+               ALFA = DANG(IAM)
+               DS1  = DACUR(IAM)
+
+               do 8006  iptg=1,nbpgau
+
+               if(ivers) then
+               ig= nbpgau+1-iptg
+               else
+               ig = iptg
+               endif
+
+*         ---- Récupération des caractéristiques matérielles et géométriques ----
+
+               melval =ivamat
+               ea = velche(min(ig,velche(/1)),
+     &                       min(JC,velche(/2)))
+
+               melval =ivacar
+               sect1 = velche(min(ig,velche(/1)),
+     &                        min(JC,velche(/2)))
+
+               SABS=SLON + DS1*(1+QSIGAU(IPTG))/2
+               IF(SABS.GT.XLMBDA) GO TO 8007
+
+               SP=F1*FAI + F2*SABS
+               IF(LAST.EQ.0) THEN
+                 GG = GG +
+     &           PS1 * (EXP(-SP) - EXP(SP-2.D0*SD))*DS1*0.5D0
+     &                                   /(EA*SECT1)
+
+                 DGDD = DGDD +
+     &           PS1 * (EXP(SP-2.D0*SD))*DSDDD*DS1/(EA*SECT1)
+               ELSE
+                 GG = GG + PS1 * (EXP(-SP))*DS1*0.5D0
+     &                                   /(EA*SECT1)
+                 DGDD = DGDD + (EXP(SP-SD))*DS1*0.5D0
+     &                                   /(EA*SECT1)
+               ENDIF
+
+ 8006          continue
+               SLON=SLON+DS1
+               FAI=FAI+ALFA
+ 8005       CONTINUE
+*
+*        TEST DE CONVERGENCE
+*
+ 8007       CONTINUE
+*****       PRINT *,'GG=',GG, ' GANC=',GANC,' FG =',GG-GANC
+*****       PRINT *,'DGDD=', DGDD
+
+            FGG(ITER)=GG-GANC
+            XLAM(ITER)=XLMBDA
+
+*
+*        CAS OU L'EFFET DE L'ANCRAGE DEPASSE LA LONGUEUR
+*        DU CABLE
+*
+*****    PRINT *,'LAST=',LAST
+         IF(LAST.EQ.1) THEN
+
+             IF(ABS(GG-GANC)/GANC.LT.1.D-3) THEN
+                PSL=0.D0
+             ELSE
+                PSL=(GG-GANC)/DGDD
+             ENDIF
+
+*****        PRINT *,'PSL=',PSL
+             IF(PSL.GT.PS1*EXP(-SD)) THEN
+*****           PRINT *,' ATTENTION PSL EST TROP GRAND '
+             ENDIF
+             GO TO 7999
+         ENDIF
+
+
+         IF(ABS(GG-GANC)/GANC.LT.1.D-3) GO TO 7999
+*
+         IF(ITER.GE.6 .AND.IDICH.EQ.0.AND.
+     &                     FGG(ITER)*FGG(ITER-1).LT.0.D0) THEN
+            IDICH=1
+            XLAM1=XLAM(ITER-1)
+            XLAM2=XLAM(ITER)
+            FG1=FGG(ITER-1)
+            FG2=FGG(ITER)
+         ENDIF
+*****    PRINT *,'IDICH=',IDICH
+*
+         IF(IDICH.EQ.0) THEN
+            XLMBDA=XLMBDA - (GG-GANC)/DGDD
+         ELSE
+*****       PRINT *,'XLAM(ITER)=',XLAM(ITER)
+*****       PRINT *, '  FGG(ITER)=',FGG(ITER)
+
+            IF(FG1*FGG(ITER).LT.0.D0) THEN
+               XLAM2=XLAM(ITER)
+               FG2=FGG(ITER)
+            ELSE IF (FG1*FGG(ITER).GT.0.D0) THEN
+               XLAM1=XLAM(ITER)
+               FG1=FGG(ITER)
+            ENDIF
+*
+*****       PRINT *,'XLAM1=',XLAM1,'  FG1=',FG1
+*****       PRINT *,'XLAM2=',XLAM2,'  FG2=',FG2
+            DLAM=XLAM2-XLAM1
+            PROF=FG1/(FG1-FG2)
+            XLMBDA=XLAM1+PROF*DLAM
+         ENDIF
+*
+*****      PRINT *,'NOUVELLE XLMBDA = ', XLMBDA
+
+           IF(XLMBDA.GE.SLONT) THEN
+              IF(ITER.EQ.ITEMAX-1) THEN
+                 LAST=1
+              ELSE
+                 XLMBDA=SLONT
+              ENDIF
+           ENDIF
+*
+*          si on trouve XLMBDA < 0 , on reinitialise
+*
+           IF(XLMBDA.LT.0.D0) THEN
+                IF(ITER.GE.2) THEN
+                   XLMBDA=(XLAM(ITER)+XLAM(1))/ITER
+                ELSE
+                   XLMBDA=XLAM(1)/2.D0
+                ENDIF
+*****           PRINT *,'XLMBDA  REINITIALISEE = ', XLMBDA
+           ENDIF
+*
+*          SORTIE SI IDICH=1 ET XLMBDA CONVERGE
+*
+           IF(IDICH.EQ.1.AND.ITER.EQ.ITEMAX) THEN
+              IF(XLMBDA.NE.0.D0) THEN
+                 IF(ABS(XLMBDA-XLAM(ITER))/XLMBDA.
+     &                 LT.1.D-3) GO TO 7999
+              ENDIF
+           ENDIF
+*
+           GO TO 8000
+*
+*    2-EME BOUCLE SUR LES ELEMENTS
+*
+ 7999       CONTINUE
+            SLON=0.0D0
+            FAI=0.0D0
+            IAM=0
+            DO 4005 IC=1,NBELEM
+
+            if(ivers) then
+C    ordre inverse
+               JC= NBELEM+1-IC
+            else
+C    ordre normal
+              JC=IC
+            endif
+
+C     ---- ON RECUPERE LES GRANDEURS GEOMETRIQUES -----------
+
+               IAM=IAM+1
+               ALFA = DANG(IAM)
+               DS1  = DACUR(IAM)
+
+               do 12345 iptg=1,nbpgau
+
+               if(ivers) then
+               ig= nbpgau+1-iptg
+               else
+               ig = iptg
+               endif
+
+C         ---- Récupération des EFFX deja présents -----------
+
+               IF (IPCHC1.EQ.0) THEN
+                  SINI = 0.D0
+               ELSE
+                  mptval = ivasi0
+                  MELVAL = IVAL(ipeffx)
+                  SINI =velche(min(ig,velche(/1)),
+     &                         min(JC,velche(/2)))
+               ENDIF
+
+C         ---- Récupération des caractéristiques matérielles et géométriques ----
+
+               melval =ivamat
+               ea = velche(min(ig,velche(/1)),
+     &                       min(JC,velche(/2)))
+
+               melval =ivacar
+               sect1 = velche(min(ig,velche(/1)),
+     &                        min(JC,velche(/2)))
+
+C          --- Calcul des pertes de précontrainte -------------------
+
+               ICOMP = 0
+               call precn1(PS1,ea,f1,f2,ganc,RMU0,FPRG,RH10,
+     &                     SLON+DS1*(1+qsigau(iptg))/2,FAI,SINI,
+     &                     SECT1,XLMBDA,SD,LAST,PSL,PSOUT,ICOMP)
+               IF (ICOMP.EQ.1) THEN
+                  CALL ERREUR(768)
+                  goto 9990
+                  RETURN
+               ENDIF
+
+C          --- On range les résultats
+
+               iret=1
+               MPTVAL=IVASTR
+               DO 1700 I=1,NSTRS
+                  MELVAL=IVAL(I)
+                  VELCHE(ig,JC)=PSOUT
+ 1700          CONTINUE
+
+12345          continue
+               SLON=SLON+DS1
+               FAI=FAI+ALFA
+C            write(6,*) 'slon et fai ',slon,fai
+
+ 4005       CONTINUE
+            SEGSUP ALTRAV
+C----------------------    endif  sur  CERC ou  ELEMENTS LINEAIRE
+      END IF
+
+C
+ 9990 CONTINUE
+
+      SEGSUP WRK3
+      SEGDES IMODEL
+      IF(IERR.NE.0)THEN
+         SEGSUP MCHAML
+      ELSE
+         SEGDES MCHAML
+      ENDIF
+C
+      segdes meleme
+c
+      melval = ivacar
+      segdes melval
+      melval = ivamat
+      segdes melval,mcham6,mchel6
+
+C      CALL DTMVAL(IVACAR,1)
+
+      if(IPCHC1.gt.0) call dtmval(ivasi0,1)
+C
+      IF(IERR.NE.0)THEN
+          CALL DTMVAL(IVASTR,3)
+      ELSE
+          CALL DTMVAL(IVASTR,1)
+      ENDIF
+C
+      IF(MOMATR.NE.0)THEN
+         NOMID=MOMATR
+         SEGSUP NOMID
+      ENDIF
+      IF(MOCARA.NE.0)THEN
+         NOMID=MOCARA
+         SEGSUP NOMID
+      ENDIF
+      IF(MOSTRS.NE.0)THEN
+         NOMID=MOSTRS
+         if(lsupco)SEGSUP NOMID
+      ENDIF
+C
+      SEGSUP INFO
+      if(iret.eq.0) return
+C
+  500 CONTINUE
+c-------- Fin de la boucle sur les zones du MODELE  TEMPORAIRE
+C
+C =========== rangement dans le MCHELM  final   MCHEL5
+      if(ifomod.ne.0.and.ifomod.ne.1) then
+C           les cables standards
+      segact siezo
+C      segact mchel5
+      MCHELM = IPSTRS
+      segact MCHELM
+C
+C  boucle sur les zones du modele ou champ initial
+
+C
+        ibc= 0
+      do 3010 isous=1,mchel5.imache(/1)
+      sielc = iezon(isous)
+      segact sielc
+C
+        mcham5= mchel5.ichaml(isous)
+        segact mcham5
+        melva5 =mcham5.ielval(1)
+        segact melva5*mod
+C  boucle sur les partitions provisoires de la sz
+C
+      inel = 0
+        do 3020 ik=1,nbcz
+        ibc=ibc+1
+        mchaml=ichaml(ibc)
+        segact mchaml
+        melval=ielval(1)
+        segact melval
+C
+      do iii=1,velche(/2)
+      inel = inel+1
+      iel=isens(1,inel)
+        if(isens(2,inel).eq.1) then
+      do ip=1,velche(/1)
+      melva5.velche(ip,iel)=velche(ip,iii)
+      enddo
+        else
+      do ip=1,velche(/1)
+      melva5.velche(3-ip,iel)=velche(ip,iii)
+      enddo
+        endif
+      enddo
+3020  continue
+      segsup sielc
+      segdes melva5,mcham5
+3010  continue
+      call DTCHAM(ipcar2)
+      if(ipchc2.ne.0) call DTCHAM(ipchc2)
+      segsup ipt5
+      else
+C          les cerc
+      icha1 = MCHEL5
+      MCHEL5 = MCHELM
+      MCHELM = icha1
+      endif
+333   format(i4,2E12.5)
+C  maintenant les destructions d objets temporaires
+      call DTCHAM(MCHELM)
+C      call DTMODL(ipmodt)
+      mmodel = ipmodt
+      segsup mmodel
+C
+      segdes MCHEL5
+      IPSTRS =MCHEL5
+      iret = 1
+      return
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+

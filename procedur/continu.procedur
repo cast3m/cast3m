@@ -1,0 +1,1640 @@
+$$$$ CONTINU
+* CONTINU   PROCEDUR  FD218221  17/10/18    21:15:03     9590
+*=======================================================
+*
+* CONTINU
+* ANALyse : calcul de la REPONSE_BALOURD NONlineaire par CONTINUATION
+* procédure de résolution non-linéaire
+* par une méthode de continuation par pseudo-longueur d'arc
+* creation : BP 28/01/2014
+*
+*=======================================================
+*
+************************************************************************
+*
+* CREATION : BP208322 28/01/2014
+* MODIF    : LX236206 23/06/2015  HBM (n harmoniques), adimensionnement
+*                                 analyse de stabilite
+*            BP208322 08/2016     Mise au propre
+*
+* OBJET    : Procedure de resolution Non-Lineaire
+*            Methode de continuation par longueur d'arc
+*
+* ENTREEs et SORTIES   :  Voir la notice
+*
+* PROCEDURES APPELEES :  CON_CALC, MONOSTA
+*
+*
+*
+************************************************************************
+
+DEBPROC CONTINU  TAB1*'TABLE';
+
+
+mess '____________________________________________________'
+'______________________' ;
+mess '  .oooooo.    ' ;
+mess ' d8P   `Y8b    ' ;
+mess '888                                 o8   o88  ' ;
+mess '888            ooooooo  oo oooooo o888oo oooo '
+' oo oooooo oooo  oooo ' ;
+mess '888          888     888 888   888 888    888 '
+'  888   888 888   888 ' ;
+mess '`88b    ooo  888     888 888   888 888    888 '
+'  888   888 888   888 ' ;
+mess ' `Y8bood8P     88ooo88  o888o o888o 888o o888o'
+' o888o o888o 888o88 8o' ;
+mess '____________________________________________________'
+'______________________' ;
+
+************************************************************************
+*                                                                      *
+*        VERIFICATION DES DONNEES D'ENTREE + VALEURS PAR DEFAUT        *
+*                                                                      *
+************************************************************************
+* fldebug = vrai;
+fldebug = faux;
+
+* definition du probleme a resoudre ************************************
+
+* prendre les matrices constantes ou HBM ?
+FLHBM = FAUX;
+SI (EXIS TAB1 'HBM');
+  FLHBM = TAB1 . 'HBM';
+FINSI;
+
+* Alternating Frequency / Time ?
+IAFT = 0;
+IDIFF = FAUX;
+SI (EXIS TAB1 'PROCEDURE_FREQUENCE_TEMPS');
+*   SI (EGA TAB1 . 'PROCEDURE_FREQUENCE_TEMPS'  'DFT'); IAFT = 1; FINSI;
+  SI (EGA TAB1 . 'PROCEDURE_FREQUENCE_TEMPS'  'AFT'); IAFT = 2; FINSI;
+  SI (EGA IAFT 0);
+    MESS 'PROCEDURE_FREQUENCE_TEMPS non reconnue !!!'; ERRE 21;
+  FINSI;
+  SI (NON (EXIS TAB1 'CALC_VITE'));
+    TAB1 . 'CALC_VITE' = FAUX;
+  FINSI;
+* si AFT, Jacobienne calculee par TFR(Knl*gamma+Cnl*w*gamma°)
+* ou par differentiation numerique ?
+  SI (EGA IAFT 2);
+    SI (EXIS TAB1 'JACOBIENNE');
+      IDIFF = VRAI;
+    SINON;
+       TAB1 . 'JACOBIENNE' = mot 'TFR';
+*        TAB1 . 'JACOBIENNE' = 'DIFFERENTIATION';
+    FINSI;
+  FINSI;
+FINSI;
+
+* modele et materiau
+FLMOD1  = exis TAB1  'MODELE';
+SI (FLMOD1);
+  MOD1 = TAB1 . 'MODELE';
+  SI (EXIS TAB1 'CARACTERISTIQUES');
+    MAT1 = TAB1 . 'CARACTERISTIQUES';
+  SINON;
+    MESS 'IL MANQUE LES CARACTERISTIQUES : on poursuit malgré tout...';
+  FINSI;
+SINON;
+  MESS 'IL MANQUE LE MODELE : on poursuit malgré tout... ';
+FINSI;
+
+SI (EXIS TAB1 'CHARGEMENT');
+  CHAR1 = TAB1 . 'CHARGEMENT';
+  TYPCHAR = extr CHAR1 'COMP';
+SINON;
+  SI (EGA (TYPE CHARMECA) (mot 'PROCEDUR'));
+    TYPCHAR = mots 'MECA';
+  SINON;
+*    MESS 'IL MANQUE LE CHARGEMENT : on poursuit malgré tout...';
+    MESS 'IL MANQUE LE CHARGEMENT !';
+    ERRE 21 ;
+  FINSI;
+FINSI;
+
+* conditions initiales eventuelles *************************************
+
+* s'agit-il d'une reprise ? (reprise si IPAS0 > 0)
+IPASM1 = 0;
+IPAS0 = 0;
+* SI (EXIS TAB1 'TEMPS');
+SI (EXIS TAB1 'TEMPS_PROG');
+*  recherche du dernier pas enregistre
+   IPAS0 = DIME TAB1 . 'TEMPS_PROG';
+   repe BPAS0 (dime TAB1 . 'TEMPS_PROG'); IPAS0 = IPAS0 - 1;
+     si (exis TAB1 . 'TEMPS' IPAS0); quit BPAS0; finsi;
+   fin  BPAS0;
+*  recherche de l'avant-dernier pas enregistre
+   IPASM1 = IPAS0;
+   repe BPASM1; IPASM1 = IPASM1 - 1;
+     si (exis TAB1 . 'TEMPS' IPASM1); quit BPASM1; finsi;
+   fin  BPASM1;
+   TIME0 = TAB1 . 'TEMPS' . IPAS0;
+   MESS 'Reprise du calcul au pas ' IPAS0 ' temps ' TIME0;
+SINON;
+   TIME0 = 0.;
+   TAB1 . 'TEMPS' = tabl;
+   TAB1 . 'TEMPS' . 0 = TIME0;
+FINSI;
+TIME00=TIME0;
+
+SI (non (EXIS TAB1 'DEPLACEMENTS'));
+   TAB1 . 'DEPLACEMENTS' = tabl;
+FINSI;
+SI (EXIS TAB1 . 'DEPLACEMENTS' IPAS0);
+   DEPTOT = TAB1 . 'DEPLACEMENTS' . IPAS0;
+SINON;
+   si (neg IPAS0 0); MESS 'pb dans la reprise !!!'; erre 21; finsi;
+   DEPTOT =  VIDE 'CHPOINT'/'DIFFUS';
+   TAB1 . 'DEPLACEMENTS' . IPAS0 = DEPTOT;
+FINSI;
+
+SI (FLMOD1);
+  SI (non (EXIS TAB1 'CONTRAINTES'));
+    TAB1 . 'CONTRAINTES' = tabl;
+  FINSI;
+  SI (EXIS TAB1 . 'CONTRAINTES' IPAS0);
+    SIGTOT = TAB1 . 'CONTRAINTES' . IPAS0;
+  SINON;
+    si (neg IPAS0 0); MESS 'pb dans la reprise !!!'; erre 21; finsi;
+    SIGTOT = ZERO MOD1 'CONTRAIN';
+    TAB1 . 'CONTRAINTES' . IPAS0 = SIGTOT;
+  FINSI;
+FINSI;
+
+
+
+* plage de pseudo-temps a calculer *************************************
+
+SI (EXIS TAB1 'TEMPS_CALCULES');
+  PRTIME0 = TAB1 . 'TEMPS_CALCULES';
+  NTIME0  = DIME PRTIME0;
+  MinTIME0 = mini PRTIME0;   MaxTIME0 = maxi PRTIME0;
+  PRDT0 = (PRTIME0 enle 1) - (PRTIME0 enle NTIME0);
+* croissante ou decroissante?
+  dtimemin = mini PRDT0;  dtimemax = maxi PRDT0;
+  si ((dtimemin * dtimemax) < 0.);
+    mess 'Les TEMPS_CALCULES doivent etre ordonnées '; erre 21;
+  finsi;
+  si (dtimemin < 0.);
+    mess 'Les TEMPS_CALCULES doivent etre croissantes '; erre 21;
+  finsi;
+* le 1er pas doit etre 0 si non reprise
+  si (MinTIME0 < 0.);
+    mess 'Le 1er TEMPS_CALCULES doit etre positif'; erre 21;
+  finsi;
+  si ((MinTIME0 > 0.) et (TIME0 ega 0.));
+    mess 'Le 1er TEMPS_CALCULES est 0. (sauf si reprise)';
+    PRTIME0 = inse PRTIME0 1 TIME0;
+    NTIME0  = DIME PRTIME0;
+*bp    MinTIME0 = mini PRTIME0;   MaxTIME0 = maxi PRTIME0;
+    PRDT0 = (PRTIME0 enle 1) - (PRTIME0 enle NTIME0);
+  finsi;
+* * finesse (=PRDT0) dans le cas croissant
+*   DTIME0 = (extr PRTIME0 2) - TIME0;
+*   PRDT0 = (prog DTIME0) et ((PRTIME0 enle 1) - (PRTIME0 enle NTIME0));
+*bp* on prolonge pour etre coherent en longueur
+*bp  PRDT0 = PRDT0 et (extr PRDT0 (NTIME0 - 1));
+* pour eviter erreurs d arrondi
+* lorsqu'on teste si toute la plage est couverte
+  dtpetit = maxi (prog ((mini PRDT0 'ABS') * 1.E-3) 1.E-16);
+*bp : les CI ne sont pas forcement en equilibre :
+  PRTIME0 = PRTIME0 enle 1;
+  MinTIME0 = mini PRTIME0;   MaxTIME0 = maxi PRTIME0;
+  MinTIME0 = MinTIME0 + dtpetit;   MaxTIME0 = MaxTIME0 - dtpetit;
+  mess '* plage de temps calcules : ' MinTIME0 MaxTIME0 ' *';
+SINON;
+  MESS 'IL MANQUE LE LISTREEL DES TEMPS_CALCULES'; ERRE 21;
+FINSI;
+
+
+* plage de frequence (cas dynamique frequentiel) ***********************
+
+SI (EXIS TAB1 'FREQUENCE');
+  SI (EGA (TYPE TAB1 . 'FREQUENCE') 'MOT');
+    SI (NEG TAB1 . 'FREQUENCE' (MOT 'INCONNUE'));
+      MESS 'FREQUENCE doit etre une EVOLUTION  w(t) '
+           'ou le MOT INCONNUE !'; ERRE 21;
+    FINSI;
+  SINON;
+    SI (NEG (TYPE TAB1 . 'FREQUENCE') 'EVOLUTIO');
+      MESS 'FREQUENCE doit etre une EVOLUTION  w(t) '
+           'ou le MOT INCONNUE !'; ERRE 21;
+    FINSI;
+  FINSI;
+SINON;
+  MESS '* par defaut, on identifie :  w = t';
+  tp_tmp = ORDO (prog 0. (MinTIME0 - dtpetit) (MaxTIME0 + dtpetit));
+  evfrqt = EVOL 'MANU' 't' tp_tmp '\w' tp_tmp;
+  TAB1 . 'FREQUENCE' = evfrqt;
+FINSI;
+
+
+
+* parametres de la resolution nonlineaire ******************************
+
+* nombre d iteration maxi et ideal
+SI (EXIS TAB1 'MAXITERATION');
+  NMAXIT  = TAB1 . 'MAXITERATION';
+SINON;
+*   NMAXIT = 50;
+  NMAXIT = 24;
+  TAB1 . 'MAXITERATION' = NMAXIT;
+FINSI;
+SI (EXIS TAB1 'NB_ITERATION');
+  itideal = TAB1 . 'NB_ITERATION';
+  si ((itideal > (NMAXIT/2)) ou (itideal <eg 4));
+  mess 'NB_ITERATION ideal doit etre compris entre 4 et MAXITERATION/2';
+  erre 21;
+  finsi;
+SINON;
+  itideal = 6;
+  TAB1 . 'NB_ITERATION' = itideal;
+FINSI;
+itmin = (enti (0.5*itideal)) + 1;
+itmax = (enti (1.5*itideal)) + 1;
+
+* nombre de pas total souhaité
+SI (EXIS TAB1 'MAXIPAS');
+  NPAS  = TAB1 . 'MAXIPAS';
+SINON;
+  NPAS = 1000;
+  TAB1 . 'MAXIPAS' = NPAS;
+FINSI;
+* nombre de sous-pas total souhaité
+SI (EXIS TAB1 'MAXSOUSPAS');
+  maxsous = TAB1 . 'MAXSOUSPAS';
+SINON;
+  maxsous = 5;
+  TAB1 . 'MAXSOUSPAS' = maxsous;
+FINSI;
+
+* precision
+SI (EXIS  TAB1 'PRECISION');
+  XPREC = TAB1 . 'PRECISION';
+SINON;
+  XPREC = 1.E-6;
+  TAB1 . 'PRECISION' = XPREC;
+FINSI;
+* norme de reference pour le residu
+SI (EXIS  TAB1 'NORME_RESIDU');
+  NF20 = TAB1 . 'NORME_RESIDU';
+SINON;
+  NF20 = mot 'NONDEFINI';
+FINSI;
+
+
+* acceleration toutes les iterations
+SI (EXIS  TAB1 'ACCELERATION');
+  nacc = TAB1 . 'ACCELERATION';
+SINON;
+  nacc = 4;
+  TAB1 . 'ACCELERATION' = nacc;
+FINSI;
+
+* LINESEARCH ?
+SI (EXIS  TAB1 'LINESEARCH');
+  FLAGLS = TAB1 . 'LINESEARCH';
+  si FLAGLS;  mess 'option LINESEARCH debranchee !'; erre 21;  finsi;
+SINON;
+  FLAGLS = FAUX;
+  TAB1 . 'LINESEARCH' = FLAGLS;
+FINSI;
+
+*Quasi Newton ou Full Newton ?
+SI (EXIS  TAB1 'NEWTON');
+  FLFULL0 = ega (TAB1 . 'NEWTON') 'FULL';
+SINON;
+  FLFULL0 = FAUX;
+  TAB1 . 'NEWTON' = FLFULL0;
+FINSI;
+FLFULL = FLFULL0;
+SI (FLFULL); MESS 'FULL NEWTON'; FINSI;
+
+* calcul a omega fixe ?
+SI (EXIS TYPCHAR 'MECA');
+  OMEFIXE = FAUX;
+SINON;
+  SI (EXIS TYPCHAR 'DIMP');
+    OMEFIXE = VRAI;
+  SINON;
+    MESS 'SEULEMENT LEs CHARGEMENTs MECANIQUE et DepIMP sont PREVUs !';
+    ERRE 21;
+  FINSI;
+FINSI;
+
+* verification de la stabilité ?
+SI (EXIS  TAB1 'STABILITE');
+  SI (EGA (TYPE TAB1 . 'STABILITE') 'LOGIQUE');
+    SI (TAB1 . 'STABILITE') ;
+      SI FLHBM; MOSTAB = MOTS 'DIAG' 'FLOQ';
+      SINON;    MOSTAB = MOTS 'DIAG';
+      FINSI;
+    SINON;      MOSTAB = MOTS ' ';
+    FINSI;
+  SINON;
+    SI (EGA (TYPE TAB1 . 'STABILITE') 'LISTMOTS');
+      MOSTAB = TAB1 . 'STABILITE';
+    SINON;
+      MESS 'STABILITE doit etre un LOGIQUE ou un LISTMOTS !';
+      ERRE 21;
+    FINSI;
+  FINSI;
+  si (non (exis TAB1   'RESULTATS_STABILITE'));
+    TAB1 . 'RESULTATS_STABILITE' = TABL;
+  finsi;
+SINON;          MOSTAB = MOTS ' ';
+FINSI;
+*-via DIAG(K)
+FLDIAG = EXIS MOSTAB 'DIAG';
+*-via calcul de la matrice de monodromie
+FLMONO = EXIS MOSTAB 'MONO';
+*-par la theorie de HILL? (exposants de FLOQuet)
+FLFLOQ = (EXIS MOSTAB 'HILL') ou (EXIS MOSTAB 'FLOQ');
+
+
+* resultats a stocker  *************************************************
+
+FLRES1 = EXIS TAB1  'RESULTATS';
+SI (FLRES1);
+  SI(FLHBM);
+    TRES1 = TAB1 . 'RESULTATS_HBM';
+  SINON;
+    TRES1 = TAB1 . 'RESULTATS';
+  FINSI;
+FINSI;
+
+*pas a sauver
+SI (exis TAB1  'PAS_SAUVES');
+  SI (ega (TYPE TAB1 . 'PAS_SAUVES') 'ENTIER');
+    ISAUV = TAB1 . 'PAS_SAUVES';
+  SINON;
+    si (ega TAB1 . 'PAS_SAUVES'  'TOUS');  ISAUV = 1; finsi;
+    si (ega TAB1 . 'PAS_SAUVES'  'AUCUN'); ISAUV = NPAS; finsi;
+  FINSI;
+SINON;
+  ISAUV = 10;
+FINSI;
+MESS 'ON SAUVE TOUS LES ' ISAUV ' PAS DE CALCULS';
+
+*stabilite
+*-via DIAG(K)
+SI FLDIAG;
+  SI (NON (EXIS TAB1 . 'RESULTATS_STABILITE'  'DIAG'));
+    TAB1 . 'RESULTATS_STABILITE' . 'DIAG' = prog;
+    TAB1 . 'RESULTATS_STABILITE' . 'DIAG_AUGMENTEE' = prog;
+  FINSI;
+FINSI;
+*-via Hill (exposants de floquet)
+SI FLFLOQ;
+  SI (NON (EXIS TAB1 . 'RESULTATS_STABILITE'  'FLOQ'));
+    TAB1 . 'RESULTATS_STABILITE' . 'FLOQ' = tabl;
+    TFLOQ = TAB1 . 'RESULTATS_STABILITE' . 'FLOQ';
+    TFLOQ . 'EXPOSANT_REEL' = tabl;
+    TFLOQ . 'EXPOSANT_IMAG' = tabl;
+    nfloq=-3;
+    TFLOQ . 'STABILITE' = lect;
+  SINON;
+    TFLOQ = TAB1 . 'RESULTATS_STABILITE' . 'FLOQ';
+    nfloq = DIME TFLOQ . 'EXPOSANT_REEL' ;
+  FINSI;
+FINSI;
+
+* resultats a afficher  ************************************************
+SI (exis TAB1  'AFFICHAGE_RESULTATS');
+  laffich = TAB1 . 'AFFICHAGE_RESULTATS';
+SINON;
+  laffich = lect 1 2;
+FINSI;
+affich1 = extr laffich 1;
+affich2 = extr laffich 2;
+si(affich1 > affich2);
+  mess 'les AFFICHAGE_RESULTATS doivent etre par ordre croissant!';
+  erre 21;
+finsi;
+
+
+
+* sorties a effectuer  *************************************************
+
+FLSOR1 = EXIS TAB1  (mot 'SORTIE');
+list FLSOR1;
+SI (FLSOR1); mess 'FLSOR1 = VRAI';
+SINON;       mess 'FLSOR1 = faux';
+FINSI;
+
+SI (FLSOR1);
+ list TAB1;
+  TSOR1 = TAB1 . 'SORTIE'; list TSOR1;
+  SI (EXIS TSOR1  (mot 'FORMAT'));TYPSOR = TSOR1 . 'FORMAT';
+  SINON;                          TYPSOR = mot 'VTK';
+  FINSI;
+  SI (EXIS TSOR1  (mot 'FICHIER'));FICSOR = TSOR1 . 'FICHIER';
+  SINON;                           FICSOR = mot 'AVS/SORTIE_CON';
+  FINSI;
+  SI (EXIS TSOR1  (mot 'MAILLAGE'));MAISOR = TSOR1 . 'MAILLAGE' ;
+  SINON;
+    SI (FLMOD1);  MAISOR = EXTR MOD1 'MAILLAGE';
+    SINON;        MESS 'IL MANQUE LE MAILLAGE de SORTIE'; ERRE 21;
+    FINSI;
+  FINSI;
+  SI (EXIS TSOR1  (mot 'CHAMPS')); LMOSOR = TSOR1 . 'CHAMPS' ;
+  SINON;
+    SI (FLMOD1);                   LMOSOR = mots 'DEPL' 'CONT';
+    SINON;                         LMOSOR = mots 'DEPL' ;
+    FINSI;
+  FINSI;
+* on suppose qu'on sort toujours le deplacement,
+* sort-on aussi les contraintes?
+  FLSOR2 = EXIS LMOSOR (mot 'CONT');
+  TCHSOR = TABL;
+  MESS 'SORTIE AU FORMAT ' TYPSOR ' DANS LE FICHIER ' FICSOR;
+SINON;
+  MESS 'PAS DE SORTIE VTK';
+FINSI;
+
+
+* grands deplacements ? et options associées ***************************
+
+SI (EXIS TAB1 'GRANDS_DEPLACEMENTS');
+  FLGDEP  = TAB1 . 'GRANDS_DEPLACEMENTS';
+SINON;
+  MESS 'GRANDS_DEPLACEMENTS = FAUX par defaut'; FLGDEP = FAUX;
+  TAB1 . 'GRANDS_DEPLACEMENTS' = FLGDEP;
+FINSI;
+
+SI (EXIS TAB1 'K_SIGMA');
+  FLKSIG  = TAB1 . 'K_SIGMA';
+SINON;
+  MESS (chai 'K_SIGMA = ' FLGDEP ' par defaut'); FLKSIG = FLGDEP;
+  TAB1 . 'K_SIGMA' = FLKSIG;
+FINSI;
+* recalcul de K apres la prediction?
+SI (EXIS TAB1 'RECALCUL_K');
+  FLRECA  = TAB1 . 'RECALCUL_K';
+SINON;
+  MESS (chai 'RECALCUL_K = FAUX par defaut'); FLRECA = FAUX;
+  TAB1 . 'RECALCUL_K' = FLRECA;
+FINSI;
+
+
+* procedures perso1, charmeca ? ****************************************
+
+SI (EXIS TAB1 'PROCEDURE_PERSO1');
+  FLPERSO1  = TAB1 . 'PROCEDURE_PERSO1';
+SINON;
+  FLPERSO1 = FAUX;
+  TAB1 . 'PROCEDURE_PERSO1' = FLPERSO1;
+FINSI;
+SI (EXIS TAB1 'PROCEDURE_CHARMECA');
+  FLSUIV  = TAB1 . 'PROCEDURE_CHARMECA';
+SINON;
+  FLSUIV = FAUX;
+  TAB1 . 'PROCEDURE_CHARMECA' = FLSUIV;
+FINSI;
+
+* parametres du pilotage par longueur d'arc ****************************
+
+*limitation de la variation de l increment relatif en deplacement
+*choix d'une norme = 'I' pour Identite
+*                  = 'K' pour la diagonale de la raideur tangente
+*                  = ...
+SI (EXIS  TAB1  'NORME_DEPLACEMENT');
+  NONORM = TAB1 . 'NORME_DEPLACEMENT';
+SINON;
+  NONORM = mot 'I';
+FINSI;
+LISNORM = mots 'I' 'K';
+SI (non (exis LISNORM NONORM));
+  MESS 'NORME_DEPLACEMENT est mal defini (= IDEN ou KDIA)'; erre 21;
+FINSI;
+*ordre de grandeur du deplacement attendu
+SI (EXIS  TAB1  'MAXI_DEPLACEMENT');
+  MAXDEPL = TAB1 . 'MAXI_DEPLACEMENT';
+  MAXDEP2 = MAXDEPL**2;
+  MESS 'MAXI_DEPLACEMENT =' MAXDEPL;
+SINO;
+  MESS 'IL MANQUE LE MAXI_DEPLACEMENT'; ERRE 21;
+*   a estimer + tard
+FINSI;
+
+* nom des composantes pour le produit scalaire u^T * u
+FLMOME = faux;
+SI (EXIS  TAB1  'COMPOSANTES');
+  SI(FLHBM);
+    motCf = TAB1 . 'COMPOSANTES' . 'FORCE_HBM';
+    motCu = TAB1 . 'COMPOSANTES' . 'DEPLACEMENT_HBM';
+  SINON;
+    motCf = TAB1 . 'COMPOSANTES' . 'FORCE';
+    motCu = TAB1 . 'COMPOSANTES' . 'DEPLACEMENT';
+    si (exis TAB1 . 'COMPOSANTES' 'ROTATION');
+      motCm = TAB1 . 'COMPOSANTES' . 'MOMENT';
+      motCr = TAB1 . 'COMPOSANTES' . 'ROTATION';
+      FLMOME = vrai;
+    finsi;
+  FINSI;
+SINO;
+ MESS 'COMPOSANTES prises par defaut';
+ si (ega (type MOD1) 'MMODEL');
+   motCf0 = extr MOD1 'FORC';
+   motCu0 = extr MOD1 'DEPL';
+*  on enleve eventuel rotation et moment
+   motCm0 = mots 'MX' 'MY' 'MZ' 'IMX' 'IMY' 'IMZ' 'MT' 'IMT';
+   motCr0 = mots 'RX' 'RY' 'RZ' 'IRX' 'IRY' 'IRZ' 'RT' 'IRT';
+   motCf = mots; motCu = mots; motCm = mots; motCr = mots;
+   nCu = dime motCu0;
+   iCu = 0;
+   repe BCu nCu; iCu = iCu + 1;
+     UCui = extr motCu0 iCu;
+     si (exis motCr0 UCui);  motCr = motCr et (mots UCui);
+     sino;                   motCu = motCu et (mots UCui);
+     finsi;
+     FCui = extr motCf0 iCu;
+     si (exis motCm0 FCui);  motCm = motCm et (mots FCui);
+     sino;                   motCf = motCf et (mots FCui);
+     finsi;
+   fin  BCu;
+*    FLMOME = (dime motCm) > 0;
+   FLMOME = faux;
+ sino;
+*    motCf  = mots 'FALF';
+*    motCu  = mots 'ALFA';
+   si (neg (VALE 'MODE') 'FOUR');
+     motfx  = mots  'FX'  'FY'  'FZ';
+     motifx = mots 'IFX' 'IFY' 'IFZ';
+     motux  = mots  'UX'  'UY'  'UZ';
+     motiux = mots 'IUX' 'IUY' 'IUZ';
+     motCm  = mots 'MX' 'MY' 'MZ' 'IMX' 'IMY' 'IMZ';
+     motCr  = mots 'RX' 'RY' 'RZ' 'IRX' 'IRY' 'IRZ';
+   sino;
+     motfx  = mots  'FR'  'FT'  'FZ';
+     motifx = mots 'IFR' 'IFT' 'IFZ';
+     motux  = mots  'UR'  'UT'  'UZ';
+     motiux = mots 'IUR' 'IUT' 'IUZ';
+     motCm  = mots 'MT' 'IMT';
+     motCr  = mots 'RT' 'IRT';
+   fins;
+   motCf  = motfx et motifx;
+   motCu  = motux et motiux;
+ fins;
+ MESS 'FORCE='; list motCf;
+ MESS 'DEPLACEMENT='; list motCu;
+FINSI;
+nCu = dime motCu;
+* nom de composantes definie dans le bdata
+LNOMDD LNOMDU = VALE 'INCO';
+
+
+
+************************************************************************
+*                                                                      *
+*                         INITIALISATIONS                              *
+*                                                                      *
+************************************************************************
+
+*creation (eventuelle) et remplissage de WTAB **************************
+
+ si (non (exis TAB1  'WTABLE')); TAB1 . 'WTABLE' = tabl; finsi;
+ WTAB = TAB1 . 'WTABLE';
+
+*cas reprise / initialisation de ds = longueur de pas
+ si (exis WTAB 'DS'); dsP = WTAB . 'DS';
+ sino;                dsP = 1.;   WTAB . 'DS' = dsP;
+ finsi;
+ si (exis WTAB 'DSMIN'); dsPmin = WTAB . 'DSMIN';
+ sinon;                  dsPmin = 1.E-4;
+ finsi;
+ si (exis WTAB 'DSMAX'); dsPmax = WTAB . 'DSMAX';
+ sinon;                  dsPmax = 1.;
+ finsi;
+ si (dsP < dsPmin); dsP=dsPmin; finsi;
+ si (dsP > dsPmax); dsP=dsPmax; finsi;
+
+*parametres lus et ranges dans WTAB (utiles pour CON_CALC , etc ...)
+ WTAB . 'HBM' = FLHBM;
+ WTAB . 'AFT' = IAFT;
+ WTAB . 'DIFFERENTIATION' = IDIFF;
+ WTAB . 'FREQ_INCONNUE'   = (EGA TAB1 . 'FREQUENCE' (MOT 'INCONNUE'));
+
+*creation point support pour la frequence si declaree comme une inconnue
+ si (WTAB . 'FREQ_INCONNUE');
+   si (non (exis WTAB  'PT_FREQ'));
+*     ptf = point support de la frequence
+      SI (EGA (VALE DIME) 2); ptf = poin 0. 0.;
+      SINO;                   ptf = poin 0. 0. 0.;
+      FINSI;
+      WTAB . 'PT_FREQ' = ptf;
+   finsi;
+*  +creation du nom d'inconnue pour la frequence
+   si (non (exis LNOMDD 'FREQ'));
+     OPTI 'INCO' 'FREQ' 'FFRE';
+   finsi;
+*  +initialisation de la valeur courante de frequence si besoin
+   si (exis (extr DEPTOT 'COMP') (mot 'FREQ'));
+     WTAB . 'FREQ' = extr DEPTOT 'FREQ' WTAB . 'PT_FREQ';
+   sinon;
+     MESS 'on initialise w a 1 ...';
+     WTAB . 'FREQ' = 1.;
+     DEPTOT = DEPTOT
+     et (manu 'CHPO' 1 WTAB . 'PT_FREQ' 'FREQ' 1. 'NATURE' 'DIFFUS');
+   finsi;
+*  +creation d'une condition de phase sur le dual de la frequence
+   si (exis TAB1 'CHPO_PHASE');
+     CHPPHA = TAB1 . 'CHPO_PHASE';
+   sinon;
+     MESS 'on utilise la condition de phase V2=0';
+     p2 = TRES1 . 1 . 'POINT_MESURE';
+     CHPPHA = MANU 'CHPO' 1  p2 'V2'  1.;
+   finsi;
+   CLPHASE = MANU 'RIGI' CHPPHA 'LIGN' 'QUEL' ptf 'FFRE';
+   TAB1 . 'RIGIDITE_HBM' = TAB1 . 'RIGIDITE_HBM' et CLPHASE;
+ finsi;
+
+*preparation des mesures ***********************************************
+ SI (FLRES1);
+   ires1 = 0;
+   TRES1 . ires1 = tabl;
+   TRES1 . ires1 . 'ITERES' = prog TIME0;
+   nRES1 = dime TRES1;
+   repe BRES1 nRES1; ires1 = ires1 + 1;
+     si (non (exis TRES1 ires1)); iter BRES1; finsi;
+     moc1 = TRES1 . ires1 . 'COMPOSANTE';
+*   -mesure de la frequence
+     si (ega moc1 'FREQ');
+       x1 = WTAB . 'FREQ';
+     sinon;
+     pt1  = TRES1 . ires1 . 'POINT_MESURE';
+*   -mesure de force
+     si (exis motCf moc1);
+*         x1 = resu (redu (exco (REAC RIGTOT0 DEPTOT) moc1) pt1);
+*       on met les reactions a 0 pour l instant
+        x1 = 0.;
+     sinon;
+*   -mesure de deplacement
+     si (exis motCu moc1);
+        si (ega (type pt1) 'POINT');
+          x1 = extr DEPTOT pt1  moc1 ;
+        sinon;
+          x1 = MAXI (REDU (EXCO DEPTOT moc1 'NOID') pt1) 'ABS';
+        finsi;
+*   -mesure autre (???)
+     sinon;
+         mess 'RESULTATS .' ires1 '. COMPOSANTE  incompris !'; erre 21;
+     finsi;
+     finsi;
+     finsi;
+*    pour la reprise eventuelle
+     si (non (exis TRES1 . ires1  'RESULTATS'));
+*        TRES1 . ires1 . 'RESULTATS' = prog x1;
+*bp : les CI ne sont pas forcement en equilibre :
+       TRES1 . ires1 . 'RESULTATS' = prog ;
+     finsi;
+     TRES1 . ires1 . 'ITERES'    = prog x1;
+   fin  BRES1;
+ FINSI;
+
+*1ere sortie  ***********************************************
+ SI (FLSOR1);
+   OPTI 'SORT' FICSOR;
+   TCHSOR . 'DEPL' = DEPTOT;
+   si FLSOR2;
+    SIGGRA = CHAN 'GRAVITE' MOD1 SIGTOT;
+    TCHSOR . 'CONT' = SIGGRA;
+    SORT TYPSOR MAISOR  TCHSOR 'TEMP' TIME0;
+   finsi;
+ FINSI;
+
+
+*creation (eventuelle) et remplissage de WTAB **************************
+* --> déplacé + haut
+
+
+*on initialise *********************************************************
+
+*le pseudo-temps
+*PRTIME = liste des temps reellement calcules
+*DTIME0 = t_n - t_n-1
+ si (exis TAB1  'TEMPS_PROG');   PRTIME = TAB1 . 'TEMPS_PROG';
+*  sinon;                          PRTIME = prog TIME0;
+*bp : les CI ne sont pas forcement en equilibre :
+ sinon;                          PRTIME = prog ;
+ finsi;
+*  DTIME0 = +1; sauf si reprise (possibilité <0)
+ si (IPAS0 > 0);
+    si (exis WTAB 'DTIME0');
+      DTIME0 = WTAB . 'DTIME0';
+    sinon;
+      DTIME0 = (TAB1 . 'TEMPS' . IPAS0) - (TAB1 . 'TEMPS' . IPASM1);
+    finsi;
+ sinon;
+   DTIME0 = ipol PRTIME0 PRDT0 TIME0;
+ finsi;
+*ptt = point support du pseudo-temps
+ SI (EGA (VALE DIME) 2); ptt = poin 0. 0.;
+ SINON;                  ptt = poin 0. 0. 0.;
+ FINSI;
+ WTAB . 'PT_TAU' = ptt;
+*+creation du nom d'inconnue pour le pseudo-temps
+ si (non (exis LNOMDD 'TAU'));
+   OPTI 'INCO' 'TAU' 'FTAU';
+ finsi;
+
+*le deplacement
+*DDEP0 = u_n - u_n-1
+ si (IPAS0 > 0);
+*   reprise :
+    si (exis WTAB 'DDEP0');
+      DDEP0 = WTAB . 'DDEP0';
+    sinon;
+      DDEP0   = DEPTOT - (TAB1 . 'DEPLACEMENTS' . IPASM1);
+    finsi;
+ sinon;
+*   debut du calcul :
+    DDEP0   = DEPTOT;
+ finsi;
+
+*les parametres numeriques (longueur de pas ...)
+ itconv = itideal; isconv=1;
+*nombre total d'iterations
+ nittot = 0;
+
+*recup de la config initiale (non deformee)
+ SI (FLGDEP);
+   GEOM0 = FORM;
+   WTAB . 'FOR0' = GEOM0;
+ FINSI;
+ WTAB . 'DEPLACEMENTS' = DEPTOT;
+ SI (FLMOD1); WTAB . 'CONTRAINTES'  = SIGTOT; FINSI;
+
+
+*listmots utiles *******************************************************
+*pour appel a CON_CALC
+*  mopred = mots 'RESI' 'RIGI' 'DRES';
+ mopred = mots          'RIGI' 'DRES';
+ mocorr = mots 'RESI' ;
+
+
+*petit entete des messages *********************************************
+chaline = chai '----'
+'--------------------------------------------------------------------';
+mess chaline;
+MESS (CHAI 'CONTINUATION PAR LONGUEUR D''''ARC ' ' ' );
+MESS (chai 'CEA - DEN/DM2S/SEMT/DYN - BP - 26/08/2016');
+mess chaline;
+mess ' Pas |Sous|iter|    Temps    |'
+'       Resultats         |  Residu ';
+mess (chai '  n  |-Pas| (i)|      t      |'
+* '     1      |     2      |  relatif');
+affich1*37 '     |' affich2*50 '     |  relatif');
+mess chaline;
+
+
+
+************************************************************************
+*                                                                      *
+*==========================> Boucle BEXTERN sur les pas                *
+*                                                                      *
+************************************************************************
+*
+ipas = IPAS0;
+REPETER BEXTERN NPAS; ipas = ipas + 1;  WTAB . 'PAS' = IPAS;
+
+
+************************************************************************
+*                                                                      *
+*                             PREDICTION                               *
+*                                                                      *
+************************************************************************
+  si(fldebug);
+   SAUT LIGN ; mess '*** PREDICTION PAS:'ipas 't='TIME0' ***';
+  finsi;
+
+* longueur de pas souhaité : DT^p  (a ajouter a t_n = TIME0) ***********
+  DTP = ipol PRTIME0 PRDT0 TIME0;
+* on limite l'augmentation trop brutale de DTP
+  si (ipas > (IPAS0 + 1));
+    si (DTP > (1.10 * DTP0)); DTP = 1.10 * DTP0; finsi;
+  finsi;
+  DTP0 = DTP;
+  DTP2 = DTP**2;
+
+* Calcul des Force, Matrices et leurs dérivées par rapport a t *********
+
+
+* appel a CON_CALC qui calcule tout !
+* on se met dans la configuration deformee
+  si (FLGDEP);
+    FORM GEOM0;
+    GEOM1 = FORM DEPTOT;
+  finsi;
+  CON_CALC TAB1 mopred TIME0 DTP;
+
+* Calcul du Résidu initial
+* et verif qu'il est bien < precision --> inutile en general sauf pour le 1er pa
+  si (&BEXTERN ega 1);
+    Res2    = WTAB . 'RESIDU' ;
+    NF2 = maxi ((PSCA Res2 Res2 motCf motCf)**0.5);
+    mess 'norme du Residu initial =' ((XTX Res2)**0.5);
+  finsi;
+
+* Construction de la matrice a resoudre : RIGTOT0 = RIGTOTF + K^{NL} + ...
+* avec RIGTOTF = K + TIME^2*M + TIME*C +/-H
+* et raideur NL : K^{NL\ (0)}_n = -\frac{dF^{NL \ (0)}}{dU}
+* etc ...
+  RIGTOT0 = WTAB . 'RAIDEUR' ;
+* Derivee de la raideur par rapport à TIME : DRIGTOT = AMOTOT1 + 2*time*M
+* Derivee des efforts par rapport à TIME : DRES0
+  DRES0   = WTAB . 'DERIVEE_RESIDU';
+
+* resolution **********************************************************
+  DDEP2P  = RESO RIGTOT0 DRES0;
+
+* stabilité en début de pas *******************************************
+*-via DIAG
+*   SI (FLDIAG);
+    ndiag = DIAG RIGTOT0;
+*-via HILL (calcul des exposants de FLOQuet)
+  SI FLFLOQ;
+    lrprog  liprog = FLOQUET TAB1;
+  FINSI;
+
+* calcul de alpha *****************************************************
+* * on peut etre tenté d'introduire le nombre de ddls, mais on ne le fait pas...
+*   nddl  = dime RIGTOT0;
+*   nddl2 = nddl**2;
+* choix de la norme 2 (Identité) pour DDEP2P
+  si (ega NONORM 'I');
+    maxdd2 = XTX (DDEP2P enle 'LX');
+    KDDEP2P = DDEP2P;
+  finsi;
+* choix de la norme diag(K) pour DDEP2P
+  si (ega NONORM 'K');
+    diagK   = (EXTR RIGTOT0 'DIAG') ENLE 'LX';
+*     KDDEP2P = *   diagK   DDEP2P motCu motCu motCu;
+*     maxdd2  = XTY KDDEP2P DDEP2P motCu motCu;
+    KDDEP2P = *   (diagK**0.5)   DDEP2P motCu motCu motCu;
+    maxdd2  = XTX KDDEP2P ;
+  finsi;
+* calcul de alpha
+  alpha = (maxdd2/MAXDEP2) + 1.;
+  alpha = 1./(alpha**0.5);
+  si OMEFIXE;
+    salpha= +1.;
+  sinon;
+    salpha=  ((DDEP0  DDEP2P XTY motCu motCu) / MAXDEP2)
+            + ((DTIME0 * DTP));
+    salpha= sign salpha;
+  finsi;
+
+* pas adaptatif dsP
+    si (itconv > itmax);
+      dsP = 0.5*dsP;
+      si (dsP < dsPmin); dsP=dsPmin; finsi;
+      mess 'pas adaptatif : reduction /2 -> dsP='dsP;
+    finsi;
+    si (itconv <eg itmin);
+      dsP0=dsP;
+      dsP = 1.2*dsP;
+      si (dsP > dsPmax);
+        dsP=dsPmax;
+        si (dsP > dsP0);
+          mess 'pas adaptatif : augmentation limitée -> dsP='dsP;
+        finsi;
+      sinon;
+        mess 'pas adaptatif : augmentation *1.2 -> dsP='dsP;
+      finsi;
+    finsi;
+*   finsi;
+  WTAB . 'DS'           = dsP;
+  alpha0 = salpha * alpha;
+* si (ega ipas 3); erre 21; finsi;
+  alpha = alpha0 * dsP;
+  si(fldebug);
+  mess 'dsP alpha DTP=' dsP alpha DTP;
+  finsi;
+
+* Mise A Jour du vecteur inconnu prenant en compte la reduction du predicteur
+* deplacement
+*dl  DDEP2  = ( (1. - alpha) * (DEPTOT EXCO 'LX' 'NOID' 'LX'))
+*dl         + (alpha * DDEP2P);
+  DDEP2 = alpha * DDEP2P;
+  DDEP2P = DDEP2;
+*dl  DEP2 = (DEPTOT ENLE 'LX') +  DDEP2;
+  DEP2  = DEPTOT + DDEP2;
+  DEP2P = DEP2;
+  WTAB . 'DEPLACEMENTS' = DEP2;
+* temps
+  DTIME0 = alpha * DTP;
+  TIME  = TIME0 + DTIME0;
+  TIMEP = TIME;
+* contrainte
+  SI (FLMOD1);
+    DEPST = EPSI MOD1 MAT1 (DEP2 - DEPTOT);
+    DSIGT = ELAS MOD1 DEPST MAT1;
+    SIG2  = SIGTOT + DSIGT ;
+    si (FLGDEP);
+      SIG2 = PICA SIG2 (DEP2 - DEPTOT) MOD1;
+    finsi;
+    WTAB . 'CONTRAINTES' = SIG2;
+    SIG2P = SIG2;
+  FINSI;
+
+* affichage
+  du0 = alpha * (maxdd2**0.5);
+  chacha0 = chai ipas*4  ' | ' 1*9 ' | '  0*14 ' | '  TIME '|' ;
+
+
+* recup des mesures
+  SI (FLRES1);
+    ires1 = 0;
+    TRES1 . ires1 . 'ITERES' = prog TIME;
+    repe BRES1 nRES1; ires1 = ires1 + 1;
+      si (non (exis TRES1 ires1)); iter BRES1; finsi;
+      moc1 = TRES1 . ires1 . 'COMPOSANTE';
+*    -mesure de la frequence
+      si (ega moc1 'FREQ');
+       x1 = WTAB . 'FREQ';
+*    -autres mesures (U, F ...)
+      sinon;
+       pt1  = TRES1 . ires1 . 'POINT_MESURE';
+       si (exis motCf moc1); iter BRES1; finsi;
+       si (ega (type pt1) 'POINT');
+         x1 = extr DEP2 pt1  moc1;
+       sinon;
+         x1 = MAXI (REDU (EXCO DEP2 moc1) pt1) 'ABS';
+       finsi;
+      finsi;
+      TRES1 . ires1 . 'ITERES' = prog x1;
+*     pour l'affichage
+*       si (ires1 <eg 2);
+      si (exis laffich ires1);
+          chacha0 = chai chacha0  x1 '|';
+      finsi;
+    fin  BRES1;
+  FINSI;
+
+  si(fldebug);  mess '* DTP=' DTP  ' alpha =' alpha ;  finsi;
+*   erre 21;
+
+************************************************************************
+*                                                                      *
+*                             CORRECTION                               *
+*                                                                      *
+************************************************************************
+
+
+* initialisation du pas
+*   NREL2i= 1.E30;
+  NF2   = NF20;
+  DUTR1 = 1.E30;
+  XCONV = faux;
+  WTAB . 'RECA_K' = FLRECA ou OMEFIXE;
+  RECA_CO= NON OMEFIXE;
+  isouspas = 0;
+* recup d'info de la prediction (considérée comme l'iteration 0)
+  DTIME = DTIME0;
+  DRES0 = alpha*DRES0;
+  Res2i = DRES0;
+  DEPTOTi=DEPTOT;
+  SI (FLMOD1); SIGTOTi=SIGTOT; FINSI;
+
+*-----------------------------------------------------> boucle iterative
+  REPE BSOUPAS maxsous; isouspas = isouspas + 1;
+
+  si(fldebug); SAUT LIGN ;  mess '*** CORRECTION ***' isouspas;  finsi;
+
+
+* initialisation du pas
+  it = 0;
+  iacc = 0;  itacc = nacc;
+* variables du linesearch : compteur, longueur beta , activation du LS
+  nls = 10; ils = 0; beta = 1.; FLLS = FAUX;
+
+*-----------------------------------------------------> boucle iterative
+  REPE BRESONL (nls*NMAXIT); it = it + 1;
+
+    SI (it > NMAXIT) ; QUIT BRESONL; FINSI;
+
+
+*---Mise a jour :
+*  -de la matrice de raideur :
+    SI (WTAB . 'RECA_K' ou FLFULL);
+*     appel a CON_CALC qui calcule tout !
+*     on se met dans la derniere configuration deformee
+      si (FLGDEP);
+        FORM GEOM0;
+        GEOM2 = FORM DEP2;
+      finsi;
+      CON_CALC TAB1 mopred TIME DTIME;
+*     la matrice a resoudre RIGTOT0 = K + OMEG^2*M + OMEG*C +/-H
+      mess 'recalcul de K';
+      RIGTOT0 = WTAB . 'RAIDEUR' ;
+      DRES0   = WTAB . 'DERIVEE_RESIDU';
+    FINSI;
+
+*---Mise a jour :
+*  -des matrices colonne et ligne supplementaires :
+    SI (RECA_CO ou FLFULL);
+*     on adimensionne DRES0
+      dRdT = MANU 'RIGI' ((-1./DTIME)*DRES0) 'COLO' 'QUEL' ptt 'TAU';
+*     on fait les corrections dans le plan orthogonal a la prediction
+      si (ega NONORM 'I');
+       DUPT = MANU 'RIGI' ((DDEP2P) enle 'LX') 'LIGN' 'QUEL' ptt 'FTAU';
+      finsi;
+*     choix de la norme diag(K) pour DDEP2P
+      si (ega NONORM 'K');
+       diagK   = (EXTR RIGTOT0 'DIAG') ENLE 'LX';
+       KDDEP2 = *   diagK  (DDEP2P) motCu motCu motCu;
+       DUPT = MANU 'RIGI' (KDDEP2 enle 'LX') 'LIGN' 'QUEL' ptt 'FTAU';
+      finsi;
+      DTT  = MANU 'RIGI' ptt (mots 'TAU')
+             'DUAL' (mots 'FTAU') (prog DTIME);
+      DUPT = (1./MAXDEP2) * DUPT;
+      DTT  = (1./DTP2)    * DTT ;
+*     rem: on pourrait sans doute mieux adimensionner ca, voire meme
+*          utiliser une expression symetrique de dRdT a la place de DUPT
+    FINSI;
+*  -de l'operateur final :
+    SI ((NON OMEFIXE) et (WTAB . 'RECA_K' ou RECA_CO ou FLFULL));
+      RIGTOT2 = RIGTOT0         et dRdT    et DUPT et DTT;
+    FINSI;
+    WTAB . 'RECA_K' = faux;
+    RECA_CO= faux;
+
+
+*---appel a CON_CALC qui calcule le residu dans la config n+1
+    SI (FLGDEP);
+       FORM GEOM0;
+       GEOM2 = FORM DEP2;
+    FINSI;
+    CON_CALC TAB1 mocorr TIME DTIME;
+*   attention : si on détecte un changement brutal de comportement (mise
+*   en contact, etc ..), alors il faut recommencer en recalculant K
+    si (WTAB . 'RECA_K');
+      it = it - 1;
+      ITER BRESONL;
+    finsi;
+*   on recupere le residu fraichement calculé
+    Res2    = WTAB . 'RESIDU' ;
+*   puis retour a la config n (en debut de pas)
+    SI (FLGDEP);
+       FORM  GEOM1 ;
+    FINSI;
+
+*     FINSI;
+
+*---calcul des reactions
+*dl    Freac2 = REAC KBLO1 DEP2;
+    Freac2 = WTAB . 'REACTION';
+
+*---calcul de la norme NF2 de ce pas
+    si (ega NF2 'NONDEFINI');
+      NF2 = maxi ((PSCA Res2 Res2 motCf motCf)**0.5);
+      NF2r = maxi ((PSCA Freac2 Freac2 motCf motCf)**0.5);
+      NF2 = NF2 + NF2r;
+      si (NF2 < 1.E-30); mess 'def de NF2 a revoir'; erre 21; finsi;
+      si (FLMOME);
+*         NF2M = maxi ((PSCA Res2 Res2 motCm motCm)**0.5);
+        NF2M = ((XTX Res2)**0.5)
+             * ((maxi DDEP2P 'ABS' 'AVEC' motCu)
+               /(maxi DDEP2P 'ABS' 'AVEC' motCr));
+        si (NF2M < 1.E-30); mess 'def de NF2M a revoir'; erre 21; finsi;
+*         mess 'normes pour tester la convergence du Residu =' NF2 NF2M;
+      sino;
+*         mess 'norme pour tester la convergence du Residu =' NF2;
+      finsi;
+    finsi;
+
+*  -condition d'equilibre des forces :
+*dl*   Equi^{(i)} = Res^{(i)} - C^T*\lambda^{(i)}
+*dl    Equi2 = (Res2 + (REAC KBLO1 DEP2)) ENLE 'FLX';
+    Equi2 = Res2  ENLE 'FLX';
+    Neq2  = maxi ((PSCA Equi2 Equi2 motCf motCf)**0.5);
+    NREL2 = Neq2 / NF2;
+    chacha = chai chacha0  FORMAT '(E13.6)' NREL2*69;
+    si (FLMOME);
+      Neq2M  = maxi ((PSCA Equi2 Equi2 motCm motCm)**0.5);
+      NREL2M = Neq2M / NF2M;
+      chacha = chai chacha '|' FORMAT '(E13.6)' NREL2M;
+    finsi;
+
+*---affichage
+    mess chacha;
+
+*---Convergence?
+    XCONV = (NREL2 < XPREC);
+    si (FLMOME); XCONV =  XCONV et (NREL2M < XPREC); finsi;
+    SI XCONV;
+      isconv = isouspas;
+      itconv = it;
+      SI (ils > 0);
+        si(fldebug); mess 'LineSearch: du^T*R(' beta ')=' DUTR2; finsi;
+      FINSI;
+      QUIT BRESONL;
+    FINSI;
+
+*     SI (NON FLFULL);
+*---Acceleration d'Aitken pour le Residu
+*   avec  CHR0k = Residu^(i-k) et CHEOk = Equilibre^(i-k)
+    si (ega itacc 4); CHR03 = Res2;  CHE03 = Equi2; finsi;
+    si (ega itacc 3); CHR02 = Res2;  CHE02 = Equi2; finsi;
+    si (ega itacc 2); CHR01 = Res2;  CHE01 = Equi2; finsi;
+    si (ega itacc 1); CHR00 = Res2;  CHE00 = Equi2; finsi;
+    itacc = itacc - 1;
+    si (ega itacc 0);
+      CORREC = ACT3 CHE02 CHE01 CHE00 CHE03 CHE02 CHE01 CHE00;
+      Res2 = Res2 - CORREC;
+      itacc = nacc;
+      mess 'acceleration Residu';
+    finsi;
+*---> ne semble pas tres compatible avec le linesearch...
+*     FINSI;
+
+
+*---Resolution du pb augmenté :
+    si(fldebug); saut lign; mess '*** iteration : ' it;  finsi;
+*     SI (it ega 2) ; erre 21; FINSI;
+* [K^{tan (i)} C^T dR/dt  ]   (\Delta U     )   (Res^{(i-1)})
+* [C           0   0      ] * (\lambda^{(i)}) = (U^{imp}_n  )
+* [Du(i-1)^T   0   Dt(i-1)]   (\Delta t     )   (0          )
+
+* si (ega ipas 21); erre 21; finsi;
+
+    si (OMEFIXE);
+      DDEP2 = RESO RIGTOT0 Res2;
+      DTIME = 0.;
+    sinon;
+      DDEP2 = RESO RIGTOT2 Res2;
+*    -Extraction de DT et de (DU,lambda)
+      DTIME = EXTR DDEP2 'TAU' ptt ;
+      DDEP2 = DDEP2 ENLE 'TAU';
+*     rem : si thermique faudra changer...
+    finsi;
+
+
+*---Actualisation du vecteur inconnu :
+
+*  -calcul du alpha^(i) de l itéré
+*   la longueur de l'itéré doit etre << dsP
+    si (ega NONORM 'I');
+      maxdd2i = XTX (DDEP2 enle 'LX');
+    finsi;
+    si (ega NONORM 'K');
+*       KDDEP2 = *   (diagK)   DDEP2 motCu motCu motCu;
+*       maxdd2  = XTY KDDEP2 DDEP2 motCu motCu;
+      KDDEP2 = *   (diagK**0.5)   DDEP2 motCu motCu motCu;
+      maxdd2i  = XTX KDDEP2 ;
+    finsi;
+    alphai  = (maxdd2i/MAXDEP2) + ((DTIME/DTP)**2);
+    alphai  = dsP / (alphai**0.5);
+    si(fldebug); mess 'DTIME= ' DTIME '  alphai= ' alphai ; finsi;
+    si (alphai < 1.);
+       si (alphai < 1.E-6); alphai = 1.E-6; finsi;
+       mess 'reduction de  l itéré par ' alphai;
+       DTIME = alphai * DTIME;
+*dl       DDEP2 = ((1.-alphai) * (exco DEP2 'LX' 'NOID' 'LX'))
+*dl             + (alphai * DDEP2);
+       DDEP2 = alphai * DDEP2;
+    sinon;
+      alphai = 1.;
+    finsi;
+
+*  -on sauve les vecteurs a literation i + Mise A Jour du vecteur inconnu
+*         U^{(i)} = U^{(i-1)} + \Delta U
+*   \lambda^{(i)} = 0         + \Delta \lambda
+*   deplacement
+    DEP2i  = DEP2;
+*dl    DEP2  = (ENLE DEP2i 'LX') + DDEP2;
+    DEP2  = DEP2i + DDEP2;
+    WTAB . 'DEPLACEMENTS' = DEP2;
+*   temps
+    TIMEi = TIME;
+    DTIMEi= DTIME;
+    TIME  = TIMEi + DTIMEi;
+*   residu
+*     Res2i = Res2;
+
+*  -increment de deformation et de contrainte calculé sur config n
+*   rem : pourrait etre calculée sur config intermediaire t_n+0.5
+    SI (FLMOD1);
+      DEPST = EPSI MOD1 MAT1 (DEP2 - DEPTOTi);
+      DSIGT = ELAS MOD1 DEPST MAT1;
+      SIG2i = SIG2;
+      SIG2  = SIGTOTi + DSIGT ;
+*     SIG2 = contrainte PK2 calculée sur config n,
+*     car SIGTOT = contrainte de Cauchy au temps n
+*                = contrainte de PK au temps n sur config n
+*                  (cf cours Brunet, p.43)
+      si (FLGDEP);
+*       on calcul les contraintes de Cauchy (sur config n+1)
+        SIG2 = PICA SIG2 (DEP2 - DEPTOTi) MOD1;
+      finsi;
+      WTAB . 'CONTRAINTES' = SIG2;
+    FINSI;
+
+*---affichage
+*     dup = alphai * (maxdd2i**0.5);
+    chacha0 = chai ipas*4 ' | ' isouspas*9 ' | '  it*14 ' | ' TIME '|';
+
+*---recup des mesures
+    SI (FLRES1);
+      ires1 = 0;
+      TRES1 . ires1 . 'ITERES' = TRES1 . ires1 . 'ITERES' et TIME;
+      repe BRES1 nRES1; ires1 = ires1 + 1;
+        si (non (exis TRES1 ires1)); iter BRES1; finsi;
+        moc1 = TRES1 . ires1 . 'COMPOSANTE';
+*      -mesure de la frequence
+        si (ega moc1 'FREQ');
+          x1 = WTAB . 'FREQ';
+*      -autres mesures (U, F ...)
+        sinon;
+          pt1  = TRES1 . ires1 . 'POINT_MESURE';
+          si (exis motCf moc1); iter BRES1; finsi;
+          si (ega (type pt1) 'POINT');
+            x1 = extr DEP2 pt1  moc1;
+          sinon;
+            x1 = MAXI (REDU (EXCO DEP2 moc1) pt1) 'ABS';
+          finsi;
+        finsi;
+        TRES1 . ires1 . 'ITERES'    = TRES1 . ires1 . 'ITERES' et x1;
+*       pour l'affichage
+*         si (ires1 <eg 2);
+        si (exis laffich ires1);
+          chacha0 = chai chacha0  x1 '|';
+        finsi;
+      fin  BRES1;
+    FINSI;
+
+
+  FIN  BRESONL;
+*<------------------------------------------- fin de la boucle iterative
+
+
+************************************************************************
+*                                                                      *
+*                          NON CONVERGENCE                             *
+*                                                                      *
+************************************************************************
+*-on sort si convergence!
+  si (XCONV);
+    nittot = nittot + itconv;
+    quit BSOUPAS;
+
+*-erreur si non-convergence!
+  sino;
+    mess 'non convergence en ' NMAXIT 'iterations !';
+
+    si (isouspas >eg maxsous);
+      mess 'non convergence en ' isouspas 'sous-pas!';
+*     erre 997;
+      mess 'On retourne le resultat malgré tout...';
+*     si le dernier pas converge n'a pas ete sauve,
+*     on le sauve pour eventuelle reprise
+      SI (NON (MULT (ipas - 1) ISAUV));
+*       sauvegarde du dernier pas converge
+        TAB1 . 'TEMPS'        . (ipas - 1) = TIME0;
+        TAB1 . 'DEPLACEMENTS' . (ipas - 1) = DEPTOTi;
+        SI (FLMOD1);  TAB1 . 'CONTRAINTES'  . ipas = SIGTOTi; FINSI;
+      FINSI;
+*     doit on faire qqchose sur WTAB ?...?
+      quit BEXTERN;
+    finsi;
+
+*     si (isouspas < maxsous);
+*     si ((isouspas <eg 3) et (dsP > dsPmin));
+    si ((isouspas <eg 3));
+
+    si ((dsP > dsPmin));
+*     on recommence avec un pas predicitif 1/xred fois + petit
+      xred  = 0.2;
+      dsP   = xred * dsP; si (dsP < dsPmin); dsP=dsPmin; finsi;
+      alpha = xred * alpha;
+      mess ' reduction du pas predicteur de ' xred;
+    sinon;
+*     on recommence avec un pas predicitif tq ds = 1 !
+      alpha = alpha0;
+      xred = 1. / dsP;
+      dsP = 1;
+      mess ' augmentation du pas predicteur de ' xred;
+    finsi;
+*     deplacement
+*dl      DDEP2  = ( (1. - alpha) * (DEPTOT EXCO 'LX' 'NOID' 'LX'))
+*dl            + (alpha * DDEP2P);
+      DDEP2  = (alpha * DDEP2P);
+      DDEP2P = DDEP2;
+*dl      DEP2 = (DEPTOT ENLE 'LX') +  DDEP2;
+      DEP2 =  DEPTOT +  DDEP2;
+      DEP2P = DEP2;
+      WTAB . 'DEPLACEMENTS' = DEP2;
+*     temps
+      DTIME = alpha * DTP;
+      DTP   = xred * DTP;
+      TIME  = TIME0 + DTIME;
+      TIMEP = TIME;
+*     contrainte
+      SI (FLMOD1);
+        DEPST = EPSI MOD1 MAT1 (DEP2 - DEPTOT);
+        DSIGT = ELAS MOD1 DEPST MAT1;
+        SIG2  = SIGTOT + DSIGT ;
+        si (FLGDEP);
+          SIG2 = PICA SIG2 (DEP2 - DEPTOT) MOD1;
+        finsi;
+        WTAB . 'CONTRAINTES' = SIG2;
+        SIG2P = SIG2;
+      FINSI;
+*     affichage
+*       du0 = alpha * (maxdd2**0.5);
+      chacha0 = chai ipas*4 ' | ' (isouspas+1)*9 ' | '  it*14 ' | '
+                     TIME '|';
+*---recup des mesures
+    SI (FLRES1);
+      ires1 = 0;
+      TRES1 . ires1 . 'ITERES' = TRES1 . ires1 . 'ITERES' et TIME;
+      repe BRES1 nRES1; ires1 = ires1 + 1;
+        si (non (exis TRES1 ires1)); iter BRES1; finsi;
+        moc1 = TRES1 . ires1 . 'COMPOSANTE';
+*      -mesure de la frequence
+        si (ega moc1 'FREQ');
+         x1 = WTAB . 'FREQ';
+*      -autres mesures (U, F ...)
+        sinon;
+          pt1  = TRES1 . ires1 . 'POINT_MESURE';
+          si (exis motCf moc1); iter BRES1; finsi;
+          si (ega (type pt1) 'POINT');
+            x1 = extr DEP2 pt1  moc1;
+          sinon;
+            x1 = MAXI (REDU (EXCO DEP2 moc1) pt1) 'ABS';
+          finsi;
+        finsi;
+        TRES1 . ires1 . 'ITERES'    = TRES1 . ires1 . 'ITERES' et x1;
+*       pour l'affichage
+*         si (ires1 <eg 2);
+        si (exis laffich ires1);
+          chacha0 = chai chacha0  x1 '|';
+        finsi;
+      fin  BRES1;
+    FINSI;
+
+    sinon;
+*     autre chance :
+      RECA_K = vrai;
+      RECA_CO = NON OMEFIXE;
+*     Pour le prochain sous-pas, on repart de la position non-convergée
+      mess ' on redemarre depuis la derniere position (non-convergée)';
+      DTP  = TIME - TIME0;
+*       TIME0   = TIME;
+      DDEP2P   = DEP2 - DEPTOT;
+      DEPTOTi  = DEP2;
+      WTAB . 'DEPLACEMENTS' = DEPTOTi;
+      SI (FLMOD1);
+        SIGTOTi  = SIG2;
+        WTAB . 'CONTRAINTES'  = SIGTOTi;
+      FINSI;
+      SI (FLGDEP);
+        FORM GEOM0;
+        GEOM1 = FORM DEPTOTi;
+      FINSI;
+
+    finsi;
+
+  fins;
+
+  FIN  BSOUPAS;
+*<------------------------------------------- fin de la boucle iterative
+
+
+************************************************************************
+*                                                                      *
+*                             CONVERGENCE                              *
+*                                                                      *
+************************************************************************
+
+*-Ici on a convergé :  ******************************
+
+* Pour le prochain pas
+  DTIME0  = TIME - TIME0;
+  TIME0   = TIME;
+  DDEP0   = DEP2 - DEPTOT;
+  DEPTOT  = DEP2;
+  SI (FLMOD1); SIGTOT  = SIG2; FINSI;
+
+* affichage
+  maxdd2 = XTX (DDEP0 enle 'LX');
+  ds2    = ((maxdd2 / MAXDEP2) + ((DTIME0 / DTP)**2))**0.5;
+  mess 'convergence en ' itconv ' iterations ' ndiag;
+  dsPP = dsP;
+  si (ds2 < (0.99*dsP));       mods = mot ' < ';
+* si on est trop grand c'est que les corrections sont grandes par
+* rapport a la prediction -> "on tourne" vite -> il faut reduire le pas
+  sinon; si (ds2 > (1.2*dsP)); mods = mot ' > ';
+*  dsP = 0.5*dsP;
+         sinon;                mods = mot ' ~ ';
+         finsi;
+  finsi;
+  chaconv = chai 'longueur du pas Ds=' ds2 mods dsPP
+  ' (Du=' (maxdd2**0.5) ' Dt=' DTIME0 ')' ;
+  mess chaconv;
+
+* si convergence on enregistre cette frequence
+  PRTIME = PRTIME et TIME;
+
+* sauvegarde pour eventuelle reprise
+  WTAB . 'DEPLACEMENTS' = DEPTOT;
+  SI (FLMOD1); WTAB . 'CONTRAINTES'  = SIGTOT; FINSI;
+  WTAB . 'DDEP0'        = DDEP0;
+  WTAB . 'DTIME0'       = DTIME0;
+  WTAB . 'TIME0'        = TIME0;
+
+* sauvegarde du pas
+  SI (MULT ipas ISAUV);
+    TAB1 . 'TEMPS'        . ipas = TIME;
+    TAB1 . 'DEPLACEMENTS' . ipas = DEPTOT;
+    SI (FLMOD1);  TAB1 . 'CONTRAINTES'  . ipas = SIGTOT; FINSI;
+  FINSI;
+
+* eventuellement recombinaison modale
+
+
+* Sauvegarde des Resultats ******************************
+
+* recup des mesures
+  SI (FLRES1);
+    nRES1 = dime TRES1;
+    ires1 = 0;
+    repe BRES1 nRES1; ires1 = ires1 + 1;
+      si (non (exis TRES1 ires1)); iter BRES1; finsi;
+      moc1 = TRES1 . ires1 . 'COMPOSANTE';
+*    -mesure de la frequence
+      si (ega moc1 'FREQ');
+       x1 = WTAB . 'FREQ';
+      sinon;
+*    -mesure de U ou F
+      pt1  = TRES1 . ires1 . 'POINT_MESURE';
+      si (exis motCf moc1);
+        x1 = maxi (resu (redu (exco (REAC RIGTOT0 DEPTOT) moc1) pt1));
+      sinon;
+        si (ega (type pt1) 'POINT');
+          x1 = extr DEPTOT pt1  moc1;
+        sinon;
+          x1 = MAXI (REDU (EXCO DEPTOT moc1) pt1) 'ABS';
+        finsi;
+      finsi;
+      finsi;
+      TRES1 . ires1 . 'RESULTATS' = TRES1 . ires1 . 'RESULTATS' et x1;
+    fin  BRES1;
+  FINSI;
+
+* stockage de la stabilite (calculee avec les matrices en debut de pas)
+*-via DIAG
+  SI FLDIAG;
+    TAB1 . 'RESULTATS_STABILITE' . 'DIAG' =
+    TAB1 . 'RESULTATS_STABILITE' . 'DIAG' et (flot ndiag);
+*   En theorie, il faudrait aussi trouver un moyen pour detecter les
+*   changements de signe de la jacobienne augmentee
+*   et s'assurer que la matrice utilisee soit bien celle en début de pas
+*   Ici, on se contente de prendre la valeur ci dessous
+*   (dont le sens reste a prouver car matrice non symetrique) :
+    ndiag2 = DIAG RIGTOT2;
+    TAB1 . 'RESULTATS_STABILITE' . 'DIAG_AUGMENTEE' =
+    TAB1 . 'RESULTATS_STABILITE' . 'DIAG_AUGMENTEE' et (flot ndiag2);
+  FINSI;
+*-via HILL (calcul des exposants de FLOQuet)
+  SI FLFLOQ;
+*   lrprog  liprog = FLOQUET TAB1;  --> fait en debut de pas
+*   initialisation des objets en sortie
+    si (nfloq ega -3);
+      nfloq = dime lrprog;
+      ifloq = 0;
+      repe Bfloq nfloq; ifloq = ifloq + 1;
+        TFLOQ . 'EXPOSANT_REEL' . ifloq = prog ;
+        TFLOQ . 'EXPOSANT_IMAG' . ifloq  = prog ;
+      fin  Bfloq ;
+*     finsi;
+*bp : les CI ne sont pas forcement en equilibre :
+    sinon;
+*     remplissage des tables de listreel en sortie
+      ifloq = 0;
+      repe Bfloq nfloq; ifloq = ifloq + 1;
+        TFLOQ . 'EXPOSANT_REEL' . ifloq
+        = TFLOQ . 'EXPOSANT_REEL' . ifloq et (extr lrprog ifloq);
+        TFLOQ . 'EXPOSANT_IMAG' . ifloq
+        = TFLOQ . 'EXPOSANT_IMAG' . ifloq et (extr liprog ifloq);
+      fin  Bfloq ;
+*     on teste la stabilite sur tous les exposants de Floquet
+*      OU
+*     on ne conserve que les (2*nddls) valeurs centrées autour de 0
+    lrprog2 liprog2 = ORDO 'DECROISSANT' lrprog  liprog;
+    toto liprog lrprog = ORDO 'CROISSANT' (ABS liprog2) liprog2 lrprog2;
+      NDDL = ((dime lrprog) / 2) / (2*(TAB1 . 'N_HARMONIQUE') + 1);
+      lprem  = lect 1 pas 1 (2 * NDDL);
+      lrprog = EXTR lrprog lprem;
+      minlr = maxi lrprog;
+      si (minlr > 1.E-16); ifloq = 1; sinon; ifloq = 0; finsi;
+      TFLOQ . 'STABILITE' = TFLOQ . 'STABILITE' et ifloq;
+    finsi;
+  FINSI;
+
+
+* sortie  ***********************************************
+
+  SI (FLSOR1);
+*   sortie sur la config initiale
+    SI (FLGDEP); FORM GEOM0;  finsi;
+    OPTI 'SORT' FICSOR;
+    TCHSOR . 'DEPL' = DEPTOT;
+    si FLSOR2;
+     SIGGRA = CHAN 'GRAVITE' MOD1 SIGTOT;
+     TCHSOR . 'CONT' = SIGGRA;
+*      SORT TYPSOR MAISOR  DEPTOT 'DEPL' SIGGRA 'SIGM' 'TEMP' TIME;
+*     sinon;
+*      SORT TYPSOR MAISOR  DEPTOT 'DEPL'  'TEMP' TIME;
+    finsi;
+    SORT TYPSOR MAISOR  TCHSOR 'TEMP' TIME0;
+  FINSI;
+
+*  trait de fin du pas ******************************************
+   mess chaline;
+
+*  On sort si on a fini !  **************************************
+   TAB1 . 'TEMPS_PROG' = PRTIME;
+   PRTIME1 = PRTIME et TIME00;
+   SI ( ((maxi PRTIME1) >eg MaxTIME0) et ((mini PRTIME1) <eg MinTIME0));
+     saut lign;
+     MESS ( CHAI 'Plage temporelle couverte = '
+            (mini PRTIME) (maxi PRTIME) );
+     saut lign;
+     mess chaline;
+     MESS '---------------------->     Succès de CONTINU'
+     '    <----------------------';
+     QUIT BEXTERN;
+   FINSI;
+
+
+FIN BEXTERN;
+************************************************************************
+*                                                                      *
+*<=== Fin de la Boucle BEXTERN sur les pas de chargement
+*                                                                      *
+************************************************************************
+
+
+     mess (chai 'nombre total d' 'iteration ' ': ' nittot);
+     mess chaline;
+     saut lign;
+
+
+************************************************************************
+*                                                                      *
+*    SAUVEGARDE DES RESULTATS (convergés jusqu'à arret de bextern)     *
+*                                                                      *
+************************************************************************
+
+* evolutions
+  SI (FLRES1);
+*   tables des titres pour l operateur DESSIN
+    TRES1 . 'TITRE' = tabl;
+    mycoul1 = mots 'VIOL' 'BLEU' 'TURQ' 'VERT' 'OLIV'
+                   'ORAN' 'ROUG' 'ROSE' 'AZUR' 'DEFA';
+    ncoul1  = dime mycoul1; icoul1 = 0;
+    evtot = vide 'EVOLUTIO' ;
+    nRES1 = dime TRES1;
+    ires1 = 0;
+    repe BRES1 nRES1; ires1 = ires1 + 1;
+      si (non (exis TRES1 ires1)); iter BRES1; finsi;
+*     titre
+      si (exis TRES1 . ires1  'TITRE');
+        tit1 = TRES1 . ires1 . 'TITRE';
+      sinon;
+        tit1 = chai 'Resultat' ires1*4;
+        tit1 = TRES1 . ires1 . 'TITRE';
+      finsi;
+      TRES1 . 'TITRE' . ires1 = tit1;
+*     couleur
+      si (exis TRES1 . ires1  'COULEUR');
+        coul1 = TRES1 . ires1 . 'COULEUR';
+      sinon;
+        icoul1 = icoul1 + 1; si (icoul1 > ncoul1); icoul1 = 1; finsi;
+        coul1 = extr mycoul1 icoul1;
+        TRES1 . ires1 . 'COULEUR' = coul1;
+      finsi;
+      ev1 = EVOL coul1 'MANU' 't' PRTIME
+                              tit1 (TRES1 . ires1 . 'RESULTATS');
+      TRES1 . ires1 . 'RESULTATS_EVOL' = ev1;
+      evtot = evtot et ev1;
+    fin  BRES1;
+    TRES1 . 'RESULTATS_EVOL' = evtot;
+  FINSI;
+
+* on quitte on revenant sur la config initiale
+ SI (FLGDEP);
+   FORM GEOM0;
+ finsi;
+
+
+FINPROC ;
+
+
+
+
+

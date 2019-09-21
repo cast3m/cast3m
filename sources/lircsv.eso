@@ -1,0 +1,392 @@
+C LIRCSV    SOURCE    CB215821  17/09/08    21:15:04     9534
+      SUBROUTINE LIRCSV
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C BUT: Lecture des donnes dans un fichier ASCII sous forme 'CSV'
+C      Possibilite de changer le separateur
+C      Pas besoin de specifier la longueur des objets LISTREEL a lire,
+C      un premier decompte est fait jusqu'à atteindre la fin du fichier
+C
+C Auteur : Clement BERTHINIER
+C Date   : ORIGINAL  Avril 2014
+C
+C Améliorations à prévoir :
+C      Possibilite de changer la virgule (Options Regionales)
+C      Possibilite de lire en ligne ou en colonne
+C
+C
+C Liste des Corrections :
+C CB215821 09/03/2016 : Fortran runtime error en cas de fichier VIDE...
+C CB215821 09/06/2016 : Possibilite d''utiliser le séparateur ' '
+C CB215821 10/06/2016 : Tentative de lire la case 0 d'une chaine
+C                       Meilleure gestion des SEGMENTS
+C CB215821 14/04/2017 : Declaration  de la  ligne dans  un  SEGMENT pour
+C                       lire toutes les tailles de lignes
+C                       Ajout d''un DATA contenant les caracteres qu''il
+C                       est possible de lire (sinon ' ')
+C
+C Appelee par : LIREFI
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+CC                       DEBUT DES DECLARATIONS                       CC
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+-INC SMLREEL
+-INC SMTABLE
+
+C Declaration des chaines de caracteres
+      CHARACTER*1    Separa
+      CHARACTER*256  Fichier
+      CHARACTER*4    CHA4
+
+C Declaration des ENTIERS
+      INTEGER IUCSV
+      INTEGER JG
+      INTEGER INCJG
+      INTEGER ICOEF
+      INTEGER NBLR
+      INTEGER NBLIGN
+      INTEGER NBSEPA
+      INTEGER NBSEPI
+      INTEGER NBOPT
+      INTEGER IDEB
+      INTEGER IFIN
+      INTEGER IDLRRE
+      INTEGER IOSTA1
+
+C Declaration des FLOTTANTS
+      REAL*8 FlotLu
+
+
+C     Liste des CARACTERES RECONNUS pour détecter les CR et LF
+      CHARACTER*94 CARAOK
+      DATA CARAOK /' 0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO
+     &PQRSTUVWXYZ+-/\*.,:;_#$%&()[]{}<=>?@`|~!"'''/
+
+
+
+C Declaration des SEGMENTS
+C     Segment pour s'adapter a la taille de la ligne a lire
+      SEGMENT SLIGNE
+C       LONGLI  : Longueur de la ligne la plus longue a lire dans le fichier
+        CHARACTER*(LONGLI) LignFi
+      ENDSEGMENT
+
+C     Segement contenant la liste des MLREEL
+      SEGMENT SLISLR
+C       LISTLR  : Tableau contenant la liste des POINTEUR LISTREEL
+C       NBLR    : Nombre de LISTREEL dans le tableau LISTLR
+        INTEGER LISTLR(NBLR)
+      ENDSEGMENT
+
+C Liste des mots clé OPTIONNELS
+      PARAMETER (NBOPT=2)
+      CHARACTER*4    MCLOPT(NBOPT)
+      DATA MCLOPT / 'DEBU','SEPA' /
+
+C Declaration des PARAMETER
+C     Unite logique du fichier d'impression au format CSV
+      PARAMETER (IUCSV=67)
+
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+CC                          Initialisations                           CC
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+ 1000 FORMAT(A)
+      NBLR  =0
+      JG    =0
+      INCJG =1000
+      ICOEF =2
+      LONGLI=2048
+      IDEBLI=1
+      NBLIGN=0
+      NBSEPI=0
+      NBSEPA=0
+      IDEB  =0
+      IFIN  =0
+      IDLRRE=0
+      IVALU =0
+
+      FlotLu=REAL(0.D0)
+
+C     Le separateur par defaut est le ';'
+      Separa=';'
+
+C Lecture des arguments : Nom du fichier a lire
+      CALL LIRCHA(Fichier,1,IRETO1)
+      IF (IERR .NE. 0) RETURN
+
+
+C Par defaut, Erreur Cast3M numero 424
+C     Erreur 424 : Probleme %i1 en ouvrant le fichier : %m1:40
+      L=LEN(Fichier)
+      L1=MIN(L,40)
+      MOTERR(1:L1)=Fichier(1:L1)
+      INTERR(1)=0
+
+C Ouverture du fichier
+      CLOSE(UNIT=IUCSV,ERR=990)
+      OPEN (UNIT=IUCSV,STATUS='OLD',FILE=Fichier(1:L),
+     &     IOSTAT=IOSTA1,FORM='FORMATTED')
+
+
+C Traitement des erreurs d'ouverture des fichiers
+      IF (IOSTA1 .NE. 0) THEN
+        INTERR(1)=IOSTA1
+        CALL ERREUR(424)
+        GOTO 990
+      ENDIF
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+CC                        DECODAGE DES OPTIONS                        CC
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+ 1    CONTINUE
+C     Lecture OPTIONNELLE des Options
+      CALL LIRCHA(CHA4,0,IRETO1)
+      IF (IERR .NE. 0) RETURN
+
+      IF (IRETO1 .NE. 0) THEN
+C       Recherche de l'option lue dans le DATA des mots-clés
+        CALL PLACE(MCLOPT,NBOPT,IRETO1,CHA4)
+        IF (IERR .NE. 0 ) RETURN
+        IF (IRETO1 .EQ. 0) THEN
+C         Cas d'une option inexistante
+          MOTERR(1:8) ='MOT     '
+          MOTERR(9:16)= CHA4
+          CALL ERREUR(11)
+          RETURN
+        ELSEIF (IRETO1 .EQ. 1) THEN
+C         Cas de l'option 'DEBU'
+C         Lecture OBLIGATOIRE d'un ENTIER (Ligne du début)
+          CALL LIRENT(IVALU,1,IRETO2)
+          IF (IERR .NE. 0) RETURN
+
+        ELSEIF (IRETO1 .EQ. 2) THEN
+C         Cas de l'option 'SEPA'
+
+C         Lecture OBLIGATOIRE d'un MOT (Separa)
+          CALL LIRCHA(Separa,1,IRETO1)
+          IF (IERR .NE. 0) RETURN
+C          IF (Separa .EQ. ' ') THEN
+C            CALL ERREUR(26)
+C            RETURN
+C          ENDIF
+        ENDIF
+
+        GOTO 1
+      ENDIF
+
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+CC                         LECTURE DU FICHIER                         CC
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+      SEGINI,SLISLR,SLIGNE
+      NUMLIG = 0
+C     Boucle de lecture des lignes
+      LMAXI =LignFi(/1)
+
+C     On saute les (IVALU-1) premieres lignes le cas echeant
+      IF     ((IVALU .EQ. 0) .OR. (IVALU .EQ. 1)) THEN
+        GOTO 10
+      ELSEIF (IVALU .GE. 2) THEN
+        DO I=1,(IVALU-1)
+          NUMLIG = NUMLIG + 1
+          READ(IUCSV,1000,IOSTAT=IOSTA1,ERR=989,END=8) LignFi
+          IF (IOSTA1 .NE. 0) GOTO 989
+        ENDDO
+        GOTO 10
+ 8      CONTINUE
+C       La fin du fichier est atteinte avant même d'avoir commencé la lecture...
+        INTERR(1)=IVALU
+        CALL ERREUR(36)
+        RETURN
+      ELSE
+        INTERR(1)=IVALU
+        CALL ERREUR(36)
+        RETURN
+      ENDIF
+
+C     Lecture des lignes utiles
+10    CONTINUE
+      IF (IERR .NE. 0) RETURN
+      NUMLIG = NUMLIG + 1
+C     Lecture de la ligne complete
+      READ(IUCSV,1000,IOSTAT=IOSTA1,ERR=989,END=100) LignFi
+      IF (IOSTA1 .NE. 0) GOTO 989
+      LCOURA = LONGLI
+
+C     Remplacement des caracteres non present dans le DATA par ' '
+      DO J=1,LCOURA
+        INDXE=INDEX(CARAOK,LignFi(J:J))
+        IF (INDXE .EQ. 0) LignFi(J:J)=' '
+      ENDDO
+
+C     Detection de la longueur des lignes
+      DO J=LCOURA,1,-1
+C       Detection en partant de la fin du premier caractere qui n'est ni ' ' ni Separa
+        IF ((LignFi(J:J) .NE. ' ') .AND.
+     &      (LignFi(J:J) .NE. Separa)) THEN
+          LMAXI=MAX(LMAXI,J)
+          LLIGN=J
+          IF (J .GT. (LONGLI - 64)) THEN
+            LONGLI = LONGLI * 2
+            SEGADJ,SLIGNE
+C           On recommence la lecture de la ligne
+            BACKSPACE(UNIT=IUCSV,IOSTAT=IOSTA1,ERR=989)
+            IF (IOSTA1 .NE. 0) GOTO 989
+            NUMLIG = NUMLIG - 1
+            GOTO 10
+          ENDIF
+          GOTO 111
+        ENDIF
+      ENDDO
+      GOTO 10
+
+ 111  CONTINUE
+      IF (Separa .EQ. ' ') THEN
+        DO J=1,LLIGN
+C         Detection en partant du debut du premier caractere qui n'est pas ' '
+          IF (LignFi(J:J) .NE. ' ') THEN
+            IDEBLI=J
+            GOTO 112
+          ENDIF
+        ENDDO
+        GOTO 10
+      ENDIF
+
+ 112   CONTINUE
+C     Cas ou la ligne n'est pas vide
+      NBLIGN = NBLIGN + 1
+
+C     Compte le nombre de separateurs, Les separateurs ' ' consecutifs sont ignorés
+      NBSEPA=0
+      IDEB=IDEBLI
+      IFIN=IDEB
+      DO J=IDEBLI,LLIGN
+        IF (NBLIGN .EQ. 1) THEN
+C         Cas de la premiere ligne
+          IF (LignFi(J:J) .EQ. Separa) THEN
+            NBSEPI = NBSEPI + 1
+            IF (LignFi(J-1:J-1) .EQ. Separa .AND. Separa .EQ. ' ') THEN
+              NBSEPI = NBSEPI - 1
+            ENDIF
+          ENDIF
+        ELSE
+C         Cas des autres lignes
+          IF (LignFi(J:J) .EQ. Separa) THEN
+            NBSEPA = NBSEPA + 1
+            IF (LignFi(J-1:J-1) .EQ. Separa .AND. Separa .EQ. ' ') THEN
+              NBSEPA = NBSEPA - 1
+            ENDIF
+          ENDIF
+        ENDIF
+      ENDDO
+
+C          PRINT *,'IDEBLI,LLIGN,NBSEPI,NBSEPA,NBLIGN',
+C     &             IDEBLI,LLIGN,NBSEPI,NBSEPA,NBLIGN
+
+C     Test sur le nombre de colonnes lues
+      IF (NBLIGN .EQ. 1) THEN
+        NBLR=NBSEPI+1
+        SEGADJ,SLISLR
+C       Creation des SEGMENTS DES LISTREELS
+        JG=INCJG
+        DO J=1,NBLR
+          SEGINI,MLREEL
+          LISTLR(J)=MLREEL
+        ENDDO
+      ENDIF
+
+C Ajustement des LISTREELS a la volee
+      IF ( NBLIGN .GT. JG) THEN
+        INCJG = INCJG * ICOEF
+        JG=NBLIGN + INCJG
+        DO J=1,NBLR
+          MLREEL=LISTLR(J)
+          SEGADJ,MLREEL
+        ENDDO
+      ENDIF
+
+C Remplissage des LISTREELS avec les valeurs lues
+      IDEB=IDEBLI
+      IFIN=IDEB
+      IDLRRE=0
+      DO 113 J=IDEBLI,LLIGN
+        IF (LignFi(J-1:J-1).EQ.Separa .AND. (Separa.EQ.' ')) THEN
+          GOTO 113
+        ELSEIF     (LignFi(J:J) .EQ. Separa) THEN
+          IFIN=J-1
+        ELSEIF (J .EQ. LLIGN) THEN
+          IFIN=LLIGN
+        ELSE
+          GOTO 113
+        ENDIF
+
+        IDLRRE = IDLRRE + 1
+        READ(LignFi(IDEB:IFIN),*,ERR=989,IOSTAT=IOSTA1) FlotLu
+        IF (IOSTA1 .NE. 0) THEN
+C          PRINT*,NUMLIG,':',LignFi,':',LignFi(IDEB:IFIN)
+          GOTO 989
+        ENDIF
+C        PRINT *,FlotLu,LignFi(IDEB:IFIN),IDLRRE,NBLIGN
+
+        IF (IDLRRE .GT. NBLR) THEN
+          CALL ERREUR(217)
+          RETURN
+        ENDIF
+        MLREEL=LISTLR(IDLRRE)
+        PROG(NBLIGN)=FlotLu
+        IDEB=J+1
+ 113  CONTINUE
+
+C     Lecture d'une nouvelle ligne
+      GOTO 10
+
+
+100   CONTINUE
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+CC                        FIN LECTURE FICHIER                         CC
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Creation de la table VIDE de sortie
+      M=0
+      SEGINI,MTABLE
+      DO J=1,NBLR
+        MLREEL=LISTLR(J)
+
+C       Ajustement des LISTREELS et ecriture dans la TABLE
+        IF ( NBLIGN .LT. MLREEL.PROG(/1)) THEN
+          JG=NBLIGN
+          SEGADJ,MLREEL
+        ENDIF
+        CALL ECCTAB(MTABLE,'ENTIER  ',J,REAL(0.D0),'RIEN',.FALSE.,0,
+     &                  'LISTREEL',0,REAL(0.D0),'RIEN',.FALSE.,MLREEL)
+        IF (IERR .NE. 0 ) RETURN
+      SEGDES,MLREEL
+      ENDDO
+
+      SEGDES,MTABLE
+      SEGSUP,SLISLR,SLIGNE
+
+C     Ecriture du resultat en sortie
+      CALL ECROBJ('TABLE   ',MTABLE)
+      IF (IERR .NE. 0 ) RETURN
+
+ 990  CONTINUE
+      RETURN
+
+ 989  CONTINUE
+      INTERR(1)=NUMLIG
+      CALL ERREUR(1069)
+      RETURN
+      END
+
+

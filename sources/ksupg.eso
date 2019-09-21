@@ -1,0 +1,763 @@
+C KSUPG     SOURCE    CB215821  19/03/20    21:15:09     10165
+C KSUPG     SOURCE    MAGN      97/07/19    21:18:18     2765
+      SUBROUTINE KSUPG(FN,GR,PG,XYZ,HR,PGSQ,RPG,
+     & NES,NP,NPG,IAXI,XCOOR,
+     & WT,WS,HK,PGSK,RPGK,AIRE,
+     & UMJ,DUMJ,KDEB,KFIN,LRV,NPX,NPGX,
+     & TN,IPADT,UN,IPADU,NPTD,NEL,ANUK,
+     & IDCEN,LE,
+     & AL,AH,AP,
+     & DTM1,DT,DTT1,DTT2,DIAEL,NUEL)
+C--------------------------------------------------------------------
+C Calcul des fonctions tests associées à la formulation Eléments
+C Finis Petrov-Galerkin afin de stabiliser les termes de convection.
+C On en profite pour calculer des temps caractéristiques.
+C--------------------------------------------------------------------
+C Cette subroutine étant écrite en fortran pur, certains arguments
+C servent uniquement au dimensionnement des tableaux.
+C Afin de doper les calculs, on decoupe la boucle sur les éléments
+C par paquets afin de bénéficier à fond de la vectorisation.
+C--------------------------------------------------------------------
+C
+C--------------------------
+C Paramètre Entrée/Sortie :
+C--------------------------
+C
+C  /S FN     : Fonction de forme associé à la transformation géométrique
+C  /S GR     : Gradient de FN dans l'élément de référence
+C  /S PG     : Poids d'intégration associé à chaque point de Gauss
+C  /S XYZ    : Coordonnées des sommets de l'élément
+C  /S HR     : Gradient des fonctions de forme dans l'élément courant
+C  /S PGSQ   : Produit du poids d'intégration par detJ
+C  /S RPG    : Rayon associé à chaque point de Gauss (cas axisymétrique)
+C
+C E/  NES    : Dimension en espace du problème traité (2 en 2D et 3 en 3D)
+C E/  NP     : Nombre de points support de ddl pour l'élément considéré
+C E/  NPG    : Nombre de points de Gauss
+C E/  IAXI   : Précise l'axe de symétrie dans le cas axisymétrique
+C              (en fait l'axe de symétrie est toujours y -> IAXI=2)
+C E/  XCOOR  : Coordonnées de l'ensemble des points (voir SMCOORD.INC)
+C              Petrov-Galerkin choisi pour stabiliser la convection
+C              Petrov-Galerkin choisi pour stabiliser la convection
+C  /S HK     : Gradient de FN dans l'élément courant
+C  /S PGSK   : Produit du poids d'intégration par detJ
+C  /S RPGK   : Rayon associé à chaque point de Gauss (cas axisymétrique)
+C  /S AIRE   : Volume de chaque élément
+C  /S UMJ    : Vitesse servant à la convection en chaque point de Gauss
+C  /S DUMJ   : Gradient de Vitesse servant en formulation conservative
+C E/  KDEB   : Indice du début de la fenetre
+C E/  KFIN   : Indice de fin de la fenetre
+C E/  LRV    : Dimension de la fenetre
+C E/  NPX    : Nombre de points maximum par élément
+C E/  NPGX   : Nombre de points de Gauss maximum
+C E/  TN     : Inconnue transportée au pas de temps précédent
+C E/  IPADT  : Correspondance numérotation locale et globale pour les
+C              points SOMMET : J=LECT(I) : le point numéro I est rangé
+C              en Jème position   pour le CHAMP TN
+C E/  UN     : Champ de vitesse transportant aux sommets des éléments
+C E/  IPADU  : Correspondance numérotation locale et globale pour les
+C              points SOMMET : J=LECT(I) : le point numéro I est rangé
+C              en Jème position   pour le CHAMP UN
+C E/  NPTD   : Nombre de points sous-tendant le spg associé à UN
+C E/  NEL    : Nombre de points sous-tendant le spg associé à XXDXDY
+C E/  ANUK   : Champ contenant le coefficient de diffusion (diffusivité
+C              pour l'énergie, rapport viscosité sur densité pour qdm)
+C E/  IDCEN  : Contient le schéma associé au terme convectif
+C              (1=CENTREE 2=SUPGDC 3=SUPG 4=TVISQUEUX 5=CNG)
+C E/  LE     : Maillage de la zone considérée
+C E/  AL     : Première composante de XXDXDY (longueur carac. en x)
+C E/  AH     : Deuxième composante de XXDXDY (longueur carac. en y)
+C E/  AP     : Troiième composante de XXDXDY (longueur carac. en z)
+C E/  DTM1   : Pas de temps imposé
+C E/S DT     : Pas de temps
+C  /S DTT1   : Temps caractéristique associé à la diffusion/convection
+C  /S DTT2   : Temps caractéristique associé à la diffusion
+C  /S DIAEL  : Longueur carac. de l'élément le plus pénalisant pour dt
+C  /S NUEL   : Numéro de l'élément le plus pénalisant pour dt
+C
+C--------------------------------------------------------------------
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+-INC CCOPTIO
+-INC CCREEL
+      DIMENSION IPADT(*),IPADU(*),LE(NP,NEL)
+
+      DIMENSION XCOOR(*)
+      DIMENSION UN(NPTD,IDIM),TN(*)
+      DIMENSION ANUK(LRV)
+
+      DIMENSION FN(NP,NPG),GR(IDIM,NP,NPG),PG(NPG),XYZ(IDIM,NP)
+      DIMENSION HR(IDIM,NP,NPG),PGSQ(NPG),RPG(NPG)
+      DIMENSION WT(LRV,NPX,NPGX),WS(LRV,NPX,NPGX),HK(LRV,3,NPX,NPGX)
+      DIMENSION PGSK(LRV,NPGX),RPGK(LRV,NPGX),AIRE(LRV)
+C
+      PARAMETER (LRV1=64,NPGX1=64)
+      DIMENSION AL(LRV),AH(LRV),AP(LRV)
+      DIMENSION UM(LRV1),UMI(LRV1,3),BMI(LRV1),TOI1(LRV1),TOI2(LRV1)
+      DIMENSION GRAD(LRV1,3,NPGX1),UMJ(LRV,3,NPG),DUMJ(LRV,3,NPG)
+      DIMENSION UP(LRV1,NPGX1),UPI(LRV1,3,NPGX1)
+      DIMENSION BM(LRV1,NPGX1),BP(LRV1,NPGX1)
+      DIMENSION TO1(LRV1,NPGX1),TO2(LRV1,NPGX1)
+      DIMENSION CXT(LRV1,NPGX1),CYT(LRV1,NPGX1),CZT(LRV1,NPGX1)
+C     Pas utilise en mars 2019 : commentaire
+C      DIMENSION CXY(LRV1,NPGX1),CXZ(LRV1,NPGX1),CYZ(LRV1,NPGX1)
+      DIMENSION AL2(LRV1),AH2(LRV1),AP2(LRV1),XMB(LRV1)
+C
+      CC0 = 1.D0
+
+C     Initialisation par CB215821 sinon NAN...
+      DT  =-1.D0
+      DTT1=-1.D0
+      DTT2=-1.D0
+
+      IF (LRV.NE.LRV1)  CALL ARRET(0)
+      IF (NPG.GT.NPGX1) CALL ARRET(0)
+C
+C- Pour les éléments de la fenetre KDEB:KFIN initialisations des
+C- données associées à l'élément fini utilisé : fonctions de forme,
+C- gradients des fonctions de forme, aire de l'élément, poids des
+C- points de Gauss et rayon des points de Gauss pour le cas axi.
+C
+      DO 100 K=KDEB,KFIN
+         KP = K - KDEB + 1
+         DO 20 I=1,NP
+            J = LE(I,K)
+            DO 10 N=1,IDIM
+               XYZ(N,I) = XCOOR((J-1)*(IDIM+1)+N)
+  10        CONTINUE
+  20     CONTINUE
+         CALL CALJBC(FN,GR,PG,XYZ,HR,PGSQ,RPG,
+     &               NES,IDIM,NP,NPG,IAXI,AIRE(KP))
+C
+         DO 50 L=1,NPG
+            DO 40 N=1,IDIM
+               DO 30 I=1,NP
+                  HK(KP,N,I,L) = HR(N,I,L)
+  30           CONTINUE
+  40        CONTINUE
+            PGSK(KP,L) = PGSQ(L)
+            RPGK(KP,L) = RPG(L)
+  50    CONTINUE
+ 100  CONTINUE
+C
+C- Initialisations des variables
+C
+      DO 120 N=1,IDIM
+         DO 110 K=KDEB,KFIN
+            KP = K - KDEB + 1
+            UMI(KP,N) = XPETIT
+ 110     CONTINUE
+ 120  CONTINUE
+C
+      DO 150 L=1,NPG
+         DO 140 N=1,IDIM
+            DO 130 K=KDEB,KFIN
+               KP = K - KDEB + 1
+               UMJ(KP,N,L)  = XPETIT
+               DUMJ(KP,N,L) = XPETIT
+               UPI(KP,N,L)  = XPETIT
+               GRAD(KP,N,L) = XPETIT
+ 130        CONTINUE
+ 140     CONTINUE
+ 150  CONTINUE
+C
+C- Calcul en chaque élément, pour chaque point de Gauss
+C-    UMJ  : Vitesse
+C-    GRAD : Gradient de l'inconnue scalaire au pas de temps précédent
+C- Le gradient n'est à calculer que pour l'option SUPGDC
+C
+      IF (IDCEN.EQ.2) THEN
+      DO 190 N=1,IDIM
+         DO 180 L=1,NPG
+            DO 170 I=1,NP
+               DO 160 K=KDEB,KFIN
+                  KP = K - KDEB + 1
+                  NF = IPADU(LE(I,K))
+                  NT = IPADT(LE(I,K))
+                  UMJ(KP,N,L)  = UMJ(KP,N,L)  + UN(NF,N)*FN(I,L)
+                  DUMJ(KP,N,L) = DUMJ(KP,N,L) + UN(NF,N)*HK(KP,N,I,L)
+                  GRAD(KP,N,L) = GRAD(KP,N,L) + TN(NT)  *HK(KP,N,I,L)
+ 160           CONTINUE
+ 170        CONTINUE
+ 180     CONTINUE
+ 190  CONTINUE
+      ELSE
+      DO 230 N=1,IDIM
+         DO 220 L=1,NPG
+            DO 210 I=1,NP
+               DO 200 K=KDEB,KFIN
+                  KP = K - KDEB + 1
+                  NF = IPADU(LE(I,K))
+                  UMJ(KP,N,L)  = UMJ(KP,N,L)  + UN(NF,N)*FN(I,L)
+                  DUMJ(KP,N,L) = DUMJ(KP,N,L) + UN(NF,N)*HK(KP,N,I,L)
+ 200           CONTINUE
+ 210        CONTINUE
+ 220     CONTINUE
+ 230  CONTINUE
+      ENDIF
+C
+C- Calcul pour chaque élément de
+C-    UMI : Vitesse moyenne
+C- pour les options SUPGDC et SUPG
+C
+      IF (IDCEN.EQ.2.OR.IDCEN.EQ.3) THEN
+      DO 260 L=1,NPG
+         DO 250  N=1,IDIM
+            DO 240 K=KDEB,KFIN
+               KP = K - KDEB + 1
+               UMI(KP,N) = UMI(KP,N) + UMJ(KP,N,L)*PGSK(KP,L)/AIRE(KP)
+ 240        CONTINUE
+ 250     CONTINUE
+ 260  CONTINUE
+      ENDIF
+C
+C
+C====================================================================
+C                                Cas 2D
+C====================================================================
+C
+C
+      IF (IDIM.EQ.2) THEN
+C
+C- Calcul pour chaque élément de
+C-    UM  : Norme de la vitesse moyenne
+C-    BMI : Inverse d'un temps caractéristique associé à la convection
+C- pour l'option SUPGDC et SUPG
+C
+      IF (IDCEN.EQ.2.OR.IDCEN.EQ.3) THEN
+      DO 1000 K=KDEB,KFIN
+         KP = K - KDEB + 1
+         UM(KP)  = UMI(KP,1)*UMI(KP,1) + UMI(KP,2)*UMI(KP,2)
+         UM(KP)  = SQRT(UM(KP))
+         BMIX    = UMI(KP,1) / AL(KP)
+         BMIY    = UMI(KP,2) / AH(KP)
+         BMI(KP) = BMIX*BMIX + BMIY*BMIY
+         BMI(KP) = SQRT(BMI(KP)) + XPETIT
+ 1000 CONTINUE
+      ENDIF
+C
+C- Calcul de facteur géométrique associé à chaque élément
+C
+      DO 1010 K=KDEB,KFIN
+         KP=K-KDEB+1
+         AL2(KP) = 1.D0 / AL(KP) / AL(KP)
+         AH2(KP) = 1.D0 / AH(KP) / AH(KP)
+         XMB(KP) = (AL(KP)+AH(KP)) / 2.D0
+ 1010 CONTINUE
+C
+C- Calcul en chaque élément, pour chaque point de Gauss de
+C-     GRAD : vecteur unitaire porté par le gradient du champ scalaire
+C-     UP   : projection de la vitesse sur la direction donnée par GRAD
+C-     UPI  : vecteur UP*GRAD
+C-     BM   : inverse d'un temps caractéristique basé sur la vitesse
+C-     BP   : idem BP mais en considérant la projection de V sur GRAD
+C- pour l'option SUPGDC
+C
+      IF (IDCEN.EQ.2) THEN
+      DO 1030 L=1,NPG
+         DO 1020 K=KDEB,KFIN
+            KP = K - KDEB + 1
+            AX = GRAD(KP,1,L)*GRAD(KP,1,L) + GRAD(KP,2,L)*GRAD(KP,2,L)
+            AX = SQRT(AX) + XPETIT
+            GRAD(KP,1,L) = GRAD(KP,1,L) / AX
+            GRAD(KP,2,L) = GRAD(KP,2,L) / AX
+            UP(KP,L)     = GRAD(KP,1,L) * UMJ(KP,1,L)
+     &                   + GRAD(KP,2,L) * UMJ(KP,2,L)
+            UPI(KP,1,L)  = GRAD(KP,1,L) * UP(KP,L)
+            UPI(KP,2,L)  = GRAD(KP,2,L) * UP(KP,L)
+ 1020    CONTINUE
+ 1030 CONTINUE
+      DO 1050 L=1,NPG
+         DO 1040 K=KDEB,KFIN
+            KP  = K - KDEB + 1
+            BMX = UMJ(KP,1,L) / AL(KP)
+            BMY = UMJ(KP,2,L) / AH(KP)
+            BPX = UPI(KP,1,L) / AL(KP)
+            BPY = UPI(KP,2,L) / AH(KP)
+            BM(KP,L) = BMX*BMX + BMY*BMY
+            BP(KP,L) = BPX*BPX + BPY*BPY
+            BM(KP,L) = SQRT(BM(KP,L)) + XPETIT
+            BP(KP,L) = SQRT(BP(KP,L)) + XPETIT
+ 1040    CONTINUE
+ 1050 CONTINUE
+      ENDIF
+C
+C-----------------------------
+C- DECENTREMENT suivant IDCEN
+C-----------------------------
+C     On calcule dans chaque cas TO1 et TO2 ainsi que le tenseur
+C     associé à la viscosité numérique afin d'évaluer le pas de
+C     temps de stabilité pour les schémas explicites.
+C
+C----------
+C CENTREE :
+C----------
+      IF (IDCEN.EQ.1) THEN
+         SI1 = 0.D0
+         SI2 = 0.D0
+         DO 1110 L=1,NPG
+            DO 1100 K=KDEB,KFIN
+               KP = K - KDEB + 1
+               TO1(KP,L) = 0.D0
+               TO2(KP,L) = 0.D0
+               CXT(KP,L) = 0.D0
+               CYT(KP,L) = 0.D0
+C     Pas utilise en mars 2019 : commentaire
+C               CXY(KP,L) = 0.D0
+ 1100       CONTINUE
+ 1110    CONTINUE
+C---------
+C SUPGDC : Base théorique dans : A New FE formulation for computational
+C fluid dynamics, II Beyond SUPG, HUGHES et al., in Comp.Meth.Appl.Mech.
+C Eng., vol 54, pp 341-355 (1986).
+C---------
+      ELSEIF (IDCEN.EQ.2) THEN
+         SI1 = 1.D0
+         SI2 = 1.D0
+         DO 1130 L=1,NPG
+            DO 1120 K=KDEB,KFIN
+               KP = K - KDEB + 1
+C
+C- Approximation "doublement asymptotique" basée sur la vitesse moyenne
+C-    HMK  : Distance basé sur la vitesse moyenne
+C-    ALFA : Peclet de maille basé sur la vitesse moyenne
+C
+               HMK = 2.D0 * UM(KP) / BM(KP,L)
+               ALFA = UM(KP) * HMK / ANUK(KP) / 2.D0
+               IF (ALFA.GT.3.D0) THEN
+                  AKSI = 1.D0
+               ELSE
+                  AKSI = ALFA / 3.D0
+               ENDIF
+               CCT     = AKSI / BM(KP,L)
+               XMB(KP) = HMK
+C
+C- Approximation "doublement asymptotique" basée sur la projection de
+C- la vitesse sur le gradient du champ scalaire
+C-    HMK  : Distance basée sur la vitesse projetée
+C-    ALFA : Peclet de maille basé sur la vitesse projetée
+C
+               HPK  = 2.D0 * UP(KP,L) / BP(KP,L)
+               ALFA = UP(KP,L) * HPK / ANUK(KP) / 2.D0
+               IF (ALFA.GT.3.D0) THEN
+                  AKSI = 1.D0
+               ELSE
+                  AKSI = ALFA / 3.D0
+               ENDIF
+               CCP = AKSI / BP(KP,L)
+C
+               CPT = CCP - CCT
+               IF (CPT.GE.0.D0) then
+                  CC2 = CPT * CC0
+               ELSE
+                  CC2 = 0.D0
+               ENDIF
+C
+               TO1(KP,L) = CCT
+               TO2(KP,L) = CC2
+               CXT(KP,L) = UMJ(KP,1,L)*UMJ(KP,1,L)*CCT
+     &                   + UPI(KP,1,L)*UPI(KP,1,L)*CC2
+               CYT(KP,L) = UMJ(KP,2,L)*UMJ(KP,2,L)*CCT
+     &                   + UPI(KP,2,L)*UPI(KP,2,L)*CC2
+
+C     Pas utilise en mars 2019 : commentaire
+C              CXY(KP,L) = UMJ(KP,1,L)*UMJ(KP,2,L)*CCT
+     &                   + UPI(KP,1,L)*UPI(KP,2,L)*CC2
+
+ 1120       CONTINUE
+ 1130    CONTINUE
+C-------
+C SUPG :
+C-------
+      ELSEIF (IDCEN.EQ.3) THEN
+         SI1 = 1.D0
+         SI2 = 1.D0
+         DO 1150 L=1,NPG
+            DO 1140 K=KDEB,KFIN
+               KP = K - KDEB + 1
+C
+C- Approximation "doublement asymptotique" basée sur la vitesse moyenne
+C-    HMK  : Distance basé sur la vitesse moyenne
+C-    ALFA : Peclet de maille basé sur la vitesse moyenne
+C
+               HMK  = 2.D0 * UM(KP) / BMI(KP)
+               ALFA = UM(KP) * HMK / ANUK(KP) / 2.D0
+               IF (ALFA.GT.3.D0) THEN
+                  AKSI = 1.D0
+               ELSE
+                  AKSI = ALFA / 3.D0
+               ENDIF
+               CCT     = AKSI / BMI(KP)
+               XMB(KP) = HMK
+C
+               TO1(KP,L) = CCT
+               TO2(KP,L) = 0.D0
+               CXT(KP,L) = UMJ(KP,1,L)*UMJ(KP,1,L)*CCT
+               CYT(KP,L) = UMJ(KP,2,L)*UMJ(KP,2,L)*CCT
+
+C     Pas utilise en mars 2019 : commentaire
+C              CXY(KP,L) = UMJ(KP,1,L)*UMJ(KP,2,L)*CCT
+ 1140       CONTINUE
+ 1150    CONTINUE
+C-------------------
+C Tenseur Visqueux :
+C-------------------
+      ELSEIF (IDCEN.EQ.4) THEN
+         SI1  =-1.D0
+         SI2  = 1.D0
+         DT19 = DTM1 * 0.5D0
+         DO 1170 L=1,NPG
+            DO 1160 K=KDEB,KFIN
+               KP = K - KDEB + 1
+               TO1(KP,L) = DT19
+               TO2(KP,L) = 0.D0
+               CXT(KP,L) = UMJ(KP,1,L)*UMJ(KP,1,L)*DT19
+               CYT(KP,L) = UMJ(KP,2,L)*UMJ(KP,2,L)*DT19
+
+C     Pas utilise en mars 2019 : commentaire
+C              CXY(KP,L) = UMJ(KP,1,L)*UMJ(KP,2,L)*DT19
+ 1160       CONTINUE
+ 1170    CONTINUE
+C-----------------------------
+C Crank Nicholson généralisé :
+C-----------------------------
+      ELSEIF (IDCEN.EQ.5) THEN
+         SI1  =-1.D0
+         SI2  = 1.D0
+         DT19 = DTM1/6.D0
+         DO 1190 L=1,NPG
+            DO 1180 K=KDEB,KFIN
+               KP = K - KDEB + 1
+               TO1(KP,L) = DT19
+               TO2(KP,L) = 0.D0
+ 1180       CONTINUE
+ 1190    CONTINUE
+      ENDIF
+C
+C---------------------------
+C Pas de temps de stabilité
+C---------------------------
+C
+C La viscosité utilisée dans l'évaluation des pas de temps de stabilité
+C explicite ajoute à la viscosité physique la viscosité numérique :
+C   DT1 : Correspond à une CFL de 1 et un Peclet de maille de 1
+C               CFL=1 -> dx=Vdt  |
+C                                |-> dt=2D/V2
+C                Pe=1 -> dx=2D/V |
+C   DT2 : Correspond au pas de temps de stabilité lié à la diffusion
+C               FOU=1 -> dt=0.5 dx2/D
+C
+      IF (IDCEN.NE.5) THEN
+         DO 2010 L=1,NPG
+            DO 2000 K=KDEB,KFIN
+               KP  = K - KDEB + 1
+               DT0 = DT
+               DT1 = 2.D0 /
+     &             ( UMJ(KP,1,L)*UMJ(KP,1,L)/(CXT(KP,L)+ANUK(KP))
+     &             + UMJ(KP,2,L)*UMJ(KP,2,L)/(CYT(KP,L)+ANUK(KP)) )
+               DT2 = 0.5D0 /
+     &             ( (CXT(KP,L)+ANUK(KP))*AL2(KP)
+     &             + (CYT(KP,L)+ANUK(KP))*AH2(KP) )
+               IF (DT .LT. 0.D0) DT=DT1
+               IF (DT1.LT.DT)    DT=DT1
+               IF (DT2.LT.DT)    DT=DT2
+               IF (DT.NE.DT0) THEN
+                  DTT1  = DT1
+                  DTT2  = DT2
+                  DIAEL = XMB(KP)
+                  NUEL  = K
+               ENDIF
+ 2000       CONTINUE
+ 2010    CONTINUE
+      ENDIF
+C
+C---------------------------------------------------
+C Fonction test pour la formulation Petrov-Galerkin
+C---------------------------------------------------
+C   Ce qui est diffusion numérique en explicite se transforme en
+C   ajoutant de la viscosité numérique (Tenseurs visqueux et CNG).
+C       WS : Fonction test pour la partie explicite
+C
+      DO 2050 L=1,NPG
+      DO 2050 I=1,NP
+      DO 2050 K=KDEB,KFIN
+         KP = K - KDEB + 1
+         WT(KP,I,L) = FN(I,L) + SI1 *
+     &  (TO1(KP,L)*(UMJ(KP,1,L)*HK(KP,1,I,L)+UMJ(KP,2,L)*HK(KP,2,I,L))
+     &  +TO2(KP,L)*(UPI(KP,1,L)*HK(KP,1,I,L)+UPI(KP,2,L)*HK(KP,2,I,L)))
+         WS(KP,I,L) = FN(I,L) + SI2 *
+     &  (TO1(KP,L)*(UMJ(KP,1,L)*HK(KP,1,I,L)+UMJ(KP,2,L)*HK(KP,2,I,L))
+     &  +TO2(KP,L)*(UPI(KP,1,L)*HK(KP,1,I,L)+UPI(KP,2,L)*HK(KP,2,I,L)))
+ 2050 CONTINUE
+C
+C
+C====================================================================
+C                                Cas 3D
+C====================================================================
+C
+C
+      ELSEIF (IDIM.EQ.3) THEN
+      IF (IDCEN.EQ.2.OR.IDCEN.EQ.3) THEN
+      DO 5000 K=KDEB,KFIN
+         KP = K - KDEB + 1
+         UM(KP)  = UMI(KP,1)*UMI(KP,1)
+     &           + UMI(KP,2)*UMI(KP,2)
+     &           + UMI(KP,3)*UMI(KP,3)
+         UM(KP)  = SQRT(UM(KP))
+         BMIX    = UMI(KP,1) / AL(KP)
+         BMIY    = UMI(KP,2) / AH(KP)
+         BMIZ    = UMI(KP,3) / AP(KP)
+         BMI(KP) = BMIX*BMIX + BMIY*BMIY + BMIZ*BMIZ
+         BMI(KP) = SQRT(BMI(KP)) + XPETIT
+ 5000 CONTINUE
+      ENDIF
+*
+      DO 5010 K=KDEB,KFIN
+         KP=K-KDEB+1
+         AL2(KP) = 1.D0 / AL(KP) / AL(KP)
+         AH2(KP) = 1.D0 / AH(KP) / AH(KP)
+         AP2(KP) = 1.D0 / AP(KP) / AP(KP)
+         XMB(KP) = (AL(KP)+AH(KP)+AP(KP)) / 3.D0
+ 5010 CONTINUE
+*
+      IF (IDCEN.EQ.2) THEN
+      DO 5030 L=1,NPG
+         DO 5020 K=KDEB,KFIN
+            KP = K-KDEB+1
+            AX = GRAD(KP,1,L)*GRAD(KP,1,L)
+     &         + GRAD(KP,2,L)*GRAD(KP,2,L)
+     &         + GRAD(KP,3,L)*GRAD(KP,3,L)
+            AX = SQRT(AX) + XPETIT
+            GRAD(KP,1,L) = GRAD(KP,1,L) / AX
+            GRAD(KP,2,L) = GRAD(KP,2,L) / AX
+            GRAD(KP,3,L) = GRAD(KP,3,L) / AX
+            UP(KP,L)     = GRAD(KP,1,L) * UMJ(KP,1,L)
+     &                   + GRAD(KP,2,L) * UMJ(KP,2,L)
+     &                   + GRAD(KP,3,L) * UMJ(KP,3,L)
+            UPI(KP,1,L)  = GRAD(KP,1,L) * UP(KP,L)
+            UPI(KP,2,L)  = GRAD(KP,2,L) * UP(KP,L)
+            UPI(KP,3,L)  = GRAD(KP,3,L) * UP(KP,L)
+ 5020    CONTINUE
+ 5030 CONTINUE
+      DO 5050 L=1,NPG
+         DO 5040 K=KDEB,KFIN
+            KP = K-KDEB+1
+            BMX = UMJ(KP,1,L) / AL(KP)
+            BMY = UMJ(KP,2,L) / AH(KP)
+            BMZ = UMJ(KP,3,L) / AP(KP)
+            BPX = UPI(KP,1,L) / AL(KP)
+            BPY = UPI(KP,2,L) / AH(KP)
+            BPZ = UPI(KP,3,L) / AP(KP)
+            BM(KP,L) = BMX*BMX + BMY*BMY + BMZ*BMZ
+            BP(KP,L) = BPX*BPX + BPY*BPY + BPZ*BPZ
+            BM(KP,L) = SQRT(BM(KP,L)) + XPETIT
+            BP(KP,L) = SQRT(BP(KP,L)) + XPETIT
+ 5040    CONTINUE
+ 5050 CONTINUE
+      ENDIF
+C
+C-----------------------------
+C- DECENTREMENT suivant IDCEN
+C-----------------------------
+C
+C----------
+C CENTREE :
+C----------
+      IF (IDCEN.EQ.1) THEN
+         SI1= 0.D0
+         SI2= 0.D0
+         DO 5110 L=1,NPG
+            DO 5100 K=KDEB,KFIN
+               KP = K - KDEB + 1
+               TO1(KP,L) = 0.D0
+               TO2(KP,L) = 0.D0
+               CXT(KP,L) = 0.D0
+               CYT(KP,L) = 0.D0
+               CZT(KP,L) = 0.D0
+
+C     Pas utilise en mars 2019 : commentaire
+C              CXY(KP,L) = 0.D0
+C              CXZ(KP,L) = 0.D0
+C              CYZ(KP,L) = 0.D0
+ 5100       CONTINUE
+ 5110    CONTINUE
+C---------
+C SUPGDC :
+C---------
+      ELSEIF (IDCEN.EQ.2) THEN
+         SI1= 1.D0
+         SI2= 1.D0
+         DO 5130 L=1,NPG
+            DO 5120 K=KDEB,KFIN
+               KP   = K - KDEB + 1
+               HMK  = 2.D0 * UM(KP) / BM(KP,L)
+               ALFA = UM(KP)*HMK / ANUK(KP) / 2.D0
+               IF (ALFA.GT.3.D0) THEN
+                  AKSI = 1.D0
+               ELSE
+                  AKSI = ALFA / 3.D0
+               ENDIF
+               CCT     = AKSI / BM(KP,L)
+               XMB(KP) = HMK
+*
+               HPK  = 2.D0 * UP(KP,L) / BP(KP,L)
+               ALFA = UP(KP,L)*HPK / ANUK(KP) / 2.D0
+               IF (ALFA.GT.3.D0) THEN
+                  AKSI = 1.D0
+               ELSE
+                  AKSI = ALFA / 3.D0
+               ENDIF
+               CCP = AKSI / BP(KP,L)
+*
+               CPT=CCP-CCT
+               IF (CPT.GE.0.D0) then
+                  CC2 = CPT * CC0
+               ELSE
+                  CC2 = 0.D0
+               ENDIF
+*
+               TO1(KP,L) = CCT
+               TO2(KP,L) = CC2
+               CXT(KP,L) = UMJ(KP,1,L)*UMJ(KP,1,L)*CCT
+     &                   + UPI(KP,1,L)*UPI(KP,1,L)*CC2
+               CYT(KP,L) = UMJ(KP,2,L)*UMJ(KP,2,L)*CCT
+     &                   + UPI(KP,2,L)*UPI(KP,2,L)*CC2
+               CZT(KP,L) = UMJ(KP,3,L)*UMJ(KP,3,L)*CCT
+     &                   + UPI(KP,3,L)*UPI(KP,3,L)*CC2
+
+C     Pas utilise en mars 2019 : commentaire
+C              CXY(KP,L) = UMJ(KP,1,L)*UMJ(KP,2,L)*CCT
+C    &                   + UPI(KP,1,L)*UPI(KP,2,L)*CC2
+C              CXZ(KP,L) = UMJ(KP,1,L)*UMJ(KP,3,L)*CCT
+C    &                   + UPI(KP,1,L)*UPI(KP,3,L)*CC2
+C              CYZ(KP,L) = UMJ(KP,2,L)*UMJ(KP,3,L)*CCT
+C    &                   + UPI(KP,2,L)*UPI(KP,3,L)*CC2
+
+ 5120       CONTINUE
+ 5130    CONTINUE
+C-------
+C SUPG :
+C-------
+      ELSEIF (IDCEN.EQ.3) THEN
+         SI1= 1.D0
+         SI2= 1.D0
+         DO 5150 L=1,NPG
+            DO 5140 K=KDEB,KFIN
+               KP   = K - KDEB + 1
+               HMK  = 2.D0 * UM(KP) / BM(KP,L)
+               ALFA = UM(KP)*HMK / ANUK(KP) / 2.D0
+               IF (ALFA.GT.3.D0) THEN
+                  AKSI = 1.D0
+               ELSE
+                  AKSI = ALFA / 3.D0
+               ENDIF
+               CCT     = AKSI / BM(KP,L)
+               XMB(KP) = HMK
+               TO1(KP,L) = CCT
+               TO2(KP,L) = 0.D0
+               CXT(KP,L) = UMJ(KP,1,L)*UMJ(KP,1,L)*CCT
+               CYT(KP,L) = UMJ(KP,2,L)*UMJ(KP,2,L)*CCT
+               CZT(KP,L) = UMJ(KP,3,L)*UMJ(KP,3,L)*CCT
+
+C     Pas utilise en mars 2019 : commentaire
+C              CXY(KP,L) = UMJ(KP,1,L)*UMJ(KP,2,L)*CCT
+C              CXZ(KP,L) = UMJ(KP,1,L)*UMJ(KP,3,L)*CCT
+C              CYZ(KP,L) = UMJ(KP,2,L)*UMJ(KP,3,L)*CCT
+ 5140       CONTINUE
+ 5150    CONTINUE
+C-------------------
+C Tenseur Visqueux :
+C-------------------
+      ELSEIF (IDCEN.EQ.4) THEN
+         SI1  =-1.D0
+         SI2  = 1.D0
+         DT19 = DTM1 * 0.5D0
+         DO 5170 L=1,NPG
+            DO 5160 K=KDEB,KFIN
+               KP = K - KDEB + 1
+               TO1(KP,L) = DT19
+               TO2(KP,L) = 0.D0
+               CXT(KP,L) = UMJ(KP,1,L)*UMJ(KP,1,L)*DT19
+               CYT(KP,L) = UMJ(KP,2,L)*UMJ(KP,2,L)*DT19
+               CZT(KP,L) = UMJ(KP,3,L)*UMJ(KP,3,L)*DT19
+
+C     Pas utilise en mars 2019 : commentaire
+C               CXY(KP,L) = UMJ(KP,1,L)*UMJ(KP,2,L)*DT19
+C               CXZ(KP,L) = UMJ(KP,1,L)*UMJ(KP,3,L)*DT19
+C               CYZ(KP,L) = UMJ(KP,2,L)*UMJ(KP,3,L)*DT19
+ 5160       CONTINUE
+ 5170    CONTINUE
+C-----------------------------
+C Crank Nicholson généralisé :
+C-----------------------------
+      ELSEIF(IDCEN.EQ.5)THEN
+         SI1  =-1.D0
+         SI2  = 1.D0
+         DT19 = DTM1/6.D0
+         DO 5190 L=1,NPG
+            DO 5180 K=KDEB,KFIN
+               KP = K - KDEB + 1
+               TO1(KP,L) = DT19
+               TO2(KP,L) = 0.D0
+ 5180       CONTINUE
+ 5190    CONTINUE
+      ENDIF
+C
+C---------------------------
+C Pas de temps de stabilité
+C---------------------------
+C
+      IF (IDCEN.NE.5) THEN
+         DO 5210 L=1,NPG
+            DO 5200 K=KDEB,KFIN
+               KP  = K - KDEB + 1
+               DT0 = DT
+               DT1 = 2.D0 /
+     &              ( UMJ(KP,1,L)*UMJ(KP,1,L)/(CXT(KP,L)+ANUK(KP))
+     &              + UMJ(KP,2,L)*UMJ(KP,2,L)/(CYT(KP,L)+ANUK(KP))
+     &              + UMJ(KP,3,L)*UMJ(KP,3,L)/(CZT(KP,L)+ANUK(KP)) )
+
+               DT2 = 0.5D0 /
+     &              ( (CXT(KP,L)+ANUK(KP))*AL2(KP)
+     &              + (CYT(KP,L)+ANUK(KP))*AH2(KP)
+     &              + (CZT(KP,L)+ANUK(KP))*AP2(KP) )
+
+               IF (DT1.LT.DT) DT=DT1
+               IF (DT2.LT.DT) DT=DT2
+               IF (DT.NE.DT0) THEN
+                   DTT1  = DT1
+                   DTT2  = DT2
+                   DIAEL = XMB(KP)
+                   NUEL  = K
+               ENDIF
+ 5200       CONTINUE
+ 5210    CONTINUE
+      END IF
+C
+C---------------------------------------------------
+C Fonction test pour la formulation Petrov-Galerkin
+C---------------------------------------------------
+C
+      DO 5220 L=1,NPG
+      DO 5220 I=1,NP
+      DO 5220 K=KDEB,KFIN
+      KP = K - KDEB + 1
+      WT(KP,I,L)= FN(I,L) + SI1
+     &                    * ( TO1(KP,L) * ( UMJ(KP,1,L)*HK(KP,1,I,L)
+     &                                    + UMJ(KP,2,L)*HK(KP,2,I,L)
+     &                                    + UMJ(KP,3,L)*HK(KP,3,I,L) )
+     &                      + TO2(KP,L) * ( UPI(KP,1,L)*HK(KP,1,I,L)
+     &                                    + UPI(KP,2,L)*HK(KP,2,I,L)
+     &                                    + UPI(KP,3,L)*HK(KP,3,I,L) ))
+      WS(KP,I,L)= FN(I,L) + SI2
+     &                    * ( TO1(KP,L) * ( UMJ(KP,1,L)*HK(KP,1,I,L)
+     &                                    + UMJ(KP,2,L)*HK(KP,2,I,L)
+     &                                    + UMJ(KP,3,L)*HK(KP,3,I,L))
+     &                      + TO2(KP,L) * ( UPI(KP,1,L)*HK(KP,1,I,L)
+     &                                    + UPI(KP,2,L)*HK(KP,2,I,L)
+     &                                    + UPI(KP,3,L)*HK(KP,3,I,L) ))
+ 5220 CONTINUE
+      ENDIF
+      END
+
+

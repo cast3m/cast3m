@@ -1,0 +1,713 @@
+#!/bin/bash
+
+#Recuperation des variables d'environnement
+if [ "${CASTEM_VERSION}" == "" ]   ; then CASTEM_VERSION=19                                     ; fi
+if [ "${CASTEM_REP}" == "" ]       ; then CASTEM_REP="$( cd "$( dirname "${BASH_SOURCE[0]}")/.." && pwd )"; fi
+source ${CASTEM_REP}/bin/environnement_Cast3M${CASTEM_VERSION}
+
+# Definition de variables
+castX="bin_Cast3M_${CASTEM_PLATEFORME}_${LICENCETYPE}_${BIT}_${CASTEM_VERSION}"
+castX_Local="cast_${BIT}_${CASTEM_VERSION}"
+AIDE="FAUX"          # Si VRAI permet d'afficher le manuel -Fr- du script
+HELP="FAUX"          # Si VRAI permet d'afficher le manuel -En- du script
+BAD_ARG="FAUX"       # Si VRAI permet d'afficher une sortie avec erreur d'argument
+LISTE_BAD_ARG=""     # Contient la liste des arguments qui ne sont pas corrects
+NO_ARG="FAUX"        # Si VRAI signifie que le script est lance sans arguments
+NEW_FICHIER="FAUX"   # Si VRAI le fichier d'entree est cree et contiendra les commandes tapees en interactif
+C_UTIL="FAUX"        # Si VRAI permet de faire UTILPROC et UTILNOTI
+DEBUG_MODE="FAUX"    # Si VRAI lance Cast3M en mode debug
+VALGRIND_MODE="FAUX" # Si VRAI lance Cast3M dans l'environnement Valgrind
+GET_FICHIER="FAUX"   # Si VRAI signifie que l'on souhaite recuperer une liste de dgibi, sources, procedures ou une notices
+MEMDEF="FAUX"        # Si VRAI signifie que l'on bride la memoire disponible
+VALMEM=0
+MEMLIB="FAUX"
+VALLIBRE=0
+ZERMEM="FAUX"
+SWAP="VRAI"
+CPUDEF="FAUX"        # Si VRAI signifie que l'on bride le nombre de CPUs
+VALCPU=0
+TEST="FAUX"          # Si VRAI permet de lancer l'ensemble de la base de donnees
+RETURN=0
+ETOILE="__________________________________________________________________________"
+
+
+# Definition de quelques limites
+ulimit -s 2048
+ulimit -c 0
+
+export DIRLIC="${CASTEM_REP}/licence"
+export ESOPE_PARAM="NTRK=1,LTRK=1" # NTRK=:  Nombre de blocs de debordement
+                                   # LTRK=:  Taille des blocs du fichier de debordement
+                                   # ESOPE=:(Optionnel) Memoire Virtuelle reservee au lancement de Cast3M en MOTS (1 MOT = 4 octets en 32-bits et 8 octets en 64-bits)
+export ESOPE_TEMP="/tmp"
+export MIF_PATH="${CASTEM_REP}/header"
+
+export CASTEM_ERREUR="${CASTEM_REP}/data/GIBI.ERREUR"
+export CASTEM_NOTICE="${CASTEM_REP}/data/CAST3M.MASTER"
+export CASTEM_PROC="${CASTEM_REP}/data/CAST3M.PROC"
+
+# Teste le nombre d'arguments d'entree
+COMPT_DGI_1=0
+if [ "$#" == "0" ]; then
+  # Cas du nombre d'arguments nul
+  NO_ARG="VRAI"
+
+else
+  # Boucle sur les arguments
+  LISTE_DGI_1=""
+  LISTE_PRO_1=""
+  LISTE_NOT_1=""
+  LISTE_ESO_1=""
+  LISTE_NUM='^[0-9]+$'
+
+  SORT_WHI="FAUX"
+
+  while [ "${SORT_WHI}" == "FAUX" ]; do
+    arg_num1=$1
+    arg_num2=$2
+    SORT_WHI="TRUE"
+
+    # tentative lecture d'une option valide
+    if [ "${arg_num1}" == "--aide" ]; then
+      AIDE="VRAI";
+
+    elif [ "${arg_num1}" == "--help" ]; then
+      HELP="VRAI"
+
+    elif [ "${arg_num1}" == "-u" ]; then
+      C_UTIL="VRAI"
+      SORT_WHI="FAUX"
+      shift
+
+    elif [ "${arg_num1}" == "-d" ]; then
+      DEBUG_MODE="VRAI"
+      SORT_WHI="FAUX"
+      shift
+
+    elif [ "${arg_num1}" == "-V" ]; then
+      VALGRIND_MODE="VRAI"
+      SORT_WHI="FAUX"
+      shift
+
+    elif [ "${arg_num1}" == "-r" ]; then
+      GET_FICHIER="VRAI"
+      SORT_WHI="FAUX"
+      shift
+
+    elif [ "${arg_num1}" == "-test" ]; then
+      TEST="VRAI"
+      SORT_WHI="FAUX"
+      shift
+
+    elif [ "${arg_num1}" == "-MEM" ]; then
+      MEMDEF="VRAI"
+      VALMEM=${arg_num2}
+      SORT_WHI="FAUX"
+      shift
+      shift
+
+    elif [ "${arg_num1}" == "-LIBRE" ]; then
+      MEMLIB="VRAI"
+      VALLIBRE=${arg_num2}
+      SORT_WHI="FAUX"
+      shift
+      shift
+
+    elif [ "${arg_num1}" == "-ZERMEM" ]; then
+      ZERMEM="VRAI"
+      SORT_WHI="FAUX"
+      shift
+
+    elif [ "${arg_num1}" == "-NOSWAP" ]; then
+      SWAP="FAUX"
+      SORT_WHI="FAUX"
+      shift
+
+    elif [ "${arg_num1}" == "-NCPU" ]; then
+      CPUDEF="VRAI"
+      if [[ ${arg_num2} =~ ${LISTE_NUM} ]] && [ ${arg_num2} -gt 0 ]; then
+        VALCPU=${arg_num2}
+        SORT_WHI="FAUX"
+        shift
+        shift
+
+      else
+        echo 'Le nombre de CPU doit etre un entier superieur ou egal a 1'
+        exit 2
+      fi
+
+    # tentative lecture d'un nom de fichier valide
+    else
+
+      # Modification en avril 2019 : on avait une erreur dans 'basename' lors de l'appel deux fois de suite de castemXX -r :
+      #   castemXX -r 'mate.eso' => tout vas bien
+      #   castemXX -r 'mate.eso' => erreur
+      if [[ ${arg_num1} != "" ]] && \
+        (([ "$GET_FICHIER" == "VRAI" ] && [[ "$arg_num1" =~ ^.*\.dgibi$ ]]) \
+        || ([ "$GET_FICHIER" == "FAUX" ] && [ "${arg_num1}" == "`dirname  ${arg_num1}`/`basename ${arg_num1} .dgibi`.dgibi" ])); then
+
+        LISTE_DGI_1="${LISTE_DGI_1} ${arg_num1}"
+        COMPT_DGI_1=$((${COMPT_DGI_1}+1))
+        SORT_WHI="FAUX"
+        shift
+
+      elif [[ ${arg_num1} != "" ]] && \
+        (([ "$GET_FICHIER" == "VRAI" ] && [[ "$arg_num1" =~ ^.*\.dgibi$ ]]) \
+        || ([ "$GET_FICHIER" == "FAUX" ] && [ "${arg_num1}" == "`basename ${arg_num1} .dgibi`.dgibi" ])); then
+
+        LISTE_DGI_1="${LISTE_DGI_1} ${arg_num1}"
+        COMPT_DGI_1=$((${COMPT_DGI_1}+1))
+        SORT_WHI="FAUX"
+        shift
+
+      elif [[ ${arg_num1} != "" ]] && \
+        (([ "$GET_FICHIER" == "VRAI" ] && [[ "$arg_num1" =~ ^.*\.procedur$ ]]) \
+        || ([ "$GET_FICHIER" == "FAUX" ] && [ "${arg_num1}" == "`basename ${arg_num1} .procedur`.procedur" ])); then
+
+        LISTE_PRO_1="${LISTE_PRO_1} ${arg_num1}"
+        SORT_WHI="FAUX"
+        shift
+
+      elif [[ ${arg_num1} != "" ]] && \
+        (([ "$GET_FICHIER" == "VRAI" ] && [[ "$arg_num1" =~ ^.*\.notice$ ]]) \
+        || ([ "$GET_FICHIER" == "FAUX" ] && [ "${arg_num1}" == "`basename ${arg_num1} .notice`.notice" ])); then
+
+        LISTE_NOT_1="${LISTE_NOT_1} ${arg_num1}"
+        SORT_WHI="FAUX"
+        shift
+
+      elif [[ ${arg_num1} != "" ]] && \
+        (([ "$GET_FICHIER" == "VRAI" ] && [[ "$arg_num1" =~ ^.*\.eso$ ]]) \
+        || ([ "$GET_FICHIER" == "FAUX" ] && [ "${arg_num1}" == "`basename ${arg_num1} .eso`.eso" ])); then
+
+        LISTE_ESO_1="${LISTE_ESO_1} ${arg_num1}"
+        SORT_WHI="FAUX"
+        shift
+
+      elif [[ ${arg_num1} != "" ]] && \
+        (([ "$GET_FICHIER" == "VRAI" ] && [[ "$arg_num1" =~ ^.*\.INC$ ]]) \
+        || ([ "$GET_FICHIER" == "FAUX" ] && [ "${arg_num1}" == "`basename ${arg_num1} .INC`.INC" ])); then
+        LISTE_INC_1="${LISTE_INC_1} ${arg_num1}"
+        SORT_WHI="FAUX"
+        shift
+
+      # On sort en erreur si on a ni reussi a lire un nom de fichier valide, ni une option valide
+      else
+
+        if [[ ${arg_num1} != "" ]]; then
+          BAD_ARG="VRAI"
+          LISTE_BAD_ARG="${LISTE_BAD_ARG} ${arg_num1}"
+          SORT_WHI="FAUX"
+          shift
+        fi
+      fi
+    fi
+  done
+fi
+
+# Limitation de la memoire
+if [ "${MEMDEF}" == "VRAI" ]; then
+  export ESOPE_PARAM="${ESOPE_PARAM},ESOPE=${VALMEM}"
+fi
+if [ "${MEMLIB}" == "VRAI" ]; then
+  export ESOPE_PARAM="${ESOPE_PARAM},LIBRE=${VALLIBRE}"
+fi
+if [ "${ZERMEM}" == "VRAI" ]; then
+  export ESOPE_PARAM="${ESOPE_PARAM},ZERMEM=OUI"
+fi
+if [ "${SWAP}" == "FAUX" ]; then
+  export ESOPE_PARAM="${ESOPE_PARAM},NTRK=300000,LTRK=1"
+fi
+
+# Limitation de l'usage de CPU
+if [ "${CPUDEF}" == "VRAI" ] && [ "${VALCPU}" -gt "0" ]; then
+  export CASTEM_NCPU=${VALCPU}
+fi
+
+#ýLes differentes possibilites sont passees en revue
+if [ "${BAD_ARG}" == "FAUX" ]; then
+  # Cas ou les arguments sont bien des options existantes et/ou des fichiers avec la bonne extension
+  if [ "${C_UTIL}" == "VRAI" ]; then
+    # Cas ou l'on souhaite construire UTILPROC & UTILNOTI
+    cast_UTIL${CASTEM_VERSION}
+    if [ -f "ZZZ_noti.trace" ]    ; then rm -f ZZZ_noti.trace     ; fi
+    if [ -f "ZZZ_procedur.trace" ]; then rm -f ZZZ_procedur.trace ; fi
+  fi
+
+  if [ "${TEST}" == "VRAI" ]; then
+    # Lancement de la base des Cas-Tests si on passe ici
+    echo ''
+    if [ "${CASTEM_REP}" == "`pwd`" ]; then
+      echo " Impossible de lancer la base des cas-tests dans le repertoire d'installation"
+      echo ''
+
+    else
+      # Preparation des repertoires de travail
+      if [ -d dgibi ]  ; then \rm -rf dgibi  ; fi
+      if [ -d divers ] ; then \rm -rf divers ; fi
+      mkdir dgibi divers
+      cp -r ${CASTEM_REP}/dgibi .
+      cp -r ${CASTEM_REP}/divers .
+
+      if [ -f ${castX_Local} ] ; then cp ${castX_Local} dgibi;fi
+      if [ -f UTILNOTI ]       ; then cp UTILNOTI dgibi      ;fi
+      if [ -f UTILPROC ]       ; then cp UTILPROC dgibi      ;fi
+
+      cd dgibi
+      # Teste la presence de fichier .dgibi dans le repertoire courant
+      \ls -l *.dgibi > /dev/null 2>&1
+      CODE_RETOUR=$?
+
+      if [ ${CODE_RETOUR} -eq 0 ] ; then
+        echo "|"
+        # Nombre de fichier .dgibi
+        dgibicompt=`(\ls -1 *.dgibi | wc -l)`
+
+        dgibinum=0
+        dgibierr=0
+        for i in *.dgibi ; do
+          # Lancement des cas tests
+          NOM_RES=`basename $i .dgibi`.res
+          NOM_ERR=`basename $i .dgibi`.err
+          echo "| $i"
+          echo "FIN;" | ${CASTEM_REP}/bin/castem$CASTEM_VERSION $i > ${NOM_RES} 2>&1
+
+          # Verifie la presence de la chaine de caractere "ARRET DU PROGRAMME CAST3M NIVEAU D'ERREUR:   0" : Si elle est absente, le cas-tests a echoue
+          ERROR_CASTEM=`fgrep -c "ARRET DU PROGRAMME CAST3M NIVEAU D'ERREUR:   0" ${NOM_RES}`
+          if [ ${ERROR_CASTEM} = "1" ] ; then
+            dgibinum=`expr ${dgibinum} + 1`
+          else
+            dgibierr=`expr ${dgibierr} + 1`
+            mv ${NOM_RES} ${NOM_ERR}
+            echo " $i" >> ZZZ_ERROR.txt
+          fi
+
+          echo "|  Cas-tests reussis :" ${dgibinum}"/"${dgibicompt}
+          if [ ${dgibierr} -gt 0 ] ; then echo "|  Cas-tests echoues :" ${dgibierr}"/"${dgibicompt} ;fi
+          echo "|"
+        done
+        #~ RETURN=${dgibierr} #Plantage de l'installateur si valeur retourne != 0... a corriger a l'avenir
+        RETURN=0
+
+        # Affichage final apres l'execution
+        echo "${ETOILE}"
+        if [ ${dgibierr} -eq 0 ] ; then
+          echo "|              LES CAS-TESTS ONT ETE EXECUTES AVEC SUCCES               "
+        else
+          echo "|                LES ${dgibierr} CAS-TESTS SUIVANTS ONT ECHOUES                 "
+          echo "${ETOILE}"
+          cat ZZZ_ERROR.txt
+          echo "${ETOILE}"
+          echo "|  Consultez les fichiers .err correspondants"
+        fi
+        echo "${ETOILE}"
+      fi
+      cd ..
+    fi
+
+  elif [ "${AIDE}" == "VRAI" ]; then
+    # Affiche l'aide du script en Francais
+    echo ''
+    echo "${ETOILE}"
+    echo "NOM"
+    echo "    castem${CASTEM_VERSION} : Logiciel de calcul par Element Finis"
+    echo "    Site web : http://www-cast3m.cea.fr/"
+    echo ''
+    echo "VERSION"
+    echo "    Version du Script : ${CASTEM_VERSION}.${CASTEM_REVISION}"
+    echo ''
+    echo "SYNTAXE"
+    echo "    castem${CASTEM_VERSION} [OPTION]... [LISTE_FICHIERS]..."
+    echo ''
+    echo "DESCRIPTION"
+    echo "     --aide     : Affiche le manuel de cette commande en Francais"
+    echo "     --help     : Affiche le manuel de cette commande en Anglais"
+    echo "     -test      : execute la base des cas-tests de Cast3M"
+    echo "     -r         : Recupere des fichier depuis le repertoire de Cast3M :"
+    echo "                  .dgibi, .procedur, .notice, .eso, .c, .INC, .h"
+    echo "     -u         : Contruit UTILPROC et UTILNOTI : compatible avec '-d' et '-V'"
+    echo "     -d         : Lance Cast3M avec gdb [Version developpeur]"
+    echo "                  non compatible avec '-V'"
+    echo "     -V         : Lance Cast3M avec valgrind (si valgrind est installe)"
+    echo "                  non compatible avec '-d'"
+    echo "     -MEM   Val1: Memoire reservee par Cast3M [MOTS, Mo ou Go]"
+    echo "                   -Exemple en MOTS : Val1=360027352"
+    echo "                   -Exemple en Mo   : Val1=1500Mo"
+    echo "                   -Exemple en Go   : Val1=2Go"
+    echo "     -LIBRE Val2: Memoire laissee libre pour le systeme"
+    echo "                  Reglage prioritaire sur -MEM Val1"
+    echo "                   -Exemple en MOTS : Val2=360027352"
+    echo "                   -Exemple en Mo   : Val2=1500Mo"
+    echo "                   -Exemple en Go   : Val2=2Go"
+    echo "     -ZERMEM    : Remise a zero physique de la memoire"
+    echo "     -NOSWAP    : Interdiction d'utiliser le fichier de debordement"
+    echo "     -NCPU   Val: Nombre maximum de CPU utilises par Cast3M"
+    echo ''
+    echo "VARIABLES D'ENVIRONNEMENT UTILES"
+    echo "     CASTEM_VERSION    : Annee de la version de Cast3M"
+    echo "     CASTEM_REVISION   : Numero de la revision pour cette annee"
+    echo "     CASTEM_REP        : Repertoire dans lequel est installe Cast3M"
+    echo "     CASTEM_PLATEFORME : Plateforme sur laquelle est installe Cast3M"
+    echo "     CASTEM_LICENCE    : Licence de Cast3M installe"
+    echo ''
+    echo "EXEMPLES"
+    echo "     castem${CASTEM_VERSION}"
+    echo "          Lance Cast3M sans jeu de donnee : Mode Interactif"
+    echo ''
+    echo "     castem${CASTEM_VERSION} fichier"
+    echo "          Lance le jeu de donnee 'fichier'"
+    echo ''
+    echo "     castem${CASTEM_VERSION} [-d | -V ] fichier"
+    echo "          Lance le jeu de donnee 'fichier' dans l'environnement"
+    echo "          gdb"
+    echo ''
+    echo "     castem${CASTEM_VERSION} -u fichier"
+    echo "          Construit UTILPROC et UTILNOTI avec les fichiers .procedur"
+    echo "          et .notice du repertoire courant et lance le jeu de donnee"
+    echo "          'fichier'"
+    echo ''
+    echo "     castem${CASTEM_VERSION} -r 'p*.procedur' 'main.eso' '*l.notice'"
+    echo "     'elas*.dgibi'"
+    echo "          Recupere la liste de fichiers : les expressions regulieres"
+    echo "          sont interpretees"
+    echo ''
+    echo "     castem${CASTEM_VERSION} -test"
+    echo "          Lance la base des cas tests de Cast3M"
+    echo ''
+    echo "AUTEUR"
+    echo "    Script ecrit par Clement BERTHINIER"
+    echo ''
+    echo "VOIR AUSSI"
+    echo "    Aide du Script 'compilcast${CASTEM_VERSION}' : 'compilcast${CASTEM_VERSION} --aide'"
+    echo "    Aide du Script 'essaicast${CASTEM_VERSION}'  : 'essaicast${CASTEM_VERSION}  --aide'"
+    echo "        Version developpeur de Cast3M seulement"
+    echo "${ETOILE}"
+    echo ''
+
+  elif [ "${HELP}" == "VRAI" ]; then
+    # Affiche l'aide du script en Anglais
+    echo ''
+    echo "${ETOILE}"
+    echo "NAME"
+    echo "    castem${CASTEM_VERSION}: Finite Element solver Software"
+    echo "    Web site: http://www-cast3m.cea.fr/"
+    echo ''
+    echo "VERSION"
+    echo "    Script Version : ${CASTEM_VERSION}.${CASTEM_REVISION}"
+    echo ''
+    echo "SYNTAX"
+    echo "    castem${CASTEM_VERSION} [OPTION]... [FILE_LIST]..."
+    echo ''
+    echo "DESCRIPTION"
+    echo "     --aide     : Print the manual of this script in French"
+    echo "     --help     : Print the manual of this script in English"
+    echo "     -test      : Run the Cast3M testing files"
+    echo "     -r         : Retrieves files from the Cast3M directory :"
+    echo "                  .dgibi, .procedur, .notice, .eso, .c, .INC, .h"
+    echo "     -u         : Build UTILPROC and UTILNOTI : compatible with '-d' and '-V'"
+    echo "     -d         : Execute Cast3M with gdb      (if gdb      is installed)"
+    echo "                  not compatible with '-V'"
+    echo "     -V         : Execute Cast3M with valgrind (if valgrind is installed)"
+    echo "                  not compatible with '-d'"
+    echo "     -MEM   Val1: Memory allocated by Cast3M [MOTS, Mo or Go]"
+    echo "                   -Example in MOTS : Val1=360027352"
+    echo "                   -Example in Mo   : Val1=1500Mo"
+    echo "                   -Example in Go   : Val1=2Go"
+    echo "     -LIBRE Val2: Free memory for the system"
+    echo "                  Overwrite -MEM Val1"
+    echo "                   -Example in MOTS : Val2=360027352"
+    echo "                   -Example in Mo   : Val2=1500Mo"
+    echo "                   -Example in Go   : Val2=2Go"
+    echo "     -ZERMEM    : The memory is physicaly defined to low state"
+    echo "     -NOSWAP    : The SWAP is not allowed"
+    echo "     -NCPU   Val: Maximum number of CPU used by Cast3M"
+    echo ''
+    echo "USEFUL ENVIRONNEMENT VARIABLES"
+    echo "     CASTEM_VERSION    : Year of the version of Cast3M"
+    echo "     CASTEM_REVISION   : Update number for this year"
+    echo "     CASTEM_REP        : Cast3M Install directory"
+    echo "     CASTEM_PLATEFORME : Plateform on which is installed Cast3M"
+    echo "     CASTEM_LICENCE    : Cast3M type of License"
+    echo ''
+    echo "EXAMPLES"
+    echo "     castem${CASTEM_VERSION}"
+    echo "          Execute Cast3M without any input file : Interactive mode"
+    echo ''
+    echo "     castem${CASTEM_VERSION} file.dgibi"
+    echo "          Execute Cast3M with the input file 'file.dgibi' if it exists"
+    echo "          If 'file.dgibi' doesn't exist it will be created"
+    echo ''
+    echo "     castem${CASTEM_VERSION} [-d | -V ] file.dgibi"
+    echo "          Execute Cast3M with the input file 'file.dgibi'"
+    echo "          in the gdb or valgrind environment"
+    echo ''
+    echo "     castem${CASTEM_VERSION} -u file.dgibi"
+    echo "          Build UTILPROC & UTILNOTI and execute the input file"
+    echo "          'file.dgibi'"
+    echo ''
+    echo "     castem${CASTEM_VERSION} -r 'p*.procedur' 'main.eso' '*l.notice'"
+    echo "     'elas*.dgibi'"
+    echo "          Copy in your directory the file list : regular expressions "
+    echo "          are interpreted"
+    echo ''
+    echo "     castem${CASTEM_VERSION} -test"
+    echo "          runs all test cases"
+    echo ''
+    echo "AUTHOR"
+    echo "    Script written by Clement BERTHINIER"
+    echo ''
+    echo "SEE ALSO"
+    echo "    Manual for 'compilcast${CASTEM_VERSION}' : 'compilcast${CASTEM_VERSION} --help'"
+    echo "    Manual for 'essaicast${CASTEM_VERSION}'  : 'essaicast${CASTEM_VERSION}  --help'"
+    echo "        Developper version of Cast3M only"
+    echo "${ETOILE}"
+    echo ''
+
+  elif [ "${GET_FICHIER}" == "VRAI" ]; then
+    # Cas ou on demande a recuperer des fichiers dans les repertoire d'origine
+    # Teste si les fichiers de la liste LISTE_DGI_1 existent
+    LISTE_DGI_2=""
+    for i in ${LISTE_DGI_1}; do
+      for j in ${CASTEM_REP}/dgibi/${i}; do
+        # permet de developper des listes contenant des caracteres '*' et  '?'
+        if [ ! -f ${j} ]; then
+          BAD_ARG="VRAI"
+          LISTE_BAD_ARG="${i}"
+        else
+          LISTE_DGI_2="${LISTE_DGI_2} ${j}"
+        fi
+      done
+    done
+    if [ "${LISTE_DGI_2}" != "" ]; then
+      cp ${LISTE_DGI_2} .
+    fi
+
+    # Teste si les fichiers de la liste LISTE_PRO_1 existent
+    LISTE_PRO_2=""
+    for i in ${LISTE_PRO_1}; do
+      for j in ${CASTEM_REP}/procedur/${i}; do
+        # permet de developper des listes contenant des caracteres '*' et  '?'
+        if [ ! -f ${j} ]; then
+          BAD_ARG="VRAI"
+          LISTE_BAD_ARG="${LISTE_BAD_ARG} ${i}"
+        else
+          LISTE_PRO_2="${LISTE_PRO_2} ${j}"
+        fi
+      done
+    done
+    if [ "${LISTE_PRO_2}" != "" ]; then
+      cp ${LISTE_PRO_2} .
+    fi
+
+    # Teste si les fichiers de la liste LISTE_NOT_1 existent
+    LISTE_NOT_2=""
+    for i in ${LISTE_NOT_1}; do
+      for j in ${CASTEM_REP}/notice/${i}; do
+        # permet de developper des listes contenant des caracteres '*' et  '?'
+        if [ ! -f ${j} ]; then
+          BAD_ARG="VRAI"
+          LISTE_BAD_ARG="${LISTE_BAD_ARG} ${i}"
+        else
+          LISTE_NOT_2="${LISTE_NOT_2} ${j}"
+        fi
+      done
+    done
+    if [ "${LISTE_NOT_2}" != "" ]; then
+      cp ${LISTE_NOT_2} .
+    fi
+
+    # Teste si les fichiers de la liste LISTE_ESO_1 existent
+    LISTE_ESO_2=""
+    for i in ${LISTE_ESO_1}; do
+      for j in ${CASTEM_REP}/sources/${i}; do
+        # permet de developper des listes contenant des caracteres '*' et  '?'
+        if [ ! -f ${j} ]; then
+          BAD_ARG="VRAI"
+          LISTE_BAD_ARG="${LISTE_BAD_ARG} ${i}"
+        else
+          LISTE_ESO_2="${LISTE_ESO_2} ${j}"
+        fi
+      done
+    done
+    if [ "${LISTE_ESO_2}" != "" ]; then
+      cp ${LISTE_ESO_2} .
+    fi
+
+    # Teste si les fichiers de la liste LISTE_INC_1 existent
+    LISTE_INC_2=""
+    for i in ${LISTE_INC_1}; do
+      for j in ${CASTEM_REP}/include/eso/${i}; do
+        # permet de developper des listes contenant des caracteres '*' et  '?'
+        if [ ! -f ${j} ]; then
+          BAD_ARG="VRAI"
+          LISTE_BAD_ARG="${LISTE_BAD_ARG} ${i}"
+        else
+          LISTE_INC_2="${LISTE_INC_2} ${j}"
+        fi
+      done
+    done
+    if [ "${LISTE_INC_2}" != "" ]; then
+      cp ${LISTE_INC_2} .
+    fi
+
+  else
+    # Cas ou on demande a lancer Cast3M
+    if [ ${COMPT_DGI_1} -gt 1 ] || [ "$LISTE_PRO_1" != "" ] || [ "$LISTE_NOT_1" != "" ] || [ "$LISTE_ESO_1" != "" ];then
+      # Cas ou plus d'un fichier dgibi est donne en argument avec eventuellement des fichiers d'un autre type
+      BAD_ARG="VRAI"
+      LISTE_BAD_ARG="$@"
+
+    elif [  ${COMPT_DGI_1} == 0 ]; then
+      # Cas ou il n'y a pas de fichier donne en argument
+
+      #ýSuppression des fichiers issus d'une precedente utilisation de castem${CASTEM_VERSION} sans arguments
+      if [ -f "Cast3M_defaut_20${CASTEM_VERSION}.dgibi" ] ; then rm -f "Cast3M_defaut_20${CASTEM_VERSION}.dgibi" ; fi
+      if [ -f "Cast3M_defaut_20${CASTEM_VERSION}.ps" ]    ; then rm -f "Cast3M_defaut_20${CASTEM_VERSION}.ps"    ; fi
+      if [ -f "Cast3M_defaut_20${CASTEM_VERSION}.trace" ] ; then rm -f "Cast3M_defaut_20${CASTEM_VERSION}.trace" ; fi
+
+      export CASTEM_PROJET="Cast3M_defaut_20${CASTEM_VERSION}"
+      LISTE_DGI_1=${CASTEM_PROJET}.dgibi
+      touch ${LISTE_DGI_1}
+      # Affiche la Notice de INFO pour la version Industrielle et ainsi le nombre de jours restants
+      if [ -d ${DIRLIC}  ]; then echo 'INFO INFO;' >> ${LISTE_DGI_1} ;fi
+
+      echo "${ETOILE}"
+      echo "|                        INFORMATIONS SUR LE CALCUL                      |"
+      echo "${ETOILE}"
+      echo "| UTILISATEUR   : $USER"
+      echo "| REPERTOIRE    : `pwd`/."
+      echo "| DATE          : `date`"
+
+    elif [ -f ${LISTE_DGI_1} ]; then
+      # Cas ou le fichier donne en entree existe
+      export CASTEM_PROJET="`dirname  ${LISTE_DGI_1}`/`basename ${LISTE_DGI_1} .dgibi`"
+
+      if  [ "$CASTEM_PLATEFORME" != "MAC" ];then
+        TAILLE=`stat -c %s ${LISTE_DGI_1}` 2>/dev/null
+      fi
+
+      echo "${ETOILE}"
+      echo "|                        INFORMATIONS SUR LE CALCUL                      |"
+      echo "${ETOILE}"
+      echo "| UTILISATEUR   : ${USER}"
+      echo "| REPERTOIRE    : `pwd`/`dirname  ${LISTE_DGI_1}`"
+      echo "| NOM FICHIER   : `basename ${LISTE_DGI_1}`"
+      if [ "${TAILLE}" != "" ]; then
+        echo "| TAILLE        : ${TAILLE} octets"
+      fi
+      echo "| DATE          : `date`"
+
+    else
+      # Cas ou le fichier en entree n'existe pas
+      NEW_FICHIER="VRAI"
+      export CASTEM_PROJET="`dirname  ${LISTE_DGI_1}`/`basename ${LISTE_DGI_1} .dgibi`"
+      touch ${CASTEM_PROJET}.dgibi
+      # Affiche la Notice de INFO pour la version Industrielle et ainsi le nombre de jours restants
+      if [ -d ${DIRLIC}  ]; then echo 'INFO INFO;' >> ${CASTEM_PROJET}.dgibi ;fi
+
+      echo "${ETOILE}"
+      echo "|                        INFORMATIONS SUR LE CALCUL                      |"
+      echo "${ETOILE}"
+      echo "| UTILISATEUR   : $USER"
+      echo "| REPERTOIRE    : `pwd`/`dirname  ${LISTE_DGI_1}`"
+      echo "| NOM FICHIER   : `basename ${LISTE_DGI_1}`"
+      echo "| TAILLE        : `stat -c %s ${LISTE_DGI_1}` octets"
+      echo "| DATE          : `date`"
+    fi
+
+    if [ -x ${castX_Local} ];  then
+    # Message lancement d'un cast local
+      echo "${ETOILE}"
+      echo "|                     EXECUTION de ${castX_Local} LOCAL                      |"
+      echo "${ETOILE}"
+      cat ${CASTEM_REP}/bin/LOGO_ASCII_${CASTEM_VERSION}.txt
+      echo "${ETOILE}"
+
+    else
+    # Message lancement de Cast3M d'origine
+      echo "${ETOILE}"
+      if [ ${CASTEM_PLATEFORME} == "MAC" ]; then
+        echo "|            EXECUTION de ${castX} ORIGINAL            |"
+      else
+        echo "|           EXECUTION de ${castX} ORIGINAL           |"
+      fi
+      echo "|                            Realisation ${CASTEM_VERSION}.0.${CASTEM_REVISION}                          |"
+      echo "${ETOILE}"
+      cat ${CASTEM_REP}/bin/LOGO_ASCII_${CASTEM_VERSION}.txt
+      echo "${ETOILE}"
+    fi
+
+    # Definition de l'executable a lancer
+    if [ -x ${castX_Local} ];  then
+      EXEC_CAST=./${castX_Local}
+    else
+      EXEC_CAST=${CASTEM_REP}/bin/${castX}
+    fi
+
+    if   [ "${DEBUG_MODE}"    == "VRAI" ];then
+      # Lancement avec gdb
+      OPTION_CAST=gdb
+    elif [ "${VALGRIND_MODE}" == "VRAI" ];then
+      # Lancement avec valgrind
+      OPTION_CAST=valgrind
+    fi
+
+    if [ "$BIT" == "32" ] && [ ! "${MPI_RUNCMD}" == "" ] ; then
+      # Sortie d'erreur : MPI non fonctionnel actuellement en 32-bits
+      echo ''
+      echo "${ETOILE}"
+      echo " MPI : non fonctionnel en 32-bits / MPI : not available on 32-bits systems"
+      echo "${ETOILE}"
+      echo ''
+    else
+      time ${CASTEM_REP}/bin/rlwrap_${BIT} -f ${CASTEM_REP}/bin/liste_rlwrap${CASTEM_VERSION} ${OPTION_CAST} ${MPI_RUNCMD} ${EXEC_CAST}
+      RETURN=$?
+    fi
+
+    echo "  "
+    echo "${ETOILE}"
+    echo "  "
+
+    if [ ${COMPT_DGI_1} == 1 ]; then
+      # Cas ou 1 fichier est donne en argument
+      if [ -f fort.25 ]; then mv fort.25 "${CASTEM_PROJET}.lgi"  ; fi
+      if [ -f fort.97 ]; then mv fort.97 "${CASTEM_PROJET}.mif"  ; fi
+      if [ "${NEW_FICHIER}" == "VRAI" ];then
+        if [ -f "${CASTEM_PROJET}.trace" ]; then mv "${CASTEM_PROJET}.trace" "${CASTEM_PROJET}.dgibi"; fi
+      fi
+
+    else
+      # Cas ou aucun argument n'est donne
+      if [ -f fort.25                  ]; then mv fort.25                  "default_castem_${CASTEM_VERSION}.lgi"; fi
+      if [ -f fort.97                  ]; then mv fort.97                  "default_castem_${CASTEM_VERSION}.mif"; fi
+      if [ -f "${CASTEM_PROJET}.trace" ]; then mv "${CASTEM_PROJET}.trace" "${CASTEM_PROJET}.dgibi"       ; fi
+    fi
+
+    # Un peu de menage
+    # suppression des fichiers UTILPROC et/ou UTILNOTI s'ils sont de taille nulle
+    find . -maxdepth 1 -name "UTIL*" -size 0 -exec rm -f {} ";"
+
+    # suppression du fichier .ps s'il est de taille nulle
+    find `dirname  ${LISTE_DGI_1}` -maxdepth 1 -name "`basename ${LISTE_DGI_1} .dgibi`.ps" -size 0 -exec rm -f {} ";"
+  fi
+fi
+
+
+
+########################################################################
+# Affichage en sortie de Script selon ce qu'il s'est passe
+########################################################################
+
+if [ "${BAD_ARG}" == "VRAI" ] && [ "${LISTE_BAD_ARG}" != "" ]; then
+  # Sortie d'erreur sur les arguments
+  echo ''
+  echo "${ETOILE}"
+  echo " Arguments invalides / Unavailable arguments "
+  echo "  ${LISTE_BAD_ARG}"
+  echo "${ETOILE}"
+  echo ''
+  RETURN=1
+fi
+
+#Valeur de retour - pour test fonctionnel des scripts :
+exit ${RETURN}

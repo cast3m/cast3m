@@ -1,0 +1,380 @@
+C VIBRAT    SOURCE    BP208322  18/12/14    21:15:19     10040
+      SUBROUTINE VIBRAT
+************************************************************************
+*
+*                             V I B R A T
+*                             -----------
+*
+*            SOUS-PROGRAMME ASSOCIE A L'OPERATEUR "VIBRATION"
+*
+* FONCTION:
+* ---------
+*
+*     CALCUL DE MODES PROPRES.
+*
+* PHRASE D'APPEL (EN GIBIANE):
+* ----------------------------
+*
+*     ..... = VIBRATION | PROCHE .....     | ;
+*                       | INTERVALLE ..... |
+*                       | SIMULTANE .....  |
+*                       | IRAM .....       |
+*
+*     VOIR LES DETAILS DANS LES SOUS-PROGRAMMES ASSOCIES AUX OPTIONS
+*     "PROCHE", "INTERVALLE", ETC...
+*
+* SOUS-PROGRAMMES APPELES:
+* ------------------------
+*
+*     INTVAL, LIRMOT, PROCHE, SIMULT, ARPACK
+*
+*
+* AUTEUR, DATE DE CREATION:
+* -------------------------
+*
+*     PASCAL MANIGOT     13 NOVEMBRE 1984
+*
+*
+* MODIFICATION:
+* --------------
+*
+*     PASCAL BOUDA, 24 JUIN 2015 : AJOUT DE L'OPTION IRAM
+*     BP, 2019-09-28 : LIMAGE=VRAI PAR DEFAUT
+*     BP, 2019-09-28 : LOG1=VRAI PAR DEFAUT
+*                      EN PREVISION SUPPRESSION DES OBJETS SOLUTIONS
+*
+*
+* LANGAGE:
+* --------
+*
+*     FORTRAN77 + EXTENSION: CARACTERES MIS DANS DES ENTIERS
+*
+************************************************************************
+*
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+-INC SMSOLUT
+-INC SMCHPOI
+-INC SMRIGID
+-INC SMTABLE
+
+
+      COMMON/CITINV/ NBITER,IACCEL,NUMAC,IPX2,IPX0,IPX1,IPBX1,
+     C IBBX1,IBBX2,ITPRO,DIFREL
+*
+      PARAMETER (NBRMOT = 10)
+      PARAMETER (NBIMOT = 9)
+
+
+      CHARACTER*4 LISMOT(NBRMOT)
+      CHARACTER*8 letyp,charre
+      CHARACTER*2 LIRAM(NBIMOT)
+
+      COMPLEX*16 SHIFT
+      CHARACTER*2 SOLU
+
+
+      LOGICAL LOG1, LIMAGE, LMULT,boolin
+*
+      DATA LISMOT/'PROC','INTE','SIMU','IRAM',
+cbp 2017-09-28 &                'IMPR','BASS','HAUT','TBAS','MULT'/
+     &                   'IMPR','BASS','HAUT','TBAS','MULT','SOLU'/
+
+*15/06/24 PB: AJOUT DE LISTE SPECIFIQUES IRAM
+      DATA LIRAM/'LM','SM','LR','SR','LI','SI','LA','SA','BE'/
+
+
+************************************************************************
+*     INITIALISATIONS et VERIFICATION
+************************************************************************
+*
+      IBASS  = 0
+      IHAUT  = 0
+      NOPT   = 0
+      ivalin = 0
+cbp 2017-09-28      LOG1 = .FALSE.
+      LOG1 = .TRUE.
+      LMULT = .FALSE.
+cbp 2017-09-28      LIMAGE=  .FALSE.
+      LIMAGE=  .TRUE.
+      NIMP=IIMPI
+      ICODE = 0
+      NBMOT = NBRMOT
+      NBMOTI= NBIMOT
+      NBMO=0
+      SHIFT=CMPLX(0.D0,0.D0)
+
+
+*     verification de l'option de calcul des deformations
+      IF(MEPSIL.NE.1) THEN
+      WRITE(IOIMP,*)'L OPERATEUR VIBR SUPPOSE DES PETITES PERTURBATIONS'
+      WRITE(IOIMP,*)'VOUS POUVEZ CHOISIR DES DEFORMATIONS LINEAIRES VIA'
+     & ,' LA COMMANDE :'
+      WRITE(IOIMP,*)'    OPTI EPSI LINEAIRE;'
+      WRITE(IOIMP,*)'AVANT LA CONSTRUCTION DES MODELES'
+      CALL ERREUR(1037)
+      RETURN
+      ENDIF
+*
+************************************************************************
+*     LECTURE DES MOTS-CLE ET DONNEES SPECIFIQUES ASSOCIEES
+************************************************************************
+
+***** 1ere liste de mots-cles ******************************************
+      DO 10 I=1,5
+
+      CALL LIRMOT (LISMOT,NBMOT,NUMLIS,ICODE)
+      IF (IERR .NE. 0) RETURN
+      IF (NUMLIS.EQ.0) GOTO 10
+
+c    -lecture effective de 'PROC','INTE','SIMU' ou 'IRAM'
+      IF (NUMLIS.LE.4) THEN
+        IF (NUMLIS.EQ.1) THEN
+           CALL LIROBJ ('LISTREEL',IPFREQ,1,IRETOU)
+           IF (IERR.NE.0) RETURN
+           IPNMOD = 0
+           CALL LIROBJ ( 'LISTENTI', IPNMOD, 0, IRETOU )
+           IF (IERR .NE. 0) RETURN
+        ENDIF
+        IF (NUMLIS.EQ.2) THEN
+           CALL LIRREE(XINT1,1,IRETOU)
+           IF (IERR.NE.0) RETURN
+           CALL LIRREE(XINT2,1,IRETOU)
+           IF(IERR.NE.0) RETURN
+        ENDIF
+        IF (NUMLIS.GE.3) THEN
+           CALL LIRREE(XINT1,1,IRETOU)
+           IF (IERR.NE.0) RETURN
+           CALL LIRENT (IBASS,1,IRETOU)
+           IF (IERR.NE.0) RETURN
+        ENDIF
+        NOPT=NUMLIS
+        GOTO 10
+      ENDIF
+
+c    -autres options
+      IF (NUMLIS.EQ.5) THEN
+***     IIMPI=2
+        CALL GINT2
+      ENDIF
+
+      IF (NUMLIS.EQ.6)  CALL LIRENT (IBASS,1,IRETOU)
+      IF(IERR.NE.0) RETURN
+      IF (NUMLIS.EQ.7)  CALL LIRENT(IHAUT,1,IRETOU)
+
+      IF(IERR.NE.0) RETURN
+cbp 2017-09-28      IF (NUMLIS.EQ.8) LOG1 = .TRUE.
+      IF (NUMLIS.EQ.8) THEN
+        MOTERR(1:12)='mot-cle TBAS'
+        MOTERR(13:40)=' '
+        CALL ERREUR(1070)
+c       WARNING : mot-cle TBAS soon obsolete
+      ENDIF
+      IF (NUMLIS.EQ.10) THEN
+        LOG1  = .FALSE.
+        MOTERR(1:14)='OBJET SOLUTION'
+        MOTERR(15:40)=' '
+        CALL ERREUR(1070)
+c       WARNING : OBJET SOLUTION soon obsolete
+      ENDIF
+      IF (NUMLIS.EQ.9) LMULT = .TRUE.
+
+10    CONTINUE
+
+
+***** 15/06/24 PB: AJOUT DE MOTS CLES SPECIFIQUES IRAM *****************
+      IF (NOPT .EQ. 4) THEN
+
+c       on recupere shift Re + i Im et nbmo a calculer
+        X=XINT1
+        Y=0.D0
+        CALL LIRREE(Y,0,IRETOU)
+        SHIFT=CMPLX(X,Y)
+        NBMO=IBASS
+
+        SOLU='LM'
+        CALL LIRMOT (LIRAM,NBMOTI,NUMIRA,ICODE)
+        IF (IERR .NE. 0) RETURN
+        IF (NUMIRA.NE.0) SOLU=LIRAM(NUMIRA)
+
+      ENDIF
+
+
+************************************************************************
+*     LECTURE DES RIGIDITES
+************************************************************************
+
+      CALL LIROBJ('RIGIDITE',IPRIG1,1,IRETOU)
+      IF(IERR.NE.0) RETURN
+
+      CALL LIROBJ ('RIGIDITE',IPRIG2,1,IRETOU)
+      IF (IERR.NE.0) RETURN
+
+      CALL LIROBJ ('RIGIDITE',IPRIG3,0,IRETOU)
+      IF (IERR.NE.0) RETURN
+
+      CALL WHICH1 (IPRIG1,IPRIG2,IPRIGI,IPMASS)
+      iprig1=iprigi
+      iprig2=ipmass
+
+*     Lecture d'un logique optionnel pour savoir que faire si (2pi*w)^2
+*     est negatif (faux --> on renvoie |w|, vrai --> on renvoie -|w|
+*     car pas d'imaginaire)
+      CALL LIRLOG(LIMAGE,0,IRETOU)
+
+*     dualisation des mult de Lagrange
+      mrigid=iprig1
+      segini, ri1=mrigid
+      segdes mrigid
+      mrigid=ri1
+      imgeo2=0
+      call dbblx(mrigid,lagdua)
+      imlag=lagdua
+      iprig1=mrigid
+
+
+************************************************************************
+*     APPEL DES ROUTINES SELON L'OPTION
+************************************************************************
+
+***** PROCHE *****
+      IF (NOPT .EQ. 1) THEN
+         ITPRO=1
+         CALL PROCHE (IPMASS,IPSOLU,IPFREQ,IPRIG1,IPRIG2,LIMAGE,
+     &        IPNMOD,MBASC,INSYM)
+         IF (IERR.NE.0) RETURN
+c        TODO : debrancher le solveur non-symetrique de PROCHE
+
+***** INTERVALLE *****
+      ELSE IF (NOPT .EQ. 2) THEN
+         ITPRO=0
+         INSYM = 0
+         CALL INTVAL (IPMASS,IPSOLU,XINT1,XINT2,IBASS,IHAUT,
+     $          LIMAGE,IPRIG1,IPRIG2,LMULT)
+         IF (IERR.NE.0) RETURN
+
+***** SIMULTANE *****
+      ELSE IF (NOPT .EQ. 3) THEN
+         ITPRO=0
+         INSYM = 0
+         CALL SIMULT (IPMASS,IPSOLU,IPRIG1,IPRIG2,LIMAGE,XINT1,IBASS)
+         IF (IERR.NE.0) RETURN
+
+***** IRAM *****
+      ELSE IF (NOPT .EQ. 4) THEN
+         CALL ARPACK (IPRIG1,IPRIG2,IPRIG3,IPSOLU,SHIFT,
+     $                                        NBMO,SOLU,INSYM,LAGDUA)
+         IF (IERR.NE.0) RETURN
+         GOTO 999
+
+      ELSE
+         CALL ERREUR (533)
+         RETURN
+      ENDIF
+
+
+************************************************************************
+*     POST TRAITEMENT DES RESULTATS
+************************************************************************
+
+c NB: INSYM=0 si pb aux v.p. Hermitien (K et M Reels et symetriques)
+
+c     APPEL A DBBCF POUR DEDUALISER LA SOLUTION
+
+      IF (insym.eq.0) then
+*        dedualisation de la solution
+         msolut=ipsolu
+         segact msolut*mod
+         do 210 ilx=1,msolit(/1)
+          if (msolit(ilx).eq.2) then
+          msolen=msolis(ilx)
+          segact msolen*mod
+          do 200 iso=1,isolen(/1)
+           mchpoi=isolen(iso)
+           segact mchpoi*mod
+           if (lagdua.ne.0) call dbbcf(mchpoi,lagdua)
+           isolen(iso)=mchpoi
+ 200      continue
+          endif
+ 210     continue
+
+      ELSE
+       if (lagdua.ne.0)  then
+         mtable=mbasc
+         segact mtable
+         call acctab(mbasc,'MOT     ',iva,xvalin,'MODES',boolin,iobin,
+     $              'TABLE  ',ivalre,xvalre,charre,boolin,mtab1)
+         do 250 i=1,10000
+          letyp=' '
+          call acctab (mtab1,'ENTIER  ',i,xva,charre,boolin,iobin,
+     $           letyp,ivalre,xvalre,charre,boolin,mtab2)
+          if(letyp.ne.'TABLE   ') go to 251
+           letyp=' '
+           call acctab(mtab2,'MOT',iva,xva,'DEFORMEE_MODALE_REELLE',
+     $   boolin,iobin,letyp,ivalre,xvalre,charre,boolin,iobre)
+         if(letyp.eq.'CHPOINT') then
+            mchpoi=iobre
+            segact mchpoi*mod
+            call dbbcf(mchpoi,lagdua)
+            call ecctab(mtab2,'MOT',iva,xva,'DEFORMEE_MODALE_REELLE',
+     $      boolin,iobin,letyp,ivalre,xvalre,charre,boolin,mchpoi)
+         else
+          call erreur(5)
+          return
+         endif
+
+          letyp=' '
+          call acctab(mtab2,'MOT',iva,xva,'DEFORMEE_MODALE_IMAGINAIRE',
+     $   boolin,iobin,letyp,ivalre,xvalre,charre,boolin,iobre)
+         if(letyp.eq.' ')go to 250
+            mchpoi=iobre
+            segact mchpoi*mod
+            call dbbcf(mchpoi,lagdua)
+            call ecctab(mtab2,'MOT',ivalin,xva,'DEFORMEE_MODALE_IMAG',
+     $      boolin,iobin,letyp,ivalre,xvalre,charre,boolin,mchpoi)
+  250    continue
+       endif
+  251  continue
+      ENDIF
+
+      IF (INSYM .EQ. 0) THEN
+        IF (LOG1) THEN
+          CALL CRTBAS (IPSOLU,IPMASS)
+          CALL DESOLU (IPSOLU)
+        ELSE
+          CALL ECROBJ ('SOLUTION',IPSOLU)
+        ENDIF
+      ELSE
+          CALL LIROBJ('CHPOINT', IPOINT, 0, IRETOU)
+          CALL ECROBJ('TABLE', MBASC)
+      ENDIF
+
+      GOTO 100
+
+
+*15/06/24 PB: OPTION IRAM
+999   CONTINUE
+
+      IF (.NOT. LOG1) THEN
+        CALL ECROBJ ('SOLUTION',IPSOLU)
+      ELSE
+        IF (INSYM .EQ. 0) THEN
+          CALL CRTBAS (IPSOLU,IPMASS)
+          CALL DESOLU (IPSOLU)
+        ELSE
+          CALL CCTBAS (IPSOLU,IPMASS)
+          CALL DESOLU (IPSOLU)
+        ENDIF
+      ENDIF
+
+100   CONTINUE
+
+      IIMPI=NIMP
+      CALL GINT2
+
+      END
+
+
+

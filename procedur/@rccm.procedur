@@ -1,0 +1,1121 @@
+$$$$ @RCCM
+* @RCCM     PROCEDUR  FANDEUR   14/10/10    21:15:01     8178
+* RCCM PROCEDURE                                    96/11/20   09:00:00
+* ----------------------------------------------------------------------
+******                       PROCEDURE @RCCM                      ******
+* ----------------------------------------------------------------------
+*
+*   CETTE PROCEDURE PERMET D'EFFECTUER UN DEPOUILLEMENT RCCM :
+*     - linearisations de coupes
+*     - variations d'etats
+*     - fatigue
+*
+* ----------------------------------------------------------------------
+*
+*   LES DONNEES SONT :
+*    ----> la table de definition des coupes
+*    ----> la table de definition des etats
+*    ----> la table de definition des groupes de transitoires
+*    ----> la table pour le calcul a la fatigue
+*
+*   EN SORTIE :
+*    ----> impression des resultats
+*
+* ----------------------------------------------------------------------
+*   PAR Joseph MANNINO
+* ----------------------------------------------------------------------
+'DEBPROC' @RCCM TABCOUP*TABLE TABET*TABLE TABGROU/TABLE TABFATI/TABLE;
+
+* ======================================================================
+*   initialisations
+* ======================================================================
+MESSAGE ' ' ;
+MESSAGE '***** DEBUT DU CALCUL RCCM *****' ;
+MESSAGE '--------------------------------' ;
+MESSAGE ' ' ;
+* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+*   formation de la table des etats (la table des etats
+*   thermomecaniques doit etre complete ; la table des etats thermiques
+*   peut etre incomplete ou vide, elle est alors completee ici)
+* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+M       = MOT M ;
+T       = MOT T ;
+FLEXT   = VRAI ;
+SI (NON (EXISTE TABET M)) ;
+  MESSAGE 'LA TABLE DES ETATS THERMOMECANIQUES NE CONVIENT PAS' ;
+  QUITTER @RCCM ;
+FINSI ;
+NETM    = DIME TABET.M ;
+SI (NETM EGA 0) ;
+  MESSAGE 'LA TABLE DES ETATS THERMOMECANIQUES NE CONVIENT PAS' ;
+  QUITTER @RCCM ;
+FINSI ;
+REPETER BOUCLE (NETM) ;
+  I         = &BOUCLE ;
+  SI (NON (EXISTE (TABET.M) I)) ;
+    MESSAGE 'LA TABLE DES ETATS THERMOMECANIQUES NE CONVIENT PAS' ;
+    QUITTER @RCCM ;
+  FINSI ;
+FIN BOUCLE ;
+SI (NON (EXISTE TABET T)) ;
+  FLEXT   = FAUX ;
+FINSI ;
+SI (EXISTE TABET T) ;
+  SI ((DIME TABET.T) > 0) ;
+    INDT = INDEX (TABET.T) ;
+    REPETER BOUCLE (DIME INDT) ;
+      J = &BOUCLE ;
+      K = INDT.J ;
+      SI ((K > NETM) OU (K < 1)) ;
+        MESSAGE 'LA TABLE DES ETATS THERMIQUES NE CONVIENT PAS' ;
+        QUITTER @RCCM ;
+      FINSI ;
+    FIN BOUCLE ;
+  FINSI ;
+FINSI ;
+TABETAT = TABLE ;
+REPETER BOUCLE (NETM) ;
+  I         = &BOUCLE ;
+  TABETAT.I = TABET.M.I ;
+FIN BOUCLE ;
+REPETER BOUCLE (NETM) ;
+  I = &BOUCLE ;
+  J = I + NETM ;
+  SI (FLEXT) ;
+    SI (EXISTE (TABET.T) I) ;
+      TABETAT.J = TABET.T.I ;
+    SINON ;
+      TABETAT.J = (TABETAT.I) * 0. ;
+    FINSI ;
+  FINSI ;
+FIN BOUCLE ;
+* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+*   formation de la table des groupes (la table des groupes thermiques
+*   est formee a partir des groupes thermomecaniques) :
+*    - 1 : groupe thermomecanique
+*    - 2 : groupe thermique permettant d'exclure la flexion thermique
+*   reorganisation de la table des groupes :
+*    - l'etat 0 est mis a la fin
+* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+NCOUPS    = DIME TABCOUP ;
+NETATS    = DIME TABETAT ;
+L         = 1 ;
+M         = 2 ;
+SI ( EXISTE TABGROU ) ;
+  TABGROU.M = TABLE ;
+  NGROUPTM = DIME TABGROU.L ;
+  SI ( NGROUPTM EGA 0 ) ;
+    MESSAGE 'LES LISTES DES GROUPES NE CONVIENNENT PAS' ;
+    QUITTER @RCCM ;
+  FINSI ;
+  REPETER BOUCLE1 (NGROUPTM) ;
+    I      = &BOUCLE1 ;
+    LETAT1 = TABGROU.L.I ;
+    LETAT2 = LECT ;
+    REPETER BOUCLE2 (DIME LETAT1) ;
+      J    = &BOUCLE2 ;
+      ETAT = EXTRAIRE LETAT1 J ;
+      SI (ETAT EGA 0) ;
+        LETAT2 = LETAT2 ET (LECT ETAT) ;
+      SINON ;
+        LETAT2 = LETAT2 ET (LECT (ETAT+NETM)) ;
+      FINSI ;
+    FIN BOUCLE2 ;
+    SI (FLEXT) ;
+      TABGROU.M.I = LETAT2 ;
+      MESSAGE ' ' ;
+      MESSAGE 'CREATION DU GROUPE THERMIQUE CORRESPONDANT AU GROUPE '
+              'THERMOMECANIQUE' I ;
+      LIST LETAT2 ;
+      MESSAGE ' ' ;
+    SINON ;
+      TABGROU.M.I = LETAT1 ;
+      MESSAGE ' ' ;
+      MESSAGE 'ATTENTION VOUS AVEZ EXCLU TOUTE LA FLEXION AU GROUPE '
+              'THERMOMECANIQUE' I ;
+      LIST LETAT1 ;
+      MESSAGE ' ' ;
+    FINSI ;
+  FIN BOUCLE1 ;
+  REPETER BOUCLE1 (NGROUPTM) ;
+    I      = &BOUCLE1 ;
+    LETAT1 = ORDONNER 'DECROISSANT' (TABGROU.L.I) ;
+    LETAT2 = ORDONNER 'DECROISSANT' (TABGROU.M.I) ;
+    TABGROU.L.I = LETAT1 ;
+    TABGROU.M.I = LETAT2 ;
+  FIN BOUCLE1 ;
+FINSI ;
+* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+* INITIALISATIONS
+* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SEISME   = FAUX ;
+DIMP     = VALE DIME ;
+TCE      = TABLE ;
+TVTMG    = TABLE ;
+TVTHG    = TABLE ;
+TVARSG   = TABLE ;
+TABOCCUR = TABLE ;
+TABDONF  = TABLE ;
+ID       = 1 ;
+IND1     = 1 ;
+IND2     = 2 ;
+IND3     = 3 ;
+IND4     = 4 ;
+IND5     = 5 ;
+IND6     = 6 ;
+IND7     = 7 ;
+IND8     = 8 ;
+IND9     = 9 ;
+* ======================================================================
+*   verifications
+* ======================================================================
+MESSAGE ' ' ;
+MESSAGE '---> phase verification' ;
+MESSAGE '     ------------------' ;
+MESSAGE ' ' ;
+SI ( ( NCOUPS EGA 0 ) OU ( NETATS EGA 0 ) ) ;
+  QUITTER @RCCM ;
+FINSI ;
+SI ( EXISTE TABGROU ) ;
+  REPETER BOUCLE1 ( NGROUPTM ) ;
+    I       = &BOUCLE1 ;
+    LISTETM = TABGROU.IND1.I ;
+    NTRANS  = DIME LISTETM ;
+    REPETER BOUCLE2 ( NTRANS ) ;
+      J    = &BOUCLE2 ;
+      ETAT = EXTRAIRE LISTETM J ;
+      SI ( ( ETAT > NETATS ) OU ( ETAT < 0 ) ) ;
+        MESSAGE 'LA FORMATION DES GROUPES THERMO-MECANIQUES NE '
+                'CONVIENT PAS' ;
+        QUITTER @RCCM ;
+      FINSI ;
+    FIN BOUCLE2 ;
+    LISTETH = TABGROU.IND2.I ;
+    NTRANS  = DIME LISTETH ;
+    REPETER BOUCLE2 ( NTRANS ) ;
+      J    = &BOUCLE2 ;
+      ETAT = EXTRAIRE LISTETH J ;
+      SI ( ( ETAT > NETATS ) OU ( ETAT < 0 ) ) ;
+        MESSAGE 'LA FORMATION DES GROUPES POUR EXCLUSION DE LA '
+                'FLEXION THERMIQUE NE CONVIENT PAS' ;
+        QUITTER @RCCM ;
+      FINSI ;
+    FIN BOUCLE2 ;
+  FIN BOUCLE1 ;
+  SI ( EXISTE TABFATI ) ;
+    NTABFAT1 = DIME TABFATI.IND1 ;
+    SI ( NTABFAT1 NEG NGROUPTM ) ;
+      MESSAGE 'LA TABLE DES NOMBRES D"OCCURENCES POUR LA FATIGUE NE '
+              'CONVIENT PAS' ;
+      QUITTER @RCCM ;
+    FINSI ;
+    NTABFAT2 = DIME TABFATI.IND2 ;
+    SI ( NTABFAT2 NEG NCOUPS ) ;
+      MESSAGE 'LA TABLE DE DESCRIPTION DES MATERIAUX POUR LA FATIGUE '
+              'NE CONVIENT PAS' ;
+      QUITTER @RCCM ;
+    FINSI ;
+    SI (EXISTE TABFATI IND3) ;
+      SEISME = VRAI ;
+      NTABFAT3 = DIME TABFATI.IND3 ;
+      SI ( NTABFAT3 NEG NCOUPS ) ;
+        MESSAGE 'LA TABLE DE DESCRIPTION DES SEISMES POUR LA FATIGUE '
+                'NE CONVIENT PAS' ;
+        QUITTER @RCCM ;
+      FINSI ;
+    FINSI ;
+    REPETER BOUCLE1 ( NCOUPS ) ;
+      I       = &BOUCLE1 ;
+      LISTEMA = TABFATI.IND2.I ;
+      NMATER  = DIME ( LISTEMA ) ;
+      SI (((NON SEISME) ET (NMATER NEG 6)) OU
+          (SEISME ET (NMATER NEG 7))) ;
+        MESSAGE 'LA TABLE DE DESCRIPTION DES MATERIAUX POUR LA FATIGUE '
+                'NE CONVIENT PAS' ;
+        QUITTER @RCCM ;
+      FINSI ;
+    FIN BOUCLE1 ;
+    SI (SEISME) ;
+      REPETER BOUCLE1 ( NCOUPS ) ;
+        I       = &BOUCLE1 ;
+        LISTSEI = TABFATI.IND3.I ;
+        NCTORS  = DIME ( LISTSEI ) ;
+        SI (((DIMP EGA 2) ET (NCTORS NEG 6)) OU
+            ((DIMP EGA 3) ET (NCTORS NEG 8))) ;
+          MESSAGE 'LA TABLE DE DESCRIPTION DU SEISME POUR LA FATIGUE '
+                  'NE CONVIENT PAS' ;
+          QUITTER @RCCM ;
+        FINSI ;
+      FIN BOUCLE1 ;
+    FINSI ;
+  FINSI ;
+FINSI ;
+* ======================================================================
+*   coupes et linearisation des contraintes
+* ======================================================================
+MESSAGE ' ' ;
+MESSAGE '---> phase coupes et linearisation des contraintes' ;
+MESSAGE '     ---------------------------------------------' ;
+MESSAGE ' ' ;
+* ----------------------------------------------------------------------
+*   boucle sur les etats
+* ----------------------------------------------------------------------
+REPETER BOUCLE1 ( NETATS ) ;
+  I     = &BOUCLE1 ;
+  TCE.I = TABLE ;
+* ----------------------------------------------------------------------
+*   boucle sur les coupes
+* ----------------------------------------------------------------------
+  REPETER BOUCLE2 ( NCOUPS ) ;
+    J = &BOUCLE2 ;
+    MESSAGE ' ' ;
+    MESSAGE '   ---> etat ' I ' coupe ' J ;
+    MESSAGE '        -------------------------' ;
+    MESSAGE ' ' ;
+
+      TCE.I.J = @RCCMCO2 I J TABCOUP.J.IND1 TABCOUP.J.IND2
+                             TABCOUP.J.IND3 TABCOUP.J.IND4
+                             TABETAT.I      TABCOUP.J.IND5
+                             TABCOUP.J.IND6 TABCOUP.J.IND7
+                             TABCOUP.J.IND8 TABCOUP.J.IND9;
+     'SI' ('NEG' ('TYPE' (TCE.I.J)) 'TABLE   ');
+       'SI' ('EGA' (TCE.I.J) 'ARRET') ;'QUITTER' @RCCM ;'FINSI' ;
+     'FINSI';
+  FIN BOUCLE2 ;
+FIN BOUCLE1 ;
+MESSAGE ' ' ;
+MESSAGE '---> fin phase coupes et linearisation des contraintes' ;
+MESSAGE '     -------------------------------------------------' ;
+MESSAGE ' ' ;
+* ======================================================================
+*   variations  et fatigue
+* ======================================================================
+SI ( EXISTE TABGROU ) ;
+SI ( NGROUPTM >EG 1 ) ;
+MESSAGE ' ' ;
+MESSAGE '---> phase variations' ;
+MESSAGE '     ----------------' ;
+MESSAGE ' ' ;
+* ----------------------------------------------------------------------
+*   variations  si TABGROU existe
+* ----------------------------------------------------------------------
+*modif VARIATI: la procedure VARIATI est supprimee
+*et est directement integree ci dessous
+*en conservant la notice explicative
+*modif effectuees avant l entree dans variati:
+* BOUCL01 a 03 remplacent BOUCLE1 a 3
+* II JJ KK LL MM NN ont remplace I J K L M N
+
+  REPETER BOUCL01 ( NGROUPTM ) ;
+    II       = &BOUCL01 ;
+    LISTETM = TABGROU.IND1.II ;
+    LISTETH = TABGROU.IND2.II ;
+    NTRANS  = DIME LISTETM ;
+    REPETER BOUCL02 ( NCOUPS ) ;
+      JJ       = &BOUCL02 ;
+      TVTMG.JJ = TABLE ;
+      TVTHG.JJ = TABLE ;
+      LL = 0 ;
+      REPETER BOUCL03 ( NTRANS ) ;
+        KK = &BOUCL03 ;
+        SAUT LIGNE;TIRET=
+'          ---------------------------------------------------';
+   MESSAGE '     ---> groupe ' II ' coupe ' JJ ' transitoire TM ' KK ;
+        MESSAGE TIRET;
+        MESSAGE ' ' ;
+        ETAT = EXTRAIRE LISTETM KK ;
+        SI ( ETAT NEG 0 ) ;
+          LL         = LL + 1 ;
+          TVTMG.JJ.LL = TCE.ETAT.JJ ;
+        FINSI ;
+      FIN BOUCL03 ;
+      NN = 0 ;
+      REPETER BOUCL03 ( NTRANS ) ;
+        MM = &BOUCL03 ;
+        SAUT LIGNE;
+ MESSAGE '     ---> groupe ' II ' coupe ' JJ ' transitoire TH ' MM ;
+        MESSAGE TIRET;
+        SAUT LIGNE;
+        ETAT = EXTRAIRE LISTETH MM ;
+        SI ( ETAT NEG 0 ) ;
+          NN         = NN + 1 ;
+          TVTHG.JJ.NN = TCE.ETAT.JJ ;
+        FINSI ;
+      FIN BOUCL03 ;
+    FIN BOUCL02 ;
+*LIST  (TVTMG . 1 . 1) ;
+*LIST  (TVTMG . 1 . 2) ;
+*LIST  ( TVTHG . 1 . 1);
+*LIST  ( TVTHG . 1 . 2);
+
+
+*modif
+*    SI ( LL NEG KK ) ;
+*      TVARSG.II = @VARIATI FLEXT TABGROU.ID.II TVTMG TVTHG 'NUL' ;
+*    SINON ;
+*      TVARSG.II = @VARIATI FLEXT TABGROU.ID.II TVTMG TVTHG ;
+*    FINSI ;
+*initialisations
+MOPT*LOGIQUE = FAUX ;
+SI ( LL NEG KK ) ;MOPT*LOGIQUE=VRAI ; FINSI ;
+*FLEXT ichange
+ETATS = TABGROU.ID.II ;
+TABVM = TVTMG ;
+TABVT = TVTHG ;
+*on garde la notice de variati
+*$$$$ @VARIATI
+* @VARIATI PROCEDURE                                 96/10/08   16:00:00
+* ----------------------------------------------------------------------
+******                     PROCEDURE @VARIATI                     ******
+* ----------------------------------------------------------------------
+*
+*   CETTE PROCEDURE PERMET DE CALCULER LA VARIATION MAXIMALE ENTRE
+*   2 TORSEURS, SUR LES PEAUX D'UNE COUPE, SUIVANT LE RCCM.
+*
+* ----------------------------------------------------------------------
+*
+*   LES DONNEES SONT :
+*    ----> une variable logique indiquant si VRAI que la flexion
+*          thermique est exclue
+*    ----> la liste des etats du groupe
+*    ----> une table a 2 indices contenant :
+*            - premier indice  : un numero de coupe
+*            - deuxieme indice : un chargement mecanique sous forme
+*                                de table a 6 indices comprenant :
+*                                - 1 : torseur de flexion, paroi
+*                                      interieure
+*                                - 2 : torseur de membrane+flexion,
+*                                      paroi interieure
+*                                - 3 : torseur des contraintes totales,
+*                                      paroi interieure
+*                                - 4 : torseur de flexion, paroi
+*                                      exterieure
+*                                - 5 : torseur de membrane+flexion,
+*                                      paroi exterieure
+*                                - 6 : torseur des contraintes totales,
+*                                      paroi exterieure
+*    ----> une table a 2 indices contenant :
+*            - premier indice  : un numero de coupe
+*            - deuxieme indice : un chargement thermique sous forme
+*                                de table a 6 indices comprenant :
+*                                - 1 : torseur de flexion, paroi
+*                                      interieure
+*                                - 2 : torseur de membrane+flexion,
+*                                      paroi interieure
+*                                - 3 : torseur des contraintes totales,
+*                                      paroi interieure
+*                                - 4 : torseur de flexion, paroi
+*                                      exterieure
+*                                - 5 : torseur de membrane+flexion,
+*                                      paroi exterieure
+*                                - 6 : torseur des contraintes totales,
+*                                      paroi exterieure
+*    ----> un mot eventuel permettant de prendre en compte un chargement
+*          supplementaire nul
+*
+*   EN SORTIE :
+*    ----> impression des resultats
+*    ----> sortie d'une table a 4 indices contenant :
+*            - premier   indice  : numero de coupe
+*            - deuxieme  indice  : code :
+*                                  - 1 : paroi interieure
+*                                  - 2 : paroi exterieure
+*            - troisieme indice  : code :
+*                                  - 1 : contraintes totales
+*                                  - 2 : contraintes membrane+flexion
+*                                  - 3 : contraintes membrane+flexion,
+*                                        flexion thermique exclue
+*            - quatrieme indice  : 5 sorties :
+*                                  - 1 : indice du premier torseur
+*                                  - 2 : indice du deuxieme torseur
+*                                  - 3 : premier torseur
+*                                  - 4 : deuxieme torseur
+*                                  - 5 : tresca
+*
+* ----------------------------------------------------------------------
+*   PAR Joseph MANNINO
+* ----------------------------------------------------------------------
+*debut variati
+*'DEBPROC' @VARIATI FLEXT*LOGIQUE ETATS*LISTENTI TABVM*TABLE  TABVT*TABLE
+*                   MOPT/MOT ;
+* ======================================================================
+*   initialisation
+* ======================================================================
+*
+TAB1  = TABLE ;
+TAB2  = TABLE ;
+TAB3  = TABLE ;
+TABVS = TABLE ;
+* ======================================================================
+*   nombre de coupes
+* ======================================================================
+NCOUP = DIME TABVM ;
+SI ( NCOUP NEG ( DIME TABVT ) ) ;
+  MESSAGE 'LES TABLES POUR VARIATIONS NE CONVIENNENT PAS' ;
+  QUITTER @RCCM ;
+FINSI ;
+* ======================================================================
+*   creation d'une droite fictive et du modele associe, pour calcul
+*   du TRESCA
+* ======================================================================
+DIMG = VALE 'DIME' ;
+MODG = VALE 'MODE' ;
+
+SI ( DIMG EGA 2 ) ;
+  P1 = 0. 0. ;
+  P2 = 1. 0. ;
+SINON ;
+  P1 = 0. 0. 0. ;
+  P2 = 1. 0. 0. ;
+FINSI ;
+DR = P1 D 1 P2 ;
+MODLDR = 'MODE' DR 'MECANIQUE' 'ELASTIQUE' ;
+* ======================================================================
+*   boucle sur les coupes
+* ======================================================================
+REPETER TCOUP ( NCOUP ) ;
+  L       = &TCOUP ;
+  $L      = CHAINE L/3 ;
+  TABVS.L = TABLE ;
+* ----------------------------------------------------------------------
+*   boucle sur les parois interieures et exterieures
+*   m=1 --> paroi interieure
+*   m=2 --> paroi exterieure
+* ----------------------------------------------------------------------
+
+  REPETER TPARO ( 2 ) ;
+    M         = &TPARO ;
+    TABVS.L.M = TABLE ;
+* ----------------------------------------------------------------------
+*   verification des chargements
+* ----------------------------------------------------------------------
+    NTORS = DIME TABVM.L ;
+    SI ( NTORS NEG ( DIME TABVT.L ) ) ;
+      MESSAGE 'LES TABLES POUR VARIATIONS NE CONVIENNENT PAS' ;
+      QUITTER @RCCM ;
+    FINSI ;
+* ----------------------------------------------------------------------
+*   extraction des chargements
+* ----------------------------------------------------------------------
+    REPETER TCHAR ( NTORS ) ;
+      N      = &TCHAR ;
+      TABM   = TABVM.L.N ;
+      TABT   = TABVT.L.N ;
+      SI ( M EGA 1 ) ;
+        TAB1.N = TABM. 3 ;
+        TAB2.N = TABM. 2;
+        TAB3.N = TABT. 1 ;
+      SINON ;
+        TAB1.N = TABM. 6 ;
+        TAB2.N = TABM. 5 ;
+        TAB3.N = TABT. 4 ;
+      FINSI ;
+    FIN TCHAR ;
+* ----------------------------------------------------------------------
+*  on rajoute eventuellement le chargement null
+* ----------------------------------------------------------------------
+    SI  MOPT  ;
+      NTORS = NTORS + 1 ;
+      SI ( ( DIMG EGA 3 ) OU (  EGA MODG 'FOUR' ) ) ;
+        TAB1.NTORS = PROG 0. 0. 0. 0. 0. 0. ;
+        TAB2.NTORS = PROG 0. 0. 0. 0. 0. 0. ;
+        TAB3.NTORS = PROG 0. 0. 0. 0. 0. 0. ;
+      SINON ;
+        TAB1.NTORS = PROG 0. 0. 0. 0. ;
+        TAB2.NTORS = PROG 0. 0. 0. 0. ;
+        TAB3.NTORS = PROG 0. 0. 0. 0. ;
+      FINSI ;
+    FINSI ;
+* ======================================================================
+*   on soustrait 2 a 2 les torseurs contenus dans tab et on retient
+*   la combinaison qui donne le plus grand tresca
+* ======================================================================
+    TREJM1 = 0. ;
+    TREJM2 = 0. ;
+    TREJM3 = 0. ;
+    IS1    = 1 ;
+    JS1    = 1 ;
+    IS2    = 1 ;
+    JS2    = 1 ;
+    IS3    = 1 ;
+    JS3    = 1 ;
+    REPETER BOUCLE1 ( NTORS - 1 ) ;
+      I = &BOUCLE1 ;
+      J = I ;
+      REPETER BOUCLE2 ( NTORS -  I ) ;
+        J     = J + 1 ;
+        TORS1 = TAB1.I - TAB1.J ;
+        TORS2 = TAB2.I - TAB2.J ;
+        NFOIS = 2 ;
+        SI ( EXISTE TAB3 ) ;
+          TORS3 = ( TAB2.I - TAB3.I ) - ( TAB2.J - TAB3.J ) ;
+          NFOIS = 3 ;
+        FINSI ;
+        REPETER BOUCLE3 ( NFOIS ) ;
+          K = &BOUCLE3 ;
+          SI ( K EGA 1 ) ;
+            S1 = EXTRAIRE TORS1 1 ;
+            S2 = EXTRAIRE TORS1 2 ;
+            S3 = EXTRAIRE TORS1 3 ;
+            S4 = EXTRAIRE TORS1 4 ;
+            SI ( ( DIMG EGA 3 ) OU (  EGA MODG 'FOUR' ) ) ;
+              S5 = EXTRAIRE TORS1 5 ;
+              S6 = EXTRAIRE TORS1 6 ;
+            FINSI ;
+          FINSI ;
+          SI ( K EGA 2 ) ;
+            S1 = EXTRAIRE TORS2 1 ;
+            S2 = EXTRAIRE TORS2 2 ;
+            S3 = EXTRAIRE TORS2 3 ;
+            S4 = EXTRAIRE TORS2 4 ;
+            SI ( ( DIMG EGA 3 ) OU (  EGA MODG 'FOUR' ) ) ;
+              S5 = EXTRAIRE TORS2 5 ;
+              S6 = EXTRAIRE TORS2 6 ;
+            FINSI ;
+          FINSI ;
+          SI ( K EGA 3 ) ;
+            S1 = EXTRAIRE TORS3 1 ;
+            S2 = EXTRAIRE TORS3 2 ;
+            S3 = EXTRAIRE TORS3 3 ;
+            S4 = EXTRAIRE TORS3 4 ;
+            SI ( ( DIMG EGA 3 ) OU (  EGA MODG 'FOUR' ) ) ;
+              S5 = EXTRAIRE TORS3 5 ;
+              S6 = EXTRAIRE TORS3 6 ;
+            FINSI ;
+          FINSI ;
+* ----------------------------------------------------------------------
+*   creation d'un champ par element fictif constant sur la droite,
+*   equivalent au torseur
+* ----------------------------------------------------------------------
+          SI ( DIMG EGA 2 ) ;
+            SI ( EGA MODG 'FOUR' ) ;
+              CHAM1 = MANU  'CHPO' DR 6 'SMRR' S1 'SMZZ' S2 'SMTT' S3
+                                        'SMRZ' S4 'SMRT' S5 'SMZT' S6 ;
+            SINON ;
+              SI ( EGA MODG 'AXIS' ) ;
+                CHAM1 = MANU  'CHPO' DR 4 'SMRR' S1 'SMZZ' S2 'SMTT' S3
+                                          'SMRZ' S4 ;
+              SINON ;
+                CHAM1 = MANU  'CHPO' DR 4 'SMXX' S1 'SMYY' S2 'SMZZ' S3
+                                          'SMXY' S4 ;
+              FINSI ;
+            FINSI ;
+          SINON ;
+            CHAM1 = MANU  'CHPO' DR 6 'SMXX' S1 'SMYY' S2 'SMZZ' S3
+                                      'SMXY' S4 'SMXZ' S5 'SMYZ' S6 ;
+          FINSI ;
+
+          CHAM2 = CHAN   'CHAM' CHAM1 MODLDR ;
+* ----------------------------------------------------------------------
+*   calcul du tresca
+* ----------------------------------------------------------------------
+          CHAM3 =  TRES  MODLDR CHAM2 ;
+          SI ( K EGA 1 ) ;
+            TREJ1 = EXTR CHAM3 'SCAL' 1 1 1 ;
+            SI ( TREJ1 > TREJM1 ) ;
+              TREJM1 = TREJ1 ;
+              IS1    = I ;
+              JS1    = J ;
+            FINSI ;
+          FINSI ;
+          SI ( K EGA 2 ) ;
+            TREJ2 = EXTR CHAM3 'SCAL' 1 1 1 ;
+            SI ( TREJ2 > TREJM2 ) ;
+              TREJM2 = TREJ2 ;
+              IS2    = I ;
+              JS2    = J ;
+            FINSI ;
+          FINSI ;
+          SI ( K EGA 3 ) ;
+            TREJ3 = EXTR CHAM3 'SCAL' 1 1 1 ;
+            SI ( TREJ3 > TREJM3 ) ;
+              TREJM3 = TREJ3 ;
+              IS3    = I ;
+              JS3    = J ;
+            FINSI ;
+          FINSI ;
+          DETRUIRE CHAM1 ;
+          DETRUIRE CHAM2 ;
+          DETRUIRE CHAM3 ;
+        FIN BOUCLE3 ;
+* ----------------------------------------------------------------------
+*   destruction des objets crees a chaque pas
+* ----------------------------------------------------------------------
+    DETRUIRE TORS1 ;
+    DETRUIRE TORS2 ;
+    SI (NFOIS EGA 3 ) ;
+      DETRUIRE TORS3 ;
+    FINSI ;
+    FIN BOUCLE2 ;
+    FIN BOUCLE1 ;
+* ======================================================================
+*   resultat de la variation
+* ======================================================================
+    REPETER BOUCLE3 ( NFOIS ) ;
+      K           = &BOUCLE3 ;
+      TABVS.L.M.K = TABLE ;
+      SI ( K EGA 1 ) ; UY =  TABVS.L.M.K;
+         UY . 1 = IS1 ;
+         UY . 2 = JS1 ;
+         UY . 3 = TAB1.IS1 ;
+         UY . 4 = TAB1.JS1 ;
+         UY . 5 = TREJM1 ;
+        VAL11           = EXTRAIRE TAB1.IS1 1 ;
+        VAL21           = EXTRAIRE TAB1.IS1 2 ;
+        VAL31           = EXTRAIRE TAB1.IS1 3 ;
+        VAL41           = EXTRAIRE TAB1.IS1 4 ;
+       $VALT1 = CHAINE FORMAT '(F9.2)' VAL11 VAL21 VAL31  VAL41 ;
+        SI ( ( DIMG EGA 3 ) OU (  EGA MODG 'FOUR' ) ) ;
+          VAL51           = EXTRAIRE TAB1.IS1 5 ;
+          VAL61           = EXTRAIRE TAB1.IS1 6 ;
+       $VALT1 = CHAINE $VALT1 FORMAT '(F9.2)'  VAL61 VAL51;
+        FINSI ;
+        VAL12           = EXTRAIRE TAB1.JS1 1 ;
+        VAL22           = EXTRAIRE TAB1.JS1 2 ;
+        VAL32           = EXTRAIRE TAB1.JS1 3 ;
+        VAL42           = EXTRAIRE TAB1.JS1 4 ;
+       $VALT2 = CHAINE FORMAT '(F9.2)' VAL12 VAL22 VAL32  VAL42 ;
+        SI ( ( DIMG EGA 3 ) OU (  EGA MODG 'FOUR' ) ) ;
+          VAL52           = EXTRAIRE TAB1.JS1 5 ;
+          VAL62           = EXTRAIRE TAB1.JS1 6 ;
+       $VALT2 = CHAINE $VALT2 FORMAT '(F9.2)'  VAL62 VAL52;
+        FINSI ;
+        IS1E            = EXTRAIRE ETATS IS1 ;
+        JS1E            = EXTRAIRE ETATS JS1 ;
+        $IS1            = CHAINE IS1E/3 ;
+        $JS1            = CHAINE JS1E/3 ;
+        $TREJM1         = CHAINE FORMAT '(F9.2)' TREJM1  ;
+        SAUTER 2 'LIGNE';
+        SI ( M EGA 1 ) ;
+          MESSAGE '                      COUPE PAROI INTERIEURE' $L ;
+        SINON ;
+          MESSAGE '                      COUPE PAROI EXTERIEURE' $L ;
+        FINSI ;
+          MESSAGE '                      -------------------------' ;
+        SAUTER  'LIGNE';
+        MESSAGE 'VARIATION CONTRAINTES TOTALES = DELTA(PM+PB+Q+F) : SP';
+        SAUTER  'LIGNE';
+          MESSAGE '  ETAT NO' $IS1 ' -->' $VALT1;
+          MESSAGE '  ETAT NO' $JS1 ' -->' $VALT2;
+        MESSAGE '  TRESCA' $TREJM1 ' MPA' ;
+      FINSI ;
+      SI ( K EGA 2 ) ; UY= TABVS.L.M.K;
+         UY . 1 = IS2 ;
+         UY . 2 = JS2 ;
+         UY . 3 = TAB2.IS2 ;
+         UY . 4 = TAB2.JS2 ;
+         UY . 5 = TREJM2 ;
+        VAL11           = EXTRAIRE TAB2.IS2 1 ;
+        VAL21           = EXTRAIRE TAB2.IS2 2 ;
+        VAL31           = EXTRAIRE TAB2.IS2 3 ;
+        VAL41           = EXTRAIRE TAB2.IS2 4 ;
+       $VALT1 = CHAINE FORMAT '(F9.2)' VAL11 VAL21 VAL31  VAL41 ;
+        SI ( ( DIMG EGA 3 ) OU (  EGA MODG 'FOUR' ) ) ;
+          VAL51           = EXTRAIRE TAB2.IS2 5 ;
+          VAL61           = EXTRAIRE TAB2.IS2 6 ;
+
+       $VALT1 = CHAINE $VALT1  FORMAT '(F9.2)' VAL61 VAL51;
+        FINSI ;
+        VAL12           = EXTRAIRE TAB2.JS2 1 ;
+        VAL22           = EXTRAIRE TAB2.JS2 2 ;
+        VAL32           = EXTRAIRE TAB2.JS2 3 ;
+        VAL42           = EXTRAIRE TAB2.JS2 4 ;
+       $VALT2 = CHAINE FORMAT '(F9.2)' VAL12 VAL22 VAL32  VAL42 ;
+        SI ( ( DIMG EGA 3 ) OU (  EGA MODG 'FOUR' ) ) ;
+          VAL52           = EXTRAIRE TAB2.JS2 5 ;
+          VAL62           = EXTRAIRE TAB2.JS2 6 ;
+       $VALT2 = CHAINE $VALT2  FORMAT '(F9.2)' VAL62 VAL52;
+        FINSI ;
+        IS2E            = EXTRAIRE ETATS IS2 ;
+        JS2E            = EXTRAIRE ETATS JS2 ;
+        $IS2            = CHAINE IS2E/3 ;
+        $JS2            = CHAINE JS2E/3 ;
+        $TREJM2         = CHAINE FORMAT '(F9.2)' TREJM2  ;
+        SAUTER  'LIGNE';
+        MESSAGE 'VARIATION CONTRAINTES MEMBRANE+FLEXION = '
+                'DELTA(PM+PB+Q) : SN' ;
+       SAUTER  'LIGNE';
+          MESSAGE '  ETAT NO' $IS2 ' -->' $VALT1;
+          MESSAGE '  ETAT NO' $JS2 ' -->' $VALT2;
+        MESSAGE '  TRESCA' $TREJM2 ' MPA' ;
+      FINSI ;
+      SI ( K EGA 3 ) ; UY= TABVS.L.M.K;
+         UY . 1 = IS3 ;
+         UY . 2  = JS3 ;
+         UY . 3 = ( TAB2.IS3 - TAB3.IS3 ) ;
+         UY . 4 = ( TAB2.JS3 - TAB3.JS3 ) ;
+         UY . 5 = TREJM3 ;
+        VAL11  = ( EXTRAIRE TAB2.IS3 1 ) - ( EXTRAIRE TAB3.IS3 1 ) ;
+        VAL21  = ( EXTRAIRE TAB2.IS3 2 ) - ( EXTRAIRE TAB3.IS3 2 ) ;
+        VAL31  = ( EXTRAIRE TAB2.IS3 3 ) - ( EXTRAIRE TAB3.IS3 3 ) ;
+        VAL41  = ( EXTRAIRE TAB2.IS3 4 ) - ( EXTRAIRE TAB3.IS3 4 ) ;
+    $VALT1 = CHAINE FORMAT '(F9.2)' VAL11 VAL21 VAL31 VAL41;
+        SI ( ( DIMG EGA 3 ) OU (  EGA MODG 'FOUR' ) ) ;
+          VAL51  = ( EXTRAIRE TAB2.IS3 5 ) - ( EXTRAIRE TAB3.IS3 5 ) ;
+          VAL61  = ( EXTRAIRE TAB2.IS3 6 ) - ( EXTRAIRE TAB3.IS3 6 ) ;
+    $VALT1 = CHAINE  $VALT1 FORMAT '(F9.2)' VAL61 VAL51;
+        FINSI ;
+        VAL12  = ( EXTRAIRE TAB2.JS3 1 ) - ( EXTRAIRE TAB3.JS3 1 ) ;
+        VAL22  = ( EXTRAIRE TAB2.JS3 2 ) - ( EXTRAIRE TAB3.JS3 2 ) ;
+        VAL32  = ( EXTRAIRE TAB2.JS3 3 ) - ( EXTRAIRE TAB3.JS3 3 ) ;
+        VAL42  = ( EXTRAIRE TAB2.JS3 4 ) - ( EXTRAIRE TAB3.JS3 4 ) ;
+    $VALT2 = CHAINE FORMAT '(F9.2)' VAL12 VAL22 VAL32 VAL42;
+        SI ( ( DIMG EGA 3 ) OU (  EGA MODG 'FOUR' ) ) ;
+          VAL52  = ( EXTRAIRE TAB2.JS3 5 ) - ( EXTRAIRE TAB3.JS3 5 ) ;
+          VAL62  = ( EXTRAIRE TAB2.JS3 6 ) - ( EXTRAIRE TAB3.JS3 6 ) ;
+    $VALT2 = CHAINE $VALT2  FORMAT '(F9.2)' VAL62 VAL52;
+        FINSI ;
+        IS3E    = EXTRAIRE ETATS IS3 ;
+        JS3E    = EXTRAIRE ETATS JS3 ;
+        $IS3    = CHAINE IS3E/3 ;
+        $JS3    = CHAINE JS3E/3 ;
+        $TREJM3 = CHAINE FORMAT '(F9.2)' TREJM3  ;
+      SAUTER 'LIGNE';
+        SI ( FLEXT ) ;
+          MESSAGE 'VARIATION CONTRAINTES MEMBRANE+FLEXION (FLEXION '
+                  'THERMIQUE EXCLUE) : SN*' ;
+        SINON ;
+          MESSAGE 'VARIATION CONTRAINTES MEMBRANE : SN*' ;
+        FINSI ;
+      SAUTER 'LIGNE';
+          MESSAGE '  ETAT NO' $IS3 ' -->' $VALT1;
+          MESSAGE '  ETAT NO' $JS3 ' -->' $VALT2;
+        MESSAGE '  TRESCA' $TREJM3 ' MPA' ;
+      FINSI ;
+    FIN BOUCLE3 ;
+  FIN TPARO  ;
+FIN TCOUP ;
+*modifs
+*FINPROC TABVS ;
+TVARSG.II = TABVS ;
+
+  FIN BOUCL01 ;
+*
+SAUT LIGNE;
+MESSAGE '---> fin phase variations' ;
+MESSAGE '     --------------------' ;
+SAUT LIGNE;
+* ----------------------------------------------------------------------
+*   fatigue si TABFATI existe
+* ----------------------------------------------------------------------
+
+  SI ( EXISTE TABFATI ) ;
+
+    SAUT LIGNE;
+    MESSAGE '---> phase fatigue' ;
+    MESSAGE '     -------------' ;
+    SAUT LIGNE;
+    REPETER BOUCLE1 ( NGROUPTM ) ;
+      I = &BOUCLE1 ;
+      SAUT LIGNE;
+      MESSAGE '     ---> occurences groupe ' I ;
+      MESSAGE '          -----------------------' ;
+      SAUT LIGNE;
+      TABOCCUR.I = TABFATI.IND1.I ;
+    FIN BOUCLE1 ;
+
+    REPETER BOUCLE1 ( NCOUPS ) ;
+      I = &BOUCLE1 ;
+      SAUT LIGNE;
+      MESSAGE '     ---> donnees materiaux pour coupe ' I ;
+      MESSAGE '          -----------------------------' ;
+      SAUT LIGNE;
+      TABDONF.I = TABLE ;
+      LISTEMA   = TABFATI.IND2.I ;
+      NMATER    = DIME ( LISTEMA ) ;
+      REPETER BOUCLE2 ( NMATER ) ;
+        J           = &BOUCLE2 ;
+        TABDONF.I.J = EXTRAIRE LISTEMA J ;
+      FIN BOUCLE2 ;
+    FIN BOUCLE1 ;
+    SI (SEISME) ;
+      TABDSEI = TABLE ;
+      REPETER BOUCLE1 ( NCOUPS ) ;
+        I = &BOUCLE1 ;
+        SAUT LIGNE;
+        MESSAGE '     ---> donnees seisme pour coupe ' I ;
+        MESSAGE '          --------------------------' ;
+        SAUT LIGNE;
+        TABDSEI.I = TABLE ;
+        LISTSEI   = TABFATI.IND3.I ;
+        NCTORS    = DIME ( LISTSEI ) ;
+        REPETER BOUCLE2 ( NCTORS ) ;
+          J           = &BOUCLE2 ;
+          TABDSEI.I.J = EXTRAIRE LISTSEI J ;
+        FIN BOUCLE2 ;
+      FIN BOUCLE1 ;
+    FINSI ;
+
+*modif FATIGUE: la procedure FATIGUE est supprimee
+*et est directement integree ci dessous
+*en conservant la notice explicative
+*modif effectuees avant l entree dans fatigue:
+
+*    SI (NON SEISME) ;
+*      @FATIGUE TVARSG TABOCCUR TABDONF ;
+*    SINON ;
+*      @FATIGUE TVARSG TABOCCUR TABDONF TABDSEI ;
+*    FINSI ;
+*initialisations
+TABVT= TVARSG   ;
+TABNT= TABOCCUR   ;
+TABDF= TABDONF   ;
+SI ( SEISME ) ;TABDS=TABDSEI ;FINSI   ;
+
+*$$$$ @FATIGUE
+* @FATIGUE PROCEDURE                                 96/10/09   16:00:00
+* ----------------------------------------------------------------------
+******                     PROCEDURE @FATIGUE                     ******
+* ----------------------------------------------------------------------
+*
+*   CETTE PROCEDURE PERMET DE FORMER UN FICHIER POUR USE2.
+*
+* ----------------------------------------------------------------------
+*
+*   LES DONNEES SONT :
+*    ----> une table composee a chaque indice d'une table pour chaque
+*          coupe contenant elle meme une table a 4 indices correspondant
+*          a une variation (ou transitoire dans la terminolagie de USE2;
+*          l'ensemble des transitoires , avec le nombre d'occurences
+*          pour chaque transitoire forme un groupe, au sens de USE2.
+*          Cette table a 4 indices est formee
+*          par VARIATI et contient :
+*          - premier   indice  : numero de coupe
+*          - deuxieme  indice  : code :
+*                                - 1 : paroi interieure
+*                                - 2 : paroi exterieure
+*          - troisieme indice  : code :
+*                                - 1 : contraintes totales
+*                                - 2 : contraintes membrane+flexion
+*                                - 3 : contraintes membrane+flexion,
+*                                      flexion thermique exclue
+*          - quatrieme indice  : 5 sorties :
+*                                - 1 : indice du premier torseur
+*                                - 2 : indice du deuxieme torseur
+*                                - 3 : premier torseur
+*                                - 4 : deuxieme torseur
+*                                - 5 : tresca
+*
+*    ----> une table donnant pour chaque transitoire le nombre
+*          d'occurences
+*    ----> une table composee a chaque indice d'une table a 6 indices
+*          ou 7 indices correspondant a des donnees de materiaux ou code
+*          seisme pour USE2, pour chaque coupe.
+*          Cette table a 6 indices contenant :
+*            - premier   indice  : code materiau
+*            - deuxieme  indice  : module d'elasticite
+*            - troisieme indice  : facteur de concentration des
+*                                  contraintes
+*            - quatrieme indice  : contrainte SM de reference
+*            - cinquieme indice  : parametre intervenant dans le calcul
+*                                  du facteur de concentration
+*                                  elastoplastique KE
+*            - sixieme   indice  : parametre intervenant dans le calcul
+*                                  du facteur de concentration
+*                                  elastoplastique KE
+*            - septieme  indice  : code de seisme, si calcul au seisme :
+*                                  . 1 : calcul conservatif mais rapide
+*                                  . 2 : calcul realiste mais lent
+*    ----> une table eventuelle composee a chaque indice d'une table a
+*          4 indices  ou 6 indices correspondant a des donnees de seisme
+*          pour USE2, pour chaque coupe.
+*          Cette table a 4 ou 6 indices contenant les composantes du
+*          torseur du seisme.
+*
+*   EN SORTIE :
+*    ----> impression des resultats
+*
+* ----------------------------------------------------------------------
+*   PAR Joseph MANNINO
+* ----------------------------------------------------------------------
+*'DEBPROC' @FATIGUE TABVT*TABLE TABNT*TABLE TABDF*TABLE TABDS/TABLE ;
+* ======================================================================
+*   initialisation
+* ======================================================================
+DIMG = VALE 'DIME' ;
+MODG = VALE 'MODE' ;
+* ======================================================================
+*   nombre de transitoires
+* ======================================================================
+NTRAN = DIME TABVT ;
+SI ( NTRAN NEG ( DIME TABNT ) ) ;
+    MESSAGE 'LES TABLES POUR FATIGUE NE CONVIENNENT PAS' ;
+    QUITTER @RCCM ;
+FINSI ;
+* ======================================================================
+*   nombre de coupes
+* ======================================================================
+NCOUP = DIME TABVT. 1 ;
+SI ( NCOUP NEG ( DIME TABDF ) ) ;
+    MESSAGE 'LES TABLES POUR FATIGUE NE CONVIENNENT PAS' ;
+    QUITTER @RCCM ;
+FINSI ;
+* ======================================================================
+*   code de revision de USE 2
+* ======================================================================
+MESSAGE '5.' ;
+* ======================================================================
+*   boucle sur les coupes
+* ======================================================================
+REPETER TCOUP ( NCOUP ) ;
+  J  = &TCOUP ;
+  $J =  CHAINE  J/3 ;
+  SI (((DIME TABDF.J) NEG 6) ET ((DIME TABDF.J) NEG 7)) ;
+      MESSAGE 'LES TABLES POUR FATIGUE NE CONVIENNENT PAS' ;
+      QUITTER @RCCM ;
+  FINSI ;
+  UY = TABDF . J;
+  CAUD    = UY . 1  FLOT;
+  ANT     = FLOT NTRAN ;
+  EMIN    =  UY . 2  FLOT;
+  AK      = UY . 3 FLOT;
+  SM      = UY . 4  FLOT;
+  XM      = UY . 5  FLOT;
+  XN      =  UY . 6  FLOT;
+  SI (EXISTE  UY  7) ;
+    SEISME  =  UY . 7 ;
+  SINON ;
+    SEISME  = 0. ;
+  FINSI ;
+
+  SI ( ( DIMG EGA 3 ) OU (  EGA MODG 'FOUR' ) ) ;
+    OPT  = 3. ;
+  SINON ;
+    OPT  = 2. ;
+  FINSI ;
+  TEST   = 1. ;
+* ----------------------------------------------------------------------
+*   boucle sur les parois interieures et exterieures
+*   k=1 --> paroi interieure
+*   k=2 --> paroi exterieure
+* ----------------------------------------------------------------------
+
+  REPETER TPARO ( 2 ) ;
+
+    K = &TPARO ;
+
+    SI ( K EGA 1 ) ;
+      MESSAGE 'FACTEUR D"USAGE DANS LA COUPE' $J ' PAROI INTERIEURE' ;
+    SINON ;
+      MESSAGE 'FACTEUR D"USAGE DANS LA COUPE' $J ' PAROI EXTERIEURE' ;
+    FINSI ;
+AA = CHAINE FORMAT '(F10.0)' CAUD ANT EMIN   FORMAT '(F10.2)' AK
+FORMAT '(F10.1)'  SM XM XN FORMAT '(F10.0)' SEISME;
+ MESS AA;
+AA = CHAINE FORMAT '(F10.1)'  OPT   TEST;
+     MESS AA;
+* ----------------------------------------------------------------------
+*   ecriture du seisme eventuel
+* ----------------------------------------------------------------------
+  SI ((EXISTE TABDS) ET ((SEISME EGA 1.) OU (SEISME EGA 2.))) ;
+     UY =  TABDS.J;
+    S1  = UY . 1 ;
+    S2  = UY . 2 ;
+    S3  =  UY . 3 ;
+    S4  =  UY . 4 ;
+    S5  = UY . 5 ;
+    S6  =  UY . 6 ;
+    SI (DIMG EGA 3) ;
+      S7  = UY . 7 ;
+      S8  = UY . 8 ;
+    FINSI ;
+     SI (DIMG EGA 2) ;
+AA = CHAINE  FORMAT '(F10.2)'  S1 S2 S3 S4 S5 S6;
+   MESS AA;
+     SINON ;
+AA = CHAINE  FORMAT '(F10.2)'  S1 S2 S3 S4 S5 S6 S7 S8;
+   MESS AA;
+     FINSI ;
+  FINSI ;
+* ======================================================================
+*   boucle sur les transitoires
+* ======================================================================
+    REPETER TTRAN ( NTRAN ) ;
+      I = &TTRAN ;
+      SI ( NCOUP NEG ( DIME TABVT.I ) ) ;
+          MESSAGE 'LES TABLES POUR FATIGUE NE CONVIENNENT PAS' ;
+          QUITTER @RCCM ;
+      FINSI ;
+      NOC  = TABNT.I  FLOT;
+      $NOC = CHAINE FORMAT '(F10.0)'  NOC  ;
+      MESSAGE $NOC ;
+    UY = TABVT.I.J.K;
+      TORS1 =  UY . 1 . 3 ;
+      TORS2 = UY . 1 . 4 ;
+      TORS3 = UY . 2 . 3 ;
+      TORS4 = UY . 2 . 4;
+      S11  = EXTRAIRE TORS1 1 ;
+      S21  = EXTRAIRE TORS1 2 ;
+      S31  = EXTRAIRE TORS1 3 ;
+      S41  = EXTRAIRE TORS1 4 ;
+      SI ( ( DIMG EGA 3 ) OU (  EGA MODG 'FOUR' ) ) ;
+        S51  = EXTRAIRE TORS1 5 ;
+        S61  = EXTRAIRE TORS1 6 ;
+      FINSI ;
+      S12  = EXTRAIRE TORS2 1 ;
+      S22  = EXTRAIRE TORS2 2 ;
+      S32  = EXTRAIRE TORS2 3 ;
+      S42  = EXTRAIRE TORS2 4 ;
+      SI ( ( DIMG EGA 3 ) OU (  EGA MODG 'FOUR' ) ) ;
+        S52  = EXTRAIRE TORS2 5 ;
+        S62  = EXTRAIRE TORS2 6 ;
+      FINSI ;
+      S13  = EXTRAIRE TORS3 1 ;
+      S23  = EXTRAIRE TORS3 2 ;
+      S33  = EXTRAIRE TORS3 3 ;
+      S43  = EXTRAIRE TORS3 4 ;
+      SI ( ( DIMG EGA 3 ) OU (  EGA MODG 'FOUR' ) ) ;
+        S53  = EXTRAIRE TORS3 5 ;
+        S63  = EXTRAIRE TORS3 6 ;
+      FINSI ;
+      S14  = EXTRAIRE TORS4 1 ;
+      S24  = EXTRAIRE TORS4 2 ;
+      S34  = EXTRAIRE TORS4 3 ;
+      S44  = EXTRAIRE TORS4 4 ;
+      SI ( ( DIMG EGA 3 ) OU (  EGA MODG 'FOUR' ) ) ;
+        S54  = EXTRAIRE TORS4 5 ;
+        S64  = EXTRAIRE TORS4 6 ;
+      FINSI ;
+      SI ( ( DIMG EGA 3 ) OU (  EGA MODG 'FOUR' ) ) ;
+ AA = CHAINE FORMAT '(F10.2)' S11 S21 S31 S41 S61 S51;
+     MESS AA;
+ AA = CHAINE FORMAT '(F10.2)' S12 S22 S32 S42 S62 S52 ;
+     MESS AA;
+ AA = CHAINE FORMAT '(F10.2)' S13 S23 S33 S43 S63 S53 ;
+     MESS AA;
+ AA = CHAINE FORMAT '(F10.2)' S14 S24 S34 S44 S64 S54 ;
+     MESS AA;
+      SINON ;
+ AA = CHAINE FORMAT '(F10.2)' S11 S21 S31 S41 S12 S22 S32 S42 ;
+     MESS AA;
+ AA = CHAINE FORMAT '(F10.2)' S13 S23 S33 S43 S14 S24 S34 S44 ;
+     MESS AA;
+      FINSI ;
+    FIN TTRAN ;
+  SI ( ( J EGA NCOUP ) ET ( K EGA 2 ) ) ;
+    MESSAGE '0.' ;
+  SINON ;
+    MESSAGE '1.' ;
+  FINSI ;
+  FIN TPARO ;
+FIN TCOUP ;
+*FINPROC ;
+
+    SAUT LIGNE;
+    MESSAGE '---> fin phase fatigue' ;
+    MESSAGE '     -----------------' ;
+    SAUT LIGNE;
+  FINSI ;
+FINSI ;
+FINSI ;
+SAUT LIGNE;
+MESSAGE '***** FIN DU CALCUL RCCM *****' ;
+MESSAGE '------------------------------' ;
+SAUT LIGNE;
+FINPROC ;
+$$$$
+
+
+
+
+

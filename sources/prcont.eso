@@ -1,0 +1,583 @@
+C PRCONT    SOURCE    PASCAL    18/12/06    21:15:35     10029
+************************************************************************
+*     NOM         : PRCONT
+*     DESCRIPTION : Construit le contour d'un objet maillage
+*     (fonctionne suivant un principe inspire de TRAC)
+************************************************************************
+*     APPELE PAR : pilot.eso
+************************************************************************
+*     ENTREES :: aucune
+*     SORTIES :: aucune
+************************************************************************
+*     SYNTAXE (GIBIANE) :
+*
+*     GEO1 = CONTOUR ('NOID') (|'EXTE'|) GEO2 ;
+*     |'INTE'|
+*     |'TOUT'|
+*
+************************************************************************
+      SUBROUTINE PRCONT
+
+      IMPLICIT INTEGER(I-N)
+
+-INC CCOPTIO
+-INC CCGEOME
+-INC SMELEME
+-INC SMCOORD
+-INC CCASSIS
+
+      SEGMENT ICPR(XCOOR(/1)/(IDIM+1))
+      SEGMENT IDCP(ITE)
+      SEGMENT KON(NBCON,NMAX,3)
+
+      CHARACTER*8 CHAIN1
+
+      PARAMETER(NMOT1=3,NMOT2=1)
+      CHARACTER*4 LMOT1(NMOT1),LMOT2(NMOT2)
+      DATA LMOT1/'EXTE','INTE','TOUT'/
+      DATA LMOT2/'NOID'/
+
+
+*     +---------------------------------------------------------------+
+*     |           L E C T U R E   D E S   A R G U M E N T S           |
+*     +---------------------------------------------------------------+
+
+*     LECTURE DES MOTS-CLES FACULTATIFS
+      CALL LIRMOT(LMOT1,NMOT1,IMOT1,0)
+      IF (IMOT1.EQ.0) IMOT1=1
+      CALL LIRMOT(LMOT2,NMOT2,IMOT2,0)
+
+*     LECTURE DU MAILLAGE
+      CALL LIROBJ('MAILLAGE',MELEME,1,IRETOU)
+      IF (IERR.NE.0) RETURN
+      IPT8=MELEME
+
+*     ON VA VERIFIER QUE LE CONTOUR DEMANDE N'A PAS DEJA ETE CONSTRUIT
+      SEGACT,MELEME
+      IF (LISREF(/1).EQ.1.AND.IMOT1.EQ.1) THEN
+         IPT1=LISREF(1)
+         CALL ECROBJ('MAILLAGE',IPT1)
+         SEGDES,MELEME
+         RETURN
+      ENDIF
+
+*     +---------------------------------------------------------------+
+*     |        C O N N E C T I V I T E   D U   M A I L L A G E        |
+*     +---------------------------------------------------------------+
+*
+*     REMPLISSAGE DES TABLEAUX DE CORRESPONDANCE LOCALE/GLOBALE AVEC
+*     SEULEMENT LES NOEUDS SOMMETS (i.e. PAS DE NOEUDS MILIEUX)
+*     **************************************************************
+
+      SEGACT,MCOORD
+      igr=xcoor(/1)/(idim+1)+1
+      SEGINI,ICPR
+      ITE=0
+      IPT1=MELEME
+      DO 3 I=1,MAX(1,LISOUS(/1))
+         IF (LISOUS(/1).NE.0) THEN
+            IPT1=LISOUS(I)
+            SEGACT,IPT1
+         ENDIF
+         K=IPT1.ITYPEL
+
+*     Le test ci-dessous filtre les elements non surfaciques
+         IF (K.NE.KSURF(K)) GOTO 8
+
+*     Parcours des noeuds situes aux sommets de tous les elements
+         IDEP=NSPOS(K)
+         IF (NBSOM(K).GT.0) THEN
+            IFEP=IDEP+NBSOM(K)-1
+         ELSE
+*     Cas particulier de l'element POLYgone
+            IFEP=IDEP+IPT1.NUM(/1)-1
+         ENDIF
+         IF (IFEP.LT.IDEP) GOTO 8
+         DO 4 JJ=IDEP,IFEP
+            J=IBSOM(JJ)
+            DO 401 K=1,IPT1.NUM(/2)
+               IPOIT=IPT1.NUM(J,K)
+               IF (ICPR(IPOIT).NE.0) GOTO 7
+               ITE=ITE+1
+               ICPR(IPOIT)=ITE
+ 7             CONTINUE
+ 401        CONTINUE
+ 4       CONTINUE
+ 8       CONTINUE
+ 3    CONTINUE
+*
+      IF (ITE.EQ.0) THEN
+         SEGSUP,ICPR
+         CALL ERREUR(16)
+         RETURN
+      ENDIF
+*
+      SEGINI,IDCP
+      DO 40 I=1,ICPR(/1)
+         IF (ICPR(I).EQ.0) GOTO 40
+         IDCP(ICPR(I))=I
+ 40   CONTINUE
+
+
+*     REMPLISSAGE DU TABLEAU DE CONNECTIVITE VIA LES ARETES KON(I,J,K)
+*     ******************************************************************
+*     => KON(I,J,K) CONTIENT LES INFORMATIONS ASSOCIEES A LA I-EME
+*     ARETE CONNECTEE AU J-EME NOEUD (NUMEROTATION LOCALE)
+*     K=1   NOEUD A L'AUTRE EXTREMITE DE L'ARETE
+*     K=2   NOEUD MILIEU (=1 POUR LES ELT D'ORDRE 1)
+*     K=3   DESIGNE LA COULEUR DE L'ARETE + 1
+*
+*     => I EST COMPRIS ENTRE 1 ET NBCON=7, OR IL PEUT Y AVOIR BEAUCOUP
+*     PLUS D'ARETES CONNECTEES A UN NOEUD J DONNE
+*     SOLUTION : LA 7EME ARETE EST STOCKEE DANS DANS KON(1,L,K) AVEC
+*     L=KON(7,J,1) ET AINSI DE SUITE POUR LES SUIVANTES
+*     (CE QUI EXPLIQUE QUE J VARIE DE 1 A NMAX>ITE)
+*
+*     => LE SIGNE DEVANT LE NUMERO DU NOEUD MILIEU (K=2) PEUT ETRE
+*     POSITIF OU NEGATIF SELON LE SENS DE PARCOURS DU CONTOUR
+*
+*     => LA DEUXIEME FOIS QU'UNE ARETE EST RENCONTREE, LE NUMERO DU
+*     NOEUD D'EXTREMITE (K=1) DEVIENT NEGATIF => ARETE HORS CONTOUR
+*
+*     => LA TROISIEME FOIS QU'UNE ARETE EST RECONTREE, LE NUMERO DE LA
+*     COULEUR (K=3) DEVIENT NEGATIF => CONTOUR INTERNE DETECTE
+*     ******************************************************************
+      NBCON=7
+      NBCONR=NBCON-1
+      NMAX=(10*ITE)/NBCON
+      SEGINI,KON
+
+*     NBNN designe le nombre de noeuds par arete (type = SEG2 ou SEG3)
+*     COMPT est incremente des qu'on recontre un nouveau type de segment
+      NBNN=0
+      COMPT=0
+
+*     ICHAIN est l'indice J "apres debordement" permettant de definir
+*     plus de 6 aretes pour un meme noeud
+      ICHAIN=ITE
+
+*     BOUCLE SUR LES SOUS-MAILLAGES ELEMENTAIRES
+      IPT1=MELEME
+      DO 30 IO=1,MAX(1,LISOUS(/1))
+         IF (LISOUS(/1).NE.0) IPT1=LISOUS(IO)
+
+         K=IPT1.ITYPEL
+
+*     Le test ci-dessous filtre les sous-maillages non surfaciques
+         IF (K.NE.KSURF(K)) GOTO 21
+
+*     Reperage des indices de debut/fin de parcours de tous les
+*     noeuds de la face (tableau LFAC)
+         KK=LTEL(2,K)
+         ITYP=LDEL(1,KK)
+         IF (NBNN.NE.KDEGRE(K)) THEN
+            NBNN=KDEGRE(K)
+            COMPT=COMPT+1
+         ENDIF
+         IPAS=NBNN-1
+         IDEP=LDEL(2,KK)
+         IF (ITYP.NE.6) THEN
+            IFEP=IDEP+KDFAC(1,ITYP)-1
+*     [SG 2016-07-11] Pour les faces TRI7 et QUA9, on ignore le
+*     dernier point (centre de la face)
+            IF (ITYP.EQ.7.OR.ITYP.EQ.8) IFEP=IFEP-1
+         ELSE
+*     Cas particulier de l'element POLYgone
+            IFEP= IDEP+IPT1.NUM(/1)-1
+         ENDIF
+
+*     PARCOURS DES NOEUDS SOMMETS DE TOUS LES ELEMENTS
+         DO 22 I=1,IPT1.NUM(/2)
+            DO 221 J=IDEP,IFEP,IPAS
+
+*     DETERMINATION DES CARACTERISTIQUES DE L'ARETE
+*     => NI=sommet courant
+*     => NJ=sommet a l'autre extremite de l'arete
+*     => NMIL=noeud milieu si existant (ou alors IGR)
+*     => KSCOL=couleur+1
+               NMIL=IGR
+*     (VALEUR QUI PERMET DE DISTINGUER SEG2 ET SEG3 CAR LE
+*     igr n'est pas un numero de noeud possible
+               N1=ICPR(IPT1.NUM(LFAC(J),I))
+               JSUIV=J+IPAS
+               IF (JSUIV.GT.IFEP) JSUIV=IDEP
+               N2=ICPR(IPT1.NUM(LFAC(JSUIV),I))
+               IF (IPAS.EQ.2) NMIL=IPT1.NUM(LFAC(J+1),I)
+               NI=N1
+               NJ=N2
+               IF (N1*N2.EQ.0) THEN
+                  CALL ERREUR(26)
+                  SEGSUP,KON,ICPR,IDCP
+                  SEGDES,MELEME
+                  RETURN
+               ENDIF
+               KSCOL=IPT1.ICOLOR(I)+1
+
+*     PARCOURS DU TABLEAU KON POUR Y AJOUTER L'ARETE COURANTE,
+*     OU POUR INDIQUER QU'ON L'A VUE 2 OU 3 FOIS
+*     (en cas d'ajout, IPO permet d'ajouter aussi dans KON
+*     l'arete parcourue en sens inverse)
+               IPO=0
+ 23            CONTINUE
+
+*     On cherche si l'arete existe deja, ou bien sinon la
+*     premiere place libre pour l'ajouter
+ 24            DO 25 K=1,NBCONR
+                  IF (KON(K,NI,1).EQ.0) GOTO 26
+                  IF (ABS(KON(K,NI,1)).EQ.NJ.AND.
+     >                 ABS(KON(K,NI,2)).EQ.abs(NMIL)) GOTO 27
+ 25            CONTINUE
+*     Au-dela de I=6 : soit on a trouve une place libre, soit
+*     on continue a parcourir KON a l'indice J de "debordement"
+*     (car il y a deja au moins 7 aretes associees a NI)
+               IF (KON(NBCON,NI,1).EQ.0) GOTO 28
+               NI=KON(NBCON,NI,1)
+               GOTO 24
+
+*     ON AVAIT DEJA RENCONTRE CETTE ARETE...
+ 27            CONTINUE
+               IF (KON(K,NI,1).GT.0) THEN
+*     ...UNE SEULE FOIS => ON L'EXCLUT DU CONTOUR
+                  KON(K,NI,1)=-NJ
+               ELSE
+*     ...AU MOINS 2 FOIS => ON L'AJOUTE AU CONTOUR INTERNE
+                  KON(K,NI,3)=-KSCOL
+               ENDIF
+               GOTO 29
+
+*     ARETE JAMAIS RENCONTREE : AJOUT A LA PREMIERE PLACE LIBRE
+ 26            KON(K,NI,1)=NJ
+               KON(K,NI,2)=NMIL
+               KON(K,NI,3)=KSCOL
+               GOTO 29
+
+*     ARETE JAMAIS RENCONTREE, MAIS LA PREMIERE PLACE LIBRE
+*     SE TROUVE DANS LE PROCHAIN BLOC DE 6
+ 28            ICHAIN=ICHAIN+1
+               IF (ICHAIN.GE.NMAX) THEN
+                  NMAX=NMAX*2
+                  SEGADJ,KON
+               ENDIF
+               KON(NBCON,NI,1)=ICHAIN
+               K=1
+               NI=ICHAIN
+               GOTO 26
+
+*     A CHAQUE FOIS QU'UNE NOUVELLE ARETE EST RENCONTREE, ON
+*     AJOUTE AUSSI DANS KON CELLE PARCOURUE EN SENS INVERSE
+ 29            IF (IPO.EQ.1) GOTO 221
+               NMIL=-NMIL
+               NI=N2
+               NJ=N1
+               IPO=1
+               GOTO 23
+ 221        CONTINUE
+ 22      CONTINUE
+
+ 21      CONTINUE
+         IF (LISOUS(/1).NE.0) SEGDES,IPT1
+
+ 30   CONTINUE
+
+*     WARNING : contour complexe detecte (SEG2 et SEG3)
+      IF (COMPT.GT.1) CALL ERREUR(-333)
+
+*     ####################################################
+*     IMPRESSIONS POUR DEBUGAGE (OPTI 'IMPI')
+      IF (IIMPI.NE.0) THEN
+
+*     CONTENU DU TABLEAU ICPR
+         WRITE(IOIMP,FMT='("ICPR(",I7,")=",I7)')(I,ICPR(I),I=1,ICPR(/1))
+         WRITE(IOIMP,*) '********************'
+
+*     CONTENU DU TABLEAU IDCP
+         WRITE(IOIMP,FMT='("IDCP(",I7,")=",I7)')(I,IDCP(I),I=1,IDCP(/1))
+         WRITE(IOIMP,*) '********************'
+
+*     CONTENU DU TABLEAU KON
+         IF (IIMPI.EQ.2) THEN
+            DO J=1,NMAX
+               WRITE(IOIMP,FMT='(A,I7,A,I7)') 'J=',J,'/',NMAX
+               WRITE(IOIMP,FMT='(3I7)') ((KON(I,J,K),K=1,3),I=1,NBCON)
+            ENDDO
+         ENDIF
+
+*     ON VERIFIE SI CHAQUE NOEUD DU CONTOUR EST BIEN RELIE UNIQUEMENT
+*     A DEUX ELEMENTS
+         NNOEUD=0
+         CHAIN1='NODE'
+         DO 70 NI=1,ITE
+            NINTT=NI
+            NKON=0
+ 72         CONTINUE
+            DO 71 J=1,NBCONR
+               IF (KON(J,NINTT,1).EQ.0) GOTO 71
+               IF (KON(J,NINTT,1).GT.0) NKON=NKON+1
+ 71         CONTINUE
+            IF (KON(NBCON,NINTT,1).NE.0) THEN
+               NINTT=KON(NBCON,NINTT,1)
+               GOTO 72
+            ENDIF
+            IF (NKON.GT.2) THEN
+               NNOEUD=NNOEUD+1
+               JP1=IDCP(NI)
+               NNO=NNOEUD
+               IF (NNO.LE.9) THEN
+                  WRITE(CHAIN1(5:5),FMT='(I1)') NNO
+               ELSEIF(NNO.LE.99) THEN
+                  WRITE(CHAIN1(5:6),FMT='(I2)') NNO
+               ELSEIF(NNO.LE.999) THEN
+                  WRITE(CHAIN1(5:7),FMT='(I3)') NNO
+               ELSEIF(NNO.LE.9999) THEN
+                  WRITE(CHAIN1(5:8),FMT='(I4)') NNO
+               ELSEIF(NNO.LE.99999) THEN
+                  WRITE(CHAIN1(4:8),FMT='(I5)') NNO
+               ELSEIF(NNO.LE.999999) THEN
+                  WRITE(CHAIN1(3:8),FMT='(I6)') NNO
+               ENDIF
+               CALL NOMOBJ('POINT',CHAIN1,JP1)
+               MOTERR(1:8)=CHAIN1
+               INTERR(1)=NKON
+               CALL ERREUR(-335)
+            ENDIF
+ 70      CONTINUE
+
+      ENDIF
+*     ####################################################
+
+      SEGDES,MELEME
+      SEGSUP,ICPR
+
+
+*     CREATION DU MAILLAGE CONTENANT LE CONTOUR
+*     *****************************************
+
+
+*     ON COMMENCE PAR COMPTER LE NOMBRE D'ELEMENTS DU CONTOUR
+      NBELEM2=0
+      NBELEM3=0
+      DO 41 J=1,ITE
+         JJ=J
+ 43      DO 42 I=1,NBCONR
+            KON1=KON(I,JJ,1)
+            KON3=KON(I,JJ,3)
+            if (kon1.eq.0) goto 42
+            IF ((IMOT1.EQ.3.AND.KON1.LT.0.AND.KON3.GT.0)
+     &           .OR.(IMOT1.EQ.2.AND.(KON1.GT.0.OR.KON3.GT.0))
+     &           .OR.(IMOT1.EQ.1.AND.KON1.LT.0)) GOTO 42
+*     noeud milieu or not noeud milieu?
+            if (abs(kon(i,jj,2)).eq.igr) then
+               nbelem2=nbelem2+1
+            else
+               nbelem3=nbelem3+1
+            endif
+ 42      CONTINUE
+         IF (KON(NBCON,JJ,1).EQ.0) GOTO 41
+         JJ=KON(NBCON,JJ,1)
+         GOTO 43
+ 41   CONTINUE
+*     on a compte les aretes une fois dans chaque sens
+      NBELEM2=NBELEM2/2
+      NBELEM3=NBELEM3/2
+      IF (IIMPI.NE.0) WRITE(IOIMP,1111) NBELEM2,nbelem3
+ 1111 FORMAT(' NOMBRE D''ELEMENTS DU CONTOUR : ',2I6)
+
+      IF (NBELEM2+nbelem3.EQ.0) THEN
+         IF (IMOT2.EQ.0) THEN
+            MELEME=0
+            CALL ERREUR(26)
+            GOTO 64
+         ELSE
+            NBELEM=0
+            NBNN=2
+            NBSOUS=0
+            NBREF=0
+            SEGINI MELEME
+            ITYPEL=NBNN
+            GOTO 66
+         ENDIF
+      ENDIF
+
+*     CREATION DES meleme elementaires
+      NBELem=nbelem2
+      NBNN=2
+      NBSOUS=0
+      NBREF=0
+      if (nbelem.ne.0) then
+         SEGINI,IPT2
+         ipt2.ITYPEL=NBNN
+      endif
+      NBELem=nbelem3
+      NBNN=3
+      if (nbelem.ne.0) then
+         SEGINI,IPT3
+         ipt3.ITYPEL=NBNN
+      endif
+
+*     REMPLISSAGE SELON L'OPTION IMOT1 DEMANDEE (EXTE, INTE, TOUT)
+      IEL2=0
+      IEL3=0
+
+*     Recherche d'une arete pas encore ajoutee au contour
+      KAUX=0
+ 53   KAUX=KAUX+1
+      IF (KAUX.EQ.ITE+1) GOTO 63
+      KPRESS=KAUX
+      K=KPRESS
+      ideb=1
+*     Recherche de l'arete suivante
+ 57   CONTINUE
+      DO 56 L=1,NBCONR
+         M=KON(L,K,1)
+         IF (M.EQ.0) GOTO 56
+         M2=KON(L,K,2)
+**          IF (M2.LT.0) GOTO 56
+         M3=KON(L,K,3)
+         IF ((IMOT1.EQ.1.AND.M.LT.0) .OR.
+     &        (IMOT1.EQ.2.AND.(M.GT.0.OR.M3.GT.0)))GOTO 56
+         IF (IMOT1.EQ.3.AND.M.LT.0.AND.M3.GT.0) GOTO 56
+         GOTO 58
+ 56   CONTINUE
+      K=KON(NBCON,K,1)
+      IF (K.EQ.0)  GOTO 53
+      GOTO 57
+
+*     Ajout d'un element SEG2 ou SEG3 joignant KPRESS a M
+ 58   CONTINUE
+      IF (ABS(M2).eq.IGR) then
+         iel2=iel2+1
+*        write (6,*) 'iel2 nbelem2 ',iel2,nbelem2,m,m2,m3
+         if (iel2.GT.nbelem2) then
+            call erreur(5)
+            return
+         endif
+         ipt2.NUM(1,IEL2)=IDCP(KPRESS)
+         ipt2.NUM(2,IEL2)=IDCP(abs(m))
+         ipt2.icolor(iel2)=abs(m3)-1
+      ELSE
+         iel3=iel3+1
+**        write (6,*) 'iel3 nbelem3 ',iel3,nbelem3,m,m2,m3
+         if (iel3.GT.nbelem3) then
+            call erreur(5)
+            return
+         endif
+         ipt3.NUM(1,IEL3)=IDCP(KPRESS)
+         IPT3.NUM(2,IEL3)=ABS(M2)
+         ipt3.NUM(3,IEL3)=IDCP(abs(m))
+         ipt3.icolor(iel3)=abs(m3)-1
+      ENDIF
+
+*     On met a 0   KON(*,*,1) pour indiquer que l'element
+*     a deja ete ajoute au contour
+
+      KON(L,K,1)=0
+**       write (6,*) 'mise a zero directe ',l,k
+*     Idem, pour l'arete parcourue en sens inverse...
+      M1=ABS(M)
+ 59   DO 60 L=1,NBCONR
+         IF (ABS(KON(L,M1,2)).NE.ABS(M2)) GOTO 60
+         IF (KON(L,M1,1).EQ.0) GOTO 60
+         IF (ABS(KON(L,M1,1)).EQ.KPRESS) GOTO 61
+ 60   CONTINUE
+      M1=KON(NBCON,M1,1)
+      IF (M1.EQ.0) then
+**        write (6,*) ' rien a mettre a zero apres 60 '
+         GOTO 62
+      endif
+      GOTO 59
+ 61   KON(L,M1,1)=0
+**       write (6,*) 'mise a zero inverse ',l,m1
+ 62   CONTINUE
+*     si on est en debut de chaine, on inverse eventuellement l'arete
+      if (ideb.eq.1.and.m2.lt.0) then
+         if (abs(m2).eq.IGR) then
+            it=ipt2.num(1,iel2)
+            ipt2.num(1,iel2)=ipt2.num(2,iel2)
+            ipt2.num(2,iel2)=it
+         else
+            it=ipt3.num(1,iel3)
+            ipt3.num(1,iel3)=ipt3.num(3,iel3)
+            ipt3.num(3,iel3)=it
+         endif
+      else
+         KPRESS=abs(m)
+      endif
+      K=KPRESS
+*     ...puis on continue de suivre le contour
+      ideb=0
+      GOTO 57
+ 63   CONTINUE
+*
+*     on cree le chapeau correct si il y a lieu
+*
+*     write (6,*) ' nbelem2, iel2, nbelem3 =', nbelem2, iel2, nbelem3
+      if (nbelem2.eq.0) then
+         if (iel3.lt.nbelem3) then
+            NBNN=2
+            NBELEM=iel3
+            NBSOUS=0
+            NBREF=0
+            segadj,ipt3
+         endif
+         meleme=ipt3
+      elseif(nbelem3.eq.0) then
+         if (iel2.lt.nbelem2) then
+            NBNN=2
+            NBELEM=iel2
+            NBSOUS=0
+            NBREF=0
+            segadj,ipt2
+         endif
+         meleme=ipt2
+      else
+         if (iel2.lt.nbelem2) then
+            NBNN=2
+            NBELEM=iel2
+            NBSOUS=0
+            NBREF=0
+            segadj,ipt2
+         endif
+         if (iel3.lt.nbelem3) then
+            NBNN=2
+            NBELEM=iel3
+            NBSOUS=0
+            NBREF=0
+            segadj,ipt3
+         endif
+         nbnn=0
+         nbelem=0
+         nbsous=2
+         nbref=0
+         segini meleme
+         lisous(1)=ipt2
+         lisous(2)=ipt3
+         segdes ipt2,ipt3
+      endif
+ 66   continue
+      segdes meleme
+      CALL ECROBJ('MAILLAGE',MELEME)
+
+*     ON INSCRIT SEULEMENT LE CONTOUR EXTERIEUR DANS LES
+*     REFERENCES DU MAILLAGE INITIAL
+      SEGACT,IPT8
+      IF (IPT8.LISREF(/1).EQ.0.AND.IMOT1.EQ.1) THEN
+         NBREF=1
+         NBNN=IPT8.NUM(/1)
+         NBELEM=IPT8.NUM(/2)
+         NBSOUS=IPT8.LISOUS(/1)
+         SEGADJ,IPT8
+         IPT8.LISREF(1)=MELEME
+      ENDIF
+      SEGDES,IPT8
+
+
+
+ 64   CONTINUE
+      SEGSUP,KON,IDCP
+      RETURN
+      END
+
+
+
+
+

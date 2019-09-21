@@ -1,0 +1,1228 @@
+C DEVSO4    SOURCE    BP208322  18/01/30    21:15:16     9719
+      SUBROUTINE DEVSO4(KPREF,KTRES,KTLIAA,KTLIAB,KTNUM,NINS,
+     &                   ICHAIN,MTABLE,REPRIS,LMODYN,ITDYN,ITSORT)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*--------------------------------------------------------------------*
+*                                                                    *
+*     Operateur DYNE : algorithme de Fu - de Vogelaere               *
+*     ________________________________________________               *
+*                                                                    *
+*     Creation et remplissage de la table resultat                   *
+*                                                                    *
+*     Parametres:                                                    *
+*                                                                    *
+* e   KTRES   segment de sauvegarde des resultats                    *
+* e   KTLIAA  segment descriptif des liaisons en base A              *
+* e   KTLIAB  segment descriptif des liaisons en base B              *
+* e   KTNUM   segment contenant les parametres numeriques            *
+* e   NINS    on veut une sortie tous les NINS pas de calcul         *
+* e   ICHAIN  Segment MLENTI (ACTIF) contenant les adresses des      *
+*             chaines dans la pile des mots de CCNOYAU               *
+* s   MTABLE  table resultat de l'operateur DYNE                     *
+* e   REPRIS  vrai si reprise de calcul, faux sinon                  *
+*                                                                    *
+*     Structure de MTABLE (table de resultats) :                     *
+*
+*     . 'SOUSTYPE'        : 'RESULTAT_DYNE'
+*
+*     . 'TEMPS_DE_SORTIE' : LISTREEL des temps
+*
+*     . 'REPRISE'         : TABLE
+*
+*     . I : table des resultats au I eme pas de sortie
+*     . I . 'DEPLACEMENT'       | : CHPOINT resultat
+*           'VITESSE'           |
+*           'DEPLACEMENT_1/2'   |
+*           'VITESSE_1/2'       |
+*           'ACCELERATION'      |
+*           'ACCELERATION_1/2'  |
+*           'TRAVAIL_EXTERIEUR' |
+*           'TRAVAIL_INTERIEUR' |
+*     ou
+*     .  'DEPLACEMENT'       | : Liste des valeurs des variables
+*        'VITESSE'           |   demandees en fonction du temps
+*        'DEPLACEMENT_1/2'   |   (LISTREEL)
+*        'VITESSE_1/2'       |
+*        'ACCELERATION'      |
+*        'ACCELERATION_1/2'  |
+*        'TRAVAIL_EXTERIEUR' |
+*        'TRAVAIL_INTERIEUR' |
+*
+*     . TL1 : TABLE contenant les resultats de la liaison,
+*             TL1 etant une table definissant une liaison.
+*                                                                    *
+*--------------------------------------------------------------------*
+-INC CCOPTIO
+-INC SMTABLE
+-INC SMLREEL
+-INC SMLENTI
+-INC SMCHPOI
+-INC CCNOYAU
+*
+      SEGMENT,MPREF
+         INTEGER IPOREF(NPREF)
+      ENDSEGMENT
+      SEGMENT,MTLIAA
+         INTEGER IPALA(NLIAA,NIPALA),IPLIA(NLIAA,NPLAA),JPLIA(NPLA)
+         REAL*8 XPALA(NLIAA,NXPALA)
+      ENDSEGMENT
+      SEGMENT,MTLIAB
+         INTEGER IPALB(NLIAB,NIPALB),IPLIB(NLIAB,NPLBB),JPLIB(NPLB)
+         REAL*8 XPALB(NLIAB,NXPALB)
+         REAL*8 XABSCI(NLIAB,NIP),XORDON(NLIAB,NIP)
+      ENDSEGMENT
+      SEGMENT,MTRES
+         REAL*8 XRES(NRES,NCRES,NPRES),XREP(NREP,NCRES)
+         REAL*8 XRESLA(NLSA,NPRES,NVALA),XRESLB(NLSB,NPRES,NVALB)
+         REAL*8 XMREP(NLIAB,4,IDIMB)
+         INTEGER ICHRES(NVES),IPORES(NRESPO,NPRES),IPOREP(NREP)
+         INTEGER ILIRES(NRESLI,NCRES)
+         INTEGER IPOLA(NLSA),INULA(NLSA),IPLRLA(NLSA,NVALA)
+         INTEGER IPOLB(NLSB),INULB(NLSB),IPLRLB(NLSB,NVALB)
+         INTEGER ILIREA(NLSA,NTVAR),ILIREB(NLSB,NTVAR)
+         INTEGER ILIRNA(NLSA,NTVAR),ILIRNB(NLSB,NTVAR)
+         INTEGER IPOLR(1),IMREP(NLIAB,2),IPPREP(NLIAB,4)
+         INTEGER ILPOLA(NLIAA,2)
+      ENDSEGMENT
+      SEGMENT,MTNUM
+         REAL*8 XDT(NPC1),XTEMPS(NPC1)
+      ENDSEGMENT
+*
+      POINTEUR LCHAIN.MLENTI
+      POINTEUR MTABU.MTABLE, MTAB4.MTABLE
+*
+      INTEGER ipotab(8)
+      LOGICAL L0,L1,REPRIS,LMODYN
+      CHARACTER*8 TYPRET,TYPOBJ
+      CHARACTER*72 CHARRE,CHARRI,iwri
+*
+      MPREF  = KPREF
+      MTRES  = KTRES
+      MTLIAA = KTLIAA
+      MTLIAB = KTLIAB
+      MTNUM  = KTNUM
+      NRES   = XRES(/1)
+      NCRES  = XRES(/2)
+      NPRES  = XRES(/3)
+      NREP   = XREP(/1)
+      NLSA   = XRESLA(/1)
+      NLSB   = XRESLB(/1)
+      NTVAR  = ILIREB(/2)
+      NLIAB  = XMREP(/1)
+      NLIAA  = ILPOLA(/1)
+      IF (MTLIAA.NE.0) THEN
+      NPLAA  = IPLIA(/2)
+      NXPALA = XPALA(/2)
+      ELSE
+      NPLAA  = 0
+      NXPALA = 0
+      ENDIF
+      NPLB = JPLIB(/1)
+      IDIMB = XMREP(/3)
+      LCHAIN = ICHAIN
+      INDC10 = -12345
+      MTAB1 = -6661
+      MTAB3 = -6663
+
+      IF (ITSORT.EQ.INDC10) GOTO 1234
+
+
+************************************************************************
+*----------     CREATION DE LA TABLE RESULTAT :     ----------
+************************************************************************
+
+      M = 3 + NLSA + NLSB
+c       IF (NRES.NE.0) THEN
+c       a priori on ne sait pas si on va sortir des listreel (autant que
+c       de variables -> NRES) ou des chpoints (autant que des pas de
+c       temps sortis -> NPRES)
+c         M = M + max(NPRES,NRES)
+c       ENDIF
+c       maintenant, on sait !
+      NRESPO=IPORES(/1)
+      NRESLI=ILIRES(/1)
+      if(NRESPO.ne.0) M=M+NPRES
+      if(NRESLI.ne.0) M=M+NRES
+      SEGINI,MTABLE
+      MLOTAB = M
+
+*
+*     Sous-typage de la table resultat:
+*
+      MTABTI(1) = 'MOT'
+      ICHA6 = LCHAIN.LECT(6)
+      MTABII(1) = ICHA6
+      MTABTV(1) = 'MOT'
+      ICHA1 = LCHAIN.LECT(1)
+      MTABIV(1) = ICHA1
+
+*
+************************************************************************
+*   ----------     CREATION DE LA LISTE DES TEMPS      ----------
+************************************************************************
+*
+      IINS = 1
+      IF ( REPRIS ) IINS = NINS + 1
+      MLREEL = IPOLR(1)
+      segact mlreel*mod
+      DO 10 IRES = 1,NPRES
+         PROG(IRES) = XTEMPS(IINS)
+         IINS = IINS + NINS
+ 10      CONTINUE
+*     end do
+      SEGDES,MLREEL
+*
+*     Ecriture de la liste des temps de sortie dans la table resultat
+*     MTABLE . 'TEMPS_DE_SORTIE' = MLREEL
+      MTABTI(2) = 'MOT'
+      ICHA3 = LCHAIN.LECT(3)
+      MTABII(2) = ICHA3
+      MTABTV(2) = 'LISTREEL'
+      MTABIV(2) = MLREEL
+
+
+************************************************************************
+*   ----------     CREATION DU BLOC DE REPRISE :     ----------
+************************************************************************
+
+*+*   SOUSTYPE / TEMPS_DE_REPRISE  / variables "principales"
+      M = NREP + 2
+      IF (NLIAA.NE.0) THEN
+         IPOLY = 0
+         DO 180 I = 1,NLIAA
+            IF (ILPOLA(I,1).NE.0) IPOLY = IPOLY + 1
+ 180     CONTINUE
+         IF (IPOLY.NE.0) M = M + 1
+      ENDIF
+      IF (NLIAB.NE.0) M = M + 1
+      SEGINI,MTAB2
+      MTAB2.MLOTAB = M
+*
+* --- Sous-typage du bloc de reprise:
+*
+      MTAB2.MTABTI(1) = 'MOT'
+      ICHA6 = LCHAIN.LECT(6)
+      MTAB2.MTABII(1) = ICHA6
+      MTAB2.MTABTV(1) = 'MOT'
+      ICHA5 = LCHAIN.LECT(5)
+      MTAB2.MTABIV(1) = ICHA5
+*
+* --- Ecriture du temps de reprise:
+*
+      TREPRI = XTEMPS(IINS-NINS)
+      MTAB2.MTABTI(2) = 'MOT'
+      ICHA4 = LCHAIN.LECT(4)
+      MTAB2.MTABII(2) = ICHA4
+      MTAB2.MTABTV(2) = 'FLOTTANT'
+      MTAB2.RMTABV(2) = TREPRI
+*
+* --- Ecriture des CHPOINTs de reprise:
+*
+      J2 = 2
+      DO 20 J = 1,NREP
+         J2 = J2 + 1
+         MTAB2.MTABTI(J2) = 'MOT'
+         ICHAR = LCHAIN.LECT(6+J)
+* chpoints des travaux
+          IF (J.GT.8) ICHAR = LCHAIN.LECT(74+J)
+
+         MTAB2.MTABII(J2) = ICHAR
+         MTAB2.MTABTV(J2) = 'CHPOINT'
+         MTAB2.MTABIV(J2) = IPOREP(J)
+ 20   CONTINUE
+*
+* --- Ecriture des variables de liaison en base A
+*
+      IF (NLIAA.NE.0) THEN
+*
+         IF (IIMPI.EQ.333) THEN
+           WRITE(IOIMP,*)'DEVSO4 : bloc reprise liaison base A '
+           WRITE(IOIMP,*)'Nombre de liaisons a sauver : ',IPOLY
+         ENDIF
+         IF (IPOLY.NE.0) THEN
+            M = IPOLY
+            SEGINI,MTAB1
+            MTAB1.MLOTAB = M
+*           Boucle sur les liaisons en base A (I)
+            II = 0
+            DO 200 I = 1,NLIAA
+               IF (IIMPI.EQ.333)
+     &         WRITE(IOIMP,*)'I = ',I,' ILPOLA = ',ILPOLA(I,1)
+*              indice du numero de liaison base A
+*              II = II + 1
+
+*           -- liaisons COUPLAGE_DEPLACEMENT + CONVOLUTION --
+               IF (ILPOLA(I,1).EQ.2) THEN
+
+*                 creation sous table a l'indice II
+                  II = II + 1
+                  M = 3
+                  SEGINI MTAB3
+                  MTAB3.MLOTAB = M
+                  MTAB1.MTABTI(II) = 'ENTIER'
+                  MTAB1.MTABII(II) = II
+                  MTAB1.MTABTV(II) = 'TABLE'
+                  MTAB1.MTABIV(II) = MTAB3
+
+c                 MTAB3 . 'TYPE' = 5
+                  MTAB3.MTABTI(1) = 'MOT'
+                  ICHAR = LCHAIN.LECT(40)
+                  MTAB3.MTABII(1) = ICHAR
+                  MTAB3.MTABTV(1) = 'ENTIER'
+                  MTAB3.MTABIV(1) = 5
+
+                  IFONC=IPALA(I,3)
+Cbp2017-12-21 : pour l'instant on sort aux meme indices
+c               pour les 2 types de convolutions meme si pour le modele
+c               de granger_paidoussis il ne s'agit pas de deplacements !
+
+c                 MTAB3 . 'DEPLACEMENT' = listreel
+                  MTAB3.MTABTI(2) = 'MOT'
+                  ICHAR = LCHAIN.LECT(7)
+                  MTAB3.MTABII(2) = ICHAR
+                  MTAB3.MTABTV(2) = 'LISTREEL'
+c                   IF (IFONC.EQ.100) THEN
+                    MTAB3.MTABIV(2) = IPALA(I,5)
+c                   ELSEIF(IFONC.EQ.101) THEN
+c                   --> optimisation : on retrouve les memes indices ...
+c                     MTAB3.MTABIV(2) = IPALA(I,6)
+c                   ENDIF
+*
+c                 MTAB3 . 'DEPLACEMENT_1/2' = listreel
+                  MTAB3.MTABTI(3) = 'MOT'
+                  ICHAR = LCHAIN.LECT(9)
+                  MTAB3.MTABII(3) = ICHAR
+                  MTAB3.MTABTV(3) = 'LISTREEL'
+c                   IF (IFONC.EQ.100) THEN
+                    MTAB3.MTABIV(3) = IPALA(I,6)
+c                   ELSEIF(IFONC.EQ.101) THEN
+c                   --> optimisation : on retrouve les memes indices ...
+c                     MTAB3.MTABIV(3) = IPALA(I,7)
+c                   ENDIF
+                  SEGDES MTAB3
+
+c                   ENDIF
+
+*           -- liaisons POLYNOMIALEs --
+               ELSEIF (ILPOLA(I,1).NE.0) THEN
+
+*                 creation sous table a l'indice II
+                  II = II + 1
+                  M = 3
+                  SEGINI MTAB3
+                  MTAB3.MLOTAB = M
+*
+                  MTAB1.MTABTI(II) = 'ENTIER'
+                  MTAB1.MTABII(II) = II
+                  MTAB1.MTABTV(II) = 'TABLE'
+                  MTAB1.MTABIV(II) = MTAB3
+*
+c                 MTAB3 . 'TYPE' = 6
+                  MTAB3.MTABTI(1) = 'MOT'
+                  ICHAR = LCHAIN.LECT(40)
+                  MTAB3.MTABII(1) = ICHAR
+                  MTAB3.MTABTV(1) = 'ENTIER'
+                  MTAB3.MTABIV(1) = 6
+*
+                  MLENTI = ILPOLA(I,1)
+                  IPLEN1 = MLENTI
+                  DO 220 J = 1,NPLAA
+                     K = (J*2) - 1
+                     IPP = IPLIA(I,J)
+                     LECT(K) = JPLIA(IPP)
+                     K = J * 2
+                     LECT(K) = IPP
+ 220              CONTINUE
+                  IF (IIMPI.EQ.333) THEN
+                   NPLA2 = NPLAA * 2
+                  ENDIF
+                  SEGDES MLENTI
+*
+c                 MTAB3 . 'POINTS_LIAISON_POLYNOMIALE' = listenti
+                  MTAB3.MTABTI(2) = 'MOT'
+                  ICHAR = LCHAIN.LECT(78)
+                  MTAB3.MTABII(2) = ICHAR
+                  MTAB3.MTABTV(2) = 'LISTENTI'
+                  MTAB3.MTABIV(2) = IPLEN1
+*
+                  MLREEL = ILPOLA(I,2)
+                  IPLRE1 = MLREEL
+                  DO 230 J = 1,NXPALA
+                     PROG(J) = XPALA(I,J)
+ 230              CONTINUE
+                  IF (IIMPI.EQ.333) THEN
+                   WRITE(IOIMP,*)'DEVSO4 : PROG=',(PROG(j),j=1,NXPALA)
+                  ENDIF
+                  SEGDES MLREEL
+*
+c                 MTAB3 . 'VARIABLES_LIAISON_POLYNOMIALE' = listreel
+                  MTAB3.MTABTI(3) = 'MOT'
+                  ICHAR = LCHAIN.LECT(79)
+                  MTAB3.MTABII(3) = ICHAR
+                  MTAB3.MTABTV(3) = 'LISTREEL'
+                  MTAB3.MTABIV(3) = IPLRE1
+                  SEGDES MTAB3
+               ENDIF
+
+ 200        CONTINUE
+            SEGDES MTAB1
+*
+*           Bloc des variables internes liaison A ---> bloc de reprise
+*
+            J2 = J2 + 1
+            MTAB2.MTABTI(J2) = 'MOT'
+            ICHAR = LCHAIN.LECT(80)
+            MTAB2.MTABII(J2) = ICHAR
+            MTAB2.MTABTV(J2) = 'TABLE'
+            MTAB2.MTABIV(J2) = MTAB1
+         ENDIF
+      ENDIF
+* --- fin d'ecriture des variables de liaison en base A
+*
+* --- Ecriture des variables de liaison en base B
+*
+      IF (NLIAB.NE.0) THEN
+         M = NLIAB
+         SEGINI,MTAB1
+         MTAB1.MLOTAB = M
+*
+         DO 100 I = 1,NLIAB
+            ITYP = IMREP(I,1)
+            IF (ITYP.EQ.23 .OR.
+     &          ITYP.EQ.24 .OR. ITYP.EQ.3  .OR. ITYP.EQ.103  .OR.
+     &          ITYP.EQ.13 .OR. ITYP.EQ.113 .OR. ITYP.EQ.5  .OR.
+     &          ITYP.EQ.6  .OR. ITYP.EQ.33 .OR. ITYP.EQ.34
+     &         .OR.ITYP.EQ.-13) THEN
+               M = 5
+               SEGINI,MTAB3
+               MTAB3.MLOTAB = M
+*
+               MTAB1.MTABTI(I) = 'ENTIER'
+               MTAB1.MTABII(I) = I
+               MTAB1.MTABTV(I) = 'TABLE'
+               MTAB1.MTABIV(I) = MTAB3
+*
+               MTAB3.MTABTI(1) = 'MOT'
+               ICHAR = LCHAIN.LECT(40)
+               MTAB3.MTABII(1) = ICHAR
+               MTAB3.MTABTV(1) = 'ENTIER'
+               MTAB3.MTABIV(1) = ITYP
+*
+               MTAB3.MTABTI(2) = 'MOT'
+               ICHAR = LCHAIN.LECT(43)
+               MTAB3.MTABII(2) = ICHAR
+               MTAB3.MTABTV(2) = 'ENTIER'
+               MTAB3.MTABIV(2) = IMREP(I,2)
+*
+               MTAB3.MTABTI(3) = 'MOT'
+               ICHAR = LCHAIN.LECT(41)
+               MTAB3.MTABII(3) = ICHAR
+               MTAB3.MTABTV(3) = 'POINT'
+               MTAB3.MTABIV(3) = IPPREP(I,1)
+*
+               MTAB3.MTABTI(4) = 'MOT'
+               ICHAR = LCHAIN.LECT(42)
+               MTAB3.MTABII(4) = ICHAR
+               MTAB3.MTABTV(4) = 'POINT'
+               MTAB3.MTABIV(4) = IPPREP(I,2)
+*
+               MTAB3.MTABTI(5) = 'MOT'
+               ICHAR = LCHAIN.LECT(37)
+               MTAB3.MTABII(5) = ICHAR
+               MTAB3.MTABTV(5) = 'POINT'
+               MTAB3.MTABIV(5) = IPPREP(I,3)
+
+       ELSE IF (ITYP.EQ.25 .OR. ITYP.EQ.26) THEN
+
+               M = 6
+               SEGINI,MTAB3
+               MTAB3.MLOTAB = M
+*
+               MTAB1.MTABTI(I) = 'ENTIER'
+               MTAB1.MTABII(I) = I
+               MTAB1.MTABTV(I) = 'TABLE'
+               MTAB1.MTABIV(I) = MTAB3
+*
+               MTAB3.MTABTI(1) = 'MOT'
+               ICHAR = LCHAIN.LECT(40)
+               MTAB3.MTABII(1) = ICHAR
+               MTAB3.MTABTV(1) = 'ENTIER'
+               MTAB3.MTABIV(1) = ITYP
+*
+               MTAB3.MTABTI(2) = 'MOT'
+               ICHAR = LCHAIN.LECT(43)
+               MTAB3.MTABII(2) = ICHAR
+               MTAB3.MTABTV(2) = 'ENTIER'
+               MTAB3.MTABIV(2) = IMREP(I,2)
+*
+               MTAB3.MTABTI(3) = 'MOT'
+               ICHAR = LCHAIN.LECT(41)
+               MTAB3.MTABII(3) = ICHAR
+               MTAB3.MTABTV(3) = 'POINT'
+               MTAB3.MTABIV(3) = IPPREP(I,1)
+*
+               MTAB3.MTABTI(4) = 'MOT'
+               ICHAR = LCHAIN.LECT(42)
+               MTAB3.MTABII(4) = ICHAR
+               MTAB3.MTABTV(4) = 'POINT'
+               MTAB3.MTABIV(4) = IPPREP(I,2)
+*
+               MTAB3.MTABTI(5) = 'MOT'
+               ICHAR = LCHAIN.LECT(37)
+               MTAB3.MTABII(5) = ICHAR
+               MTAB3.MTABTV(5) = 'POINT'
+               MTAB3.MTABIV(5) = IPPREP(I,3)
+
+               MTAB3.MTABTI(6) = 'MOT'
+               ICHAR = LCHAIN.LECT(120)
+               MTAB3.MTABII(6) = ICHAR
+               MTAB3.MTABTV(6) = 'POINT'
+               MTAB3.MTABIV(6) = IPPREP(I,4)
+
+       ELSE IF (ITYP.EQ.35 .OR. ITYP.EQ.36 .OR. ITYP.EQ.37
+     &.OR. ITYP.EQ.38 .OR. ITYP.EQ.39 .OR. ITYP.EQ.40 ) THEN
+               M = 3
+               SEGINI,MTAB3
+               MTAB3.MLOTAB = M
+*
+               MTAB1.MTABTI(I) = 'ENTIER'
+               MTAB1.MTABII(I) = I
+               MTAB1.MTABTV(I) = 'TABLE'
+               MTAB1.MTABIV(I) = MTAB3
+*
+               MTAB3.MTABTI(1) = 'MOT'
+               ICHAR = LCHAIN.LECT(40)
+               MTAB3.MTABII(1) = ICHAR
+               MTAB3.MTABTV(1) = 'ENTIER'
+               MTAB3.MTABIV(1) = ITYP
+*
+               MTAB3.MTABTI(2) = 'MOT'
+               ICHAR = LCHAIN.LECT(43)
+               MTAB3.MTABII(2) = ICHAR
+               MTAB3.MTABTV(2) = 'ENTIER'
+               MTAB3.MTABIV(2) = IMREP(I,2)
+*
+*
+*       noeud  voisin
+*   creation du list entier contenant les noeuds voisins
+               NNOEMA = IPALB(I,21)
+               NNOEES = IPALB(I,22)
+               JG = (NNOEMA+NNOEES)
+               SEGINI,MLENTI
+               DO 120 IVOIS=1,(NNOEMA+NNOEES)
+                  LECT(IVOIS)=IPALB(I,26+IVOIS)
+ 120           CONTINUE
+               IVOIS1=MLENTI
+               SEGDES,MLENTI
+               MTAB3.MTABTI(3) = 'MOT'
+               ICHAR = LCHAIN.LECT(103)
+               MTAB3.MTABII(3) = ICHAR
+               MTAB3.MTABTV(3) = 'LISTENTI'
+               MTAB3.MTABIV(3) = IVOIS1
+*
+            ELSE IF (ITYP.EQ.7) THEN
+               M = 4
+               SEGINI,MTAB3
+               MTAB3.MLOTAB = M
+*
+               MTAB1.MTABTI(I) = 'ENTIER'
+               MTAB1.MTABII(I) = I
+               MTAB1.MTABTV(I) = 'TABLE'
+               MTAB1.MTABIV(I) = MTAB3
+*
+               MTAB3.MTABTI(1) = 'MOT'
+               ICHAR = LCHAIN.LECT(40)
+               MTAB3.MTABII(1) = ICHAR
+               MTAB3.MTABTV(1) = 'ENTIER'
+               MTAB3.MTABIV(1) = ITYP
+*
+               MTAB3.MTABTI(2) = 'MOT'
+               ICHAR = LCHAIN.LECT(9)
+               MTAB3.MTABII(2) = ICHAR
+               MTAB3.MTABTV(2) = 'POINT'
+               MTAB3.MTABIV(2) = IPPREP(I,1)
+*
+               MTAB3.MTABTI(3) = 'MOT'
+               ICHAR = LCHAIN.LECT(10)
+               MTAB3.MTABII(3) = ICHAR
+               MTAB3.MTABTV(3) = 'POINT'
+               MTAB3.MTABIV(3) = IPPREP(I,2)
+*
+               MTAB3.MTABTI(4) = 'MOT'
+               ICHAR = LCHAIN.LECT(12)
+               MTAB3.MTABII(4) = ICHAR
+               MTAB3.MTABTV(4) = 'POINT'
+               MTAB3.MTABIV(4) = IPPREP(I,3)
+**  ianis
+            ELSE IF (ITYP.EQ.100 .OR. ITYP.EQ.101) THEN
+               M = 2
+               SEGINI,MTAB3
+               MTAB3.MLOTAB = M
+*
+               MTAB1.MTABTI(I) = 'ENTIER'
+               MTAB1.MTABII(I) = I
+               MTAB1.MTABTV(I) = 'TABLE'
+               MTAB1.MTABIV(I) = MTAB3
+*
+               MTAB3.MTABTI(1) = 'MOT'
+               ICHAR = LCHAIN.LECT(40)
+               MTAB3.MTABII(1) = ICHAR
+               MTAB3.MTABTV(1) = 'ENTIER'
+               MTAB3.MTABIV(1) = ITYP
+*
+          IDIM   = IPALB(I,3)
+          id1 = 4
+               MTAB3.MTABTI(2) = 'MOT'
+               ICHAR = LCHAIN.LECT(82)
+               MTAB3.MTABII(2) = ICHAR
+               MTAB3.MTABTV(2) = 'FLOTTANT'
+               MTAB3.RMTABV(2) = XPALB(I,id1+idim+1)
+*
+C NW
+            ELSE IF (ITYP.EQ.16 .OR. ITYP.EQ.17) THEN
+               M = 4
+               SEGINI,MTAB3
+               MTAB3.MLOTAB = M
+*
+               MTAB1.MTABTI(I) = 'ENTIER'
+               MTAB1.MTABII(I) = I
+               MTAB1.MTABTV(I) = 'TABLE'
+               MTAB1.MTABIV(I) = MTAB3
+*
+               MTAB3.MTABTI(1) = 'MOT'
+               ICHAR = LCHAIN.LECT(40)
+               MTAB3.MTABII(1) = ICHAR
+               MTAB3.MTABTV(1) = 'ENTIER'
+               MTAB3.MTABIV(1) = ITYP
+
+*
+          idim =  IPALB(I,3)
+          if (ityp.eq.16) nn = 4 + idim
+          if (ityp.eq.17) nn = 5 + idim
+               MTAB3.MTABTI(2) = 'MOT'
+               ICHAR = LCHAIN.LECT(82)
+               MTAB3.MTABII(2) = ICHAR
+               MTAB3.MTABTV(2) = 'FLOTTANT'
+               MTAB3.RMTABV(2) = XPALB(I,NN-2)
+
+               MTAB3.MTABTI(3) = 'MOT'
+               ICHAR = LCHAIN.LECT(100)
+               MTAB3.MTABII(3) = ICHAR
+               MTAB3.MTABTV(3) = 'FLOTTANT'
+               MTAB3.RMTABV(3) = XPALB(I,NN-1)
+
+               MTAB3.MTABTI(4) = 'MOT'
+               ICHAR = LCHAIN.LECT(111)
+               MTAB3.MTABII(4) = ICHAR
+               MTAB3.MTABTV(4) = 'FLOTTANT'
+               MTAB3.RMTABV(4) = XPALB(I,NN)
+
+*
+            ELSE IF (ITYP.EQ.50 .OR. ITYP.EQ.51) THEN
+               M = 4
+               SEGINI,MTAB3
+               MTAB3.MLOTAB = M
+*
+               MTAB1.MTABTI(I) = 'ENTIER'
+               MTAB1.MTABII(I) = I
+               MTAB1.MTABTV(I) = 'TABLE'
+               MTAB1.MTABIV(I) = MTAB3
+*
+               MTAB3.MTABTI(1) = 'MOT'
+               ICHAR = LCHAIN.LECT(40)
+               MTAB3.MTABII(1) = ICHAR
+               MTAB3.MTABTV(1) = 'ENTIER'
+               MTAB3.MTABIV(1) = ITYP
+*
+          idim =  IPALB(I,3)
+          if (ityp.eq.50) nn = 4 + idim
+          if (ityp.eq.51) nn = 5 + idim
+               MTAB3.MTABTI(2) = 'MOT'
+               ICHAR = LCHAIN.LECT(102)
+               MTAB3.MTABII(2) = ICHAR
+               MTAB3.MTABTV(2) = 'FLOTTANT'
+               MTAB3.RMTABV(2) = XPALB(I,NN-2)
+
+               MTAB3.MTABTI(3) = 'MOT'
+               ICHAR = LCHAIN.LECT(99)
+               MTAB3.MTABII(3) = ICHAR
+               MTAB3.MTABTV(3) = 'FLOTTANT'
+               MTAB3.RMTABV(3) = XPALB(I,NN-1)
+
+               MTAB3.MTABTI(4) = 'MOT'
+               ICHAR = LCHAIN.LECT(112)
+               MTAB3.MTABII(4) = ICHAR
+               MTAB3.MTABTV(4) = 'FLOTTANT'
+               MTAB3.RMTABV(4) = XPALB(I,NN)
+*
+            ELSE
+               M = 1
+               SEGINI,MTAB3
+               MTAB3.MLOTAB = M
+*
+               MTAB1.MTABTI(I) = 'ENTIER'
+               MTAB1.MTABII(I) = I
+               MTAB1.MTABTV(I) = 'TABLE'
+               MTAB1.MTABIV(I) = MTAB3
+*
+               MTAB3.MTABTI(1) = 'MOT'
+               ICHAR = LCHAIN.LECT(40)
+               MTAB3.MTABII(1) = ICHAR
+               MTAB3.MTABTV(1) = 'ENTIER'
+               MTAB3.MTABIV(1) = ITYP
+            ENDIF
+*
+            SEGDES,MTAB3
+ 100     CONTINUE
+         SEGDES,MTAB1
+*
+*     Ecriture du bloc des variables de liaison dans le bloc reprise
+*
+         J2 = J2 + 1
+         MTAB2.MTABTI(J2) = 'MOT'
+         ICHAR = LCHAIN.LECT(44)
+         MTAB2.MTABII(J2) = ICHAR
+         MTAB2.MTABTV(J2) = 'TABLE'
+         MTAB2.MTABIV(J2) = MTAB1
+      ENDIF
+* --- fin d'ecriture des variables de liaison en base B
+*
+      SEGDES,MTAB2
+*
+* --- Ecriture du bloc de reprise dans la table resultat:
+*     MTABLE .'REPRISE' = MTAB2
+*
+      IF (LMODYN) THEN
+       iptlar = mtab2
+              CALL ECCTAB(ITDYN,'MOT',0,0.D0,'REPRISE_DYNE',.TRUE.,0,
+     #                   'TABLE',0,0.D0,CHARRE,.TRUE.,iptlar)
+      ELSE
+        MTABTI(3) = 'MOT'
+        ICHA5 = LCHAIN.LECT(5)
+        MTABII(3) = ICHA5
+        MTABTV(3) = 'TABLE'
+        MTABIV(3) = MTAB2
+      ENDIF
+*
+      IRE2 = 3
+
+*
+************************************************************************
+*----------     CREATION DES TABLES AUX PAS DE SORTIE     ----------
+************************************************************************
+*
+* --- syntaxe table PASAPAS ---
+      IF (LMODYN) THEN
+*
+         typobj = ' '
+         CALL ACCTAB(ITDYN,'MOT',IM,X0,'TEMPS',L0,IP0,
+     &                    typobj,np,X1,CHARRE,L1,IPTEMP)
+         M = 1
+         segini MTABU
+         MTABU.MLOTAB = 1
+         if (iptemp.gt.0.and.typobj(1:8).eq.'TABLE') then
+              call dimen7(iptemp,idimen)
+              indi1 = idimen - 1
+              DO  ISOR = 1 , 8
+                IF (ICHRES(ISOR).EQ.1) THEN
+                 ICHAR = LCHAIN.LECT(6+ISOR)
+                 IF(ISOR.GT.6) ICHAR = LCHAIN.LECT(76+ISOR)
+                    segact MTABU*mod
+                 MTABU.MTABTI(1) = 'ENTIER'
+                 MTABU.MTABII(1) = 1
+                 MTABU.MTABTV(1) = 'MOT'
+                 MTABU.MTABIV(1) = ICHAR
+                 typret=' '
+                 CALL ACCTAB(MTABU,'ENTIER',1,X0,CHARRI,L0,IP0,
+     &                    typret,IUI,X1,CHARRE,L1,IP1)
+             if (CHARRE.EQ.'VITESSE') CHARRE = 'VITESSES'
+             if (CHARRE.EQ.'DEPLACEMENT') CHARRE = 'DEPLACEMENTS'
+              CALL ACCTAB(ITDYN,'MOT',0,0.D0,CHARRE,.TRUE.,0,
+     #                   'TABLE',0,0.D0,CHARRI,.TRUE.,IPTCHP)
+                 ipotab(isor) = IPTCHP
+               ENDIF
+              ENDDO
+
+         else
+
+              CALL CRTABL(IPTEMP)
+              CALL ECCTAB(ITDYN,'MOT',0,0.D0,'TEMPS',.TRUE.,0,
+     #                   'TABLE',0,0.D0,CHARRE,.TRUE.,iptemp)
+              indi1 = -1
+              DO  ISOR = 1 , 8
+                IF (ICHRES(ISOR).EQ.1) THEN
+                 CALL CRTABL(IPTCHP)
+                 ipotab(isor) = IPTCHP
+                 ICHAR = LCHAIN.LECT(6+ISOR)
+                 IF(ISOR.GT.6) ICHAR = LCHAIN.LECT(76+ISOR)
+                    segact MTABU*mod
+                 MTABU.MTABTI(1) = 'ENTIER'
+                 MTABU.MTABII(1) = 1
+                 MTABU.MTABTV(1) = 'MOT'
+                 MTABU.MTABIV(1) = ICHAR
+                 typret=' '
+                 CALL ACCTAB(MTABU,'ENTIER',1,X0,CHARRI,L0,IP0,
+     &                    typret,IUI,X1,CHARRE,L1,IP1)
+
+             if (CHARRE.EQ.'VITESSE') CHARRE = 'VITESSES'
+             if (CHARRE.EQ.'DEPLACEMENT') CHARRE = 'DEPLACEMENTS'
+              CALL ECCTAB(ITDYN,'MOT',0,0.D0,CHARRE,.TRUE.,0,
+     #                   'TABLE',0,0.D0,CHARRI,.TRUE.,IPTCHP)
+               ENDIF
+              ENDDO
+              segsup MTABU
+         endif
+         MLREEL = IPOLR(1)
+         segact mlreel
+         indi0 = indi1
+
+         DO ires = 1,npres
+           indi1 = indi1 + 1
+           xtemp1 = prog(ires)
+*          temps calcules
+           CALL ECCTAB(IPTEMP,'ENTIER',INDI1,0.D0,CHARRI,.TRUE.,IP0,
+     #                   'FLOTTANT',0,xtemp1,CHARRE,.TRUE.,IP1)
+         ENDDO
+      ENDIF
+* --- fin syntaxe table PASAPAS ---
+
+
+* === Cas ou l'on a demande une sortie ===
+      IF (NRES.NE.0) THEN
+
+*   --- syntaxe table PASAPAS ---
+        IF (LMODYN) THEN
+          indi1 = indi0
+          DO ires = 1,npres
+            indi1 = indi1 + 1
+            IVAR = 0
+            DO isor = 1,8
+* champs en sortie
+               IF (ICHRES(ISOR).EQ.1) THEN
+                  IVAR = IVAR + 1
+                  IPTCHP = ipotab(isor)
+                  ipch1 =  IPORES(IVAR,IRES)
+           CALL ECCTAB(IPTCHP,'ENTIER',INDI1,0.D0,CHARRI,.TRUE.,IP0,
+     #               'CHPOINT',0,0.D0,CHARRE,.TRUE.,ipch1)
+
+               ENDIF
+            ENDDO
+          ENDDO
+*
+*   --- syntaxe tables DYNE normales ---
+        ELSE
+*
+*      *******************************************
+*       1.TRAITEMENT DES SORTIES DE TYPE LISTREEL
+*      *******************************************
+*
+          IF(NRESLI.GT.0) THEN
+          IVAR = 0
+          DO 41 ISOR = 1,8
+c             IF(ICHRES(ISOR).NE.0) IVAR = IVAR + 1
+c             IF(ICHRES(ISOR).NE.2) GOTO 41
+            IF(ICHRES(ISOR).NE.2) GOTO 41
+            IVAR = IVAR + 1
+c           Creation de la table de sortie de la variable
+            M = NCRES
+            SEGINI,MTAB1
+            MTAB1.MLOTAB = M
+c           avec MTAB1 . point_ref_mode_i = prog x_i(t1) ... x_i(tfin)
+            DO INCO=1,NCRES
+              IPLREE = ILIRES(IVAR,INCO)
+              MTAB1.MTABTI(INCO) = 'POINT'
+              MTAB1.MTABII(INCO) = IPOREF(INCO)
+              MTAB1.MTABTV(INCO) = 'LISTREEL'
+              MTAB1.MTABIV(INCO) = IPLREE
+c               write(*,*) 'devso4: IVAR',IVAR,' mode',INCO,
+c      #              ' listreel #',IPLREE
+            ENDDO
+            SEGDES,MTAB1
+c           on branche cette table dans la table de sortie principale
+            IRE2 = IRE2 + 1
+            ICHA6= LCHAIN.LECT(6+ISOR)
+            IF(ISOR.GT.6) ICHA6 = LCHAIN.LECT(76+ISOR)
+            MTABTI(IRE2) = 'MOT'
+            MTABII(IRE2) = ICHA6
+            MTABTV(IRE2) = 'TABLE'
+            MTABIV(IRE2) = MTAB1
+
+ 41       CONTINUE
+          ENDIF
+*
+*      *******************************************
+*       2.TRAITEMENT DES SORTIES DE TYPE CHPOINT
+*      *******************************************
+*
+          IF(NRESPO.GT.0) THEN
+*         boucle sur les pas de sortie
+          DO 30 IRES = 1 , NPRES
+*
+*           Creation de la table au pas de sortie IRES:
+            M = NRES + 1
+            SEGINI,MTAB1
+            MTAB1.MLOTAB = M
+*
+*           Sous-typage de la table au pas de sortie IRES:
+            MTAB1.MTABTI(1) = 'MOT'
+            ICHA6 = LCHAIN.LECT(6)
+            MTAB1.MTABII(1) = ICHA6
+            MTAB1.MTABTV(1) = 'MOT'
+            ICHA2 = LCHAIN.LECT(2)
+            MTAB1.MTABIV(1) = ICHA2
+*
+*           Ecriture des CHPOINTs resultats:
+            IVAR = 0
+            DO 40 ISOR = 1 , 8
+c                IF (ICHRES(ISOR).NE.0) IVAR = IVAR + 1
+c                IF (ICHRES(ISOR).NE.1) GOTO 40
+               IF (ICHRES(ISOR).NE.1) GOTO 40
+               IVAR = IVAR + 1
+               MTAB1.MTABTI(IVAR) = 'MOT'
+               ICHAR = LCHAIN.LECT(6+ISOR)
+*              chpoints de travaux
+               IF(ISOR.GT.6) ICHAR = LCHAIN.LECT(76+ISOR)
+               MTAB1.MTABII(IVAR) = ICHAR
+               MTAB1.MTABTV(IVAR) = 'CHPOINT'
+               MTAB1.MTABIV(IVAR) = IPORES(IVAR,IRES)
+ 40         CONTINUE
+            SEGDES,MTAB1
+*
+*           Ecriture de la table au pas IRES dans la table resultat:
+            IRE2 = IRE2 + 1
+            MTABTI(IRE2) = 'ENTIER'
+            MTABII(IRE2) = IRES
+            MTABTV(IRE2) = 'TABLE'
+            MTABIV(IRE2) = MTAB1
+
+ 30       CONTINUE
+          ENDIF
+
+        ENDIF
+*   --- fin syntaxe table PASAPAS / tables DYNE normales ---
+
+      ENDIF
+* === Fin du Cas ou l'on a demande une sortie ===
+
+ 1234 CONTINUE
+
+*
+************************************************************************
+*-----     CREATION DES TABLES DE LIAISONS AUX PAS DE SORTIE     -----
+************************************************************************
+*
+      IPTLA1 = 0
+      IF (LMODYN) THEN
+        IF (NLSA.NE.0.OR.NLSB.NE.0) THEN
+          typobj = ' '
+          CALL ACCTAB(ITDYN,'MOT',IM,X0,'LIAISONS',L0,IP0,
+     &                    typobj,np,X1,CHARRE,L1,IPTLA1)
+           if (iptla1.gt.0.and.typobj(1:8).eq.'TABLE') then
+              call dimen7(iptla1,idimen)
+              indi1 = idimen - 1
+           else
+              CALL CRTABL(IPTLA1)
+c*            idimen = 0
+c*            indi1 = -1
+              CALL ECCTAB(ITDYN,'MOT',0,0.D0,'LIAISONS',.TRUE.,0,
+     #                   'TABLE',0,0.D0,CHARRE,.TRUE.,IPTLA1)
+           ENDIF
+        ENDIF
+      ENDIF
+*
+      MTABU = 0
+      M = 1
+      segini MTABU
+      MTABU.MLOTAB = 1
+
+*-----     LIAISONS_A     -----
+      IF (NLSA.NE.0) THEN
+         DO 50 IL = 1,NLSA
+*
+*           Creation de la table pour la liaison IL :
+*
+            NVAR = ICHRES(10 + IL)
+            M = NVAR + 1
+            SEGINI,MTAB3
+            MTAB3.MLOTAB = M
+*
+*           Sous-typage de la table pour la liaison IL :
+*
+            ID = 1
+            MTAB3.MTABTI(ID) = 'MOT'
+            ICHA6 = LCHAIN.LECT(6)
+            MTAB3.MTABII(ID) = ICHA6
+            MTAB3.MTABTV(ID) = 'MOT'
+            ICHA1 = LCHAIN.LECT(ID)
+            MTAB3.MTABIV(ID) = ICHA1
+*
+       IPTLA3 = 0
+       IF (LMODYN) THEN
+         itmodl = IPOLA(IL)
+         typobj = ' '
+         CALL ACCTAB(IPTLA1,'MMODEL ',IM,X0,CHARRE,L0,itmodl,
+     &                    typobj,np,X1,CHARRI,L1,IPTLA3)
+
+         if (typobj.eq.'TABLE'.and.iptla3.gt.0) then
+           ipta3 = 0
+         else
+           iptla3 = 0
+           ipta3 = mtab3
+              CALL ECCTAB(IPTLA1,'MMODEL  ',0,0.D0,CHARRE,.TRUE.,itmodl,
+     #                   'TABLE',0,0.D0,CHARRI,.TRUE.,ipta3)
+         endif
+       ELSE
+*
+*           Ecriture de la table de liaison dans la table resultat:
+*
+            IRE2 = IRE2 + 1
+            MTABTI(IRE2) = 'TABLE'
+            MTABII(IRE2) = IPOLA(IL)
+            MTABTV(IRE2) = 'TABLE'
+            MTABIV(IRE2) = MTAB3
+*
+       ENDIF
+*
+            II = 0
+            IF (IIMPI.EQ.333) THEN
+            WRITE(IOIMP,*)'DEVSO4 : creation table liaison ',IL
+            WRITE(IOIMP,*)'DEVSO4 : longueur table = ',M
+            WRITE(IOIMP,*)'DEVSO4 : !!! NTVAR = ',NTVAR
+            ENDIF
+            DO 52 IV = 1,NTVAR
+               IF (ILIREA(IL,IV).EQ.1) THEN
+                  II = II + 1
+                  ICHA = ILIRNA(IL,IV)
+                  MLREEL = IPLRLA(IL,II)
+                  DO 54 IRES = 1 , NPRES
+                     PROG(IRES) = XRESLA(IL,IRES,II)
+ 54               CONTINUE
+                  ipl2 = mlreel
+                  SEGDES,MLREEL
+*
+*                 Ecriture de la liste de reels dans la table MTAB3 :
+*
+                  ID = ID + 1
+                  MTAB3.MTABTI(ID) = 'MOT'
+                  MTAB3.MTABII(ID) = LCHAIN.LECT(ICHA)
+                  MTAB3.MTABTV(ID) = 'LISTREEL'
+                  MTAB3.MTABIV(ID) = MLREEL
+               ENDIF
+ 52         CONTINUE
+               if (IPTLA3.gt.0.and.ILIREA(IL,IV).EQ.1) then
+                 ICHAR = LCHAIN.LECT(ICHA)
+                    segact MTABU*mod
+                 MTABU.MTABTI(1) = 'ENTIER'
+                 MTABU.MTABII(1) = 1
+                 MTABU.MTABTV(1) = 'MOT'
+                 MTABU.MTABIV(1) = ICHAR
+                 typret=' '
+                 CALL ACCTAB(MTABU,'ENTIER',1,X0,CHARRI,L0,IP0,
+     &                    typret,IUI,X1,CHARRE,L1,IP1)
+                  typret=' '
+             CALL ACCTAB(IPTLA3,'MOT',0,0.D0,CHARRE,.TRUE.,0,
+     #                   typret,0,0.D0,CHARRI,.TRUE.,IPTC3)
+                 if (typret.eq.'LISTREEL') then
+                  call fuspro(iptc3,ipl2,ipl3)
+              CALL ECCTAB(IPTLA3,'MOT',0,0.D0,CHARRE,.TRUE.,0,
+     #                   typret,0,0.D0,CHARRI,.TRUE.,ipl3)
+                 else if (typret.eq.'TABLE') then
+                  MTAB4 = IPTC3
+                  segact MTAB4,MTAB1
+                  M4 = MTAB4.MLOTAB
+                  do IRES = 1,NPRES
+                    ipch3 =  MTAB1.MTABIV(IRES)
+              CALL ECCTAB(IPTC3,'ENTIER',M4+IRES,0.D0,CHARRE,.TRUE.,0,
+     #                 'CHPOINT ',0,0.D0,CHARRI,.TRUE.,ipch3)
+
+                  enddo
+                  segsup MTAB1
+                  segdes MTAB4
+                 else
+                 endif
+
+               endif
+            SEGDES,MTAB3
+               if (IPTLA3.gt.0) segsup MTAB3
+*
+ 50         CONTINUE
+*        end do
+      ENDIF
+
+*-----     LIAISONS_B     -----
+      IF (NLSB.NE.0) THEN
+         DO 60 IL = 1,NLSB
+*
+*           Creation de la table pour la liaison IL :
+*
+            NVAR = ICHRES(10 + IL + NLSA)
+            M = NVAR + 1
+            SEGINI,MTAB3
+            MTAB3.MLOTAB = M
+*
+*           Sous-typage de la table pour la liaison IL :
+*
+            ID = 1
+            MTAB3.MTABTI(ID) = 'MOT'
+            ICHA6 = LCHAIN.LECT(6)
+            MTAB3.MTABII(ID) = ICHA6
+            MTAB3.MTABTV(ID) = 'MOT'
+            ICHA1 = LCHAIN.LECT(ID)
+            MTAB3.MTABIV(ID) = ICHA1
+*
+*           Ecriture de la table de liaison dans la table resultat:
+*
+       IPTLA3 = 0
+       IF (LMODYN) THEN
+         itmodl = IPOLB(IL)
+         typobj = ' '
+         CALL ACCTAB(IPTLA1,'MMODEL ',IM,X0,CHARRE,L0,itmodl,
+     &                    typobj,np,X1,CHARRI,L1,IPTLA3)
+         ipta3 = mtab3
+         if (typobj.eq.'TABLE'.and.iptla3.gt.0) then
+         else
+           iptla3 = 0
+              CALL ECCTAB(IPTLA1,'MMODEL  ',0,0.D0,CHARRE,.TRUE.,itmodl,
+     #                   'TABLE',0,0.D0,CHARRI,.TRUE.,ipta3)
+         endif
+       ELSE
+            IRE2 = IRE2 + 1
+c             write(*,*) 'branche table',MTAB3,'a indice',IRE2,MTABTI(/1)
+c             write(*,*) 'de',MTABLE,' et IL=',IL,IPOLB(/1)
+            MTABTI(IRE2) = 'TABLE'
+            MTABII(IRE2) = IPOLB(IL)
+            MTABTV(IRE2) = 'TABLE'
+            MTABIV(IRE2) = MTAB3
+*
+       ENDIF
+*
+            II = 0
+            DO 62 IV = 1,NTVAR
+               IF (ILIREB(IL,IV).EQ.1) THEN
+                  II = II + 1
+                  ICHA = ILIRNB(IL,IV)
+
+                  MLREEL = IPLRLB(IL,II)
+                  DO 64 IRES = 1 , NPRES
+                     PROG(IRES) = XRESLB(IL,IRES,II)
+ 64                  CONTINUE
+*                 end do
+                  ipl2 = mlreel
+                  SEGDES,MLREEL
+*
+*                 Ecriture de la liste de reels dans la table MTAB3 :
+*
+                  ID = ID + 1
+                  MTAB3.MTABTI(ID) = 'MOT'
+                  MTAB3.MTABII(ID) = LCHAIN.LECT(ICHA)
+                  MTAB3.MTABTV(ID) = 'LISTREEL'
+                  MTAB3.MTABIV(ID) = MLREEL
+              ELSE
+*  Ecriture des chpoints dans la table MTAB1, puis de cette
+*  table dans la table MTAB3
+                  IF (ILIREB(IL,IV).EQ.2) THEN
+                    ICHA = ILIRNB(IL,IV)
+                    MTAB1 = IPLRLB(IL,II+1)
+                    SEGACT,MTAB1*MOD
+                    MLENTI= IPLRLB(IL,II+2)
+                    SEGACT,MLENTI
+                    DO 65 IRES=1,NPRES
+                        III=II
+                        MCHPOI=LECT(IRES)
+                        SEGACT MCHPOI
+                        MSOUPO=IPCHP(1)
+                        SEGACT,MSOUPO
+                        MPOVAL=IPOVAL
+                        SEGACT,MPOVAL*MOD
+                        DO 66 IP=1,NPLB
+                          DO 67 IDD=1,2
+                            III=III+1
+                            VPOCHA(IP,IDD)=XRESLB(IL,IRES,III)
+ 67                       CONTINUE
+ 66                     CONTINUE
+                        SEGDES,MPOVAL,MSOUPO,MCHPOI
+                        MTAB1.MTABIV(IRES)=MCHPOI
+ 65                 CONTINUE
+                    SEGSUP,MLENTI
+                    SEGDES,MTAB1
+                    II=III
+                    ID = ID + 1
+                    MTAB3.MTABTI(ID) = 'MOT'
+                    MTAB3.MTABII(ID) = LCHAIN.LECT(ICHA)
+                    MTAB3.MTABTV(ID) = 'TABLE'
+                    MTAB3.MTABIV(ID) =  MTAB1
+                  ENDIF
+               ENDIF
+               if (IPTLA3.gt.0.and.
+     &  (ILIREB(IL,IV).EQ.1.or.ILIREB(IL,IV).EQ.2)) then
+                 ICHAR = LCHAIN.LECT(ICHA)
+                    segact MTABU*mod
+                 MTABU.MTABTI(1) = 'ENTIER'
+                 MTABU.MTABII(1) = 1
+                 MTABU.MTABTV(1) = 'MOT'
+                 MTABU.MTABIV(1) = ICHAR
+                 typret=' '
+                 CALL ACCTAB(MTABU,'ENTIER',1,X0,CHARRI,L0,IP0,
+     &                    typret,IUI,X1,CHARRE,L1,IP1)
+                  typret=' '
+             CALL ACCTAB(IPTLA3,'MOT',0,0.D0,CHARRE,.TRUE.,0,
+     #                   typret,0,0.D0,CHARRI,.TRUE.,IPTC3)
+                 if (typret.eq.'LISTREEL') then
+                  call fuspro(iptc3,ipl2,ipl3)
+              CALL ECCTAB(IPTLA3,'MOT',0,0.D0,CHARRE,.TRUE.,0,
+     #                   typret,0,0.D0,CHARRI,.TRUE.,ipl3)
+                 else if (typret.eq.'TABLE') then
+                  MTAB4 = IPTC3
+                  segact MTAB4,MTAB1
+                  M4 = MTAB4.MLOTAB
+                  do IRES = 1,NPRES
+                    ipch3 =  MTAB1.MTABIV(IRES)
+              CALL ECCTAB(IPTC3,'ENTIER',M4+IRES,0.D0,CHARRE,.TRUE.,0,
+     #                 'CHPOINT ',0,0.D0,CHARRI,.TRUE.,ipch3)
+
+                  enddo
+                  segsup MTAB1
+                  segdes MTAB4
+                 else
+                 endif
+
+               endif
+ 62            CONTINUE
+*           end do
+            SEGDES,MTAB3
+               if (IPTLA3.gt.0) segsup MTAB3
+ 60         CONTINUE
+*        end do
+      ENDIF
+
+      segsup MTABU
+      IF (ITSORT.EQ.INDC10) THEN
+         if (iptla1.gt.0) THEN
+           MTAB1 = IPTLA1
+           segsup MTAB1
+         ENDIF
+         if (itdyn.gt.0) THEN
+           MTAB2 = ITDYN
+           segsup MTAB2
+           ITDYN = MTAB3
+         ENDIF
+         RETURN
+      ENDIF
+
+c     mise a jour de la taille de la table
+      M=IRE2
+      MLOTAB=IRE2
+      SEGADJ,MTABLE
+      SEGDES,MTABLE
+*
+      RETURN
+      END
+
+
+
+
+
+
+
+

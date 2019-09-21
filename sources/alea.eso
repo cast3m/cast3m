@@ -1,0 +1,544 @@
+C ALEA      SOURCE    CB215821  19/03/20    21:15:01     10165
+      SUBROUTINE ALEA
+C
+C=======================================================================
+C
+C  Opérateur ALEA : génération d'un champ scalaire aléatoire gaussien
+C  stationnaire isotrope par la méthode des bandes tournantes.
+C
+C---------------------------
+C Phrase d'appel (GIBIANE) :
+C---------------------------
+C
+C     OBJ1 = 'ALEA' 'BANDES_TOURNANTES' | MODE1  (MOT1)
+C                                       | MAIL1
+C            'EXPO' 'SIGMA' FLOT1 ('MOYENNE' FLOT2)
+C                  |  'LAMBDA'  FLOT3
+C                  |  'LAMBDA1' FLOT4 (VEC4)
+C                    ('LAMBDA2' FLOT5 (VEC5))
+C                    ('LAMBDA3' FLOT6 (VEC6))
+C
+C------------------------
+C Opérandes et résultat :
+C------------------------
+C
+C
+C 'BANDES_TOURNANTES'
+C             : mot-clé indiquant que l'on utilise la méthode des bandes
+C               tournantes
+C
+C       MODE1 : Modèle sur lequel s'appuie le champ résultat
+C               (type MMODEL), pour obtenir un champ par élément en sortie.
+C
+C        MOT1 : mot-clef facultatif valant 'NOEUD','GRAVITE','RIGIDITE',
+C               'MASSE','STRESSES','FACE','VITESSE' ou 'PRESSION'
+C               indiquant quels points supports prendre en compte dans la
+C               génération du champ (défaut = 'NOEUD').
+C
+C       MAIL1 : Maillage sur lequel s'appuie le champ résultat
+C               (type MELEME), pour obtenir un champ par point en sortie.
+C
+C      'EXPO' : mot-clé indiquant que la loi de covariance est
+C               exponentielle.
+C
+C     'SIGMA' : mot-clé suivi de :
+C
+C       FLOT1 : écart-type du champ à générer (type FLOTTANT).
+C
+C   'MOYENNE' : mot-clé optionnel suivi de :
+C
+C       FLOT2 : valeur de la moyenne du champ aléatoire (type FLOTTANT)
+C               par défaut = 0.
+C
+C    'LAMBDA' : mot-clé (cas de la corrélation isotrope) suivi de :
+C
+C       FLOT3 : longueur de corrélation isotrope (type FLOTTANT).
+C
+C   'LAMBDA1' : mots-clés (cas de la corrélation anisotrope)
+C  ('LAMBDA2')  autant que la dimension de la structure de corrélation,
+C  ('LAMBDA3')  suivis respectivement de :
+C
+C       FLOT4 : longueurs de corrélation (type FLOTTANT) dans les 3
+C      (FLOT5)
+C      (FLOT6)  directions principales.
+C
+C       VEC4  : directions optionnelles orthogonales des axes principaux
+C      (VEC5)   de corrélation 1, 2, et 3 respectivement (type POINT).
+C      (VEC6)   Ils doivent être non nuls et orthogonaux.
+C               Par défaut, ce sont les axes x, y et z.
+C
+C        OBJ1 : champ résultat (type 'CHPOINT ' ou 'MCHAML' selon que
+C               l'on donne un maillage ou un modèle en entrée),
+C               diffus (si c'est un champ-point), une composante 'SCAL'.
+C
+C------------
+C Remarques :
+C------------
+C
+C           1.  Les options 'RIGIDITE','MASSE','STRESSES' réclament un
+C               modèle de mécanique.
+C
+C           2.  Les options 'VITESSE','PRESSION' réclament un modèle
+C               NAVIER-STOKES (non implémenté pour l'instant).
+C
+C           3.  Les options 'GRAVITE','FACE' réclament un modèle
+C               NAVIER-STOKES ou DARCY (usage de la table domaine)
+C
+C           4.  L'option FACE n'est pas encore mise en service.
+C
+C--------------------------------------
+C Développements ultérieurs possibles :
+C--------------------------------------
+C
+C Génération aux points de gauss pour la MECA-FLUX (pression et vitesse)
+C
+C=======================================================================
+C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+      REAL*8 ZDIST, VALMOY, OMMAX
+C
+-INC CCOPTIO
+-INC CCREEL
+-INC CCGEOME
+-INC SMCOORD
+-INC SMELEME
+-INC SMMODEL
+
+      DIMENSION    XDIR1(3),XDIR2(3),XDIR3(3)
+      CHARACTER*20 MOTMET(2)
+      CHARACTER*8  MOTL(1), MOTS(1), MOTLA(4), MOTM(1)
+      CHARACTER*8  MOTOBJ(2), MOTSUP(8)
+
+      INTEGER      IOBJ, IPOSI
+
+      LOGICAL      AXES
+C
+      DATA MOTMET /'BANDES_TOURNANTES','MATRICIELLE'/
+      DATA MOTL   /'EXPO    '/
+      DATA MOTS   /'SIGMA   '/
+      DATA MOTLA  /'LAMBDA  ','LAMBDA1 ','LAMBDA2 ','LAMBDA3 '/
+      DATA MOTM   /'MOYENNE '/
+      DATA MOTSUP /'NOEUD','GRAVITE','RIGIDITE','MASSE','STRESSES',
+     &             'FACE','VITESSE','PRESSION'/
+
+C     epsilon servant à différents tests (1.D-10)
+      EPS = 1.D5 * (SQRT(XPETIT))
+c
+c     ================  Lecture données  ================
+c
+C
+C     Lecture du mode de génération
+C     -----------------------------
+      CALL LIRMOT(MOTMET,2,IMET,1)
+      IF (IERR.NE.0) RETURN
+*
+*     Lecture du modèle ou du maillage de points
+*     La présence du modèle indique que l'on désire un objet CHAMELEM
+*     en sortie. Sinon, un maillage est fourni et on rendra un CHAMPOINT
+*
+      CALL LIROBJ('MMODEL',MMODEL,0,IRET)
+      IF (IERR.NE.0) RETURN
+      IF (IRET.NE.0) THEN
+*       Il y a un modèle
+        IOBJ = 1
+      ELSE
+*       Il y a un maillage
+        IOBJ = 2
+        CALL LIROBJ('MAILLAGE',MELENT,1,IRET)
+        IF (IERR.NE.0) RETURN
+      ENDIF
+C
+C     Lecture du support (points centre ou sommet) - facultatif
+C     ------------------
+      CALL LIRMOT(MOTSUP,8,IPOSI,0)
+      IF (IERR.NE.0) RETURN
+      IF (IPOSI.EQ.0) THEN
+C       valeur par défaut = NOEUD
+        IPOSI = 1
+      ENDIF
+C
+C     Lecture du mot-clé 'EXPO'
+C     -------------------------
+      CALL LIRMOT(MOTL,1,IRET,1)
+      IF (IERR.NE.0) RETURN
+      IF (IRET.EQ.0) THEN
+        MOTERR(1:4) = 'EXPO'
+c       Il manque le mot-clé %m1:4
+        CALL ERREUR(396)
+        RETURN
+      ENDIF
+C
+C     Lecture du mot-clé 'SIGMA'
+C     --------------------------
+      CALL LIRMOT(MOTS,1,IRET,1)
+      IF (IERR.NE.0) RETURN
+      IF (IRET.EQ.0) THEN
+        MOTERR(1:4) = 'SIGM'
+c       Il manque le mot-clé %m1:4
+        CALL ERREUR(396)
+        RETURN
+      ENDIF
+C     Lecture de la valeur de sigma (strictement supérieure à 0.D0)
+      CALL LIRREE(ZSIG,1,IRET)
+      IF (IERR.NE.0) RETURN
+      IF (IRET.EQ.0) THEN
+        MOTERR(1:4) = 'SIGM'
+c       Le mot-clé %m1:4 n'est pas suivi de la donnée correspondante
+        CALL ERREUR(166)
+        RETURN
+      ENDIF
+      IF (ZSIG.LE.0.D0) THEN
+        REAERR(1) = REAL(ZSIG)
+        REAERR(2) = REAL(0.D0)
+        MOTERR(1:8) = ' SIGMA '
+c       %m1:8 = %r1 inférieur à %r2
+        CALL ERREUR(41)
+        RETURN
+      ENDIF
+C
+C     Lecture du mot-clé 'MOYENNE'
+C     ----------------------------
+      CALL LIRMOT(MOTM,1,IRET,0)
+      IF (IERR.NE.0) RETURN
+      IF (IRET.EQ.0) THEN
+*       valeur par défaut = 0
+        VALMOY = 0.D0
+      ELSE
+C       Lecture de la valeur de la moyenne
+        CALL LIRREE(VALMOY,1,IRET)
+        IF (IERR.NE.0) RETURN
+        IF (IRET.EQ.0) THEN
+          MOTERR(1:4) = 'MOYE'
+c         Le mot-clé %m1:4 n'est pas suivi de la donnée correspondante
+          CALL ERREUR(166)
+          RETURN
+        ENDIF
+      ENDIF
+C
+C     Lecture du ou des mot(s)-clé(s) 'LAMBDA' (isotrope) ou 'LAMBDAx' (anisotrope)
+C     Initialisation des CLAMDx et XDIRx.
+C     -----------------------------------------------------------------------------
+      CALL LIRMOT(MOTLA,4,ILAM,1)
+      IF (IERR.NE.0) RETURN
+      IF (ILAM.EQ.0) THEN
+        MOTERR(1:4) = 'LAMB'
+c       Il manque le mot-clé %m1:4
+        CALL ERREUR(396)
+        RETURN
+      ENDIF
+
+      IF (ILAM.EQ.1) THEN
+C       Cas ISOTROPE
+
+*       la statistique a la même dimension que l'espace réel :
+        LADIM = IDIM
+
+C       Lecture de la valeur de lambda (strictement supérieure à 0.D0)
+        CALL LIRREE(CLAMDA,1,IRET)
+        IF (IERR.NE.0) RETURN
+        IF (IRET.EQ.0) THEN
+          MOTERR(1:4) = 'LAMB'
+c         Le mot-clé %m1:4 n'est pas suivi de la donnée correspondante
+          CALL ERREUR(166)
+          RETURN
+        ENDIF
+        IF (CLAMDA.LE.0.D0) THEN
+          REAERR(1) = REAL(CLAMDA)
+          REAERR(2) = REAL(0.D0)
+          MOTERR(1:8) = 'LAMBDA  '
+c         %m1:8 = %r1 inférieur à %r2
+          CALL ERREUR(41)
+          RETURN
+        ENDIF
+
+*       mêmes longueurs de corrélation dans toutes les directions
+        CLAMD1 = CLAMDA
+        CLAMD2 = CLAMDA
+        CLAMD3 = CLAMDA
+*       les vecteurs principaux sont les axes x, y et z
+        XDIR1(1) = 1.D0
+        XDIR1(2) = 0.D0
+        XDIR1(3) = 0.D0
+        XDIR2(1) = 0.D0
+        XDIR2(2) = 1.D0
+        XDIR2(3) = 0.D0
+        XDIR3(1) = 0.D0
+        XDIR3(2) = 0.D0
+        XDIR3(3) = 1.D0
+
+      ELSE
+C       Cas ANISOTROPE
+
+C       axe 1 :
+C       on doit avoir lu le mot-clef 'LAMBDA1'
+        IF (ILAM.NE.2) THEN
+*         Syntaxe incorrecte : on attend %m1:30
+          MOTERR(1:30) = 'le mot-clef LAMBDA1           '
+          CALL ERREUR(881)
+          RETURN
+        ENDIF
+C       Lecture de la valeur de lambda1 (strictement supérieure à 0.D0)
+        CALL LIRREE(CLAMD1,1,IRET)
+        IF (IERR.NE.0) RETURN
+        IF (IRET.EQ.0) THEN
+          MOTERR(1:4) = 'LAMB'
+c         Le mot-clé %m1:4 n'est pas suivi de la donnée correspondante
+          CALL ERREUR(166)
+          RETURN
+        ENDIF
+        IF (CLAMD1.LE.0.D0) THEN
+          REAERR(1) = REAL(CLAMD1)
+          REAERR(2) = REAL(0.D0)
+          MOTERR(1:8) = 'LAMBDA1 '
+c         %m1:8 = %r1 inférieur à %r2
+          CALL ERREUR(41)
+          RETURN
+        ENDIF
+
+C       Lecture optionnelle de la direction VEC1
+        CALL LIROBJ('POINT',IPTV,0,IRET)
+        IF (IERR.NE.0) RETURN
+
+*       si on ne donne pas d'axe, ce sont les axes par défaut, et la
+*       statistique a la même dimensinonalité que l'espace réel.
+        AXES = (IRET.NE.0)
+
+        IF (.NOT.AXES) THEN
+*         pas de vecteurs => axes par défaut.
+          XDIR1(1) = 1.D0
+          XDIR1(2) = 0.D0
+          XDIR1(3) = 0.D0
+          XDIR2(1) = 0.D0
+          XDIR2(2) = 1.D0
+          XDIR2(3) = 0.D0
+          XDIR3(1) = 0.D0
+          XDIR3(2) = 0.D0
+          XDIR3(3) = 1.D0
+*         la statistique a la même dimension que l'espace réel :
+          LADIM = IDIM
+        ELSE
+C         on charge le vecteur et on vérifie qu'il n'est pas de longueur nulle
+C         on le normalise aussi.
+          IREF = (IPTV-1) * (IDIM+1)
+          SDIR = 0.D0
+          DO 13 I=1,IDIM
+            XDIR1(I) = XCOOR(IREF+I)
+            SDIR = SDIR + (XDIR1(I) * XDIR1(I))
+ 13       CONTINUE
+          SDIR     = SQRT(SDIR)
+C         sinon, erreur :
+          IF (SDIR.LT.EPS) THEN
+c           Une direction ne peut pas être définie par un vecteur nul
+            CALL ERREUR(239)
+            RETURN
+          ENDIF
+*         normalisation
+          DO I=1,IDIM
+          XDIR1(I) = XDIR1(I) / SDIR
+          ENDDO
+*         la statistique est au moins de dimension 1
+*         (à surcharger si nécessaire) :
+          LADIM = 1
+        ENDIF
+
+C       axe 2 :
+C       Si le mot-clef 'LAMBDA2' existe, stat 2D au moins
+        CALL LIRMOT(MOTLA,4,ILAM,0)
+        IF (IERR.NE.0) RETURN
+
+        IF ((ILAM.NE.0).AND.(ILAM.NE.3)) THEN
+*         Syntaxe incorrecte : on attend %m1:30
+          MOTERR(1:30) = 'le mot-clef LAMBDA2           '
+          CALL ERREUR(881)
+          RETURN
+        ENDIF
+        IF (ILAM.EQ.3) THEN
+*         la statistique est au moins de dimension 2
+          LADIM = 2
+
+C         Lecture de la valeur de lambda2 (strictement supérieure à 0.D0)
+          CALL LIRREE(CLAMD2,1,IRET)
+          IF (IERR.NE.0) RETURN
+          IF (IRET.EQ.0) THEN
+            MOTERR(1:4) = 'LAMB'
+c           Le mot-clé %m1:4 n'est pas suivi de la donnée correspondante
+            CALL ERREUR(166)
+            RETURN
+          ENDIF
+          IF (CLAMD2.LE.0.D0) THEN
+            REAERR(1) = REAL(CLAMD2)
+            REAERR(2) = REAL(0.D0)
+            MOTERR(1:8) = 'LAMBDA2 '
+c           %m1:8 = %r1 inférieur à %r2
+            CALL ERREUR(41)
+            RETURN
+          ENDIF
+
+C         Lecture obligatoire de la direction VEC2 si on a donné VEC1
+          IF (AXES) THEN
+            CALL LIROBJ('POINT',IPTV,1,IRET)
+            IF (IERR.NE.0) RETURN
+
+            IF (IRET.EQ.0) THEN
+*             Syntaxe incorrecte : on attend %m1:30
+              MOTERR(1:30) = 'un vecteur                    '
+              CALL ERREUR(881)
+              RETURN
+            ENDIF
+
+C           on charge le vecteur et on vérifie qu'il n'est pas de longueur
+C           nulle, et qu'il est bien perpendiculaire à VEC1.
+C           on le normalise aussi.
+            IREF = (IPTV-1) * (IDIM+1)
+            SDIR = 0.D0
+            PSCL = 0.D0
+            DO 14 I=1,IDIM
+              XDIR2(I) = XCOOR(IREF+I)
+              SDIR = SDIR + (XDIR2(I) * XDIR2(I))
+              PSCL = PSCL + (XDIR1(I) * XDIR2(I))
+ 14         CONTINUE
+            SDIR   = SQRT(SDIR)
+*           si VEC2 de longueur nulle
+            IF (SDIR.LT.EPS) THEN
+c             Une direction ne peut pas être définie par un vecteur nul
+              CALL ERREUR(239)
+              RETURN
+            ENDIF
+*           si VEC2 non perpendiculaire à VEC1
+            IF ((ABS(PSCL)).GE.(EPS*SDIR*SDIR)) THEN
+c             Les vecteurs définissant le repère local ne sont pas orthogonaux
+              CALL ERREUR(161)
+              RETURN
+            ENDIF
+*           orthogonalisation à VEC1 :
+            DO I=1,IDIM
+              XDIR2(I) = XDIR2(I) - (PSCL * XDIR1(I))
+            ENDDO
+*           normalisation
+            DO I=1,IDIM
+              XDIR2(I) = XDIR2(I) / SDIR
+            ENDDO
+          ENDIF
+
+C         axe 3 (si 3D) :
+          IF (IDIM.EQ.3) THEN
+C           Si le mot-clef 'LAMBDA3' existe, stat 3D
+            CALL LIRMOT(MOTLA,4,ILAM,0)
+            IF (IERR.NE.0) RETURN
+
+            IF ((ILAM.NE.0).AND.(ILAM.NE.4)) THEN
+*             Syntaxe incorrecte : on attend %m1:30
+              MOTERR(1:30) = 'le mot-clef LAMBDA3           '
+              CALL ERREUR(881)
+              RETURN
+            ENDIF
+            IF (ILAM.EQ.4) THEN
+*             la statistique est de dimension 3
+              LADIM = 3
+
+C             Lecture de la valeur de lambda3 (strictement supérieure à 0.D0)
+              CALL LIRREE(CLAMD3,1,IRET)
+              IF (IERR.NE.0) RETURN
+              IF (IRET.EQ.0) THEN
+                MOTERR(1:4) = 'LAMB'
+c               Le mot-clé %m1:4 n'est pas suivi de la donnée correspondante
+                CALL ERREUR(166)
+                RETURN
+              ENDIF
+              IF (CLAMD3.LE.0.D0) THEN
+                REAERR(1) = REAL(CLAMD3)
+                REAERR(2) = REAL(0.D0)
+                MOTERR(1:8) = 'LAMBDA3 '
+c               %m1:8 = %r1 inférieur à %r2
+                CALL ERREUR(41)
+                RETURN
+              ENDIF
+
+C             Lecture obligatoire de la direction VEC3 si on a donné
+C             VEC1 et VEC2
+              IF (AXES) THEN
+                CALL LIROBJ('POINT',IPTV,1,IRET)
+                IF (IERR.NE.0) RETURN
+
+                IF (IRET.EQ.0) THEN
+*                 Syntaxe incorrecte : on attend %m1:30
+                  MOTERR(1:30) = 'un vecteur                    '
+                  CALL ERREUR(881)
+                  RETURN
+                ENDIF
+
+C               on charge le vecteur et on vérifie qu'il n'est pas de longueur
+C               nulle, et qu'il est bien perpendiculaire à VEC1 et à VEC2.
+C               on le normalise aussi.
+                IREF  = (IPTV-1) * (IDIM+1)
+                SDIR  = 0.D0
+                PSCL  = 0.D0
+                PSCL2 = 0.D0
+                DO 15 I=1,IDIM
+                  XDIR3(I) = XCOOR(IREF+I)
+                  SDIR  = SDIR + (XDIR3(I) * XDIR3(I))
+                  PSCL  = PSCL + (XDIR1(I) * XDIR3(I))
+                  PSCL2 = PSCL + (XDIR2(I) * XDIR3(I))
+ 15             CONTINUE
+                SDIR    = SQRT(SDIR)
+*               si VEC3 de longueur nulle
+                IF (SDIR.LT.EPS) THEN
+c                 Une direction ne peut pas être définie par un vecteur nul
+                  CALL ERREUR(239)
+                  RETURN
+                ENDIF
+*               si VEC3 non perpendiculaire à VEC1 et VEC2
+                IF (((ABS(PSCL )).GE.(EPS*SDIR*SDIR)).OR.
+     &              ((ABS(PSCL2)).GE.(EPS*SDIR*SDIR))) THEN
+c                 Les vecteurs définissant le repère local ne sont pas
+*                 orthogonaux
+                  CALL ERREUR(161)
+                  RETURN
+                ENDIF
+*               orthogonalisation à VEC1 :
+                DO I=1,IDIM
+                  XDIR2(I)=XDIR2(I) - (PSCL*XDIR1(I)) - (PSCL2*XDIR2(I))
+                ENDDO
+*               normalisation
+                DO I=1,IDIM
+                  XDIR3(I) = XDIR3(I) / SDIR
+                ENDDO
+              ENDIF                                                      lit vec3
+            ENDIF                                                        stat 3D
+          ENDIF                                                          dime 3D
+        ENDIF                                                            stat 2D
+      ENDIF                                                              anisotrope
+c
+c     ================  Travail  ================
+c
+C     Dans la suite, les coordonnées vont être adimensionnées par
+C     Lambda. Donc toutes les données numériques seront calculées comme
+C     si Lambda est isotrope égal à 1.
+
+C     Longueur minimale de description des hétérogénéités
+C     pour déterminer la plage de variation des vecteurs d'onde
+      ZDIST = 0.2D0
+*     Pas de discrétisation de la bande (avec lambda = 1)
+      IF (LADIM.EQ.1) THEN
+        DELZET = ZDIST / 3.D0
+      ELSE
+        DELZET = ZDIST / 4.D0
+      ENDIF
+
+*     Fréquence de coupure (avec lambda = 1),
+*     elle doit être supérieure à 2 pi / dx
+      OMMAX = 1.1D0 * (2.D0 * XPI / ZDIST)
+
+*     Génération
+      IF (IOBJ.EQ.1) THEN
+*       On veut un CHAMELEM en sortie
+        CALL ALEA1(MMODEL,IPOSI,LADIM,XDIR1,XDIR2,XDIR3,
+     &             ZSIG,CLAMD1,CLAMD2,CLAMD3,VALMOY,DELZET,OMMAX)
+      ELSEIF (IOBJ.EQ.2) THEN
+*       On veut un CHAMPOINT en sortie
+        CALL ALEA2(MELENT,LADIM,XDIR1,XDIR2,XDIR3,
+     &             ZSIG,CLAMD1,CLAMD2,CLAMD3,VALMOY,DELZET,OMMAX)
+      ENDIF
+      END
+

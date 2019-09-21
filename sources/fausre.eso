@@ -1,0 +1,255 @@
+C FAUSRE    SOURCE    BECC      11/01/05    21:15:01     6836
+      subroutine fausre(ndim, nesp, nLHS, nordpo,
+     &     reacoe, aprop, Runiv,
+     &     Tmaxcv, v_inf,
+     &     cnna, ctna, ct1na,
+     &     wvec_l,
+     &     wvec_r,
+     &     wwork, y, acv_l, acv_r, acv_b, acv_w   ,
+     &     flu, f_lag, cellt,
+     &     logan)
+C
+c************************************************************************
+c
+c name              :  fausre
+c
+c description       :  Reactive Euler equations for a mixture of reactive
+C                      thermally perfect gases.
+c
+c                      AUSM-up, implemented in a
+C                      "Discrete Equation Method" fashion.
+c
+c                      Voir:
+c                      1) Beccantini, Studer, IJNMF 2010
+C                      2) Metayer, Massoni, Saurel, "Modelling
+C                         evaporations fronts with reactive Riemann
+C                          solvers.", JCP 205, 2005
+c
+c language          :  fortran 77
+c
+c author            :  a. beccantini den/dm2s/sfme/ltmf
+c
+c************************************************************************
+c
+c called sub        :  prithe, racre2, flufun
+C
+c************************************************************************
+c
+c**** input
+C
+C     ndim                =  dimension of the domain
+c
+c     nesp                =  species involved in the Euler equations
+C
+C     nLHS                =  species involved in the LHS of the global
+C                            reaction
+c
+c     nordp0              =  polynomial order of the cv
+c
+c     reacoe              =  coefficient involved in the global reaction
+c                            (positive in the LHS, negative in the RHS...
+c                            the first one should be positive)
+c
+c     aprop               =  gas properties (cv, molar mass, formation
+C                            energy)
+c
+C     Runiv               =  universal gas constant
+c
+C     Tmaxcv              =  Tmax for cv expansion
+C
+C     V_inf               =  cut-off coefficient (velocity)
+C
+C     cnna, ctna, ct1na   = scalar products
+C                           (\vec{n},\vec{n}_{\rm alpha})
+C                           (\vec{t},\vec{n}_{\rm alpha})
+C                           (\vec{t1},\vec{n}_{\rm alpha})
+C                           HP. We suppose that \vec{n}_{\rm alpha} is
+C                               always from the burnt to the unburnt state
+C
+c     wvec_l             =  left primitive variables
+c
+c     wvec_r             =  right primitive variables
+C
+C                            NB Primitive variables =
+C
+C                            w(1)             = rho
+C                            w(2)             = ux
+C                            w(3)             = uy
+C                            w(4)             = uz
+C                            w(2+ndim)        = p
+C                            w(3+ndim)        = csi
+C                            w(3+ndim+1)      = yf(1)
+C                                ...
+C                            w(3+ndim+nLHS)   = yf(nLHS)
+C                            w(3+ndim+nLHS+1) = yi(nLHS+1)
+C                                ...
+C                            w(3+ndim+nesp-1) = yi(nesp-1)
+C                            w(3+ndim+nesp)   = dy1t = yi(1) - yf(1)
+C                            w(4+ndim+nesp)   = k0
+C
+C                            For ndim = 1, the total number of variables
+C                            is 4 + 1 + nesp = 5 + nesp.
+c
+c     wwork, y, acv_l,
+C     acv_r, acv_b,
+C     acv_w               =  temporary work vectors
+C                            wwork(4+ndim+nesp), y(1:nesp),
+C                            acv_l(0:nordpo),
+C                            acv_r(0:nordpo),
+C                            acv_b(0:nordpo),
+C                            acv_w   (0:nordpo)
+C
+c**** output
+c
+c     flu                 =  Eulerian interfacial flux in (n,t1,t2), i.e.
+c                            rho*un                 mass
+C                            rho*un*un + p          momentum along n
+C                            rho*un*ut1             momentum along t1
+*                            rho*un*ut2             momentum along t2
+C                            rho*un*ht              energy
+c                            0.0                    alpha
+C                            rho*un*y_{1,f}         mass * y_{1,f}
+C                            ...
+C                            rho*un*y_{nLHS+1,i}    mass * y_{nLHS+1,i}
+c                            ...
+C                            rho*un*dy_{1,t}        mass * dy_{1,t}
+C                            rho*un*k0              mass * k0
+C
+C                            NB. flu(1:(4+ndim+nesp))
+c
+C     f_lag             =  Lagrangian interfacial flux on the reactive
+C                            discontinuty in (n,t1,t2), i.e.
+c                            rho*(un - D_resh)                 mass
+C                            rho*un*un + p - (D_resh rho un)   momentum along n
+C                            rho*(un - D_resh)*ut1             momentum along t1
+C                            rho*(un - D_resh)*ut2             momentum along t2
+C                            rho*un*ht - (D_resh rho et)       energy
+c                            - D_resh                          alpha
+c                            rho*(un - D_resh)*y_{1,f}         mass * y_{1,f}
+C                            ...
+C
+C                            NB. f_lag(1:(4+ndim+nesp))
+C
+c
+c     cellt               =  stability condition, i.e.
+c
+c                            dt/dx < cellt (dimension 1/velocity)
+c
+c     logan               =  si true, anomaly detected
+c
+c************************************************************************
+c
+C     10/04/2008      created
+C     19/08/2008      distinction between reactive and non-reactive case
+C
+C
+c************************************************************************
+c
+c n.b.: all variables are declared
+c
+c      implicit none
+      implicit integer(i-n)
+      integer ndim, nesp, nLHS, nordpo
+      integer nesp1, nsca1
+      integer icomp
+      real*8  reacoe(nesp), aprop(0:(nordpo+2),nesp), Runiv, Tmaxcv
+     &     , wvec_l(4+ndim+nesp), wvec_r(4+ndim+nesp)
+     &     , flu(4+ndim+nesp)
+     &     , f_lag(4+ndim+nesp),  cellt
+     &     , cnna, ctna, ct1na
+      real*8 wwork(4+ndim+nesp)
+     &     , acv_l(0:nordpo), acv_r(0:nordpo), acv_b(0:nordpo)
+     &     , acv_w(0:nordpo)
+     $     , y(1:nesp)
+      real*8 gam_l, Rgas_l, cv_l, hf_l, rho_l, u_l(1:3), p_l, T_l
+     &     , et_l, csi_l
+     &     , gam_r, Rgas_r, cv_r, hf_r, rho_r, u_r(1:3), p_r, T_r
+     &     , et_r, csi_r
+     &     , un_r, un_l, ut_l, ut_r, ut1_l, ut1_r
+      real*8 xst, flurho, coefy, omcoey
+     &     , v_inf
+C
+      logical logan
+      logical logdeb, logk0n
+C     logdeb = debugging ?
+C     logk0n = .true.  : instead of k0, we take k0 * abs(cnna)
+C              .false. : instead of k0, we take k0 * abs(cnna)
+      parameter (logdeb = .false., logk0n = .true.)
+C
+C************************************************************************
+C******* NON REACTIVE CASE ONLY *****************************************
+C************************************************************************
+C
+      call prithe(ndim, nesp, nLHS, nordpo, aprop, reacoe, Runiv,
+     $     Tmaxcv,wvec_l,gam_l, Rgas_l, cv_l, acv_l, hf_l, rho_l,
+     $     u_l, p_l, T_l,y, et_l, csi_l, logan)
+      if (logan) then
+         write(*,'(/A8)') 'fvlhre.f'
+         write(*,*) 'ANOMALY DETECTED 01'
+         goto 9999
+      endif
+C
+      call prithe(ndim, nesp, nLHS, nordpo, aprop, reacoe, Runiv,
+     $     Tmaxcv,wvec_r,gam_r, Rgas_r, cv_r, acv_r, hf_r, rho_r,
+     $     u_r, p_r, T_r,y, et_r, csi_r, logan)
+      if (logan) then
+         write(*,'(/A8)') 'fvlhre.f'
+         write(*,*) 'ANOMALY DETECTED 02'
+         goto 9999
+      endif
+C
+      un_l = u_l(1)
+      un_r = u_r(1)
+C
+C        d_l d_b  un_b=un_a   d_a d_r
+C
+      xst = 0.0D0
+C
+      nesp1 = 0
+      nsca1 = 0
+C
+      if (ndim .eq. 1) then
+         ut_l = 0.0D0
+         ut_r = 0.0D0
+         ut1_l = 0.0D0
+         ut1_r = 0.0D0
+      elseif(ndim .eq. 2) then
+         ut_l = wvec_l(3)
+         ut_r = wvec_r(3)
+         ut1_l = 0.0D0
+         ut1_r = 0.0D0
+      elseif(ndim .eq. 3) then
+         ut_l = wvec_l(3)
+         ut_r = wvec_r(3)
+         ut1_l = wvec_l(4)
+         ut1_r = wvec_r(4)
+      endif
+C
+C     We should take into account the formation energy in the flux
+C
+      call fauupt(nesp1, nsca1, ndim,
+     &     gam_l, rho_l, p_l, un_l, ut_l, ut1_l, (et_l + hf_l),
+     &     gam_r, rho_r, p_r, un_r, ut_r, ut1_r, (et_r + hf_r),
+C     &     yl,yr,sl,sr,
+     &     1.0D0, 1.0D0, 1.0D0, 1.0D0,
+     &     v_inf, flu,
+     &     cellt)
+C
+      flurho = flu(1)
+      flu(3+ndim) = 0.0d0
+C     The Larrouturou theorem does hold
+      coefy = 0.5d0 * (1.0d0 + sign(1.0d0, flurho))
+      omcoey = 1.0d0 - coefy
+C
+      do icomp = (ndim + 4), (ndim + nesp + 4), 1
+         flu(icomp) = flurho * ((coefy * wvec_l(icomp)) +
+     &        (omcoey * wvec_r(icomp)))
+      enddo
+C
+C******* f_lag is here not defined !!!
+C
+ 9999 continue
+      return
+      end
+
+

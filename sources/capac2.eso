@@ -1,0 +1,223 @@
+C CAPAC2    SOURCE    CB215821  17/01/16    21:15:09     9279
+
+C=======================================================================
+C=                            C A P A C 2                              =
+C=                            -----------                              =
+C=                                                                     =
+C=  Fonction :                                                         =
+C=  ----------                                                         =
+C=   Calcul de la matrice de CAPACITE CALORIFIQUE pour les elements    =
+C=   finis COQUEs de type COQ4, COQ6 et COQ8                           =
+C=                                                                     =
+C=  Parametres :  (E)=Entree  (S)=Sortie                               =
+C=  ------------                                                       =
+C=   NEF      (E)    Numero de l'ELEMENT FINI dans NOMTP (cf. CCHAMP)  =
+C=   IMAIL    (E)    Numero du segment IMODEL dans le segment MMODEL   =
+C=   IPCHA1   (E)    Pointeur sur un segment MCHEL1 de caracteristiques=
+C=   CLAT     (E)    Chaleur latente du changement de phase            =
+C=   IPRIGI   (E/S)  Matrice de CAPACITE resultat              (ACTIF) =
+C=                                                                     =
+C=  P. DOWLATYARI, aout 1990.                                          =
+C=======================================================================
+
+      SUBROUTINE CAPAC2 (NEF,IPMAIL,IPINT1,IPINT2,IVAMAT,NVAMAT,
+     &                   IVAPHA,NVAPHA, IPMATR,NLIGR,INFOR)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCREEL
+-INC CCHAMP
+
+-INC SMCHAML
+-INC SMCOORD
+-INC SMELEME
+-INC SMINTE
+-INC SMRIGID
+
+      CHARACTER*16 MOFOR
+
+      SEGMENT MMAT1
+        REAL*8 XE(3,NBNN),CAPSS(NBNN,NBNN),CAPV(NLIGR,NLIGR)
+        REAL*8 TXR(3,3,NBNN),EXC(NBNN),FORME(NBNN)
+        REAL*8 VACOMP(NBPGAU),EP(NBPGAU)
+      ENDSEGMENT
+
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS),NSOF(NS),IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+
+      DIMENSION XJ(3,3)
+
+      SEGMENT SVACOM
+        REAL*8 VACOMG(NVAMAT)
+      ENDSEGMENT
+
+C= Coefficients d'integration dans l'epaisseur (Degay 04/95)
+      PARAMETER (X1s15=0.066666666666666666666666666667D0)
+      PARAMETER (X2s15=0.133333333333333333333333333333D0)
+      PARAMETER (X8s15=0.533333333333333333333333333333D0)
+      PARAMETER (Xm1s30=-0.033333333333333333333333333333D0)
+      DATA Coef11,Coef12,Coef13 /  X2s15 , X1s15 , Xm1s30 /
+      DATA Coef21,Coef22,Coef23 /  X1s15 , X8s15 ,  X1s15 /
+      DATA Coef31,Coef32,Coef33 / Xm1s30 , X1s15 ,  X2s15 /
+
+      SEGINI,SVACOM
+
+C  1 - INITIALISATIONS ET VERIFICATIONS
+C ======================================
+      MELEME = IPMAIL
+c*      SEGACT,MELEME
+      NBNN   = NUM(/1)
+      NBELEM = NUM(/2)
+      NBNN2 = 2*NBNN
+      NBNN3 = 3*NBNN
+C =====
+      MINTE1 = IPINT1
+      SEGACT,MINTE1
+      NBPGAU = MINTE1.POIGAU(/1)
+C =====
+      MINTE2 = IPINT2
+      SEGACT,MINTE2
+C =====
+      MPTVAL = IVAMAT
+c*      SEGACT,MPTVAL
+c*C- Verification sur la constance du champ d'epaisseur :
+c*C- epaisseur toujours placee en derniere position du mptval
+c*      IPMELV = IVAL(NVAMAT)
+c*      CALL QUELCH(IPMELV,IOK)
+c*      IF (IOK.NE.0) THEN
+c*        CALL ERREUR(566)
+c*        GOTO 9990
+c*      ENDIF
+C =====
+c*      IF (IVAPHA.NE.0) THEN
+c*        MPTVAL = IVAPHA
+c*        SEGACT,MPTVAL
+c*      ENDIF
+C =====
+      xMATRI = IPMATR
+c*      SEGACT,XMATRI*MOD
+c*      NLIGRP = NBNN3 = NLIGR
+c*      NLIGRD = NBNN3 = NLIGR
+C =====
+      SEGINI,MMAT1
+
+      E3 = XZERO
+
+C  2 - BOUCLE SUR LES ELEMENTS DU MAILLAGE ELEMENTAIRE IPMAIL
+C ============================================================
+      DO iElt = 1, NBELEM
+C =====
+C  2.1 - Recuperation des coordonnees GLOABLES des noeuds de l'element
+C =====
+        CALL DOXE(XCOOR,IDIM,NBNN,NUM,iElt,XE)
+C =====
+C  2.2 - Calcul des axes locaux lies a l'element COQUE pour tous les
+C        noeuds de l'element fini
+C =====
+        CALL CQ8LOC(XE,NBNN,MINTE2.SHPTOT,TXR,iOK)
+        IF (iOK.EQ.0) THEN
+          CALL ERREUR(515)
+          GOTO 9990
+        ENDIF
+C =====
+C  2.3 - Recuperation des caracteristiques materielles pour tous les
+C        points de Gauss de l'element (avec calcul du terme Rho.Cp.Vol
+C        et prise en compte d'un eventuel changement de phase)
+C =====
+        DO iGau = 1, NBPGAU
+C          MPTVAL = IVAMAT
+          DO i = 1, NVAMAT
+            MELVAL = IVAL(i)
+            IGMN = MIN(iGau,VELCHE(/1))
+            IEMN = MIN(iElt,VELCHE(/2))
+            VACOMG(i) = VELCHE(IGMN,IEMN)
+          ENDDO
+          VALRHO = VACOMG(1)
+
+C         CAS THERMIQUE on fait RHO.CP
+          IF (INFOR .EQ. 1) VACOMG(1) = VALRHO * VACOMG(2)
+
+          VACOMP(iGau) = VACOMG(1)
+          EP(iGau)     = VACOMG(NVAMAT)
+        ENDDO
+C =====
+C  2.4 - Mise a zero de la matrice de CAPACITE de l'element iElt
+C =====
+        CALL ZERO(CAPV,NLIGR,NLIGR)
+C =====
+C  2.5 - Boucle sur les points de Gauss de l'element iElt
+C =====
+        DO iGau = 1, NBPGAU
+C =======
+C  2.5.1 - Calcul du jacobien associe a ce point de Gauss
+C =======
+          CALL CQ8JCE(iGau,NBNN,E3,XE,EP,EXC,TXR,MINTE1.SHPTOT,XJ,
+     &                DJAC,iOK)
+C =======
+C  2.5.2 - Erreur si le jacobien est nul en ce point de Gauss
+C =======
+          IF (iOK.LT.0) THEN
+            INTERR(1) = iElt
+            CALL ERREUR(405)
+            GOTO 9990
+          ENDIF
+C =======
+C  2.5.3 - Calcul de la contribution du point de Gauss a la matrice
+C          CAPACITE elementaire pour cet element fini
+C =======
+          CAPA = DJAC * minte1.POIGAU(iGau) * VACOMP(iGau)
+          CALL ZERO(CAPSS,NBNN,NBNN)
+          DO i0 = 1, NBNN
+            FORME(i0) = MINTE1.SHPTOT(1,i0,iGau)
+          ENDDO
+          CALL NTNST(FORME,CAPA,NBNN,1,CAPSS)
+C =======
+C  2.5.4 - Ajout de termes specifiques dus a l'integration (analytique)
+C          suivant l'epaisseur de l'element de type COQUE
+C =======
+          DO j0=1,NBNN
+            j1=j0+NBNN
+            j2=j1+NBNN
+            DO i0=1,NBNN
+              i1=i0+NBNN
+              i2=i1+NBNN
+              Cte=CAPSS(i0,j0)
+              CAPV(i0,j0)=CAPV(i0,j0) + Cte*Coef11
+              CAPV(i1,j0)=CAPV(i1,j0) + Cte*Coef21
+              CAPV(i2,j0)=CAPV(i2,j0) + Cte*Coef31
+              CAPV(i0,j1)=CAPV(i0,j1) + Cte*Coef12
+              CAPV(i1,j1)=CAPV(i1,j1) + Cte*Coef22
+              CAPV(i2,j1)=CAPV(i2,j1) + Cte*Coef32
+              CAPV(i0,j2)=CAPV(i0,j2) + Cte*Coef13
+              CAPV(i1,j2)=CAPV(i1,j2) + Cte*Coef23
+              CAPV(i2,j2)=CAPV(i2,j2) + Cte*Coef33
+            ENDDO
+          ENDDO
+        ENDDO
+C =====
+C  2.6 - Stockage de la matrice de CAPACITE pour cet element fini
+C        (remplissage de XMATRI)
+C =====
+        CALL REMPMT(CAPV,NLIGR,RE(1,1,iElt))
+      ENDDO
+
+C  3 - MENAGE : DESACTIVATION/DESTRUCTION DE SEGMENTS
+C ====================================================
+ 9990 CONTINUE
+      SEGSUP,MMAT1,SVACOM
+c*      SEGDES,MELEME,MINTE,MINTE2,XMATRI
+c*      MPTVAL = IVAMAT
+c*      SEGDES,MPTVAL
+c*      IF (IVAPHA.NE.0) THEN
+c*        MPTVAL = IVAPHA
+c*        SEGDES,MPTVAL
+c*      ENDIF
+
+      RETURN
+      END
+
+

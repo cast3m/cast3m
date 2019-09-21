@@ -1,0 +1,466 @@
+C YCTSCL    SOURCE    CHAT      05/01/13    04:16:35     5004
+      SUBROUTINE YCTSCL
+C
+C     VERSION VECTORISEE
+C
+C     Les éléments sont groupés en paquets de LRV éléments, LRV étant
+C     la longueur des registres vectoriels de la machine cible, i.e
+C     64 sur Cray, 128 ou 256 sur IBM 3090VF. On promène une fenêtre
+C     de longueur LRV sur la boucle générale de longueur NEL.
+C
+     & (HR,RPG,DRR,LE,NEL,K0,IES,NP,IAXI,
+     & IPADI,IPADS,IPADF,IKOMP,IKAS,
+     & ALFE,IND1,UN,INDU,NPTS,TN,NPTD,QE,IKS,
+     & HRN,G,NPTI,
+     & ALT,SGT,
+     & VOLU,COTE,NELZ,IDCEN,IPG,
+     & DTM1,DT,DTT1,DTT2,NUEL,DIAEL,FN)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+C***********************************************************************
+C
+C  CE SP DISCRETISE UNE EQUATION GENERALE DE TRANSPORT-DIFFUSION AVEC
+C  SOURCE.
+C    EN 2D SUR LES ELEMENTS QUA4 ET TRI3      PLAN OU AXI
+C    EN 3D SUR LES ELEMENTS CUB8 ET PRI6
+C  LES OPERATEURS SONT "SOUS-INTEGRES"
+C
+C
+C                        APPELE PAR YTSCAL
+C
+C
+C***********************************************************************
+
+-INC CCVQUA4
+-INC CCREEL
+C
+C Longueur des registres vectoriels de la machine cible
+C On prend 64 pour ne pas augmenter la taille des tableaux
+C nécessaires à la vectorisation.
+C
+      PARAMETER(LRV=64)
+
+      DIMENSION UN(NPTS,IES),HRN(NPTI),TN(NPTD)
+      DIMENSION COTE(NELZ,IES),VOLU(NELZ),QE(*)
+      DIMENSION ALFE(*),ALT(*)
+
+      DIMENSION IPADI(*),IPADS(*),IPADF(*),LE(NP,1)
+      DIMENSION HR(NEL,NP,IES),RPG(1),DRR(NP,NEL)
+
+      DIMENSION BF(9,9)
+      DIMENSION QGGT(8,8),Q1(8,8),Q2(8,8),Q3(8,8)
+
+      DIMENSION AIRE(LRV)
+      DIMENSION AL(LRV),AH(LRV),AP(LRV)
+      DIMENSION ALFT(LRV),QT(LRV)
+      DIMENSION UIX(LRV,9),UIY(LRV,9),UIZ(LRV,9)
+      DIMENSION TETAC(LRV,9),TETAD(LRV,9),TETA(LRV,9)
+      DIMENSION UMI(LRV,3)
+      DIMENSION SBF(LRV,9)
+      DIMENSION WT(LRV,9),CHGLD(LRV),CHGLP(LRV)
+
+      REAL*8    G(NPTS),FN(NP,*)
+
+      SAVE IPAS,QGGT,Q1,Q2,Q3
+
+      DATA CD/1.D0/
+
+      DATA IPAS/0/
+C************************************************************************
+C
+C           INITIALISATIONS DIVERSES
+C
+       ZERMA=XPETIT
+
+      NK=K0
+C                           ********
+C                           *  2D  *
+C                           ********
+
+
+      IF(IES.EQ.3)GO TO 10
+
+      IAX1=0
+      IAX2=0
+      IF(IAXI.EQ.1)IAX2=1
+      IF(IAXI.EQ.2)IAX1=1
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+C                           DIFFERENCES TRIANGLE / QUADRANGLE
+      QUA4=0.D0
+      IF(NP.EQ.4)QUA4=1.D0
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+C
+C Calcul du nombre de paquets de LRV éléments
+C
+      NNN=MOD(NEL,LRV)
+      IF(NNN.EQ.0) NPACK=NEL/LRV
+      IF(NNN.NE.0) NPACK=1+(NEL-NNN)/LRV
+      KPACKD=1
+      KPACKF=NPACK
+C
+C ******* BOUCLE SUR LES PAQUETS DE LRV ELEMENTS **********
+C
+      DO 7001 KPACK=KPACKD,KPACKF
+C
+C ======= A L'INTERIEUR DE CHAQUE PAQUET DE LRV ELEMENTS =======
+C
+C 1. Calcul des limites du paquet courant.
+      KDEB=1+(KPACK-1)*LRV
+      KFIN=MIN(NEL,KDEB+LRV-1)
+C
+      DO 7002 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NK=K+K0
+      NK1=(1-IND1)*(NK-1)+1
+      ALFT(KP)=ALFE(NK1)+ZERMA
+      AIRE(KP)=VOLU(NK)
+      AL(KP)=COTE(NK,1)
+      AH(KP)=COTE(NK,2)
+ 7002 CONTINUE
+
+      IF((IKOMP.EQ.0.AND.IKAS.EQ.5).OR.
+     &(IKOMP.EQ.1.AND.IKAS.EQ.6))THEN
+      DO 7003 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NK=K+K0
+      ALFT(KP)=ALFT(KP)+ALT(NK)/SGT
+ 7003 CONTINUE
+      ENDIF
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+      DO 7006 I=1,NP
+      DO 7006 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NF=IPADF(LE(I,K))
+      NU=IPADS(LE(I,K))
+      NI=IPADI(LE(I,K))
+      NFU=(1-INDU)*(NU-1)+1
+      UIX(KP,I)=UN(NFU,1)
+      UIY(KP,I)=UN(NFU,2)
+      TETAC(KP,I)=HRN(NI)
+      TETAD(KP,I)=TN(NF)
+ 7006 CONTINUE
+
+      CALL KSUPG1(WT,UMI,CHGLD,CHGLP,KDEB,KFIN,LRV,
+     &HRN,IPADI,UN,ALFT,NPTS,NEL,NP,DRR,HR,FN,
+     &AIRE,AL,AH,AP,IDCEN,IPADS,LE,QUA4,IKOMP,
+     &DTM1,DT,DTT1,DTT2,DIAEL,NUEL)
+C
+C Initialisation de la variable d'accumulation SBF au terme source
+C
+
+      IF(IKOMP.EQ.0)THEN
+
+         DO 70021 K=KDEB,KFIN
+         KP=K-KDEB+1
+         NK=K+K0
+         NKS=(1-IKS)*(NK-1)+1
+         QT(KP)=QE(NKS)
+70021    CONTINUE
+
+         IF(IPG.EQ.0)THEN
+         DO 70062 I=1,NP
+         DO 70062 K=KDEB,KFIN
+         KP=K-KDEB+1
+         SBF(KP,I)=-QT(KP)*DRR(I,K)
+70062    CONTINUE
+         ELSE
+         DO 71062 I=1,NP
+         DO 71062 K=KDEB,KFIN
+         KP=K-KDEB+1
+         SBF(KP,I)=-QT(KP)*WT(KP,I)
+71062    CONTINUE
+         ENDIF
+
+      ELSEIF(IKOMP.EQ.1)THEN
+
+         DO 70023 K=KDEB,KFIN
+         KP=K-KDEB+1
+         NK=K+K0
+         NKS=(1-IKS)*(NK-1)+1
+         QT(KP)=QE(NKS)
+70023    CONTINUE
+
+       IF(IPG.EQ.0)THEN
+         DO 70064 I=1,NP
+         DO 70064 K=KDEB,KFIN
+         KP=K-KDEB+1
+         SBF(KP,I)=-QT(KP)*DRR(I,K)
+70064    CONTINUE
+       ELSE
+         DO 71064 I=1,NP
+         DO 71064 K=KDEB,KFIN
+         KP=K-KDEB+1
+         SBF(KP,I)=-QT(KP)*WT(KP,I)
+71064    CONTINUE
+       ENDIF
+
+      ENDIF
+
+C Le coeur du calcul ...
+
+      IF(IKOMP.EQ.0)THEN
+
+      DO 7014 I=1,NP
+      DO 7014 J= 1,NP
+      DO 7014 K=KDEB,KFIN
+      KP=K-KDEB+1
+      ZVGG=AIRE(KP)*CHGLP(KP)*VGGT(J,I)
+
+      ZVGT=AIRE(KP)*(
+     &     HR(K,I,1)*HR(K,J,1)*ALFT(KP)
+     &+    HR(K,I,2)*HR(K,J,2)*ALFT(KP)
+     &+    CHGLD(KP)*VGGT(J,I) )
+
+      V2=(UMI(KP,1)*HR(K,J,1)+UMI(KP,2)*HR(K,J,2))*WT(KP,I)
+
+      SBF(KP,I)=SBF(KP,I)+TETAC(KP,J)*(ZVGG+V2)+ TETAD(KP,J)*ZVGT
+
+ 7014 CONTINUE
+
+      ELSEIF(IKOMP.EQ.1)THEN
+
+      DO 7015 I=1,NP
+      DO 7015 J= 1,NP
+      DO 7015 K=KDEB,KFIN
+      KP=K-KDEB+1
+      ZVGG=AIRE(KP)*CHGLP(KP)*VGGT(J,I)
+
+      ZVGT=AIRE(KP)*(
+     &     HR(K,I,1)*HR(K,J,1)*ALFT(KP)
+     &+    HR(K,I,2)*HR(K,J,2)*ALFT(KP)
+     &+    CHGLD(KP)*VGGT(J,I) )
+
+      V2=(UIX(KP,J)*HR(K,J,1)+UIY(KP,J)*HR(K,J,2))*WT(KP,I)
+
+      SBF(KP,I)=SBF(KP,I)+TETAC(KP,J)*(ZVGG+V2)+ TETAD(KP,J)*ZVGT
+
+ 7015 CONTINUE
+
+      ENDIF
+C
+C     Fin de l'accumulation dans SBF.
+C     On ajoute ces incréments G.
+C
+      DO 7017 I=1,NP
+      DO 7017 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NF=IPADS(LE(I,K))
+      G(NF) = G(NF)-SBF(KP,I)
+ 7017 CONTINUE
+
+ 7001 CONTINUE
+
+C     WRITE(6,*)' G DANS YCTSCL '
+C     WRITE(6,1984)(M,G(M),M=1,NPTS)
+ 1984 FORMAT(7(1X,I4,2X,1PE11.4))
+
+C     CALL ARRET(0)
+      IPAS=1
+      RETURN
+
+C                           ********
+C                           *  3D  *
+C                           ********
+
+ 10   CONTINUE
+
+      IF(IPAS.EQ.0)CALL CALHRH(QGGT,Q1,Q2,Q3,IES)
+      CUB8=0.D0
+      IF(NP.EQ.8)CUB8=1.D0
+
+C
+C Calcul du nombre de paquets de LRV éléments
+C
+      NNN=MOD(NEL,LRV)
+      IF(NNN.EQ.0) NPACK=NEL/LRV
+      IF(NNN.NE.0) NPACK=1+(NEL-NNN)/LRV
+      KPACKD=1
+      KPACKF=NPACK
+C
+C ******* BOUCLE SUR LES PAQUETS DE LRV ELEMENTS **********
+C
+      DO 8001 KPACK=KPACKD,KPACKF
+C
+C ======= A L'INTERIEUR DE CHAQUE PAQUET DE LRV ELEMENTS =======
+C
+C 1. Calcul des limites du paquet courant.
+      KDEB=1+(KPACK-1)*LRV
+      KFIN=MIN(NEL,KDEB+LRV-1)
+C
+      DO 8002 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NK=K+K0
+      NK1=(1-IND1)*(NK-1)+1
+      ALFT(KP)=ALFE(NK1)+ZERMA
+      AIRE(KP)=VOLU(NK)
+      AL(KP)=COTE(NK,1)
+      AH(KP)=COTE(NK,2)
+      AP(KP)=COTE(NK,3)
+ 8002 CONTINUE
+      IF((IKOMP.EQ.0.AND.IKAS.EQ.5).OR.
+     &(IKOMP.EQ.1.AND.IKAS.EQ.6))THEN
+      DO 8003 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NK=K+K0
+      ALFT(KP)=ALFT(KP)+ALT(NK)/SGT
+ 8003 CONTINUE
+      ENDIF
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+      DO 8006 I=1,NP
+      DO 8006 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NF=IPADF(LE(I,K))
+      NU=IPADS(LE(I,K))
+      NI=IPADI(LE(I,K))
+      NFU=(1-INDU)*(NU-1)+1
+      UIX(KP,I)=UN(NFU,1)
+      UIY(KP,I)=UN(NFU,2)
+      UIZ(KP,I)=UN(NFU,3)
+      TETAC(KP,I)=HRN(NI)
+      TETAD(KP,I)=TN(NF)
+ 8006 CONTINUE
+
+      CALL KSUPG1(WT,UMI,CHGLD,CHGLP,KDEB,KFIN,LRV,
+     &HRN,IPADI,UN,ALFT,NPTS,NEL,NP,DRR,HR,FN,
+     &AIRE,AL,AH,AP,IDCEN,IPADS,LE,CUB8,IKOMP,
+     &DTM1,DT,DTT1,DTT2,DIAEL,NUEL)
+
+C
+C Initialisation de la variable d'accumulation SBF au terme source
+C                                                                      M
+      IF(IKOMP.EQ.0)THEN
+
+         DO 80021 K=KDEB,KFIN
+         KP=K-KDEB+1
+         NK=K+K0
+         NKS=(1-IKS)*(NK-1)+1
+         QT(KP)=QE(NKS)
+80021    CONTINUE
+
+       IF(IPG.EQ.0)THEN
+         DO 80062 I=1,NP
+         DO 80062 K=KDEB,KFIN
+         KP=K-KDEB+1
+         SBF(KP,I)=-QT(KP)*DRR(I,K)
+80062    CONTINUE
+       ELSE
+         DO 81062 I=1,NP
+         DO 81062 K=KDEB,KFIN
+         KP=K-KDEB+1
+         SBF(KP,I)=-QT(KP)*WT(KP,I)
+81062    CONTINUE
+       ENDIF
+
+      ELSEIF(IKOMP.EQ.1)THEN
+
+         DO 80023 K=KDEB,KFIN
+         KP=K-KDEB+1
+         NK=K+K0
+         NKS=(1-IKS)*(NK-1)+1
+         QT(KP)=QE(NKS)
+80023    CONTINUE
+
+       IF(IPG.EQ.0)THEN
+         DO 80064 I=1,NP
+         DO 80064 K=KDEB,KFIN
+         KP=K-KDEB+1
+         SBF(KP,I)=-QT(KP)*DRR(I,K)
+80064    CONTINUE
+       ELSE
+         DO 81064 I=1,NP
+         DO 81064 K=KDEB,KFIN
+         KP=K-KDEB+1
+         SBF(KP,I)=-QT(KP)*WT(KP,I)
+81064    CONTINUE
+       ENDIF
+
+      ENDIF
+
+C Le coeur du calcul ...
+
+      IF(IKOMP.EQ.0)THEN
+
+      DO 8014 I=1,NP
+      DO 8014 J= 1,NP
+      DO 8014 K=KDEB,KFIN
+      KP=K-KDEB+1
+
+      ZVGG=AIRE(KP)*CHGLP(KP)*QGGT(J,I)
+
+      ZVGT=AIRE(KP)*(
+     &     HR(K,I,1)*HR(K,J,1)*ALFT(KP)
+     &+    HR(K,I,2)*HR(K,J,2)*ALFT(KP)
+     &+    HR(K,I,3)*HR(K,J,3)*ALFT(KP) )
+     &+    CHGLD(KP)*QGGT(J,I)
+
+      V2=UMI(KP,1)*HR(K,J,1)+UMI(KP,2)*HR(K,J,2)+UMI(KP,3)*HR(K,J,3)
+
+      SBF(KP,I)=SBF(KP,I)
+     &         +TETAC(KP,J)*(ZVGG+V2*WT(KP,I))+TETAD(KP,J)*ZVGT
+
+ 8014 CONTINUE
+
+      ELSEIF(IKOMP.EQ.1)THEN
+
+      DO 8015 I=1,NP
+      DO 8015 J= 1,NP
+      DO 8015 K=KDEB,KFIN
+
+      KP=K-KDEB+1
+
+      ZVGG=AIRE(KP)*CHGLP(KP)*QGGT(J,I)
+
+      ZVGT=AIRE(KP)*(
+     &     HR(K,I,1)*HR(K,J,1)*ALFT(KP)
+     &+    HR(K,I,2)*HR(K,J,2)*ALFT(KP)
+     &+    HR(K,I,3)*HR(K,J,3)*ALFT(KP) )
+     &+    CHGLD(KP)*QGGT(J,I)
+
+      V2=UIX(KP,J)*HR(K,J,1)+UIY(KP,J)*HR(K,J,2)+UIZ(KP,J)*HR(K,J,3)
+
+      SBF(KP,I)=SBF(KP,I)
+     &         +TETAC(KP,J)*(ZVGG+V2*WT(KP,I))+TETAD(KP,J)*ZVGT
+
+ 8015 CONTINUE
+
+      ENDIF
+
+C
+C     Fin de l'accumulation dans SBF.
+C     On ajoute ces incréments G.
+C
+      DO 8017 I=1,NP
+      DO 8017 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NF=IPADS(LE(I,K))
+      G(NF) = G(NF)-SBF(KP,I)
+ 8017 CONTINUE
+
+ 8001 CONTINUE
+
+C     WRITE(6,*)' G DANS YCTSCL '
+C     WRITE(6,1984)(M,G(M),M=1,NPTS)
+
+C     CALL ARRET(0)
+      IPAS=1
+      RETURN
+ 1002 FORMAT(10(1X,1PE11.4))
+      END
+
+
+
+
+
+
+
+

@@ -1,0 +1,209 @@
+$$$$ PAS_RAYO
+* PAS_RAYO  PROCEDUR  FANDEUR   17/04/06    21:15:02     9389
+* PAS_RAYO  PROCEDUR
+*
+* Procedure pour le calcul des termes dus au rayonnement
+* (facteurs de forme, matrices, seconds membres)
+*
+* PRECED   table de calcul envoyee a PASAPAS
+* TEMM     instant courant du calcul
+* IAPPEL   vaut - 1 si l'appel vient de DUPONT2
+*               - 2 si premier appel de TRANSNON
+*               - 3 si deuxieme appel de TRANSNON
+*
+'DEBP' PAS_RAYO  PRECED*'TABLE' TEMM*'FLOTTANT' IAPPEL*'ENTIER' ;
+
+*'MESS' '*--- Entree dans PAS_RAYO TEMM = ' TEMM IAPPEL '---*' ;
+
+  etab = PRECED.'WTABLE' ;
+  TAA = 'TABLE' ;
+
+*----------------------------------------------------------------------*
+* En cas d'appel non prevu : pas de rayonnement --> sortie directe
+*----------------------------------------------------------------------*
+  'SI' ('NON' etab.'RAYO') ;
+    'RESPRO' TAA ;
+    'QUITTER' PAS_RAYO ;
+  'FINSI' ;
+*----------------------------------------------------------------------*
+* Pour le rayonnement, le calcul des facteurs de forme, des matrices et
+* du chpoint est a faire si appel vient de DUPONT2.
+* Seul le calcul des facteurs de forme est a faire lors du premier appel
+* par TRANSNON.
+* Seuls les matrices et CHPOINT sont a evaluer lors du deuxieme appel
+* par TRANSNON.
+*----------------------------------------------------------------------*
+*  04/2014
+*!   ne pas partitionner selon le type d'element mais
+*!   utiliser la table deja obtenue avec 'PRRA' dans PAS_DEFA
+*!   (procedure de pretraitement de PASAPAS):
+*!    tabray = 'PRRA'  (etab.'MOD_RAY');
+*!   au lieu de:
+*     tabray= 'EXTR' mor 'ZONE';
+*!    NDIM3    = ('DIME' tabray) / 2 ;
+*!   on obtient ainsi directement la table RAYO_VAL avec le type de
+*!   la condition (infini, fac_a_fac, cavite)
+*----------------------------------------------------------------------*
+  rayo_val = etab.'RAYONNEMENT' ;
+  NDIM3    = 'DIME' rayo_val ;
+
+*----------------------------------------------------------------------*
+* Premiere partie du rayonnement calcul des facteurs de forme
+*----------------------------------------------------------------------*
+  'SI' ('<' IAPPEL 3) ;
+
+    'SI' ('NON' ('EXISTE' etab 'CTE_STEFAN_BOLTZMANN')) ;
+      CTE_SB = 5.673E-8 ;
+      etab.'CTE_STEFAN_BOLTZMANN' = CTE_SB ;
+      'MESS' 'ATTENTION ! Constante de Stefan-Boltzmann en unites SI' ;
+      'MESS' '            soit ' CTE_SB ;
+    'FINSI' ;
+
+    etab.'DEJA_CALC_PAS_RAYO' = TEMM ;
+
+    mar = etab.'MAT_RAY' ;
+
+* Mise a jour des facteurs de forme (CAVITE) si necessaire :
+    b_z = 'NON' ('EXIS' etab 'FAC_FORM') ;
+    'SI' b_z ;
+      etab. 'FAC_FORM' = 'TABLE' ;
+    'FINSI' ;
+
+    'SI' (etab.'REA_GEOM' 'OU' b_z) ;
+      'REPETER' bou_ray NDIM3 ;
+        mo_ray = rayo_val . &bou_ray . 'MODELE' ;
+        'SI' ('EXIS' mo_ray 'MATE' 'CAVITE') ;
+          ma_ray = 'REDU' mar mo_ray ;
+          etab. 'FAC_FORM' . &bou_ray = 'FFOR' mo_ray ma_ray ;
+        'FINSI' ;
+      'FIN' bou_ray ;
+    'FINSI' ;
+
+  'FINSI' ;
+
+*----------------------------------------------------------------------*
+* Deuxieme partie du rayonnement calcul matrices et chpoint
+*----------------------------------------------------------------------*
+  'SI' ( ('EGA' IAPPEL 1) 'OU' ('EGA' IAPPEL 3) ) ;
+    CTE_SB = etab.'CTE_STEFAN_BOLTZMANN' ;
+
+    TREF = etab.'TREF' ;
+    U0 = etab.'THER_COURANT' '+' TREF ;
+    MAT_CHPO = 0. ;
+
+    'REPETER' bou_ray NDIM3 ;
+
+      mo_ray = rayo_val. &bou_ray .'MODELE';
+      RTYPE  = rayo_val. &bou_ray .'TYPE' ;
+
+* Pourrait-on prendre etab.'MAT_RAY' plutot que etab.'CHMAT' ?
+      CH_EMI  = 'REDU' etab.'CHMAT' mo_ray ;
+
+      MAIL_RAD = 'EXTR' CH_EMI 'MAIL' ;
+      CH_RAD   = 'REDU' U0 MAIL_RAD ;
+*      'MESS' 'CH_RAD: ' ('MINI' CH_RAD) ('MAXI' CH_RAD);
+
+*--------- Calcul des differents CHPOINTs sur le maillage -------------*
+*----------------------------------------------------------------------*
+      'SI'  ('NEG' RTYPE 'CAVITE') ;
+*
+        CH_EMI2 = 'CHAN' 'NOEUD' mo_ray CH_EMI ;
+*
+*------------- Cas du rayonnement face a face -------------------------*
+        'SI' ('EGA' RTYPE 'FAC_A_FAC') ;
+* on recupere les objets par extraire obje pour le face a face :
+          fac1 fac2 geo mcv = 'EXTR' mo_ray 'OBJE' ;
+          mo_ray1 = 'REDU' mo_ray fac1 ;
+          mo_ray2 = 'REDU' mo_ray fac2 ;
+          ma_ray1 = 'REDU' CH_EMI2 mo_ray1 ;
+          ma_ray2 = 'REDU' CH_EMI2 mo_ray2 ;
+          ch_rad1 = 'REDU' CH_RAD fac1 ;
+          ch_rad2 = 'REDU' CH_RAD fac2 ;
+*
+*  correction 06/12/06: on met d'abord la face 1 puis la face 2
+*  en coherence avec l'orientation des elements du maillage GEO
+          MAT_RAD = HRAYO mcv  mo_ray1 ma_ray1 ch_rad1
+                               mo_ray2 ma_ray2 ch_rad2
+                               geo  CTE_SB  ;
+*
+*------------- Cas du rayonnement a l'infini --------------------------*
+        'SINON' ;
+*Note on pourrait faire une seule fois ce TIRE !
+          CH_TER = 'TIRE' (etab.'CHARGEMENT') 'TERA' TEMM ;
+          CH_TE1 = 'REDU' CH_TER MAIL_RAD ;
+          CH_TE1 = CH_TE1 '+' TREF ;
+
+*???           mcv = mail_rad 'MODE' 'THERMIQUE' CONVECTION ;
+          mcv = ('EXTR' mo_ray 'MAIL') 'MODE' 'THERMIQUE' CONVECTION ;
+
+          ma_ray = 'REDU' CH_EMI2 mo_ray ;
+* on prend pour E_IM la valeur 1. par defaut :
+          'SI' ('NON' ('EXIS'  MA_RAY 'E_IN'));
+**            ma_rayin = 'MATE' mo_ray 'E_IN' 1. ;
+**            ma_ray  = ma_ray 'ET' ('CHAN' 'NOEUD' MO_RAY MA_RAYIN) ;
+            ma_rayin = 'MANU' 'CHML' mo_ray 'E_IN' 1.
+                                     'TYPE' 'CARACTERISTIQUES' 'NOEUD' ;
+            ma_ray  = ma_ray 'ET' ma_rayin ;
+          'FINSI' ;
+
+          MAT_RAD = HRAYO  mcv  mo_ray  ma_ray CH_RAD
+                                CH_TE1   CTE_SB  ;
+
+          CHAL_TES = 'CONVECTION' mcv MAT_RAD CH_TE1 ;
+          MAT_CHPO = MAT_CHPO '+' CHAL_TES ;
+
+        'FINSI' ;
+*
+        RIG_RAD = 'CONDUCTIVITE' mcv MAT_RAD ;
+*
+*------------- Cas du rayonnement dans une cavite--------------------
+      'SINON' ;
+
+        U_CAK2 = 'CHAN' 'CHAM' mo_ray CH_RAD 'GRAVITE' ;
+*
+* Methode avec calcul de la matrice de rayonnement
+        'SI' ('NON' ('EXIS' mo_ray 'MATE' 'TRAYO')) ;
+* methode avec le calcul de la temperature de rayonnement a l'infini
+* equivalente a l'ensemble de la cavite pour la face consideree
+          MRT = mo_ray ;
+          TCAV = 'RAYE' MRT 1.E-7  (etab.'FAC_FORM'.&bou_ray)
+                        CH_EMI U_CAK2 ;
+          HRAD =  HRCAV  MRT CH_EMI U_CAK2 TCAV ;
+          RIG_RAD = 'COND' MRT HRAD ;
+
+          TCAV_N1 = 'CHAN' 'CHPO' MRT TCAV ;
+          TCAV_N  = 'NOMC' TCAV_N1 'T' 'NATU' 'DIFFUS';
+          CHAL_TES = 'CONV' MRT HRAD TCAV_N ;
+          MAT_CHPO = MAT_CHPO '+' CHAL_TES ;
+
+        'SINON';
+* Methode par defaut
+          MAT_RAYE = 'RAYE' mo_ray (etab.'FAC_FORM'.&bou_ray)
+                            CH_EMI ;
+          RIG_RAD = 'RAYN' mo_ray MAT_RAYE U_CAK2 CTE_SB ;
+        'FINSI';
+
+      'FINSI';
+*---------------------------------------------------------------------
+
+      'SI' ('EGA' &bou_ray 1) ;
+        bb = rig_rad ;
+      'SINON';
+        bb = rig_rad 'ET' bb;
+      'FINSI' ;
+
+    'FIN' bou_ray ;
+
+* On n'ajoute second membre que si c'est un CHPOINT !
+    'SI' ('NEG' MAT_CHPO 0.) ;
+      TAA.'ADDI_SECOND'  = MAT_CHPO ;
+    'FINSI' ;
+    TAA.'ADDI_MATRICE' = bb ;
+    TAA.'RAYO_VALEUR'  = rayo_val ;
+
+  'FINSI';
+
+  'RESPRO' TAA ;
+'FINPROC' ;
+
+

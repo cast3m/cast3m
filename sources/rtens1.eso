@@ -1,0 +1,462 @@
+C RTENS1    SOURCE    BP208322  17/03/01    21:18:12     9325
+      SUBROUTINE RTENS1(IPCHE1,IFOMEM,IMOT,IPTV2,IELEME,IVAVEC,IVACOM,
+     &                  IVARES,IDEFO,IINTE,MELE,NPINT,NVEC,V1,V2,W2,W3,
+     &                  CENTR1,CENTR2,AXEI1,IER1)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*-----------------------------------------------------------------------*
+*     Operateur RTENS : cas de la formulation massive                   *
+*                                                                       *
+*     IPCHE1    (e)    pointeur sur un MCHAML de caracteristiques       *
+*                      = 0 si isotropie                                 *
+*     IFOMEM    (e)    = IFOUR de CCOPTIO                               *
+*     IMOT      (e)    indique le type de repere desire (cf RTENS)      *
+*     IPTV2     (e)    pointeur sur le 2nd point repere                 *
+*     IELEME    (e)    pointeur sur le segment MELEME (actif)           *
+*     IVAVEC    (e/s)  pointeur sur un segment MPTVAL (actif)           *
+*     IVACOM    (e/s)  pointeur sur un segment MPTVAL (actif)           *
+*     IVARES    (e/s)  pointeur sur un segment MPTVAL (actif)           *
+*     IDEFO     (e)    =1 : tenseur de deformations (contraintes sinon) *
+*     IINTE     (e)    pointeur sur le segment MINTE  (actif)           *
+*     MELE      (e)    numero de l'element-fini dans NOMTP              *
+*     NPINT     (e)    nombre de points d'integration (coques)          *
+*     NVEC      (e)    nombre de composantes du futur MCHAML            *
+*     V1        (e)    coordonnees et norme du 1er vecteur              *
+*     V2        (e)    coordonnees et norme du 2nd vecteur              *
+*     W2        (e)    coordonnees d'un 1er vecteur de travail          *
+*     W3        (e)    coordonnees d'un 2nd vecteur de travail          *
+*     CENTR1    (e)    coordonnees du 1er point repere                  *
+*     CENTR2    (e)    coordonnees du 2nd point repere                  *
+*     AXEI1     (e)    coordonnees du vecteur de l'axe de symetrie      *
+*     IER1      (s)    code d'erreur pour desactivation dans RTENS      *
+*     D.R.-M. le 17/3/94                                                *
+*-----------------------------------------------------------------------*
+-INC CCOPTIO
+-INC CCHAMP
+-INC SMCHAML
+-INC SMINTE
+-INC SMCOORD
+-INC SMELEME
+*
+*     MWRK1,3,4 initialises dans RTENS1
+*
+      SEGMENT MWRK1
+        REAL*8 XEL(3,NBNN),XEL2(3,NBNN)
+      ENDSEGMENT
+*
+      SEGMENT MWRK3
+        REAL*8 A(NDIM,NDIM),R(NDIM,NDIM),RT(NDIM,NDIM),TRAV(NDIM,NDIM)
+      ENDSEGMENT
+*
+      SEGMENT MWRK4
+        REAL*8 XLOC(3,3),XGLOB(3,3)
+        REAL*8 TXR1(IDIM,IDIM),VALVEC(NVEC)
+      ENDSEGMENT
+*
+*     Les MPTVAL recueillent les donnees pour le MCHAML resultat
+*     IVAL contient les pointeurs des MELVAL du nouveau MCHAML
+*
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS) , NSOF(NS)
+        INTEGER IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+*
+      DIMENSION VECWRK(3),V1(4),V2(4),W2(3),W3(3)
+      DIMENSION CENTR1(3),CENTR2(3),AXEI1(3),VECX(3),VECY(3)
+      DIMENSION UR(3),UTHETA(3),UPHI(3),UN(3),UT(3),XIGAU(3)
+*
+      IER1   = 0
+      BIDON  = 0.D0
+      ERRAXI = 0
+      MELEME = IELEME
+      NBNN   = NUM(/1)
+      NBELEM = NUM(/2)
+      MINTE  = IINTE
+      NBPGAU = POIGAU(/1)
+*
+      NDIM=IDIM
+      IF (IFOMEM.EQ.1) NDIM=IDIM+1
+      SEGINI MWRK3
+*
+      IF (IPCHE1.EQ.0.AND.IMOT.EQ.0) THEN
+*
+*        Repere cartesien : on veut le tenseur dans un repere defini
+*        par un ou deux vecteurs. On construit la matrice de rotation
+*        qui fait passer du repere general au repere defini par V1
+*        (et V2 en 3D)
+*
+         IF (IDIM.EQ.2) THEN
+            R(1,1)=V1(1)/V1(4)
+            R(2,1)=V1(2)/V1(4)
+            R(1,2)= -1.D0 * V1(2)/V1(4)
+            R(2,2)=V1(1)/V1(4)
+            IF (IFOMEM.EQ.1) THEN
+               R(3,3) = 1.D0
+            ENDIF
+         ELSE IF (IDIM.EQ.3) THEN
+            IF (IPTV2.EQ.0) THEN
+               CALL ERREUR(338)
+               SEGSUP MWRK3
+               IER1 = 1
+               RETURN
+            ENDIF
+            R(1,1)=V1(1)/V1(4)
+            R(2,1)=V1(2)/V1(4)
+            R(3,1)=V1(3)/V1(4)
+            R(1,2)=W2(1)
+            R(2,2)=W2(2)
+            R(3,2)=W2(3)
+            R(1,3)=W3(1)
+            R(2,3)=W3(2)
+            R(3,3)=W3(3)
+         ENDIF
+         CALL TRSPOD(R,NDIM,NDIM,RT)
+      ELSE
+*
+*     Le repere choisi n'est pas cartesien. On recupere les fonctions
+*     de forme et leurs derivees au centre de l'element pour calculer
+*     les axes locaux
+*
+         NLG=NUMGEO(MELE)
+         CALL RESHPT(1,NBNN,NLG,MELE,NPINT,IPT1,IRT1)
+         MINTE2=IPT1
+         SEGACT MINTE2
+         SEGINI MWRK4,MWRK1
+      ENDIF
+*
+*     Boucle sur les elements
+*
+      DO 1010  IB=1,NBELEM
+*
+*        Recherche des coordonnees des noeuds de l'element IB
+*
+         IF (IMOT.NE.0.OR.IPCHE1.NE.0)
+     $      CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XEL)
+*
+         IF (IPCHE1.NE.0) THEN
+*
+*           >>> Repere d'Orthotropie <<<
+*
+*           Calcul des axes locaux pour les materiaux orthotropes,
+*           anisotropes et unidirectionnels
+*
+            NBSH=MINTE2.SHPTOT(/2)
+            CALL RLOCAL(XEL,MINTE2.SHPTOT,NBSH,NBNN,TXR1)
+        if (nbsh.eq.-1) then
+         call erreur(525)
+         return
+        endif
+            IF (IERR.NE.0) THEN
+               SEGSUP MWRK1,MWRK3,MWRK4
+               IER1 = 1
+               RETURN
+            ENDIF
+*
+*           RECHERCHE DE NBGMAX
+*
+            NBGMAX=1
+            MPTVAL=IVAVEC
+            DO 1311 IV=1,NVEC
+               IF (IVAL(IV).NE.0) THEN
+                  MELVAL=IVAL(IV)
+                  NBGMAX=MAX(NBGMAX,VELCHE(/1))
+               ENDIF
+ 1311       CONTINUE
+
+         ENDIF
+
+
+*
+*        Boucle sur les points de Gauss
+*
+
+         DO 1010 IGAU=1,NBPGAU
+
+
+
+*
+*           >>> Repere d'Orthotropie <<<
+*
+*------------------------------------------------------------
+*     MLR  13/8/99  ON MET LE CALCUL DES AXES DANS LA BOUCLE
+*    SUR LES POINTS DE GAUSS ET NON PAS EN DEHORS
+*------------------------------------------------------------
+
+         IF (IPCHE1.NE.0) THEN
+           IF(IGAU.EQ.1.OR.NBGMAX.GT.1) THEN
+
+            MPTVAL=IVAVEC
+
+            DO 1011 IV=1,NVEC
+               IF (IVAL(IV).NE.0) THEN
+                  MELVAL=IVAL(IV)
+                  IBMN=MIN(IB,VELCHE(/2))
+                  IGMN=MIN(IGAU,VELCHE(/1))
+                  VALVEC(IV)=VELCHE(IGMN,IBMN)
+               ELSE
+                  VALVEC(IV)=0.D0
+               ENDIF
+ 1011       CONTINUE
+            CALL RGLOB(VALVEC,IDIM,TXR1,XLOC,XGLOB,IFOMEM)
+            IF (IERR.NE.0) THEN
+               SEGSUP MWRK1,MWRK3,MWRK4
+                IER1 = 1
+                RETURN
+            ENDIF
+            DO 1012 IC=1,IDIM
+            DO 1012 IL=1,IDIM
+               R(IL,IC)=XGLOB(IL,IC)
+ 1012       CONTINUE
+            IF (IDIM.EQ.2.AND.IFOMEM.EQ.1) R(3,3)=1.D0
+            CALL TRSPOD(R,NDIM,NDIM,RT)
+
+           ENDIF
+         ENDIF
+
+
+*------------------------------------------------------------
+
+
+*
+*           Sous-zones du MCHAML avant rotation
+*
+            MPTVAL=IVACOM
+*
+*           Initialisations
+*
+            IF (IMOT.NE.0) THEN
+               DO 1013 IC = 1,IDIM
+               XIGAU(IC) = 0.D0
+               DO 1013 IL=1,XEL(/2)
+               XIGAU(IC)=XIGAU(IC)+(SHPTOT(1,IL,IGAU)*XEL(IC,IL))
+ 1013          CONTINUE
+*
+               SCAL=0.D0
+               DO 1014 IL=1,IDIM
+                  UTHETA(IL)=0.D0
+                  UPHI(IL)=0.D0
+                  UT(IL)=0.D0
+                  VECX(IL)=0.D0
+                  VECY(IL)=0.D0
+                  UR(IL)=XIGAU(IL)-CENTR1(IL)
+                  UN(IL)=UR(IL)
+ 1014          CONTINUE
+               DO 1015 IL=1,IDIM
+                  SCAL=SCAL+UR(IL)*V1(IL)
+ 1015          CONTINUE
+               DO 1016 IL=1,IDIM
+                  UR(IL)=UR(IL)-SCAL*V1(IL)
+ 1016          CONTINUE
+*
+               SCAL=0.D0
+               DO 1017 IL=1,IDIM
+                  SCAL=SCAL+UR(IL)**2
+ 1017          CONTINUE
+               SCAL = SQRT(SCAL)
+               IF (SCAL.EQ.0.D0) THEN
+                  CALL ERREUR(642)
+                  IER1 = 1
+                  GOTO 1010
+               ENDIF
+               IF (IDIM.EQ.3) THEN
+                  CALL NORMER(UR)
+                  CALL NORMER(UN)
+                  CALL PROVEC(V1,UR,UTHETA)
+               ELSE
+*
+*                 Dimension 2 : 'POLA'
+*
+                  UR(1)=UR(1)/SCAL
+                  UR(2)=UR(2)/SCAL
+                  R(1,1)=UR(1)
+                  R(1,2)=-UR(2)
+                  R(2,2)=UR(1)
+                  R(2,1)=UR(2)
+                  IF (IFOMEM.EQ.1) THEN
+                     R(3,3)=1D0
+                  ENDIF
+                  CALL TRSPOD (R,NDIM,NDIM,RT)
+               ENDIF
+*
+*              Debut des calculs de R pour les autres reperes
+*
+*              -- Cas CYLINDRIQUE --
+*
+               IF (IMOT.EQ.2) THEN
+                  DO 1019 IL=1,IDIM
+                     R(IL,1)=UR(IL)
+                     R(IL,2)=UTHETA(IL)
+                     R(IL,3)=V1(IL)
+ 1019             CONTINUE
+                  CALL TRSPOD (R,NDIM,NDIM,RT)
+               ELSE
+
+               ENDIF
+*
+*              -- Cas SPHERIQUE --
+*
+               IF (IMOT.EQ.3) THEN
+                  UR(1)=UN(1)
+                  UR(2)=UN(2)
+                  UR(3)=UN(3)
+                  UPHI(1)=UTHETA(1)
+                  UPHI(2)=UTHETA(2)
+                  UPHI(3)=UTHETA(3)
+                  CALL PROVEC (UPHI,UR,UTHETA)
+                  DO 1021 IL=1,IDIM
+                     R(IL,1)=UR(IL)
+                     R(IL,2)=UTHETA(IL)
+                     R(IL,3)=UPHI(IL)
+ 1021             CONTINUE
+                  CALL TRSPOD (R,NDIM,NDIM,RT)
+               ENDIF
+*
+*              -- Cas TORIQUE CIRCULAIRE --
+*
+               IF (IMOT.EQ.4) THEN
+                  VECWRK(1)=CENTR2(1)-CENTR1(1)
+                  VECWRK(2)=CENTR2(2)-CENTR1(2)
+                  VECWRK(3)=CENTR2(3)-CENTR1(3)
+                  CALL NORME(VECWRK,SCAL)
+                  UN(1)=UN(1)-SCAL*UR(1)
+                  UN(2)=UN(2)-SCAL*UR(2)
+                  UN(3)=UN(3)-SCAL*UR(3)
+                  CALL NORMER(UN)
+                  CALL PROVEC(UN,UTHETA,UT)
+                  DO 1022 IL=1,IDIM
+                     R(IL,1)=UTHETA(IL)
+                     R(IL,2)=UT(IL)
+                     R(IL,3)=UN(IL)
+ 1022             CONTINUE
+                  CALL TRSPOD (R,NDIM,NDIM,RT)
+               ENDIF
+*
+*              -- Cas TORIQUE CARTESIEN --
+*
+               IF (IMOT.EQ.5) THEN
+                  DO 1023 IL=1,IDIM
+                     R(IL,1)=UR(IL)
+                     R(IL,2)=UTHETA(IL)
+                     R(IL,3)=V1(IL)
+ 1023             CONTINUE
+                  CALL TRSPOD (R,NDIM,NDIM,RT)
+               ENDIF
+            ENDIF
+*
+*           Tenseur avant changement de repere
+*
+            MELVAL=IVAL(1)
+            IGMN = MIN(IGAU,VELCHE(/1))
+            IBMN = MIN(IB,  VELCHE(/2))
+            A(1,1) =  VELCHE(IGMN,IBMN)
+*
+            MELVAL=IVAL(2)
+            IGMN = MIN(IGAU,VELCHE(/1))
+            IBMN = MIN(IB,  VELCHE(/2))
+            A(2,2) = VELCHE(IGMN,IBMN)
+*
+            MELVAL=IVAL(4)
+            IGMN = MIN(IGAU,VELCHE(/1))
+            IBMN = MIN(IB,  VELCHE(/2))
+            A(1,2) = VELCHE(IGMN,IBMN)
+*
+            IF (IDEFO.EQ.1) A(1,2)=A(1,2)/2.D0
+            A(2,1)=A(1,2)
+*
+            IF (IFOMEM.LT.1) GOTO 6610
+*
+            MELVAL=IVAL(3)
+            IGMN = MIN(IGAU,VELCHE(/1))
+            IBMN = MIN(IB,  VELCHE(/2))
+            A(3,3) = VELCHE(IGMN,IBMN)
+*
+            MELVAL=IVAL(5)
+            IGMN = MIN(IGAU,VELCHE(/1))
+            IBMN = MIN(IB,  VELCHE(/2))
+            A(3,1) = VELCHE(IGMN,IBMN)
+*
+            MELVAL=IVAL(6)
+            IGMN = MIN(IGAU,VELCHE(/1))
+            IBMN = MIN(IB,  VELCHE(/2))
+            A(3,2) = VELCHE(IGMN,IBMN)
+*
+            IF (IDEFO.EQ.1) A(3,1)=A(3,1)/2.D0
+            IF (IDEFO.EQ.1) A(3,2)=A(3,2)/2.D0
+            A(1,3)=A(3,1)
+            A(2,3)=A(3,2)
+*
+            MELVAL=IVAL(3)
+            IGMN = MIN(IGAU,VELCHE(/1))
+            IBMN = MIN(IB,  VELCHE(/2))
+            A(3,3) = VELCHE(IGMN,IBMN)
+*
+ 6610       CONTINUE
+*
+            MELVAL=IVAL(3)
+            IGMN = MIN(IGAU,VELCHE(/1))
+            IBMN = MIN(IB,  VELCHE(/2))
+            AUX = VELCHE(IGMN,IBMN)
+*                                           t
+*           >>>  Rotation du tenseur : A = R  A  R  <<<
+*
+            CALL MULMAT(TRAV,A,R,NDIM,NDIM,NDIM)
+            CALL MULMAT(A,RT,TRAV,NDIM,NDIM,NDIM)
+*
+*           Tenseur apres changement de repere
+*           Sous-zones du MCHAML resultat
+*
+            MPTVAL=IVARES
+*
+            MELVAL=IVAL(1)
+            VELCHE(IGAU,IB) = A(1,1)
+*
+            MELVAL=IVAL(2)
+            VELCHE(IGAU,IB) = A(2,2)
+*
+            IF (IDEFO.EQ.1) A(1,2)=A(1,2)*2.D0
+*
+            MELVAL=IVAL(4)
+            VELCHE(IGAU,IB) = A(1,2)
+*
+            IF (IFOMEM.LT.1) THEN
+*
+               MELVAL=IVAL(3)
+               VELCHE(IGAU,IB)= AUX
+*
+            ELSE
+*
+               MELVAL=IVAL(3)
+               VELCHE(IGAU,IB)=A(3,3)
+*
+               IF (IDEFO.EQ.1) A(3,1)=A(3,1)*2.D0
+               IF (IDEFO.EQ.1) A(3,2)=A(3,2)*2.D0
+*
+               MELVAL=IVAL(5)
+               VELCHE(IGAU,IB)= A(3,1)
+*
+               MELVAL=IVAL(6)
+               VELCHE(IGAU,IB)=A(3,2)
+*
+            ENDIF
+*
+ 1010 CONTINUE
+      SEGSUP MWRK3
+      IF (IPCHE1.NE.0.OR.IMOT.NE.0) THEN
+         SEGSUP MWRK1,MWRK4
+         SEGDES MINTE2
+      ENDIF
+*
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+

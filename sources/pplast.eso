@@ -1,0 +1,678 @@
+C PPLAST    SOURCE    CB215821  16/04/21    21:18:03     8920
+
+       SUBROUTINE PPLAST(XMAT,NMATT,VAR0,VARF,NVARI,SIG0,
+     & SIGF,DEPST,NSTRS,KERRE)
+
+***************************************
+* Routine de traitement en plasticité *
+***************************************
+
+* Entrées / Sorties
+
+* Entrées
+
+       INTEGER NMATT, NVARI, NSTRS
+*      NMATT : Nombre de parametres materiaux
+*      NVARI : Nombre de variables internes
+*      NSTRS : Nombre de composantes
+
+       REAL*8    XMAT(NMATT), VAR0(NVARI), SIG0(NSTRS)
+       REAL*8    DEPST(NSTRS)
+*      XMAT : Paramètres matériaux
+*      VAR0 : Variables internes
+*      SIG0 : Contraintes reelles
+*      DEPST : Increment de deformations totales
+
+* Sorties
+
+       REAL*8    SIGF(NSTRS), VARF(NVARI)
+*      SIGF : Contraintes effective
+*      VARF : Variables internes en sortie de plasticite
+
+* Variables materiau
+       REAL*8    E,NU
+       REAL*8    AC, AT, BC, BT, EPSD0, FC, FT
+       REAL*8    P, AH, BH, CH, GAMMA, ALFA
+       REAL*8    A, K0
+       REAL*8    DEUXMU, LAMB, TREPS
+
+* Données intermédiaires et autres
+       INTEGER ITER, I , J, K, KGLOB, KTEST
+       LOGICAL CONV
+       REAL*8    TEST,F0
+       REAL*8    LIM, DEPST2(6)
+       REAL*8    SIGE0(6), SIGE0P(3), TOL, TOLDYN
+       REAL*8    VECPC(3,3), NORM, DSIGT(6)
+       REAL*8    DFDS(6), H, SIG02(6), VAR02(9)
+       REAL*8    FTB, FH, FM(6), C
+       REAL*8    TRS, KH, KH0, KH2, TR(3,3)
+       REAL*8    DMP, RES(8), RESUM(6), RESU(6), KHM, ELAS(6,6)
+       REAL*8    JAC(7,7)
+       REAL*8    DFDK, N(6), DHDK, KH1, DHDS(6), DMDK(6)
+       REAL*8    FHP(6), FMM1(6)
+       REAL*8    FHM(6)
+       REAL*8    FMP1(6)
+       REAL*8    DMDS(6,6), FHPH, FHMH, ETA, ETAP
+       REAL*8    FHM1
+       REAL*8    FHP1, SIGP(6), SIGMM(6), DELTA(8)
+       REAL*8    SIGMP1(6),DSDE(7,7)
+       REAL*8    M
+       LOGICAL PLASTI,CONV1,CONV2,TEST5
+       INTEGER FLAG
+
+       REAL*8    ELASM(6,6)
+       REAL*8    ES(7), NUMF, NUM(7), DENOF
+       REAL*8    DENO(7), MAXI, MAXI2, SIGE00(6)
+
+
+
+***************************************
+* Récupération des variables matériau *
+***************************************
+
+       E = XMAT(1)
+       NU = XMAT(2)
+       AC = XMAT(5)
+       AT = XMAT(6)
+       BC = XMAT(7)
+       BT = XMAT(8)
+       EPSD0 = XMAT(9)
+       FC = XMAT(10)
+       FT = XMAT(11)
+       P = XMAT(12)
+       AH = XMAT(13)
+       BH = XMAT(14)
+       CH = XMAT(15)
+       GAMMA = XMAT(16)
+       ALFA = XMAT(17)
+       A = XMAT(18)
+       K0 = XMAT(19)
+
+       DEUXMU=E/(1.D0+NU)
+       LAMB=NU*DEUXMU/(1.D0-2.D0*NU)
+
+
+
+*******************************
+* Initialisationdes variables *
+*******************************
+
+* Calcul de la matrice élastique (une seule fois !)
+
+       DO I = 1,6
+         DO J = 1,6
+           ELAS(I,J) = 0.d0;
+           ELASM(I,J) = 0.d0;
+         END DO
+       END DO
+
+       ELAS(1,1)=LAMB+DEUXMU
+       ELAS(2,2)=LAMB+DEUXMU
+       ELAS(3,3)=LAMB+DEUXMU
+       ELAS(1,2)=LAMB
+       ELAS(2,1)=LAMB
+       ELAS(1,3)=LAMB
+       ELAS(3,1)=LAMB
+       ELAS(2,3)=LAMB
+       ELAS(3,2)=LAMB
+       ELAS(4,4)=DEUXMU
+       ELAS(5,5)=DEUXMU
+       ELAS(6,6)=DEUXMU
+
+       ELASM(1,1)=1.D0/E
+       ELASM(2,2)=1.D0/E
+       ELASM(3,3)=1.D0/E
+       ELASM(1,2)=(-NU)/E
+       ELASM(2,1)=(-NU)/E
+       ELASM(1,3)=(-NU)/E
+       ELASM(3,1)=-NU/E
+       ELASM(2,3)=-NU/E
+       ELASM(3,2)=-NU/E
+       ELASM(4,4)=(1.D0+NU)/E
+       ELASM(5,5)=(1.D0+NU)/E
+       ELASM(6,6)=(1.D0+NU)/E
+
+
+
+******************
+* Initialisation *
+******************
+
+* Variables tampons
+
+       DO I=1,NSTRS
+         DEPST2(I) = DEPST(I)
+         SIG02(I) = SIG0(I)
+       END DO
+
+       DO I=1,NVARI
+         VAR02(I) = VAR0(I)
+       END DO
+
+       KGLOB = 1
+       KTEST = 1
+
+* Test d'iterations globales
+       TEST5 = .TRUE.
+
+***********************
+* Iterations globales *
+***********************
+
+       DO WHILE (TEST5)
+
+* On saisit une petite valeur de KH et on saisit le plus grand à chaque itération...
+         KH0 = 1.d-3
+         KH = MAX(VAR0(9), KH0)
+
+* Initialisation de la variable KH à l'instant t
+         KHM = KH
+
+* Initialisation de l'incrément du multiplicateur plastique
+         DMP = 0.d0
+
+
+* Variables de test
+         TEST = 1.d-6
+         FLAG = 0
+
+
+
+****************************************************
+* Calcul de l'incrément de contraintes (élastique) *
+****************************************************
+
+* Prediction elastique
+         TREPS = DEPST(1) + DEPST(2) + DEPST(3)
+         DO K=1,3
+           DSIGT(K) = LAMB*TREPS + DEUXMU*DEPST(K)
+         END DO
+         DO K=4,NSTRS
+           DSIGT(K) = DEUXMU*DEPST(K)
+         END DO
+
+* Initialisation des variables plastiques
+         CONV=.FALSE.
+
+         DO I=1, NSTRS
+           DFDS(I) = 0.d0
+         END DO
+
+         DO K = 1, NSTRS
+           SIGE0(K) = VAR0(K+2)
+         END DO
+
+         ITER=0
+
+* Prediction élastique (NSTRS : nombre de composantes de SIGMA)
+         DO ISTRS = 1,NSTRS
+
+* La prédiction élastique est donnée par la contrainte réelle SIG0
+* à laquelle on somme la différence entre contrainte plastique et
+* contrainte réelle stockée en variable interne et la prédiction
+* élastique
+
+* Initialisation pour une itération lorsque l'incrément est divisé :
+* - Si c'est la première itération, on reprend la valeur initiale de
+*   la contrainte plastique pour créer la prédiction
+* - Si c'est l'itération suivante, on travaille directement sur
+*   la contrainte plastique obtenue à l'itération précédente et
+*   stockée dans SIG0. On ne recalcule pas la contrainte plastique.
+
+           IF (KTEST.EQ.1) THEN
+
+* SigE0 représente la différence entre la valeur de la contrainte dans le cas réel
+* et la valeur de la contrainte dans le cas plastique à l'instant t
+             SIGMP1(ISTRS) = SIG0(ISTRS) + SIGE0(ISTRS)
+             SIGE00(ISTRS) = SIG0(ISTRS) + SIGE0(ISTRS)
+             SIGE0(ISTRS) = SIG0(ISTRS) + SIGE0(ISTRS) + DSIGT(ISTRS)
+
+           ELSE
+             SIGMP1(ISTRS) = SIG0(ISTRS)
+             SIGE00(ISTRS) = SIG0(ISTRS)
+             SIGE0(ISTRS) = SIG0(ISTRS) + DSIGT(ISTRS)
+
+           END IF
+
+         END DO
+
+* Apres, SIGE0 represente la solution (contrainte effective)
+
+*************************************
+* Itération de calcul de plasticité *
+*************************************
+
+         DO WHILE (ITER .LE. 20 .AND. .NOT. CONV)
+           ITER=ITER+1
+
+* Critere sur la prediction permettant de ramener la solution
+* a un domaine dans lequel les equations du modele sont definies
+* Note : Il a été modifié de telle sorte que l'on applique le critère jusqu'à
+* ce que la prédiction soit acceptable (10 itérations max modifiable)
+           TRS = 0.D0
+           DO I = 1,3
+             TRS = TRS + SIGE0(I)
+           END DO
+
+           FTB = FT / FC
+           M = 3.D0 * (1.D0-(FTB)**(2.D0/GAMMA))/(FTB +
+     &         2.D0*(FTB)**(1.D0/GAMMA))
+           LIM = 3.D0*FC/M
+
+           DO WHILE (TRS.GT.LIM .AND. FLAG.LT.10)
+
+             FLAG = FLAG + 1
+
+             IF (FLAG .LT. 10) THEN
+               DO I =1,NSTRS
+                 SIGE0(I) = SIGE00(I)
+                 DSIGT(I) = DSIGT(I)/2.d0
+                 SIGE0(I) = SIGE00(I) + DSIGT(I)
+               END DO
+               DMP = 0.d0
+               KH = max(var0(9),KH0)
+               ITER = 2
+
+               TRS = 0.D0
+
+               DO I = 1,3
+                 TRS = TRS + SIGE0(I)
+               END DO
+
+               IF(TRS.GT.LIM) THEN
+                 write(6,*) 'ERREUR'
+               END IF
+
+             ELSE
+
+               DO I =1,6
+                 SIGE0(I) = SIGE00(I)
+               END DO
+
+             END IF
+
+           END DO
+
+* Calcul de FM et FH
+           CALL FLOWM(FC, FT, GAMMA, ALFA, P, K0, A, AH, BH, CH, C,
+     &                 SIGE0, KH, F0, FM, ETA)
+
+           CALL FLOWH(SIGE0, KH, AH, BH, CH, FC, FM, FH)
+
+* Calcul des résidus + vérification du critère de CV
+           DO I=1,6
+             RESU(I) = 0.D0
+             RESUM(I) = 0.D0
+             DO J=1,6
+               RESU(I) = RESU(I) + ELASM(I,J)*SIGMP1(J)
+               RESUM(I) = RESUM(I) + ELASM(I,J)*SIGE0(J)
+             END DO
+           END DO
+
+           DO I = 1,6
+             RES(I) = RESUM(I) + DMP*FM(I) - DEPST(I) - RESU(I)
+           END DO
+
+           RES(7) = KH - DMP*FH - KHM
+           RES(8) = F0
+
+           IF (KH .GE. 1.D0) THEN
+             RES(7) = 0.D0
+             KH = 1.d0
+           END IF
+
+* Convergence
+* Deux criteres : un absolu, un relatif... Critere relatif conservé
+* Les variations de contraintes sont normées avec le max des contraintes
+* en fin d'itération et celles de KH et lambda sont normées par les valeurs
+* associées en sortie d'itération
+
+           IF (((ABS(RES(8)).LT.TEST) .OR. (RES(8).LE.0.D0))
+     &        .AND. ITER.EQ.1 .AND. (FLAG.EQ.0)) THEN
+             CONV = .TRUE.
+           ELSE
+             CONV1 = .TRUE.
+             MAXI = ABS(RES(1))
+             MAXI2 = ABS(SIGE0(1))
+
+             DO I=1,8
+               MAXI = MAX(ABS(RES(I)),MAXI)
+             END DO
+             DO I=1,6
+               MAXI2 = MAX(ABS(SIGE0(I)),MAXI2)
+             END DO
+
+             IF (MAXI .LT. TEST) THEN
+               CONV1 = .TRUE.
+             ELSE
+               CONV1 = .FALSE.
+             END IF
+
+             CONV2 = .TRUE.
+             DO I=1,NSTRS
+               IF ((ABS(DELTA(I)) .LT. MAXI2*TEST)
+     &             .AND. (CONV2)) THEN
+                 CONV2 = .TRUE.
+               ELSE
+                 CONV2 = .FALSE.
+               END IF
+             END DO
+
+             IF ((ABS(DELTA(7)) .LT. ABS(KH)*TEST) .AND. (CONV2)) THEN
+               CONV2 = .TRUE.
+             ELSE
+               CONV2 = .FALSE.
+             END IF
+
+             IF ((ABS(DELTA(8)) .LT. ABS(DMP)*TEST) .AND. (CONV2)) THEN
+               CONV2 = .TRUE.
+             ELSE
+               CONV2 = .FALSE.
+             END IF
+
+             IF (CONV2) THEN
+               CONV = .TRUE.
+             END IF
+
+             IF (ITER .EQ. 1) THEN
+               CONV = .FALSE.
+             END IF
+
+           END IF
+
+           IF (.NOT. CONV) THEN
+
+             PLASTI = .TRUE.
+
+
+
+* Calcul de la dérivée de m : différentiation numérique
+* Note : le choix de h joue un role non négligeable
+* dans l'efficacité de l'algorithme
+             CALL ENDOCB(SIGE0,TR,1,2)
+             CALL JACOB3(TR,3,SIGE0P,VECPC)
+
+             NORM= 0.D0
+             DO I = 1,3
+               NORM=NORM +(SIGE0P(I)**2)
+             ENDDO
+             NORM = SQRT(NORM)
+
+             H= NORM*2.d0**(-12)
+
+
+
+* Différenciation numérique
+             DO J = 1,6
+
+               DO I = 1,6
+                 SIGP(I) = SIGE0(I)
+                 SIGMM(I)= SIGE0(I)
+               ENDDO
+
+               SIGP(J) = SIGP(J) + H
+               SIGMM(J) = SIGMM(J) - H
+
+               CALL FLOWM (FC, FT, GAMMA, ALFA, P, K0, A, AH, BH, CH,
+     &                      C, SIGP, KH, F0, FMP1, ETAP)
+               CALL FLOWM (FC, FT, GAMMA, ALFA, P, K0, A, AH, BH, CH,
+     &                       C, SIGMM, KH, F0, FMM1, ETAP)
+
+               CALL FLOWH(SIGP, KH, AH, BH, CH, FC, FMP1, FHP1)
+               CALL FLOWH(SIGMM, KH, AH, BH, CH, FC, FMM1, FHM1)
+
+
+
+* Et calcul de DMDS(i,j) = DM(i)/DS(J)
+
+               DO I = 1,6
+                 DMDS(I,J) = (FMP1(I)-FMM1(I))/(2.D0*H)
+                 DHDS(J) = (FHP1-FHM1)/(2.D0*H)
+               END DO
+
+             END DO
+
+             H=KH*2.d0**(-12)
+
+             KH1= KH+H
+
+             IF (KH1.GT.1.D0) THEN
+               KH1 = KH
+             END IF
+
+             CALL FLOWM(FC, FT, GAMMA, ALFA, P, K0, A, AH, BH, CH, C,
+     &                   SIGE0, KH1, F0, FHP, ETAP)
+             CALL FLOWH(SIGE0, KH1, AH, BH, CH, FC, FHP, FHPH)
+
+
+             KH1 = KH -H
+
+* Traitement du cas kh = 1 : d2FdK2 = 0
+
+             IF (KH.GE.1.D0) THEN
+                 KH1=KH
+             END IF
+
+             CALL FLOWM(FC, FT, GAMMA, ALFA, P, K0, A, AH, BH, CH, C,
+     &                   SIGE0, KH1, F0, FHM, ETAP)
+
+             CALL FLOWH(SIGE0, KH1, AH, BH, CH, FC, FHM, FHMH)
+
+
+             DO I=1,6
+               DMDK(I) = (FHP(I) - FHM(I))/(2.D0*H)
+             END DO
+
+             DHDK = (FHPH-FHMH)/(2.D0*H)
+
+
+
+* Calcul de N = DFDS
+
+             DO I = 1,6
+               N(I) = FM(I)
+             END DO
+
+             DFDK = ETA
+
+             DO I=1,6
+               DO J=1,6
+                 JAC(I,J)= ELASM(I,J) + DMP*DMDS(I,J)
+               ENDDO
+               JAC(I,7) = DMP*DMDK(I)
+             END DO
+
+             DO J=1,6
+               JAC(7,J) = -DMP*DHDS(J)
+             END DO
+
+             JAC(7,7) = 1.D0-DMP*DHDK
+
+             CALL INVALM(JAC,7,7,KERRE,1.d-20)
+
+             IF (KERRE.EQ.1) THEN
+               WRITE(6,*) 'Erreur d inversion de matrice'
+             END IF
+
+
+
+****************************************************************
+* Calcul des variations en sortie d'itération (Newton Raphson) *
+****************************************************************
+
+             DO I=1,7
+               DENO(I) = 0.d0
+               NUM(I) = 0.d0
+             END DO
+
+             DENOF=0
+             NUMF=0
+
+             DO I = 1,8
+               DELTA(I) = 0.d0
+             END DO
+
+             DO I=1,7
+               DO J=1,6
+                 DENO(I) = DENO(I)+JAC(I,J)*FM(J)
+               END DO
+               DENO(I) = DENO(I)-JAC(I,7)*FH
+             END DO
+
+             DO I=1,6
+               DENOF = DENOF+N(I)*DENO(I)
+             END DO
+
+             DENOF = DENOF+DFDK*DENO(7)
+
+             DO I =1,7
+               DO J = 1,7
+                 NUM(I)= NUM(I)+JAC(I,J)*RES(J)
+               END DO
+             END DO
+
+             DO I =1,6
+               NUMF = NUMF + N(I)*NUM(I)
+             END DO
+
+             NUMF = NUMF + DFDK*NUM(7)
+             NUMF = RES(8)-NUMF
+
+             DELTA(8) = NUMF/DENOF
+
+             DO I =1,6
+               ES(I) = -RES(I)-DELTA(8)*FM(I)
+             END DO
+
+             ES(7) = -RES(7)+DELTA(8)*FH
+
+             DO I = 1,7
+               DO J = 1,7
+                 DELTA(I)=DELTA(I)+JAC(I,J)*ES(J)
+               END DO
+             END DO
+
+
+* B est un vecteur à 8 composantes composées des DELTA (S, kh et LAMBDA)
+
+             DO I = 1, 6
+               SIGE0(I) = SIGE0(I) + DELTA(I)
+             END DO
+
+             KH2 = KH
+             KH = KH + DELTA(7)
+
+
+
+* Test de KH < 1
+
+             IF ((KH2.GE. 1.D0).OR.(KH.GE.1.D0)) THEN
+                 KH = 1.D0
+             END IF
+
+
+
+* KH ne diminue pas...
+
+             IF (KH .LT. KHM) THEN
+               KH = KHM
+             END IF
+
+             DMP = DMP + DELTA(8)
+
+           END IF
+
+         END DO
+
+
+
+*******************
+* Non convergence *
+*******************
+
+         IF ((ITER .EQ. 21) .AND. (.NOT. CONV)
+     &      .AND. (KGLOB.EQ.32)) THEN
+           WRITE(6,*) '**************************************'
+           WRITE(6,*) '* Divergence de l algorithme interne *'
+           WRITE(6,*) '**************************************'
+           WRITE(6,*) 'DEPST :',DEPST2
+           WRITE(6,*) 'DELTA :',DELTA
+           WRITE(6,*) 'MAXSIG,KH,DMP :',MAXI2,KH,DMP
+           WRITE(6,*) 'VAR0 :',VAR02
+           WRITE(6,*) 'SIG0 :',SIG02
+           WRITE(6,*) 'SIGF :',SIGF
+* KERRE permet de stopper CAST3M et de reprendre la main
+* lorsqu'il est non nul
+           KERRE = 1
+         END IF
+
+
+
+*****************************************************
+* Traitement des données en fin d'itération globale *
+*****************************************************
+
+         DO I=1,NSTRS
+           SIG0(I) = SIGE0(I)
+         END DO
+
+         VAR0(9) = KH
+
+* Test de convergence
+         IF (KGLOB.EQ.KTEST .AND. CONV) THEN
+           TEST5 = .FALSE.
+         ELSE IF (CONV) THEN
+           KTEST = KTEST + 1
+         END IF
+
+         IF (.NOT.CONV) THEN
+           KGLOB = KGLOB*2
+           KTEST = 1
+           DO I = 1,NSTRS
+             SIG0(I) = SIG02(I)
+             DEPST(I) = DEPST(I)/2.d0
+           END DO
+           VAR0(9) = VAR02(9)
+       END IF
+
+* Limite de la division de l'intervalle
+* On redivise par 2 pour l'afficher en sortie
+         IF (KGLOB.GT.32) THEN
+           TEST5=.FALSE.
+           KGLOB = KGLOB/2
+         END IF
+
+       END DO
+
+
+
+*******************************************
+* FIN DE LA BOUCLE GLOBALE                *
+* --> Sorties de la routine de plasticite *
+*******************************************
+
+* Les résultats finaux sont stockés dans SIG0 et VAR0
+* Les valeurs en entrée sont stockés dans SIG02 et VAR02
+       DO I = 1,NSTRS
+         SIGF(I) = SIG0(I)
+         SIG0(I) = SIG02(I)
+         DEPST(I) = DEPST2(I)
+       END DO
+
+       VARF(9) = VAR0(9)
+       VAR0(9) = VAR02(9)
+
+* On affiche s'il y a eu division de l'incrément de déformations
+       IF (KGLOB.GT.1) THEN
+*         WRITE(*,*) 'Division de l increment de deformations par',KGLOB
+*         WRITE(*,*) 'D :',VAR02(2),' et KH :',KH
+       END IF
+
+       RETURN
+
+       END
+
+
+
+
+

@@ -1,0 +1,806 @@
+C RIMA      SOURCE    PV        17/09/29    21:15:55     9578
+      subroutine rima
+
+********************************************
+*   traduction objet rigi en matrik
+*              ou    matrik en rigi
+*
+*******************************************
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+-INC SMLENTI
+      POINTEUR NOFSET.MLENTI
+-INC SMELEME
+      POINTEUR MELPRI.MELEME,MELDUA.MELEME
+      POINTEUR SMLPRI.MELEME,SMLDUA.MELEME
+-INC SMRIGID
+-INC SMLMOTS
+*INC SMMATRIK
+
+      CHARACTER*8 MOTCLE(1)
+      DATA MOTCLE /'NSYM'/
+
+      SEGMENT MATRIK
+      REAL*8  COEMTK(NMATRI)
+      INTEGER jRIGEL(NRIGE,NMATRI)
+      INTEGER KSYM,KMINC,KMINCP,KMINCD,KIZM
+      INTEGER KISPGT,KISPGP,KISPGD
+      INTEGER KNTTT,KNTTP,KNTTD
+      INTEGER KIDMAT(NKID)
+      INTEGER KKMMT(NKMT)
+      ENDSEGMENT
+
+      SEGMENT jMATRI
+      CHARACTER*8 LISPRj(NBME),LISDUb(NBME)
+      INTEGER LIZAFM(NBSOUS,NBME)
+      INTEGER KSPGP,KSPGD
+      ENDSEGMENT
+
+C Stokage matrices elementaires non assemblees (valeurs)
+      SEGMENT IZAFM
+      REAL*8  AM(NBEL,NP,MP)
+      ENDSEGMENT
+      POINTEUR IPM1.IZAFM,IPM2.IZAFM,IPM3.IZAFM,IPM4.IZAFM
+      POINTEUR IPM5.IZAFM,IPM6.IZAFM,IPM7.IZAFM,IPM8.IZAFM
+      POINTEUR IPM9.IZAFM
+
+C Reperage des inconnues
+      SEGMENT MINC
+      CHARACTER*8 LISjNC(NBI)
+      INTEGER     NPOS(NPT+1)
+      INTEGER     MPOS(NPT,NBI+1)
+      ENDSEGMENT
+      POINTEUR MINCP.MINC,MINCD.MINC
+
+      SEGMENT PMORS
+      INTEGER IA (NTT+1)
+      INTEGER JA (NJA)
+      ENDSEGMENT
+      POINTEUR PMS1.PMORS,PMS2.PMORS
+
+C Segment de stokage
+      SEGMENT IZA
+      REAL*8  A(NBVA)
+      ENDSEGMENT
+      POINTEUR IZA1.IZA,IZA2.IZA,IZAU.IZA,IZAL.IZA,ISA.IZA
+
+      SEGMENT IDMAT
+      INTEGER KZA(NTT),NUIA(NTT,2)
+      INTEGER NUAN(NPT),NUNA(NPT)
+      INTEGER IDIAG
+      INTEGER IDESCL(NBLK)
+      INTEGER IDESCU(NBLK)
+      INTEGER NLDBLK(NBLK+1)
+      ENDSEGMENT
+
+C*******************************************************************
+C
+C    REPERAGE ET STOKAGE DES MATRICES ELEMENTAIRES  puis assemblees
+C    (description par sous-zone associees a un operateur)
+C
+C   IRIGEL(1,I)   : POINTEUR SUR L'OBJET GEOMETRIE (Inconnues primales)
+C   IRIGEL(2,I)   : POINTEUR SUR L'OBJET GEOMETRIE (Inconnues duales)
+C   IRIGEL(3,I)   : Non utilise (POINTEUR SUR LE SEGMENT DESCRIPTIF D'UNE
+C                                MATRICE ELEMENTAIRE.(SEGMENT DESCR)
+C   IRIGEL(4,I)   : POINTEUR SUR LE SEGMENT CONTENANT LES POINTEURS
+C                        DES MATRICES DE MRIGIDITE DE CHAQUE ELEMENTS.
+C                        (SEGMENT IMATRI)
+C   IRIGEL(5,I)   : Non utilise
+C   IRIGEL(6,I)   : Non utilise
+C   IRIGEL(7,1)   : 0   LA MATRICE EST SYMETRIQUE
+C                 : 1   LA MATRICE EST ANTISYMETRIQUE
+C                 : 2   LA MATRICE EST NON SYMETRIQUE
+C                 : 3   LA MATRICE EST RECTANGULAIRE avec SPGP # SPGD
+C                 : 4   LA MATRICE EST type 3 et CCt (on ne stoke que C)
+C                 : 5   LA MATRICE EST diagonale
+C                 : 6   LA MATRICE EST deja assemblee en morse
+
+C KSIM  =0 matrice symetrique  =2 matrice non symetrique
+C KMINC , KMINCP , KMINCD : pointeur sur MINC repartition des inconnues
+C totales primales et duales                            PROFKS PKINC
+C KIZM  : pointeur sur les connectivites globales
+C KISPGT KISPGP KISPGD ; SPG assemble pour inc totales,prim et dua
+C KNTTT  KNTTP  KNTTD  ; nb d'inconnues total
+
+
+C KIDMAT: pointeur sur stokage bloc IDMAT (Cholevski)    TRIAKS
+C KS2B  : pointeur sur second membre(IZA)cree ds PROFKS calcule ds KASMBR
+C KMORS : pointeur sur profil Morse(PMORS)               ASSMT (KALMOR)
+C KISA  : pointeur sur stokage Morse(IZA)                ASSMT (KALMOR)
+C KMRST : pointeur sur profil Morse(PMORS)de AAt         PROFKS(KALMOR)
+C KIST  : pointeur sur stokage Morse(IZA) de AAt         PROFKS(KALMOR)
+C KCLIM : pointeur sur stokage C lim (CHPT)
+C KTRING: 0 pas triangulée 1 triangulée
+
+C  nkid=9 :  IDMATP,IDMATD,KS2B,KMORS,KISA,KMRST,KIST,KCLIM,KTRING
+
+C LIZAFM(NBSOUS,.) description par sous-objet geometrique -> IZAFM
+C KSPGP , KSPGD : SPG pour les inconnues primales et duales
+C  nkmt=7 :  KMMT,MATRIU,MATRIP,IZDU,IZDP,IZFU,IZFP
+C                               (IZA)(IZA)(IZA)(IZA)
+*  NPT nb de noeud  NBI nb de composantes total  NTT nb total de DDL
+*  MPOS(NPT,NBI+1) = 0 si l'inconnue j n est pas defini au noeud i
+*            sinon = k rang de cette inconnue pour le noeud i
+*  MPOS(i,NBI+1) nb d'inconnues au noeud i
+*  NPOS(NPT)     Position de la 1ere inconnue du noeud i
+*  NPOS et MPOS  sont donnes ds la numerotation optimisee
+*  KZA(NTT)    Longueur de chaque ligne de la matrice (diag comprise)
+*  NUIA(NTT,2) 1/ numero du bloc dans lequel se trouve la ligne i de la
+*                 matrice
+*              2/ position du debut de la ligne dans le segment IZA - 1
+
+C*******************************************************************
+
+      segment iztra
+      character*4 lisp(l1)
+      integer     itab(l1,l2),ltab(l1)
+      endsegment
+      segment jztra
+      character*4 lisd(l3)
+      integer     jtab(l3,l2),ktab(l3)
+      endsegment
+
+
+      character*8 type,typp
+      character*4 nomi
+*      WRITE(IOIMP,*) ' entree dans rima'
+      impj = 1
+*     impj = 0
+      impr=0
+
+      call quetyp(typp,0,iret)
+*     WRITE(IOIMP,*)' typp ',typp
+
+      if(typp.eq.'MATRIK')then
+         type = typp
+         CALL LIROBJ(TYPE,MATRIK,1,IRET)
+*     WRITE(IOIMP,*)' iret ',iret,' ierr ',ierr
+         CALL LIRMOT(MOTCLE,1,IVAL,0)
+*     WRITE(IOIMP,*)' IVAL ',IVAL
+         type ='MATRIK'
+         segact matrik
+         nmatri = jrigel(/2)
+         if(impj.eq.0)then
+            WRITE(IOIMP,*)'  MATRIK '
+            WRITE(IOIMP,*)' nmatri ',nmatri
+            nrigel = jrigel(/1)
+            do ik=1,nmatri
+               WRITE(IOIMP,*) ik
+               WRITE(IOIMP,*)(jrigel(il,ik),il=1,nrigel)
+               WRITE(IOIMP,*)' '
+               meleme= jrigel(1,ik)
+               segact meleme
+               nbs=lisous(/1)
+               WRITE(IOIMP,*)' nbre ssobjt mail p',nbs
+               if(nbs.eq.0) then
+                  nbnn=num(/1)
+                  nbl= num(/2)
+                  do iel=1,nbl
+                     WRITE(IOIMP,*)iel,' ',(num(io,iel),io=1,nbnn)
+                  enddo
+               endif
+               if(nbs.ge.1)then
+                  WRITE(IOIMP,*)' ssobjet maill',(lisous(io),io=1,nbs)
+                  do iss=1,nbs
+                     ipt1=lisous(iss)
+                     segact ipt1
+                     nbnn=ipt1.num(/1)
+                     nbl =ipt1.num(/2)
+                     WRITE(IOIMP,*)' nbl ',nbl,' nbnn ',nbnn
+                     do il = 1,nbl
+                        WRITE(IOIMP,*)il,'  ',(ipt1.num(iop,il),iop=1
+     $                       ,nbnn)
+                     enddo
+                     segdes ipt1
+                  enddo
+               endif
+               segdes meleme
+               meleme= jrigel(2,ik)
+               segact meleme
+               nbs=lisous(/1)
+               WRITE(IOIMP,*)' nbre ssobjt mail d',nbs
+               if(nbs.eq.0) then
+                  nbnn=num(/1)
+                  nbl= num(/2)
+                  do iel=1,nbl
+                     WRITE(IOIMP,*)iel,' ',(num(io,iel),io=1,nbnn)
+                  enddo
+               endif
+               if(nbs.ge.1)then
+                  WRITE(IOIMP,*)' ssobjet maill',(lisous(io),io=1,nbs)
+                  do iss=1,nbs
+                     ipt1=lisous(iss)
+                     segact ipt1
+                     nbnn=ipt1.num(/1)
+                     nbl =ipt1.num(/2)
+                     WRITE(IOIMP,*)' nbl ',nbl,' nbnn ',nbnn
+                     do il = 1,nbl
+                        WRITE(IOIMP,*)il,'  ',(ipt1.num(iop,il),iop=1
+     $                       ,nbnn)
+                     enddo
+                     segdes ipt1
+                  enddo
+               endif
+               segdes meleme
+            enddo
+            WRITE(IOIMP,*)'ksym kminc kmincd kizm'
+            WRITE(IOIMP,*) ksym,kminc,kmincd,kizm
+            WRITE(IOIMP,*)'kispgt kispgp kispgd knttt knttp knttd'
+            WRITE(IOIMP,*) kispgt,kispgp,kispgd,knttt,knttp,knttd
+            nkid=kidmat(/1)
+            WRITE(IOIMP,*)' kidmat '
+            WRITE(IOIMP,*)(kidmat(il),il=1,nkid)
+            nkmt=kkmmt(/1)
+            WRITE(IOIMP,*)' kkmmt  '
+            WRITE(IOIMP,*)(kkmmt(il),il=1,nkmt)
+            do ik=1,nmatri
+               WRITE(IOIMP,*)' ik ',ik
+               jmatri = jrigel(4,ik)
+               segact jmatri
+               nbme = lisprj(/2)
+               nbsous = lizafm(/1)
+               WRITE(IOIMP,*)' nbme nbsous kspgp kspgd '
+               WRITE(IOIMP,*)  nbme,nbsous,kspgp,kspgd
+               WRITE(IOIMP,*)' lisprj '
+               WRITE(IOIMP,*)(lisprj(il),il=1,nbme)
+               WRITE(IOIMP,*)' lisdub '
+               WRITE(IOIMP,*)(lisdub(il),il=1,nbme)
+               do im=1,nbme
+                  WRITE(IOIMP,*)' im ',im
+                  do is=1,nbsous
+                     WRITE(IOIMP,*)' is ',is
+                     izafm = lizafm(is,im)
+                     segact izafm
+                     nbel=am(/1)
+                     np=am(/2)
+                     mp=am(/3)
+                     WRITE(IOIMP,*)' nbel np mp'
+                     WRITE(IOIMP,*)  nbel,np,mp
+                     do ie=1,nbel
+                        WRITE(IOIMP,*)' iel ',ie
+                        do ip =1,np
+                           WRITE(IOIMP,*)ip,(am(ie,ip,kp),kp=1,mp)
+                        enddo
+                     enddo
+                     segdes izafm
+                  enddo
+               enddo
+               segdes jmatri
+            enddo
+         endif
+
+* Ligne suivante inutile cf include SMRIGID
+*         nrige = 8
+         nrigel = 0
+         do ir=1,nmatri
+            ir7=jrigel(7,ir)
+            ncmul=1
+            if (ir7.EQ.4) ncmul=2
+            jmatri=jrigel(4,ir)
+            segact jmatri
+            nbs=lizafm(/1)
+            nbe=lizafm(/2)
+            nrigel=nrigel+nbs*nbe*ncmul
+         enddo
+
+         segini mrigid
+         jr=0
+         do ir=1,nmatri
+            ir7=jrigel(7,ir)
+            ncmul=1
+            if (ir7.EQ.4) ncmul=2
+            mtymat='MATRIK  '
+            jmatri=jrigel(4,ir)
+            nbs=lizafm(/1)
+            nbe=lizafm(/2)
+            melpri =jrigel(1,ir)
+            meldua =jrigel(2,ir)
+            jg=nbs
+            segini nofset
+            if (melpri.eq.meldua) then
+*               Write(ioimp,*) 'Cas melpri=meldua'
+               meleme=melpri
+            else
+*               Write(ioimp,*) 'Cas melpri.ne.meldua'
+* On s'arrange pour que les deux maillages aient le même nombre de
+* sous-maillages
+               call fixmel(melpri,meldua,melpr2,meldu2,impr,iret)
+               if (iret.ne.0) goto 9999
+               melpri=melpr2
+               meldua=meldu2
+               segact melpri,meldua
+               nbsou1=melpri.lisous(/1)
+               nbsou2=meldua.lisous(/1)
+*               write(ioimp,*) 'nbsou1=',nbsou1
+*               write(ioimp,*) 'nbsou2=',nbsou2
+*               write(ioimp,*) 'nbs=',nbs
+               if (nbsou1.ne.nbsou2) goto 9999
+               if (max(1,nbsou1).ne.nbs) goto 9999
+               if (nbsou1.eq.0) then
+                  nbnn1=melpri.num(/1)
+                  nbnn2=meldua.num(/1)
+                  nbel1=melpri.num(/2)
+                  nbel2=meldua.num(/2)
+                  if (nbel1.ne.nbel2) goto 9999
+                  nofset.lect(1)=nbnn1
+                  nbnn=nbnn1+nbnn2
+                  nbelem=nbel1
+                  nbref=0
+                  nbsous=0
+                  segini meleme
+                  do ibelem=1,nbelem
+                     do ibnn1=1,nbnn1
+                        num(ibnn1,ibelem)=melpri.num(ibnn1,ibelem)
+                     enddo
+                     do ibnn2=1,nbnn2
+                        num(ibnn2+nbnn1,ibelem)=meldua.num(ibnn2,ibelem)
+                     enddo
+                  enddo
+                  segdes meleme
+                  segdes melpri,meldua
+               else
+                  nbsous=nbs
+                  nbref=0
+                  nbnn=0
+                  nbelem=0
+                  segini meleme
+                  do isous=1,nbs
+                     smlpri=melpri.lisous(isous)
+                     smldua=meldua.lisous(isous)
+                     segact smlpri,smldua
+                     nbnn1=smlpri.num(/1)
+                     nbnn2=smldua.num(/1)
+                     nbel1=smlpri.num(/2)
+                     nbel2=smldua.num(/2)
+                     if (nbel1.ne.nbel2) goto 9999
+                     nofset.lect(isous)=nbnn1
+                     nbnn=nbnn1+nbnn2
+                     nbelem=nbel1
+                     nbref=0
+                     nbsous=0
+                     segini ipt1
+                     do ibelem=1,nbelem
+                        do ibnn1=1,nbnn1
+                           ipt1.num(ibnn1,ibelem)=smlpri.num(ibnn1
+     $                          ,ibelem)
+                        enddo
+                        do ibnn2=1,nbnn2
+                           ipt1.num(ibnn2+nbnn1,ibelem)=smldua.num(ibnn2
+     $                          ,ibelem)
+                        enddo
+                     enddo
+                     segdes ipt1
+                     segdes smlpri,smldua
+                     lisous(isous)=ipt1
+                  enddo
+                  segdes meleme
+               endif
+            endif
+*       WRITE(IOIMP,*)' meleme ',meleme
+*       call ecmail(meleme,1)
+            segact meleme
+            nbs2 = lisous(/1)
+            if(nbs2 .eq.0) then
+               nbs2 = 1
+            endif
+            if (nbs.ne.nbs2) then
+               write(ioimp,*) 'lizafm non compatible avec meleme'
+               goto 9999
+            endif
+*       WRITE(IOIMP,*)' aa '
+            do icmul=1,ncmul
+               do is=1,nbs
+                  do in=1,nbe
+                     jr =jr+1
+*           WRITE(IOIMP,*)' jr ',jr,ir,is,in
+                     coerig(jr)=1.d0
+                     if(nbs.eq.1) then
+                        irigel(1,jr)=meleme
+                     else
+                        irigel(1,jr)=lisous(is)
+                     endif
+*           WRITE(IOIMP,*)' bb '
+                     irigel(2,jr)=0
+                     irigel(5,jr)=0
+                     irigel(6,jr)=0
+                     ii = jrigel(7,ir)
+                     if(ii.le.2) then
+                        irigel(7,jr)=ii
+
+            if(IVAL.EQ.1.AND.ii.EQ.0)then
+            irigel(7,jr)=2
+            endif
+
+                     elseif(ii.eq.3)then
+*                     WRITE(IOIMP,*)' support primal dual differents '
+*                     WRITE(IOIMP,*)'  on ne fait rien'
+*                     segsup mrigid
+*                     return
+                        irigel(7,jr)=2
+                     elseif(ii.eq.4)then
+                        irigel(7,jr)=2
+                        icc = 1
+                     elseif(ii.eq.5)then
+                        irigel(7,jr)=2
+                     elseif(ii.eq.6)then
+                        WRITE(IOIMP,*
+     $                       )' matrice de type morse on ne fait rien'
+                        goto 9999
+*                     segsup mrigid
+*                     return
+                     endif
+                     irigel(7,jr)=jrigel(7,ir)
+
+            if(IVAL.EQ.1.AND.jrigel(7,ir).EQ.0)then
+            irigel(7,jr)=2
+            endif
+
+                     irigel(8,jr)=0
+                     iforig=-1
+                     jmatri = jrigel(4,ir)
+                     izafm=lizafm(is,in)
+                     segact izafm
+                     nbel=am(/1)
+                     nelrig=nbel
+                     if (icmul.eq.1) then
+* recopier les matrices élémentaires
+                        nligrp=am(/2)
+                        nligrd=am(/3)
+                        segini descr,xmatri
+                        irigel(3,jr)=descr
+                        irigel(4,jr)=Xmatri
+                        xmatri.symre=irigel(7,jr)
+                        do il=1,nligrp
+                           lisinc(il)=lisprj(in)(1:4)
+                           noelep(il)=il
+                        enddo
+                        do il=1,nligrd
+                           lisdua(il)=lisdub(in)(1:4)
+                           noeled(il)=il+nofset.lect(is)
+                        enddo
+                        do ip=1,nbel
+                           do iu=1,nligrp
+                              do ju=1,nligrd
+                                 re(ju,iu,ip)=am(ip,iu,ju)
+                              enddo
+                           enddo
+                        enddo
+                        segdes xmatri,descr
+                     else
+* recopier les transposées des matrices élémentaires
+                        nligrd=am(/2)
+                        nligrp=am(/3)
+                        segini descr,xmatri
+                        irigel(3,jr)=descr
+                        irigel(4,jr)=Xmatri
+                        xmatri.symre=irigel(7,jr)
+                        do il=1,nligrp
+                           lisinc(il)=lisdub(in)(1:4)
+                           noelep(il)=il+nofset.lect(is)
+                        enddo
+                        do il=1,nligrd
+                           lisdua(il)=lisprj(in)(1:4)
+                           noeled(il)=il
+                        enddo
+                        do ip=1,nbel
+                           do iu=1,nligrp
+                              do ju=1,nligrd
+                                 re(ju,iu,ip)=am(ip,ju,iu)
+                              enddo
+                           enddo
+                        enddo
+                        segdes xmatri,descr
+                     endif
+                     segdes izafm
+                  enddo
+               enddo
+            enddo
+
+            segdes meleme
+            segdes jmatri
+            segsup nofset
+         enddo
+         segdes mrigid
+         segdes matrik
+         CALL ECRobj('RIGIDITE',mrigid)
+         return
+      elseif(typp.eq.'RIGIDITE') then
+         type='RIGIDITE'
+         call lirobj(type,mrigid,1,iret)
+*     WRITE(IOIMP,*)' rigidite '
+
+*     On regarde si il y a un autre argument.
+*     Si ce n'est pas le cas on appele RIMB
+*     qui termine le travail.
+*     Modif GBM
+
+         call quetyp(typp,0,iret)
+         if(typp.ne.'MAILLAGE') then
+            call RIMB(mrigid)
+            return
+         endif
+
+*     fin de modif GBM 18/12/02
+
+         type='MAILLAGE'
+         call lirobj(type,mele  ,1,iret)
+*      WRITE(IOIMP,*)' mele ',mele,iret
+*
+* eventuellemnt liste nom composante
+*
+         ico = 0
+         jmo=0
+         lmo=0
+         call quetyp(typp,ico,iret)
+         if(typp.eq.'LISTMOTS') then
+            call lirobj(typp,mlmots,0,iret)
+            segact mlmots
+            jmo = mots(/1)
+            lmo = mots(/2)
+         endif
+         segact mrigid
+         nrigel=irigel(/2)
+         nrige =irigel(/1)
+
+         if(impj.eq.0) then
+            WRITE(IOIMP,*)' nrigel',nrigel,' nrige ',nrige
+            WRITE(IOIMP,*)' mtymat ',mtymat
+            do ir =1,nrigel
+               WRITE(IOIMP,*)' ir ',ir
+               WRITE(IOIMP,*)(irigel(ik,ir),ik=1,nrige)
+               WRITE(IOIMP,*)' '
+               meleme=irigel(1,ir)
+               segact meleme
+               nbs=lisous(/1)
+               WRITE(IOIMP,*)' nbre ssobjt mail ',nbs
+               if(nbs.eq.0) then
+                  nbnn=num(/1)
+                  nbl=num(/2)
+                  do iel=1,nbl
+                     WRITE(IOIMP,*)iel,' ',(num(io,iel),io=1,nbnn)
+                  enddo
+               endif
+               if(nbs.ge.1)then
+                  WRITE(IOIMP,*)' ssobjet maill',(lisous(io),io=1,nbs)
+                  do iss=1,nbs
+                     ipt1=lisous(iss)
+                     segact ipt1
+                     nbnn=ipt1.num(/1)
+                     nbl =ipt1.num(/2)
+                     WRITE(IOIMP,*)' nbl ',nbl,' nbnn ',nbnn
+                     do il = 1,nbl
+                        WRITE(IOIMP,*)il,'  ',(ipt1.num(iop,il),iop=1
+     $                       ,nbnn)
+                     enddo
+                     segdes ipt1
+                  enddo
+               endif
+               segdes meleme
+            enddo
+            WRITE(IOIMP,*)' coerig '
+            WRITE(IOIMP,*)(coerig(ik),ik=1,nrigel)
+            WRITE(IOIMP,*)' ichole imgeo1 imgeo2 iforig '
+            WRITE(IOIMP,*)  ichole,imgeo1,imgeo2,iforig
+            WRITE(IOIMP,*)' isupeq jrcond jrdepp jrdepd '
+            WRITE(IOIMP,*)  isupeq,jrcond,jrdepp,jrdepd
+            WRITE(IOIMP,*)' jrelim jrgard jrtot '
+            WRITE(IOIMP,*)  jrelim,jrgard,jrtot
+            do ir=1,nrigel
+               xmatri = irigel(4,ir)
+               descr  = irigel(3,ir)
+               segact xmatri,descr
+               nelrig = re(/3)
+               nligrp = noelep(/1)
+               nligrd = noeled(/1)
+               WRITE(IOIMP,*)' nelrig nligrp nligrd '
+               WRITE(IOIMP,*)  nelrig,nligrp,nligrd
+               WRITE(IOIMP,*)' lisinc '
+               WRITE(IOIMP,*)(lisinc(io),io=1,nligrp)
+               WRITE(IOIMP,*)' lisdua '
+               WRITE(IOIMP,*)(lisdua(io),io=1,nligrd)
+               WRITE(IOIMP,*)' noelep '
+               WRITE(IOIMP,*)(noelep(io),io=1,nligrp)
+               WRITE(IOIMP,*)' noeled '
+               WRITE(IOIMP,*)(noeled(io),io=1,nligrd)
+               do ie=1, nelrig
+*            xmatri = imattt(ie)
+*            segact xmatri
+                  WRITE(IOIMP,*)' iel ',ie
+                  do ij =1,nligrd
+                     WRITE(IOIMP,*)ij,(re(ij,kj,ie),kj=1,nligrp)
+                  enddo
+*            segdes xmatri
+               enddo
+               segdes xmatri,descr
+            enddo
+         endif
+
+         nmatri = nrigel
+         nrige = 7
+         nrig = irigel(/1)
+         nkid=9
+         nkmt=7
+         segini matrik
+*      WRITE(IOIMP,*)' creation matrik',matrik
+         do in=1,nrigel
+            jrigel(1,in)=irigel(1,in)
+            jrigel(2,in)=irigel(1,in)
+            meleme = irigel(1,in)
+            segact meleme
+            jrigel(7,in)=0
+            if(nrig.gt.6) then
+               jrigel(7,in)=irigel(7,in)
+            endif
+*        WRITE(IOIMP,*)' in ',in,irigel(7,in)
+*        WRITE(IOIMP,*)' in ',in,irigel(6,in)
+            if(irigel(6,in).ne.0)then
+               segsup matrik
+               WRITE(IOIMP,*)' matrice definie par une inegalite'
+               return
+            endif
+            if(irigel(5,in).ne.0) then
+               segsup matrik
+               WRITE(IOIMP,*)' harmonique de fourier non nulle'
+               return
+            endif
+            coef = coerig(in)
+            descr=irigel(3,in)
+            segact descr
+            xmatri = irigel(4,in)
+            segact xmatri
+            nbp = noelep(/1)
+            nbd = noeled(/1)
+            np  = num(/1)
+            nbme = nbp/np*nbd/np
+            nbel = num(/2)
+            mp =np
+            nbsous=1
+            segini jmatri
+            jrigel(4,in)=jmatri
+*        WRITE(IOIMP,*)' jmatri ',jmatri
+
+*        WRITE(IOIMP,*)' jrigel ',(jrigel(iop,in),iop=1,7)
+
+
+
+            l1=nbp/np
+            l2=np
+            segini iztra
+*        WRITE(IOIMP,*)' iztra ',iztra,l1,l2
+            k0 = 1
+            lisp(1)=lisinc(1)
+            do io=1,np
+               itab(1,io)=io
+            enddo
+            ltab(1)=1
+            do  j=2,nbp
+               nomi=lisinc(j)
+               do l=1,k0
+                  if(nomi.eq.lisp(l))then
+                     k=ltab(l)+1
+                     itab(l,k)=j
+                     ltab(l)=k
+                     go to 30
+                  endif
+               enddo
+               k0=k0+1
+               lisp(k0)=nomi
+               ltab(k0)=1
+               itab(k0,1)=j
+ 30            continue
+            enddo
+            l3=nbd/np
+            l2=np
+            segini jztra
+            k0 = 1
+            lisd(1)=lisdua(1)
+            do io=1,np
+               jtab(1,io)=io
+            enddo
+            ktab(1)=1
+            do  j=2,nbd
+               nomi=lisdua(j)
+               do l=1,k0
+                  if(nomi.eq.lisd(l))then
+                     k=ktab(l)+1
+                     jtab(l,k)=j
+                     ktab(l)=k
+                     go to 31
+                  endif
+               enddo
+               k0=k0+1
+               lisd(k0)=nomi
+               ktab(k0)=1
+               jtab(k0,1)=j
+ 31            continue
+            enddo
+            k=0
+            do lp=1,l1
+               do ld=1,l3
+                  k=k+1
+                  lisprj(k)=lisp(lp)
+*            lisdub(k)=lisd(ld)
+                  lisdub(k)=lisp(ld)
+                  if(lmo.ne.0.and.lmo.ge.lp)then
+                     lisprj(k)= mots(lp)
+                     lisdub(k)= mots(ld)
+                  endif
+                  segini izafm
+                  lizafm(1,k)=izafm
+                  kspgp = mele
+                  kspgd = mele
+*            WRITE(IOIMP,*)' kspgp ',kspgp
+                  do ip =1,nbel
+*               xmatri = imattt(ip)
+*               segact xmatri
+                     ll=0
+                     do ki=1,np
+                        do kj=1,np
+                           il= noelep(ki)
+                           jl= noeled(kj)
+                           ii=itab(lp,ki)
+                           jj=jtab(ld,kj)
+*                  am(ip,il,jl)=coef * re(jj,ii)
+                           ll=ll+1
+                           il=noelep(ii)
+                           jl=noelep(jj)
+                           if(ip.eq.1)then
+*      WRITE(IOIMP,*)' lp ',lp,' ki ',ki,' nop  ',il,' ii ',ii,' ip ',ip
+*      WRITE(IOIMP,*)' ld ',ld,' kj ',kj,' nod  ',jl,' jj ',jj
+                           endif
+                           am(ip,il,jl)=coef * re(jj,ii,ip)
+*****              am(ip,ki,kj)=coef * re(ii,jj)
+                        enddo
+                     enddo
+*               segdes xmatri
+                  enddo
+*            WRITE(IOIMP,*)' finfin '
+                  segdes izafm
+               enddo
+            enddo
+*        WRITE(IOIMP,*)' fin 1 '
+            segsup iztra,jztra
+            segdes descr,xmatri
+            segdes jmatri
+*        WRITE(IOIMP,*)' segdes 1 '
+         enddo
+         segdes mrigid
+*        WRITE(IOIMP,*)' jrigel ',(jrigel(iop,1 ),iop=1,7)
+*        WRITE(IOIMP,*)' jrigel ',(jrigel(iop,2 ),iop=1,7)
+         segdes matrik
+*     WRITE(IOIMP,*)' segdes 2 '
+         CALL ECRobj('MATRIK',matrik)
+         return
+      else
+         WRITE(IOIMP,*)' erreur'
+         return
+      endif
+*
+* Error handling
+*
+ 9999 CONTINUE
+      WRITE(IOIMP,*) 'An error was detected in subroutine rima'
+      CALL ERREUR(5)
+      RETURN
+      end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

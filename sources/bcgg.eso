@@ -1,0 +1,392 @@
+C BCGG      SOURCE    PV        16/11/17    21:58:17     9180
+      SUBROUTINE BCGG(KMORS,KISA,B,X,
+     $     KPREC,INVDIA,ILUM,ILUI,
+     $     LRES,LNMV,
+     $     RTLD,XTLD,UHAT,R,U,Z,ZM1,Y,YP,BP,TRAV,
+     $     ITER,INMV,BRTOL,LBCG,RESID,ICALRS,IDDOT,IMVEC,IMPR,IRET)
+      IMPLICIT REAL*8 (A-H,O-Z)
+      IMPLICIT INTEGER(I-N)
+C***********************************************************************
+C NOM         : BCGG
+C DESCRIPTION :
+C     Résolution d'un système linéaire Ax=b
+C     par une méthode BiCGSTAB(l) préconditionnée ou non avec reliable
+C     updates et convex combination.
+C
+C LANGAGE     : FORTRAN 77 + chouhia ESOPE (pour les E/S)
+C AUTEUR      : Stéphane GOUNAND (CEA/DRN/DMT/SEMT/TTMF)
+C               mél : gounand@semt2.smts.cea.fr
+C REFERENCE (bibtex-like) :
+C  @BOOK{templates,
+C        AUTHOR={R.Barrett, M.Berry, T.F.Chan, J.Demmel, J.Donato,
+C                J.Dongarra, V.Eijkhout, R.Pozo, C.Romine,
+C                H. Van der Vorst},
+C        TITLE={Templates for the Solution of Linear Systems :
+C               Building Blocks for Iterative Methods},
+C        PUBLISHER={SIAM}, YEAR={1994}, ADDRESS={Philadelphia,PA} }
+C  -> URL : http://www.netlib.org/templates/Templates.html
+C@TechReport{fokkema,
+C  author =       {DR Fokkema},
+C  title =        {Enhanced implementation of BiCGSTAB(l) for solving
+C                  linear systems of equations},
+C  institution =  {?},
+C  year =         {1996}}
+C***********************************************************************
+C ENTREES            :
+C ENTREES/SORTIES    :
+C SORTIES            :
+C CODE RETOUR (IRET) : 0 si ok
+C                     <0 si problème (non utilisé !)
+C                     >0 si l'algorithme n'a pas convergé
+C***********************************************************************
+C VERSION    : v1, 28/02/06, version initiale
+C HISTORIQUE : v1, 28/02/06, création
+C HISTORIQUE :
+C HISTORIQUE :
+C***********************************************************************
+C Prière de PRENDRE LE TEMPS de compléter les commentaires
+C en cas de modification de ce sous-programme afin de faciliter
+C la maintenance !
+C***********************************************************************
+*
+*     .. Includes .. a commenter si mise au point ok
+-INC CCREEL
+-INC CCOPTIO
+-INC SMLREEL
+      POINTEUR LRES.MLREEL
+-INC SMLENTI
+      POINTEUR LNMV.MLENTI
+      POINTEUR TRAV.MLENTI
+-INC SMMATRIK
+      POINTEUR KMORS.PMORS
+      POINTEUR KISA.IZA
+      POINTEUR INVDIA.IZA
+      POINTEUR ILUM.PMORS
+      POINTEUR ILUI.IZA
+      POINTEUR B.IZA
+      POINTEUR X.IZA
+*     .. Work Vectors for BiCGSTAB(l)
+      SEGMENT SPACE
+      REAL*8  IJ(NI,NJ)
+      ENDSEGMENT
+      POINTEUR Z.SPACE,ZM1.SPACE
+      SEGMENT SPACE2
+      POINTEUR WRK(NIZA).IZA
+      ENDSEGMENT
+      POINTEUR R.SPACE2,U.SPACE2
+*     .. Work Vectors for BiCGStab
+      POINTEUR RTLD.IZA,XTLD.IZA,BP.IZA
+      POINTEUR RI.IZA,UI.IZA,UIP.IZA,RIP.IZA
+      POINTEUR UHAT.IZA,RHAT.IZA,Y.IZA,YP.IZA
+*
+      INTEGER IMPR
+*     .. Scalar Arguments ..
+      INTEGER  N,NNZ
+      INTEGER  ITER,IRET
+      REAL*8   BRTOL,RESID
+*     ..
+*
+*
+*     .. Variables locales
+*     .. Parameters
+      REAL*8 ZERO,ONE
+      PARAMETER (ZERO=0.0D0, ONE=1.0D0)
+*     ..
+      INTEGER MAXIT,III
+      REAL*8 TOL,ALPHA,BETA,RHO,RHO1,BNRM2,OMEGA
+      REAL*8 RHOTOL,OMETOL
+      REAL*8 GDOT,GNRM2,PETIT,ZMXRNR,ZMXRNX
+      LOGICAL LCPRES,LUPDAX
+*     ..
+*     .. External subroutines and functions..
+      EXTERNAL GAXPY,GCOPY,GDOT,GNRM2,GSCAL
+*     ..
+*     .. Executable Statements ..
+*
+*
+      IRET  = 0
+      INMV  = 0
+      IWARN = 0
+      IGRAN = 0
+      MGRAN = 3
+      MAXIT = ITER
+      TOL   = RESID
+*
+*     Same memory space
+      RHAT=UHAT
+*
+      IF(IMPR.GT.5) WRITE(IOIMP,*) 'Entrée dans bcgg.eso'
+*
+*     Set parameter tolerances.
+*
+      RHOTOL = BRTOL
+      SIGTOL = BRTOL
+      RRMAX = 1.D0/(XZPREC**0.25D0)
+* XZPREC* 1.D0 plante si tous les termes de la matrice Z sont égaux
+* sur IBM
+      PETIT = XZPREC*10.D0
+*
+*     Set initial residual.
+*
+C                    r(1)=b
+      RI=R.WRK(1)
+      CALL GCOPY(B,RI)
+C                    r(1)=b-Ax
+*      IF (GNRM2(X).NE.ZERO) THEN
+C                    r(1)=b-Ax
+*         CALL GMOMV ('N',-ONE,KMORS,KISA,X,ONE,R)
+*      ENDIF
+      CALL GMOMV(IMVEC,'N',-ONE,KMORS,KISA,X,ONE,RI)
+      INMV=INMV+1
+      CALL GCOPY(RI,BP)
+*
+      ITER = 0
+      BNRM2 = GNRM2(B)
+      IF(IMPR.GT.6) THEN
+         WRITE(IOIMP,*) '||B||=',BNRM2
+      ENDIF
+      RNRM2 = GNRM2(RI)
+      IF (ICALRS.EQ.1) BNRM2=RNRM2
+*
+      IF (BNRM2.LT.XPETIT) BNRM2 = ONE
+      RESID = RNRM2 / BNRM2
+      IF(IMPR.GT.6) THEN
+         WRITE(IOIMP,*) 'Résidu initial=',RESID
+      ENDIF
+      RESMAX = RESID * RRMAX
+      LRES.PROG(ITER+1)=RESID
+      LNMV.LECT(ITER+1)=INMV
+      IF (RESID.LE.TOL) GOTO 30
+C
+C Variables for reliable updating
+C
+      ZMXRNR=RNRM2
+      ZMXRNX=RNRM2
+      LCPRES=.FALSE.
+      LUPDAX=.FALSE.
+      XDELTA=1.D-2
+C                    r[tilde]=r(1)
+      CALL GCOPY(RI,RTLD)
+C                    alpha = rho0 = omega = 1
+      ALPHA = ONE
+      RHO0  = ONE
+      OMEGA = ONE
+*
+ 10   CONTINUE
+*
+*     Perform BiConjugate Gradient part.
+*
+      ITER = ITER + 1
+      IF(IMPR.GT.7) THEN
+         WRITE(IOIMP,*) 'ITER=',ITER
+      ENDIF
+*
+C                    rho0 = -omega rho0
+      RHO0 = -OMEGA * RHO0
+      DO J = 1 , LBCG
+         RI = R.WRK(J)
+         RHO1 = GDOT(RI,RTLD,IDDOT)
+         IF (ABS(RHO0).LT.RHOTOL) THEN
+            RHO0=SIGN(XZPREC,RHO0)
+            IWARN=IWARN+1
+         ENDIF
+         BETA = ALPHA * (RHO1 / RHO0)
+         RHO0 = RHO1
+         DO I = 1 , J
+            UI = U.WRK(I)
+            RI = R.WRK(I)
+            CALL GSCAL(-BETA,UI)
+            CALL GAXPY(ONE,RI,UI)
+         ENDDO
+         UI  = U.WRK(J)
+         UIP = U.WRK(J+1)
+         CALL PSOLVE('N',KPREC,KMORS,KISA,INVDIA,ILUM,ILUI
+     $        ,UHAT,UI)
+         CALL GMOMV(IMVEC,'N',ONE,KMORS,KISA,UHAT,ZERO,UIP)
+         INMV=INMV+1
+C
+         SIGMA = GDOT(UIP,RTLD,IDDOT)
+         IF (ABS(SIGMA).LT.SIGTOL) THEN
+            SIGMA=SIGN(XZPREC,SIGMA)
+            IWARN=IWARN+1
+         ENDIF
+         ALPHA = RHO1 / SIGMA
+         UI = U.WRK(1)
+         CALL GAXPY( ALPHA, UI , XTLD)
+         DO I = 1 , J
+            UIP = U.WRK(I+1)
+            RI  = R.WRK(I)
+            CALL GAXPY(-ALPHA,UIP,RI)
+         ENDDO
+         RI  = R.WRK(J)
+         RIP = R.WRK(J+1)
+         CALL PSOLVE('N',KPREC,KMORS,KISA,INVDIA,ILUM,ILUI
+     $        ,RHAT,RI)
+         CALL GMOMV(IMVEC,'N',ONE,KMORS,KISA,RHAT,ZERO,RIP)
+         INMV=INMV+1
+      ENDDO
+*
+*     Perform polynomial part.
+*
+      ZMAX=0.D0
+      DO I=1,LBCG
+         DO J=1,I
+            RI  = R.WRK(I+1)
+            RIP = R.WRK(J+1)
+            TAU = GDOT (RIP, RI,IDDOT)
+            Z.IJ(I,J) = TAU
+            IF (I .NE. J) THEN
+               Z.IJ(J,I) = TAU
+            ENDIF
+         ENDDO
+         ZMAX=MAX(ZMAX,ABS(Z.IJ(I,I)))
+         RI  = R.WRK(1)
+         RIP = R.WRK(I+1)
+         Y.A(I)=GDOT(RI,RIP,IDDOT)
+      ENDDO
+* Ca arrive dans invdiag et invide.dgibi !
+      IF (ZMAX.LT.(XPETIT**0.5D0)) THEN
+         ZMAX=XZPREC
+      ENDIF
+*  Petite pénalisation des familles pour l'inversibilité
+      DO I=1,LBCG
+         Z.IJ(I,I)=Z.IJ(I,I)+PETIT*ZMAX
+      ENDDO
+      IIMPR=1
+      CALL IVMAT(LBCG,Z.IJ,TRAV.LECT,ZM1.IJ,XDETZ,IIMPR,IRET)
+*      IF (IRET.NE.0) GOTO 25
+      IF (IRET.NE.0) THEN
+*         SEGPRT,Z
+         GOTO 25
+      ENDIF
+*
+      DO I=1,LBCG
+         YP.A(I)=ZERO
+         DO J=1,LBCG
+            YP.A(I)=YP.A(I)+(ZM1.IJ(I,J)*Y.A(J))
+         ENDDO
+      ENDDO
+      OMEGA=YP.A(LBCG)
+      DO I=1,LBCG
+         UI =U.WRK(1)
+         UIP=U.WRK(I+1)
+         CALL GAXPY (-YP.A(I),UIP,UI)
+         RI=R.WRK(I)
+         CALL GAXPY ( YP.A(I),RI,XTLD)
+         RI =R.WRK(1)
+         RIP=R.WRK(I+1)
+         CALL GAXPY (-YP.A(I),RIP,RI)
+      ENDDO
+*
+*   Compute residual
+*
+      RI=R.WRK(1)
+      RNRM2I=GNRM2(RI)
+      RESID=RNRM2I / BNRM2
+      IF (RESID.GT.RESMAX) THEN
+         IGRAN=IGRAN+1
+      ELSE
+         IGRAN=0
+      ENDIF
+      LRES.PROG(ITER+1)=RESID
+      LNMV.LECT(ITER+1)=INMV
+*      WRITE(IOIMP,*) 'ITER=',ITER,' RESID=',RESID
+*
+* Reliable update
+*
+      ZMXRNX=MAX(RNRM2I,ZMXRNX)
+      ZMXRNR=MAX(RNRM2I,ZMXRNR)
+      LUPDAX=(RNRM2I.LT.XDELTA*RNRM2.AND.RNRM2.LT.ZMXRNX)
+      LCPRES=((RNRM2I.LT.XDELTA*ZMXRNR.AND.RNRM2.LT.ZMXRNR)
+     $     .OR.LUPDAX)
+      IF (LCPRES) THEN
+         RI=R.WRK(1)
+         CALL GCOPY(BP,RI)
+         CALL PSOLVE('N',KPREC,KMORS,KISA,INVDIA,ILUM,ILUI
+     $        ,UHAT,XTLD)
+         CALL GMOMV(IMVEC,'N',-ONE,KMORS,KISA,UHAT,ONE,RI)
+         INMV=INMV+1
+         ZMXRNR=RNRM2I
+*!         WRITE(IOIMP,*) 'Compute residual'
+         IF (LUPDAX) THEN
+            CALL GAXPY(ONE,UHAT,X)
+            CALL GSCAL(ZERO,XTLD)
+            CALL GCOPY(RI,BP)
+            ZMXRNX=RNRM2I
+*!            WRITE(IOIMP,*) 'Update approx'
+         ENDIF
+      ENDIF
+*
+*   Check for tolerance.
+*
+      IF (RESID.LE.TOL) THEN
+         CALL PSOLVE('N',KPREC,KMORS,KISA,INVDIA,ILUM,ILUI
+     $        ,UHAT,XTLD)
+         CALL GAXPY(ONE,UHAT,X)
+         GOTO 30
+      ENDIF
+*
+*     Iteration fails.
+*
+*      IF (ITER.EQ.MAXIT) THEN
+      IF (INMV.GE.MAXIT.OR.IGRAN.GT.MGRAN) THEN
+         CALL PSOLVE('N',KPREC,KMORS,KISA,INVDIA,ILUM,ILUI
+     $        ,UHAT,XTLD)
+         CALL GAXPY(ONE,UHAT,X)
+         IRET = 1
+         IF (IMPR.GT.0) THEN
+C            WRITE(IOIMP,*)
+C     $           'bcgg.eso : Convergence to tolerance not achieved'
+C            WRITE(IOIMP,*) 'INMV=',INMV,
+C     $           ' TOL=',TOL,
+C     $           ' RESID=',RESID
+            IF (IWARN.GT.0) THEN
+               WRITE(IOIMP,*) 'BiCGStab(l)G nearly failed ',IWARN
+     $              ,' times.'
+            ENDIF
+         ENDIF
+         RETURN
+      ENDIF
+*
+*     Do some more
+*
+      GOTO 10
+*
+*     A breakdown in the method has occured.
+*
+ 25   CONTINUE
+      IF (IWARN.GT.0.AND.IMPR.GT.0) THEN
+         WRITE(IOIMP,*) 'BiCGStab(l)G nearly failed ',IWARN
+     $        ,' times.'
+      ENDIF
+      IRET=-1
+      RETURN
+*
+*     Iteration successful
+*
+ 30   CONTINUE
+      IF (IWARN.GT.0.AND.IMPR.GT.0) THEN
+         WRITE(IOIMP,*) 'BiCGStab(l)G nearly failed ',IWARN
+     $        ,' times.'
+      ENDIF
+      IRET = 0
+      RETURN
+*
+*     End of BCGG.
+*
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

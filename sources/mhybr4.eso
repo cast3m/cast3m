@@ -1,0 +1,259 @@
+C MHYBR4    SOURCE    BP208322  15/06/22    21:20:53     8543
+      SUBROUTINE MHYBR4(IMAIL,IPMODE,IPRIGI,IPGEOS)
+C-----------------------------------------------------------------------
+C Calcul de la matrice masse hybride utilisé pour prendre en compte les forces
+C de volume.
+C Traitement du cas des elements finis massifs a integration numerique
+C pour un maillage elementaire et une formulation hybride.
+C-----------------------------------------------------------------------
+C
+C---------------------------
+C Parametres Entree/Sortie :
+C---------------------------
+C
+C E/  IMAIL   : Numero du maillage elementaire considere,
+C               dans l'objet modele.
+C E/  IPMODE  : Pointeur sur un segment IMODEL.
+C E/  IPGEOS  : Pointeur sur le maillage sommet
+C E/S IPRIGI  : Pointeur sur l'objet rigidite resultat.
+C
+C----------------------
+C Variables en COMMON :
+C----------------------
+C
+C E/  XCOOR   : VOIR SMCOORD
+C E/  IERR    : VOIR CCOPTIO
+C E/  IDIM    : VOIR CCOPTIO
+C E/  INTERR  : VOIR CCOPTIO
+C E/  IFOMOD  : VOIR CCOPTIO
+C E/  XPETIT  : VOIR CCREEL
+C
+C----------------------
+C Tableaux de travail :
+C----------------------
+C
+C     NBNN    : Nombre de noeuds dans l'element considere
+C     NEFHYB  : Numero de l'element fini dans NOMTP.
+C     NEF     : Numero de l'element fini support geometrique
+C               dans NOMTP (voir CCHAMP)
+C     NBELEM  : Nombre d'element dans le maillage elementaire
+C     NBPGAU  : Nombre de points de gauss pour l'element fini NEF
+C**    CEL     : Matrice de conductivite elementaire
+C    CEL     : Matrice des masses elementaires
+C     XE      : Coordonnees des noeuds dans le repere global
+C**    CMAT    : Matrice de permeabilite dans le repere global
+C     SHP     : Tableau de travail contenant les fonctions de forme au
+C               point de gauss utilise + derivees
+C     SHY     : Contient les fonctions de base hybride en un point
+C               mais pas les derivees de la fonction de base.
+C**     VALMAT  : Valeurs des coeff. de la matrice CMAT et des
+C**               cosinus directeurs des axes d'ortho. / repere local
+C**     XGLOB   : Cosinus directeurs des axes d'ortho. / repere global
+C**     XLOC    : Cosinus directeurs des axes d'ortho. / repere local
+C**     TXR     : Cosinus directeurs des axes locaux / repere global
+C
+C
+C-----------------------------------------------------------------------
+C
+C Langage : ESOPE + FORTRAN77
+C
+C           02/96 L.V.BENET : fonction propre à l'option 'MASSE'
+C
+C-----------------------------------------------------------------------
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*
+-INC CCHAMP
+-INC CCOPTIO
+-INC CCREEL
+-INC SMCOORD
+-INC SMINTE
+-INC SMMODEL
+-INC SMRIGID
+-INC SMELEME
+****-INC SMCHAML
+*
+*
+      SEGMENT MMAT1
+         REAL*8  CEL(NBDDL,NBDDL),CEL1(NBDDL,NBDDL),XE(3,NBNN)
+         REAL*8  SHP(6,NBNN),SHY(IDIM,NBDDL),ZJAC(IDIM,IDIM)
+         REAL*8  CMAT(IDIM,IDIM),CMAT1(IDIM,IDIM),CMAT2(IDIM,IDIM)
+         INTEGER ICSTO(NBDDL)
+      ENDSEGMENT
+*
+      SEGMENT NOTYPE
+         CHARACTER*16 TYPE(NBTYPE)
+      ENDSEGMENT
+*
+      SEGMENT HYBSTO
+         REAL*8 HYBASE(NDIM,NBDDL,NBPP)
+      ENDSEGMENT
+*
+      CHARACTER*8  CNM
+      PARAMETER(NINF=3)
+      INTEGER INFOS(NINF)
+*
+* Recup. des caracteristiques geometriques du maillage elementaire
+* et du maillage hybride dual
+*
+      IMODEL = IPMODE
+      SEGACT IMODEL
+      IPMAIL = IMAMOD
+      MELEME = IPGEOS
+      SEGACT MELEME
+      NBNN   = NUM(/1)
+      NBELEM = NUM(/2)
+      NEFHYB = NEFMOD
+      NEF    = NUMGEO(NEFHYB)
+      MFR    = NUMMFR(NEFHYB)
+*
+      MRIGID = IPRIGI
+      SEGACT MRIGID
+      IPT1   = IRIGEL(1,IMAIL)
+      SEGACT IPT1
+      NBDDL  = IPT1.NUM(/1)
+      SEGDES IPT1
+*
+* Recup. des caracteristiques d'integration de l'EF support geometrique
+* de l'EF hybride
+*
+      CALL TSHAPE(NEF,'GAUSS',IPINTE)
+      IF (IERR.NE.0) THEN
+         SEGDES IMODEL , MELEME
+         RETURN
+      ENDIF
+*
+* Recup. des fonctions de bases hybrides
+*
+      CALL HYSHPT(NEFHYB,NBDDL,IPINTE,IPTHYB)
+      IF (IERR.NE.0) THEN
+         SEGDES IMODEL , MELEME
+         RETURN
+      ENDIF
+*
+* Activation des segments "d'integration"
+*
+      MINTE  = IPINTE
+      SEGACT MINTE
+      NBPGAU = POIGAU(/1)
+      HYBSTO = IPTHYB
+      SEGACT HYBSTO
+*
+* Recup. des caracteristiques d'integration au centre de l'EF
+*
+      CALL RESHPT(1,NBNN,NEF,NEF,0,IPT1,IRT1)
+      MINTE1 = IPT1
+      SEGACT MINTE1
+*
+* Initialisation des chapeaux de l'objet rigidité
+*
+      xMATRI = IRIGEL(4,IMAIL)
+      SEGACT xMATRI*MOD
+      NLIGRP = NBDDL
+      NLIGRD = NBDDL
+*
+* Remplissage du tableau INFOS (informations sur element).
+*
+      INFOS(1) = 0
+      INFOS(2) = 0
+      INFOS(3) = NIFOUR
+*
+* Initialisation des tableaux de travail
+*
+      NDIM = IDIM * (IDIM+1)
+      SEGINI MMAT1
+      CALL ZERO(CMAT2,IDIM,IDIM)
+      DO 5 I=1,IDIM
+           CMAT2(I,I)=1.D0
+  5   CONTINUE
+*
+*-------------------------------------------------------
+* BOUCLE SUR LES ELEMENTS DU MAILLAGE ELEMENTAIRE IMAIL
+*-------------------------------------------------------
+*
+      DO 30 IEL=1,NBELEM
+*
+* Initialisations
+*
+         IFOIS = 0
+         IFOI2 = 0
+         CALL ZERO(CEL,NBDDL,NBDDL)
+*
+* Recuperation des coordonnees globales des noeuds de l'element IEL
+*
+         CALL DOXE(XCOOR,IDIM,NBNN,NUM,IEL,XE)
+*--------------------------------
+* BOUCLE SUR LES POINTS DE GAUSS
+*--------------------------------
+         DO 20 IGAU=1,NBPGAU
+*
+* Calcul de la matrice jacobienne de la fonction de passage du
+* repere local au repere global, de son determinant ET recup.
+* des fonctions de base hybride au point de gauss IGAU.
+*
+            CALL MHYBR3(IGAU,NBNN,NBDDL,NDIM,IDIM,IDIM,XE,HYBASE,
+     S                  SHPTOT,SHY,SHP,ZJAC,DJAC)
+*
+* Controle du maillage
+*
+            IF (DJAC.LT.0.D0) IFOIS = IFOIS + 1
+            IF (ABS(DJAC).LT.XPETIT) THEN
+               IFOI2 = IFOI2 + 1
+               DJAC  = XPETIT
+            ENDIF
+*
+* Calcul du poids d'integration global affecte dans DJAC.
+*
+            DJAC = POIGAU(IGAU) / ABS(DJAC)
+*
+*- Calcul de la contribution du point de gauss IGAU a la matrice
+*- elementaire CEL de l'element IEL :
+*-    POIGAU/DJAC * transpose( ZJAC*SHY ) *inv(CMAT)* ( ZJAC*SHY )
+*- On calcule CMAT2=inv(CMAT)                    avec INVRS puis
+*- on calcule CMAT1=transpose(ZJAC)*CMAT2*ZJAC   avec PRODT puis
+*- on somme POIGAU/DJAC * transp.(SHY)*CMAT1*SHY avec BDBST.
+*
+            CALL PRODT(CMAT1,CMAT2,ZJAC,IDIM,IDIM)
+            CALL BDBST(SHY,DJAC,CMAT1,NBDDL,IDIM,CEL)
+  20     CONTINUE
+*
+* Le jacobien est negatif --> MAILLAGE INCORRECT
+*
+         IF (IFOIS.NE.0.AND.IFOIS.NE.NBPGAU) THEN
+            INTERR(1) = IEL
+            CALL ERREUR(195)
+            SEGSUP xMATRI , MRIGID
+            GOTO 40
+         ENDIF
+*
+* Le jacobien est tres petit --> MAILLAGE INCORRECT
+*
+         IF (IFOI2.EQ.NBPGAU) THEN
+            INTERR(1) = IEL
+            CALL ERREUR(259)
+            SEGSUP xMATRI , MRIGID
+            GOTO 40
+         ENDIF
+*
+* Remplissage de XMATRI
+*
+*         SEGINI XMATRI
+*         IMATTT(IEL) = XMATRI
+         CALL REMPMT(CEL,NBDDL,RE(1,1,iel))
+*         SEGDES XMATRI
+  30  CONTINUE
+*
+* Desactivation des segments
+*
+      SEGDES xMATRI , MRIGID
+  40  CONTINUE
+      SEGSUP MMAT1 , HYBSTO
+      SEGDES MELEME
+      SEGDES IMODEL
+      SEGDES MINTE , MINTE1
+      RETURN
+      END
+
+
+
+

@@ -1,0 +1,872 @@
+$$$$ DYNAMIC
+* DYNAMIC   PROCEDUR  CB215821  17/11/14    21:15:11     9612
+* ======================================================================
+* CALCUL DE LA REPONSE DYNAMIQUE PAR INTEGRATION TEMPORELLE
+* (SCHEMA DE NEWMARK OU HHT OU ALPHA-GENERALISE)
+* ======================================================================
+* Creation : ???, 1988 ???
+* Refonte  : Benoit Prabel, 23/07/2015
+* Modifications : JCARDO 15/02/2017 => post-traitement tableur + VTK
+* ======================================================================
+DEBP DYNAMIC ETAB*'TABLE' ;
+
+   IECHO = VALE 'ECHO' ;
+
+*  +-----------------------------------------------------------------+
+*  |                                                                 |
+*  |           L E C T U R E   D E S   P A R A M E T R E S           |
+*  |                                                                 |
+*  +-----------------------------------------------------------------+
+
+*  ================
+*  OPTIONS INTERNES
+*  ================
+
+   KMENAG = VRAI ;
+
+
+*  ===================================================
+*  PARAMETRES DE L'ALGORITHME D'INTEGRATION TEMPORELLE
+*  ===================================================
+
+   SI ((EXIS ETAB 'ALPHA_F') ET (EXIS ETAB 'RHO_INF')) ;
+      MESS 'Veuillez fournir 1 seul parametre parmi :' ;
+      MESS '  ALPHA_F => algorithme HHT ' ;
+      MESS '  RHO_INF => algorithme alpha-generalise' ;
+      ERRE 21 ;
+   FINS ;
+
+*  => Newmark acceleration moyenne (IALGO = 0)
+   IALGO  = 0  ;
+   ALPHAM = 0. ;
+   ALPHAF = 0. ;
+
+*  => HHT (IALGO = 1)
+   SI (EXIS ETAB 'ALPHA_F') ;
+      ALPHAF = ETAB.'ALPHA_F' ;
+      SI (IECHO >EG 0) ;
+         MESS 'ALGO = HHT (ALPHA_F=' ALPHAF ')' ;
+      FINS ;
+      IALGO = 1 ;
+   FINS ;
+
+*  => alpha-generalise (IALGO = 2)
+   SI (EXIS ETAB 'RHO_INF') ;
+      RHOINF = ETAB . 'RHO_INF' ;
+      ALPHAM = ((2.*RHOINF) - 1.) / (1.+RHOINF) ;
+      ALPHAF = RHOINF / (1.+RHOINF) ;
+      SI (IECHO >EG 0) ;
+         MESS 'ALGO = alpha-generalise (ALPHA_M=' ALPHAM
+                                    ' & ALPHA_F=' ALPHAF ')' ;
+      FINS ;
+      IALGO = 2 ;
+   FINS ;
+
+
+*  ====================
+*  CONDITIONS INITIALES
+*  ====================
+
+   U0 = ETAB.'DEPL' ;
+   V0 = ETAB.'VITE' ;
+
+
+*  =======================
+*  MATRICES ET CHARGEMENTS
+*  =======================
+
+*  Matrices et chargements constants
+   K = ETAB.'RIGI' ;
+   M = ETAB.'MASS' ;
+   KAMOR = EXIS ETAB 'AMOR' ;
+   SI KAMOR ;
+      C = EXTR (ETAB.'AMOR') 'RIGI' 'NOMU' ;
+      SI (IECHO >EG 0) ;
+         MESS 'Presence d une matrice d amortissement' ;
+      FINS ;
+   FINS ;
+   CHAR1 = ETAB.'CHAR' ;
+
+*  Matrices et chargements "utilisateur" via la procedure CHARMECA
+   KCHARM = FAUX ;
+   SI (EXIS ETAB 'CHARMECA') ;
+      KCHARM = ETAB.'CHARMECA' ;
+   FINS ;
+
+
+*  ====================================
+*  APPEL A VITEUNIL POUR LES CONTACTS ?
+*  ====================================
+
+   SI (EXIS ETAB 'VITEUNIL') ;
+      KVITUN = ETAB.'VITEUNIL' ;
+   SINON ;
+      KVITUN = (EGA IALGO 0) ;
+   FINS ;
+
+   SI (KVITUN ET (NEG IALGO 0)) ;
+      MESS 'VITEUNIL compatible uniquement avec le schema de Newmark '
+           'acceleration moyenne' ;
+      ERRE 21 ;
+   FINS ;
+
+
+*  ====================
+*  PARAMETRES TEMPORELS
+*  ====================
+
+*  Nouvelle syntaxe :
+   SI (EXIS ETAB 'TEMPS_CALCULES') ;
+      TPROG = ETAB.'TEMPS_CALCULES' ;
+
+      SI ((MINI ((ENLE TPROG 1) - (ENLE TPROG (DIME TPROG)))) <EG 0.) ;
+         MESS 'La liste des TEMPS_CALCULES doit etre strictement '
+              'croissante !' ;
+         ERRE 21 ;
+      FINS ;
+
+*  Ancienne syntaxe : on avertit et on traduit
+   SINON ; SI (EXIS ETAB  'FREQ') ;
+      MESS '!!!  SYNTAXE BIENTOT OSBOLETE : CONSULTEZ LA NOTICE  !!!' ;
+      MESS '!!!  (LE CALCUL SE POURSUIT MALGRE TOUT...)          !!!' ;
+      DTFREQ = 0.25 / ETAB.'FREQ' ;
+      SI (EXIS ETAB 'DEBU') ;
+         T0 = ETAB.'DEBU' ;
+      SINON ;
+         T0 = 0. ;
+      FINS ;
+
+      TSORT = ORDO ETAB.'INST' ;
+      ETAB.'TEMPS_SAUVES' = TSORT ;
+
+      TFIN = DTFREQ * (ENTI 'SUPERIEUR' (MAXI TSORT  / DTFREQ)) ;
+      TPROG = PROG T0 PAS DTFREQ TFIN ;
+      ETAB.'TEMPS_CALCULES' = TPROG ;
+
+   SINON ;
+      MESS 'Liste des TEMPS_CALCULES absente de la table !' ;
+      ERRE 21 ;
+   FINS ; FINS ;
+
+   NPAS = DIME TPROG ;
+
+
+*  ========================
+*  PARAMETRES DE SAUVEGARDE
+*  ========================
+
+   IGIB = 0 ;
+   ICSV = 0 ;
+   IVTK = 0 ;
+
+
+*  SAUVEGARDE VTK
+*  --------------
+
+*  Instants de sauvegarde
+   SI (EXIS ETAB 'PAS_SAUVES_VTK') ;
+      SI (EGA (TYPE ETAB.'PAS_SAUVES_VTK') 'ENTIER') ;
+         IPASVTK = ETAB.'PAS_SAUVES_VTK' ;
+      SINON ;
+         SI (EGA (ETAB.'PAS_SAUVES_VTK') 'TOUS')  ;
+            IPASVTK = 1    ;
+         SINON ; SI (EGA (ETAB.'PAS_SAUVES_VTK') 'FINAL') ;
+            IPASVTK = NPAS ;
+         SINON ;
+            MESS 'PAS_SAUVES_VTK est de type incorrect !' ;
+            ERRE 21 ;
+         FINS ; FINS ;
+      FINS ;
+      IVTK = 1 ;
+   SINON ; SI (EXIS ETAB 'TEMPS_SAUVES_VTK') ;
+      SI (NEG (TYPE ETAB.'TEMPS_SAUVES_VTK') 'LISTREEL') ;
+         MESS 'TEMPS_SAUVES_VTK doit etre de type LISTREEL !' ;
+         ERRE 21 ;
+      FINS ;
+      IVTK = 2 ;
+   FINS ; FINS ;
+
+*  Emplacement de sauvegarde
+   SI (EXIS ETAB 'FICHIER_VTK') ;
+      FICVTK = ETAB.'FICHIER_VTK' ;
+   SINON ;
+      FICVTK = 'DYNAMIC' ;
+   FINS ;
+
+*  Liste des maillages a sauvegarder
+   SI (IVTK > 0) ;
+      SI (EXIS ETAB 'MAILLAGE_VTK') ;
+         MAIVTK = ETAB.'MAILLAGE_VTK' ;
+      SINON ;
+         MESS 'L indice MAILLAGE_VTK est obligatoire !' ;
+         ERRE 21 ;
+      FINS ;
+   FINS ;
+
+
+*  SAUVEGARDE CSV (TABLEUR)
+*  ------------------------
+
+*  Instants de sauvegarde
+   SI (EXIS ETAB 'PAS_SAUVES_CSV') ;
+      SI (EGA (TYPE ETAB.'PAS_SAUVES_CSV') 'ENTIER') ;
+         IPASCSV = ETAB.'PAS_SAUVES_CSV' ;
+      SINON ;
+         SI (EGA (ETAB.'PAS_SAUVES_CSV') 'TOUS')  ;
+            IPASCSV = 1    ;
+         SINON ; SI (EGA (ETAB.'PAS_SAUVES_CSV') 'FINAL') ;
+            IPASCSV = NPAS ;
+         SINON ;
+            MESS 'PAS_SAUVES_CSV est de type incorrect !' ;
+            ERRE 21 ;
+         FINS ; FINS ;
+      FINS ;
+      ICSV = 1 ;
+   SINON ; SI (EXIS ETAB 'TEMPS_SAUVES_CSV') ;
+      SI (NEG (TYPE ETAB.'TEMPS_SAUVES_CSV') 'LISTREEL') ;
+         MESS 'TEMPS_SAUVES_CSV doit etre de type LISTREEL !' ;
+         ERRE 21 ;
+      FINS ;
+      ICSV = 2 ;
+   FINS ; FINS ;
+
+*  Emplacement de sauvegarde (eventuellement a la fin du calcul)
+   SI (EXIS ETAB 'FICHIER_CSV') ;
+      KFICCSV = VRAI ;
+      FICCSV = ETAB.'FICHIER_CSV' ;
+   SINON ;
+      KFICCSV = FAUX ;
+   FINS ;
+
+*  Liste des noeuds et composantes a sauvegarder
+   SI (ICSV > 0) ;
+      SI (EXIS ETAB 'MAILLAGE_CSV') ;
+         MAICSV = CHAN 'POI1' ETAB.'MAILLAGE_CSV' ;
+         NELCSV = NBEL MAICSV ;
+         SI (NELCSV EGA 0) ;
+            MESS 'Le maillage MAILLAGE_CSV est vide !' ;
+            ERRE 21 ;
+         FINS ;
+      SINON ;
+         MESS 'L indice MAILLAGE_CSV est obligatoire !' ;
+         ERRE 21 ;
+      FINS ;
+
+      KLISCO = FAUX ;
+      SI (EXIS ETAB 'COMPOSANTES_CSV') ;
+         LISCO = ETAB.'COMPOSANTES_CSV' ;
+         KLISCO = VRAI ;
+         SI ((DIME LISCO) EGA 0) ;
+            MESS 'La liste COMPOSANTES_CSV est vide !' ;
+            ERRE 21 ;
+         FINS ;
+      FINS ;
+   FINS ;
+
+
+*  SAUVEGARDE GIBIANE
+*  ------------------
+
+*  Instants de sauvegarde
+   SI (EXIS ETAB 'PAS_SAUVES') ;
+      SI (EGA (TYPE ETAB.'PAS_SAUVES') 'ENTIER') ;
+         IPASGIB = ETAB.'PAS_SAUVES' ;
+      SINON ;
+         SI (EGA (ETAB.'PAS_SAUVES') 'TOUS')  ;
+            IPASGIB = 1    ;
+         SINON ; SI (EGA (ETAB.'PAS_SAUVES') 'FINAL') ;
+            IPASGIB = NPAS ;
+         SINON ;
+            MESS 'PAS_SAUVES est de type incorrect !' ;
+            ERRE 21 ;
+         FINS ; FINS ;
+      FINS ;
+      IGIB = 1 ;
+   SINON ; SI (EXIS ETAB 'TEMPS_SAUVES') ;
+      SI (NEG (TYPE ETAB.'TEMPS_SAUVES') 'LISTREEL') ;
+         MESS 'TEMPS_SAUVES doit etre de type LISTREEL !' ;
+         ERRE 21 ;
+      FINS ;
+      IGIB = 2 ;
+   SINON ;
+      IPASGIB = 4 ;
+      IGIB = 1 ;
+   FINS ; FINS ;
+
+*  Sauvegarde incrementale ?
+*  (appel a "SAUV MUET ETAB" => ecriture sur disque)
+   KINCR = FAUX ;
+   SI (EXIS ETAB 'SAUV') ;
+      KINCR = ETAB.'SAUV' ;
+      SI (KINCR ET (IECHO >EG 0)) ;
+         MESS 'SAUVegarde incrementale activee' ;
+      FINS ;
+   FINS ;
+
+*  Fantomisation des resultats au fur et a mesure du calcul
+   KECON = FAUX ;
+   SI (EXIS ETAB 'ECON') ;
+      KECON = ETAB.'ECON' ;
+   FINS ;
+
+*  Restriction de la geometrie a sauvegarder
+   KMAIGIB = EXIS ETAB 'MAILLAGE_SAUVE' ;
+   SI KMAIGIB ;
+      MAIGIB = ETAB.'MAILLAGE_SAUVE' ;
+   FINS ;
+
+
+
+*  +-----------------------------------------------------------------+
+*  |                                                                 |
+*  |                  I N I T I A L I S A T I O N S                  |
+*  |                                                                 |
+*  +-----------------------------------------------------------------+
+
+*  ===================================================
+*  PARAMETRES DE L'ALGORITHME D'INTEGRATION TEMPORELLE
+*  ===================================================
+
+   ALPHA = ALPHAF - ALPHAM ;
+   GAMMA = 0.5 + ALPHA ;
+   BETA  = 0.25 * ((1.+ALPHA)**2) ;
+   1MAF  = 1. - ALPHAF ;
+   1MAM  = 1. - ALPHAM ;
+   GAMBET = GAMMA / BETA ;
+   SI (IECHO >EG 0) ;
+      MESS (CHAI 'Calcul avec GAMMA=' GAMMA ' BETA=' BETA
+                 ' (GAMMA/BETA=' GAMBET ')') ;
+   FINS ;
+
+
+*  ====================
+*  PARAMETRES TEMPORELS
+*  ====================
+
+   IPAS = 1 ;
+   T0   = EXTR TPROG IPAS ;
+   DT0  = 0. ;
+   CHACHA = CHAI 'PAS #' IPAS ' TEMPS' T0 ;
+
+
+*  ===================
+*  SYSTEME D'EQUATIONS
+*  ===================
+
+   OPER = VIDE 'RIGIDITE' ;
+   F0 = TIRE CHAR1 T0 ;
+
+
+*  =====================================================
+*  ACCELERATION INITIALE A0 (NOUVEAUX SCHEMAS TEMPORELS)
+*  =====================================================
+
+   SI (EXIS ETAB 'ACCE') ;
+      A0 = ETAB.'ACCE' ;
+   SINON ;
+      K0 = K ;
+      F2ND = (F0 ENLE 'FLX') - (K * U0) ;
+      SI KAMOR ;
+         F2ND = F2ND - (C * V0) ;
+      FINS ;
+      SI KCHARM ;
+         TCHAR = CHARMECA WTAB ;
+         KCHAF = EXIS TCHAR 'ADDI_SECOND' ;
+         SI KCHAF ;
+            F2ND = F2ND + TCHAR.'ADDI_SECOND' ;
+         FINS ;
+         KCHAK = EXIS TCHAR 'ADDI_MATRICE' ;
+         SI KCHAK ;
+            K0 = K0 ET TCHAR.'ADDI_MATRICE' ;
+         FINS ;
+     FINS ;
+     FREAC0 = REAC K0 U0 ;
+     F2ND   = F2ND + FREAC0 ;
+*    (1.*M) POUR EVITER PB HORODATAGE SI REUTILISATION DE M PLUS TARD
+     A0 = RESO (1.*M) F2ND ;
+   FINS ;
+
+
+*  ===================
+*  TABLES DE RESULTATS
+*  ===================
+
+   INDVTK = 0 ;
+   INDCSV = 0 ;
+   INDGIB = 0 ;
+   NFANTO = 0 ;
+   EPOCH0 = DATE 'EPOCH';
+
+*  SAUVEGARDE VTK
+*  --------------
+   SI (IVTK > 0) ;
+      SI (IVTK EGA 1) ;
+         KVTK = VRAI ;
+      SINON ;
+         KVTK = DANS ETAB.'TEMPS_SAUVES_VTK' T0 ;
+      FINS ;
+
+      SI KVTK ;
+         INDVTK = INDVTK + 1 ;
+         OPTI 'SORT' FICVTK ;
+         SORT 'VTK' MAIVTK U0 'DEPL' V0 'VITE' 'TEMP' T0 ;
+         CHACHA = CHAI CHACHA '  => VTK #' INDVTK ;
+      FINS ;
+   FINS ;
+
+*  SAUVEGARDE CSV
+*  --------------
+   SI (ICSV > 0) ;
+
+*     Initialisation de la table TABCSV
+      TABCSV = TABL ;
+      ETAB.'RESULTATS_CSV' = TABCSV ;
+      TABCSV.'TEMPS' = PROG ;
+      LCOCSV = MOTS ;
+      LPOCSV = LECT ;
+
+*     Titres de colonnes et initialisation des LISTREEL
+      CHPO1 = REDU (CHPO 'UNIFORME' 0. K) MAICSV ;
+      REPE I1 NELCSV ;
+         POIN1 = MAICSV POIN &I1 ;
+         COMP1 = EXTR (REDU CHPO1 POIN1) 'COMP' ;
+         SI KLISCO ;
+            COMP1 = COMP1 SAUF (COMP1 SAUF LISCO) ;
+         FINS ;
+         NCO1 = DIME COMP1 ;
+         SI (NCO1 EGA 0) ;
+            ITER I1 ;
+         FINS ;
+         LPOCSV = LPOCSV ET (LECT NCO1*&I1) ;
+         REPE I2 NCO1 ;
+            CHA1 = EXTR COMP1 &I2 ;
+            REPE I3 4 ;
+               J3 = 5 - &I3 ;
+               SI (NEG (EXTR CHA1 J3 J3) ' ') ;
+                  CHA1 = EXTR CHA1 1 J3 ;
+                  QUIT I3 ;
+               FINS ;
+            FIN I3 ;
+            LCOCSV = LCOCSV ET CHA1 ;
+            NOM1 = CHAI 'DEPL_' CHA1 '_' &I1 ;
+            NOM2 = CHAI 'VITE_' CHA1 '_' &I1 ;
+            TABCSV.NOM1 = PROG ;
+            TABCSV.NOM2 = PROG ;
+         FIN I2 ;
+      FIN I1 ;
+      _TABCSV = INDE TABCSV ;
+      NBCSV = ((DIME TABCSV) - 1) / 2 ;
+
+*     Garder l'instant initial ?
+      SI (ICSV EGA 1) ;
+         KCSV = VRAI ;
+      SINON ;
+         KCSV = DANS ETAB.'TEMPS_SAUVES_CSV' T0 ;
+      FINS ;
+
+      SI KCSV ;
+         INDCSV = INDCSV + 1 ;
+         TABCSV.'TEMPS' = TABCSV.'TEMPS' ET T0 ;
+         REPE I1 NBCSV ;
+            COMP1 = EXTR LCOCSV &I1 ;
+            POIN1 = MAICSV POIN (EXTR LPOCSV &I1) ;
+            X1 = EXTR U0 'VALE' COMP1 POIN1 'NOID' ;
+            X2 = EXTR V0 'VALE' COMP1 POIN1 'NOID' ;
+            K1 = 2*&I1 ;
+            K2 = K1 + 1 ;
+            MOT1 = MOT _TABCSV.K1 ;
+            MOT2 = MOT _TABCSV.K2 ;
+            TABCSV.MOT1 = TABCSV.MOT1 ET X1 ;
+            TABCSV.MOT2 = TABCSV.MOT2 ET X2 ;
+         FIN I1 ;
+         CHACHA = CHAI CHACHA '  => CSV #' INDCSV ;
+      FINS ;
+   FINS ;
+
+*  SAUVEGARDE GIBIANE
+*  ------------------
+   SI (IGIB > 0) ;
+
+*     Initialisation de la table STAB (indicee par INDGIB)
+      STAB = TABL ;
+      ETAB.'RESULTATS' = STAB ;
+
+*     Garder l'instant initial ?
+      SI (EGA IGIB 1) ;
+         KGIB = VRAI ;
+      SINON ;
+         KGIB = DANS ETAB.'TEMPS_SAUVES' T0 ;
+      FINS ;
+
+      SI (KGIB OU (EGA IPAS NPAS)) ;
+*        (on force la sauvegarde si dernier pas)
+         INDGIB = INDGIB + 1 ;
+         STN = TABL ;
+         STAB.INDGIB = STN ;
+         STN.'TEMP' = T0 ;
+         SI KMAIGIB ;
+            STN.'DEPL' = REDU U0 MAIGIB ;
+            STN.'VITE' = REDU V0 MAIGIB ;
+         SINON ;
+            STN.'DEPL' = U0 ;
+            STN.'VITE' = V0 ;
+         FINS ;
+         CHACHA = CHAI CHACHA '  => GIBI #' INDGIB ;
+      FINS ;
+   FINS ;
+
+
+*  =======================
+*  TABLE DE CALCUL INTERNE
+*  =======================
+
+   WTAB = TABL ;
+
+*  On transmet a WTAB la table de PARAmetres utilisateurs si elle existe
+   SI (EXIS ETAB 'PARA') ;
+      WTAB.'PARA' = ETAB.'PARA' ;
+   FINS ;
+   WTAB.'TEMP' = T0 ;
+   WTAB.'DEPL' = U0 ;
+   WTAB.'VITE' = V0 ;
+
+
+
+
+*  +-----------------------------------------------------------------+
+*  |                                                                 |
+*  |      B O U C L E   S U R   L E S   P A S   D E   T E M P S      |
+*  |                                                                 |
+*  +-----------------------------------------------------------------+
+
+
+*  AFFICHAGE DU MESSAGE D'INFORMATION POUR L'ETAT INITIAL
+   MESS CHACHA ;
+
+   REPE BPAS (NPAS - 1) ;
+      IPAS = IPAS + 1 ;
+
+*     ===========================
+*     PREPARATION DU PAS DE TEMPS
+*     ===========================
+
+*     PARAMETRES TEMPORELS
+*     --------------------
+      T1  = EXTR TPROG IPAS ;
+      DT  = T1 - T0 ;
+      DT2 = DT ** 2 ;
+      CHACHA = CHAI 'PAS #' IPAS ' TEMPS' T1 ;
+
+*     QUELQUES CONSTANTES
+*     -------------------
+      XM = 1. / (BETA*DT2) ;
+      XC = GAMMA / (BETA*DT) ;
+
+*     WTAB AVEC U_N ET T_N+1
+      WTAB.'TEMP' = T1 ;
+      WTAB.'DEPL' = U0 ;
+      WTAB.'VITE' = V0 ;
+*       WTAB.'ACCE' = A0 ;
+
+*     PROCEDURE "UTILISATEUR" (CHARMECA)
+*     ----------------------------------
+      KCHAF = FAUX ;
+      KCHAK = FAUX ;
+      KCHAFNL = FAUX ;
+      KCHAKNL = FAUX ;
+      KCHACNL = FAUX ;
+      SI KCHARM ;
+         TCHAR = CHARMECA WTAB ;
+
+*        Indices destines a l'ajout de relations (mult. de Lagrange)
+*        entre deplacements
+         KCHAF = EXIS TCHAR 'ADDI_SECOND' ;
+         SI KCHAF ;
+            FCHAR1 = TCHAR.'ADDI_SECOND' ;
+         FINS ;
+         KCHAK = EXIS TCHAR 'ADDI_MATRICE' ;
+         SI KCHAK ;
+            KCHAR1 = TCHAR.'ADDI_MATRICE' ;
+         FINS ;
+
+*        Indices destines aux autres comportements non lineaires
+         KCHAFNL = EXIS TCHAR 'ADDI_FNL' ;
+         SI KCHAFNL ;
+            FNL0 = TCHAR.'ADDI_FNL' ;
+         FINS ;
+         KCHAKNL = EXIS TCHAR 'ADDI_KNL' ;
+         SI KCHAKNL ;
+            KNL1 = TCHAR.'ADDI_KNL' ;
+         FINS ;
+         KCHACNL = EXIS TCHAR 'ADDI_CNL' ;
+         SI KCHACNL ;
+            CNL1 = TCHAR.'ADDI_CNL' ;
+         FINS ;
+      FINS ;
+
+*     CALCUL DU SECOND MEMBRE
+*     -----------------------
+      F1 = TIRE CHAR1 T1 ;
+*     (aucune difference entre ADDI_SECOND et ADDI_FNL si ce n'est
+*      l'affichage dans CHACHA)
+      SI KCHAF ;
+        F1 = F1 + FCHAR1 ;
+        CHACHA = CHAI CHACHA ' +FLX' ;
+      FINS ;
+      SI KCHAFNL ;
+        F1 = F1 + FNL0 ;
+        CHACHA = CHAI CHACHA ' +FNL' ;
+      FINS ;
+      FEXT1 = (1MAF*(F1 ENLE 'FLX')) + (ALPHAF*(F0 ENLE 'FLX'))
+            + (EXCO 'FLX' F1 'NOID' 'FLX') ;
+
+*     ANCIEN SCHEMA => COMPATIBLE AVEC VITEUNIL
+      SI KVITUN ;
+*     SI (EGA IALGO 0) ;
+         K1 = 'EXTRAI' K 'RIGI' 'NOMU' ;
+         K2 = 'EXTRAI' K 'RIGI' 'MULT' ;
+         MAICO = EXTR K 'MAIL' 'UNIL' ;
+         A1PRED = COLI V0 (1MAM / (BETA*DT)) ;
+         FA = M * A1PRED ;
+         FB = K1 * (2. * (U0 - (EXCO 'LX' U0 'NOID' 'LX'))) ;
+         SI ((NBEL MAICO) > 0) ;
+            U0PRED = U0 - (REDU U0 MAICO) ;
+         SINON ;
+            U0PRED = U0 ;
+         FINS ;
+         FG = K2 * U0PRED ;
+         F2ND = FEXT1 + (F0 ENLE 'FLX') - FB + FA - FG ;
+
+*     SYNTAXE ADAPTEE AU HHT ET ALPHA-GEN (MAIS NON COMPATIBLE AVEC
+*     RELATIONS UNILATERALES ET VITEUNIL)
+      SINON ;
+         A1PRED = COLI V0 ( 1MAM / (BETA*DT) )
+                       A0 ( (1MAM * 0.5 / BETA) - 1. ) ;
+         V1PRED = COLI V0 ( (1MAF * GAMBET) - 1. )
+                       A0 ( 1MAF * DT * ((0.5*GAMBET) - 1.) ) ;
+         U0PRED = ENLE U0 'LX' ;
+         F2ND   = FEXT1 - (K * (U0PRED))  + (M * A1PRED) ;
+         SI KAMOR ;
+            F2ND = F2ND + (C *  V1PRED) ;
+         FINS ;
+         SI KCHACNL ;
+            F2ND = F2ND + (CNL1 * (V1PRED + V0)) ;
+         FINS ;
+*        2nd membre complet = Fext_n+1 - Fint_n + Famor_n + M*(4/dt*V_n+A_n)
+
+      FINS ;
+
+*     ON RECALCULE L'OPERATEUR...
+*     ...SI LE PAS DE TEMPS CHANGE OU SI UNE MATRICE CHANGE
+*     -----------------------------------------------------
+      SI ((DT NEG DT0) OU KCHAK) ;
+         SI (KMENAG) ;
+            DETR OPER ;
+         FINS ;
+         OPER = (1MAF * K) ET ((1MAM * XM) * M) ;
+         SI KAMOR ;
+            OPER = OPER ET ((1MAF * XC) * C) ;
+         FINS ;
+         SI KCHAK ;
+            OPER = OPER ET KCHAR1 ;
+            CHACHA = CHAI CHACHA ' +[LX]' ;
+         FINS ;
+         SI KCHAKNL ;
+            OPER = OPER ET (1MAF * KNL1) ;
+            CHACHA = CHAI CHACHA ' +[KNL]' ;
+         FINS ;
+         SI KCHACNL ;
+            OPER = OPER ET ((1MAF * XC) * CNL1) ;
+            CHACHA = CHAI CHACHA ' +[CNL]' ;
+         FINS ;
+      FINS ;
+
+
+*     ======================
+*     CALCUL DU PAS DE TEMPS
+*     ======================
+
+*     RESOLUTION DU SYSTEME LINEAIRE
+      DU = RESO OPER F2ND ;
+
+*     MISE A JOUR DES VARIABLES AU TEMPS N+1
+*     U1 = U0 + DU ;
+*     A priori inutile d'enlever les LX, mais histoire d'etre sur...
+      U1 = (ENLE U0 'LX') + DU ;
+      DU1 = ENLE DU 'LX' ;
+      V1 = COLI DU1 XC V0 (1. - GAMBET)   A0 (DT*(1. - (0.5*GAMBET))) ;
+      A1 = COLI DU1 XM V0 (-1./(BETA*DT)) A0 (1. - (0.5/BETA)) ;
+
+* *     Calcul du Residu (a n+1 ou avec les alphas pour NL?)
+* *     rem : inutile en lineaire
+* *           K*U1 contient deja les reactions
+*       Res1 = F1 - (K * U1) - (M * A1);
+*       MaxRes1 = MAXI Res1 'ABS' 'SANS' (mots 'FLX');
+*       chacha = chai chacha ' max(R)=' MaxRes1;
+*
+* *     Calcul de l'energie (a n+1)
+*       Wmeca1 = 0.5 * (XTMX K (U1 enle LX) + (XTMX M V1)) ;
+*       chacha = chai chacha ' Wmeca=' FORMAT '(F8.1)' Wmeca1 ;
+
+*     CORRECTION DES VITESSES (SEULEMENT POUR NEWMARK ACC. MOY.)
+      SI KVITUN ;
+
+*        Eventuelle mise a jour de l'indicateur de presence de relations
+*        unilaterales
+         SI (KCHAK OU (IPAS <EG 2)) ;
+            MTA = EXTR OPER 'CONTACT' ;
+            KCONTA = ((DIME MTA) > 0) ;
+         FINS ;
+
+         SI KCONTA ;
+            TBID = TABL ;
+            V1 = VITEUNIL OPER M V1 DU U0 DT F2ND TBID ;
+            SI (EXIS TBID 'RATE_VITEUNIL') ;
+               MESS 'Erreur fatale dans VITEUNIL' ;
+               ERRE 5 ;
+            FINS ;
+         FINS ;
+      FINS ;
+
+
+*     ==========================
+*     SAUVEGARDE DU PAS DE TEMPS
+*     ==========================
+
+*     SAUVEGARDE VTK
+*     --------------
+      SI (IVTK > 0) ;
+         SI (IVTK EGA 1) ;
+            KVTK = MULT (IPAS - 1) IPASVTK ;
+         SINON ;
+            KVTK = DANS ETAB.'TEMPS_SAUVES_VTK' T1 ;
+         FINS ;
+
+         SI KVTK ;
+            INDVTK = INDVTK + 1 ;
+            OPTI 'SORT' FICVTK ;
+            SORT 'VTK' MAIVTK U1 'DEPL' V1 'VITE' 'TEMP' T1 ;
+            CHACHA = CHAI CHACHA '  => VTK #' INDVTK ;
+         FINS ;
+      FINS ;
+
+*     SAUVEGARDE CSV
+*     --------------
+      SI (ICSV > 0) ;
+         SI (ICSV EGA 1) ;
+            KCSV = MULT (IPAS - 1) IPASCSV ;
+         SINON ;
+            KCSV = DANS ETAB.'TEMPS_SAUVES_CSV' T1 ;
+         FINS ;
+
+         SI KCSV ;
+            INDCSV = INDCSV + 1 ;
+            TABCSV.'TEMPS' = TABCSV.'TEMPS' ET T1 ;
+            REPE I1 NBCSV ;
+               COMP1 = EXTR LCOCSV &I1 ;
+               POIN1 = MAICSV POIN (EXTR LPOCSV &I1) ;
+               X1 = EXTR U1 'VALE' COMP1 POIN1 'NOID' ;
+               X2 = EXTR V1 'VALE' COMP1 POIN1 'NOID' ;
+               K1 = 2*&I1 ;
+               K2 = K1 + 1 ;
+               MOT1 = MOT _TABCSV.K1 ;
+               MOT2 = MOT _TABCSV.K2 ;
+               TABCSV.MOT1 = TABCSV.MOT1 ET X1 ;
+               TABCSV.MOT2 = TABCSV.MOT2 ET X2 ;
+            FIN I1 ;
+            CHACHA = CHAI CHACHA '  => CSV #' INDCSV ;
+         FINS ;
+
+         SI ((EGA IPAS NPAS) ET KFICCSV) ;
+            OPTI 'SORT' FICCSV ;
+            SORT 'EXCE' TABCSV ;
+         FINS ;
+      FINS ;
+
+*     SAUVEGARDE GIBIANE
+*     ------------------
+      SI (IGIB > 0) ;
+         SI (IGIB EGA 1) ;
+            KGIB = MULT (IPAS - 1) IPASGIB ;
+         SINON ;
+            KGIB = DANS ETAB.'TEMPS_SAUVES' T1 ;
+         FINS ;
+
+         EPOCH1='DATE' 'EPOCH';
+         SI ((IPAS 'EGA' NPAS) 'OU' KGIB);
+*           (on force la sauvegarde si dernier pas)
+            INDGIB = INDGIB + 1 ;
+            STN = TABL ;
+            STAB.INDGIB = STN ;
+            STN.'TEMP' = T1 ;
+            SI KMAIGIB ;
+               STN.'DEPL' = REDU U1 MAIGIB ;
+               STN.'VITE' = REDU V1 MAIGIB ;
+            SINON ;
+               STN.'DEPL' = U1 ;
+               STN.'VITE' = V1 ;
+            FINS ;
+            CHACHA = CHAI CHACHA '  => GIBI #' INDGIB ;
+
+*           Ecriture incrementale sur disque dur
+            SI (KINCR 'ET'
+                (((EPOCH1 - EPOCH0) '>EG' 300.D0) 'OU'
+                 ((EPOCH0 EGA 0.D0) 'ET' (EPOCH1 EGA 0.D0)) 'OU'
+                 (IPAS 'EGA' NPAS))) ;
+*               (Il est necessaire de sauver aussi OPER : RIGIDITE)
+                ETAB.'OPER' = OPER ;
+                SAUV 'MUET' ETAB   ;
+                EPOCH0='DATE' 'EPOCH';
+
+*               Fantomisation des resultats sauves precedemment
+*               (attention : on a encore besoin de ceux en cours pour le
+*                            prochain pas)
+                SI (KECON) ;
+                  NFANTOL=(INDGIB - 1) - NFANTO ;
+                  SI(NFANTOL > 0);
+                    REPE SURI NFANTOL;
+                      JJ=NFANTO + &SURI;
+                      SI(JJ <EG 0);
+                        ITER SURI;
+                      FINS;
+                      'FANT' (STAB.JJ) 'DEPL' ;
+                      'FANT' (STAB.JJ) 'VITE' ;
+                    FIN SURI;
+                    NFANTO=NFANTO+NFANTOL;
+                  FINS ;
+                FINS ;
+            FINS ;
+         FINS ;
+      FINS ;
+
+
+*     ===============================
+*     PASSAGE AU PAS DE TEMPS SUIVANT
+*     ===============================
+
+*     AFFICHAGE DU MESSAGE D'INFORMATION DU PAS DE TEMPS COURANT
+      MESS CHACHA ;
+
+      T0 = T1 ;
+      DT0 = DT ;
+*       U0 = U1 ENLE 'LX' ;
+      U0 = U1 ;
+      V0 = V1 ;
+      DETR A0 ;
+      A0 = A1 ;
+      DETR F0 ;
+      F0 = F1 ;
+      SI (KMENAG) ;
+         DETR A1PRED ;
+         DETR DU ;
+      FINS ;
+
+   FIN BPAS ;
+
+
+*  Sauvegarde de la derniere acceleration (pour reprise eventuelle)
+   STN.'ACCE' = A1 ;
+
+FINP STAB ;
+
+

@@ -1,0 +1,507 @@
+C YTOIMP    SOURCE    CB215821  18/07/03    21:15:08     9868
+      SUBROUTINE YTOIMP
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+C***********************************************************************
+C     -----------------------------------------------------------
+C     ---------  TOIMP   ----------------------------------------
+C     -----------------------------------------------------------
+C     ---------  PARAMETRI DELLO OPERATORE (NELLO ORDINE) : -----
+C     -----------------------------------------------------------
+C     ---------  TENSION ( tau et pression )            ---------
+C     -----------------------------------------------------------
+C
+C     SYNTAXE :
+C
+C       TOIMP  (tau pression)
+C
+C       1------2
+C       (R1,AL1)  LEF   FLUIDE  NOEUDS 1 2
+C
+C
+C
+C   CAS TRIDIMENSIONNEL
+C                       4 ________ 3
+C                       / FLUIDE /
+C                    1 /________/2
+C
+C
+C***********************************************************************
+
+-INC CCOPTIO
+-INC CCGEOME
+-INC CCREEL
+-INC SMMATRIK
+-INC SIZFFB
+      PARAMETER (LRV=64)
+      SEGMENT PETROV
+      REAL*8 WT(LRV,NP,NPG,KDIM),WS(LRV,NP,NPG,KDIM),HK(LRV,IDIM,NP,NPG)
+      REAL*8 UIL(LRV,IDIM,NPG),DUIL(LRV,IDIM,NPG)
+      REAL*8 PGSK(LRV,NPG),RPGK(LRV,NPG),AIRE(LRV),ANUK(LRV)
+      REAL*8 AJK(LRV,IDIM,IDIM,NPG)
+      ENDSEGMENT
+
+-INC SMCOORD
+-INC SMLENTI
+      POINTEUR IPADU.MLENTI
+-INC SMELEME
+      POINTEUR MELEM1.MELEME
+-INC SMCHPOI
+      POINTEUR IZG1.MCHPOI, IZGG1.MPOVAL
+      POINTEUR IZTU1.MPOVAL,MZMU.MPOVAL,MZUN.MPOVAL
+      POINTEUR MZTO.MPOVAL,MZDT.MPOVAL
+
+-INC SMLMOTS
+      POINTEUR LINCO.MLMOTS
+      CHARACTER*8 NOMI,NOMA,TYPE,TYPC,NOM0
+      CHARACTER*4 NOM4(3)
+      PARAMETER (NTB=1)
+      CHARACTER*8 LTAB(NTB)
+      DIMENSION KTAB(NTB),IXV(3)
+      SAVE IPAS
+      DATA LTAB/'KIZX    '/,IPAS/0/
+C*****************************************************************************
+CTOIMP
+C     write(6,*)' Debut TOIMP '
+      CALL LITABS(LTAB,KTAB,NTB,1,IRET)
+      IF (IERR.NE.0) RETURN
+      MTABX=KTAB(1)
+C
+C- Récupération de la table EQEX (pointeur MTAB1)
+C
+      CALL LEKTAB(MTABX,'EQEX',MTAB1)
+      IF(MTAB1.EQ.0)THEN
+C Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  EQEX  '
+         MOTERR( 9:16) = '  EQEX  '
+         MOTERR(17:24) = '  KIZX  '
+         CALL ERREUR(786)
+      RETURN
+      ENDIF
+      CALL ACME(MTAB1,'NAVISTOK',NASTOK)
+      IF(NASTOK.EQ.0)THEN
+      CALL ZZOIMP(MTABX,MTAB1)
+      RETURN
+      ENDIF
+C
+C- Récupération de la table INCO (pointeur KINC)
+C
+      CALL LEKTAB(MTAB1,'INCO',KINC)
+      IF(KINC.EQ.0)THEN
+C Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  INCO  '
+         MOTERR( 9:16) = '  INCO  '
+         MOTERR(17:24) = '  EQEX  '
+         CALL ERREUR(786)
+      RETURN
+      ENDIF
+
+C*****************************************************************************
+C OPTIONS
+C KIMPL = 0 -> EXPL     1 -> IMPL     2 -> SEMI
+C KFORM = 0 -> SI       1 -> EF       2 -> VF    3 -> EFMC
+C IDCEN = 0-> rien  1-> CENTREE  2-> SUPGDC  3-> SUPG  4-> TVISQUEU  5-> CNG
+C Pour IDCEN on autorise 1,2 et 3
+
+      IAXI=0
+      IF(IFOMOD.EQ.0)IAXI=2
+C
+C- Récupération de la table des options KOPT (pointeur KOPTI)
+C
+      CALL LEKTAB(MTABX,'KOPT',KOPTI)
+      IF (KOPTI.EQ.0) THEN
+C Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  KOPT  '
+         MOTERR( 9:16) = '  KOPT  '
+         MOTERR(17:24) = '  KIZX  '
+         CALL ERREUR(786)
+         RETURN
+      ENDIF
+
+      IKOMP=0
+      CALL ACME(KOPTI,'KIMPL',KIMPL)
+      CALL ACME(KOPTI,'KFORM',KFORM)
+      CALL ACMF(KOPTI,'CMD',CMD)
+      CALL ACME(KOPTI,'IDCEN',IDCEN)
+
+      KDIM=1
+      IF(IDCEN.EQ.2)KDIM=IDIM
+      KDCEN=(IDCEN-1)*(IDCEN-2)*(IDCEN-3)
+      IF(KDCEN.NE.0)THEN
+            MOTERR( 1: 8) = 'IDCEN'
+            CALL ERREUR(803)
+            RETURN
+        ENDIF
+
+      IF(KFORM.NE.0.AND.KFORM.NE.1)THEN
+C        Option %m1:8 incompatible avec les données
+            MOTERR( 1: 8) = 'EF/EFM1 '
+            CALL ERREUR(803)
+            RETURN
+        ENDIF
+      IF (IERR.NE.0) RETURN
+
+C     write(6,*)' Apres les options '
+C*****************************************************************************
+C
+C- Récupération de la table DOMAINE associée au domaine local
+C
+      CALL LEKTAB(MTABX,'DOMZ',MTABZ)
+      IF(MTABZ.EQ.0)THEN
+C Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  DOMZ  '
+         MOTERR( 9:16) = '  DOMZ  '
+         MOTERR(17:24) = '  KIZX  '
+         CALL ERREUR(786)
+         RETURN
+      ENDIF
+
+      CALL LEKTAB(MTABZ,'MAILLAGE',MELEME)
+      CALL LEKTAB(MTABZ,'CENTRE',MELEMC)
+      IF (IERR.NE.0) RETURN
+
+      SEGACT MELEME
+
+C*************************************************************************
+C VERIFICATIONS SUR LES INCONNUES
+C
+C- Récupération du nombre d'inconnues et du nom de l'inconnue NOMI
+C
+      TYPE='LISTMOTS'
+      CALL ACMO(MTABX,'LISTINCO',TYPE,LINCO)
+      IF (IERR.NE.0) RETURN
+      SEGACT LINCO
+      NBINC=LINCO.MOTS(/2)
+      IF(NBINC.NE.1)THEN
+C        Indice %m1:8 : contient plus de %i1 %m9:16
+         MOTERR( 1:8) = 'LISTINCO'
+         INTERR(1) = 1
+         MOTERR(9:16) = ' MOTS   '
+         CALL ERREUR(799)
+      RETURN
+      ENDIF
+
+C --> 1 ere Inconnue
+
+      NOMI=LINCO.MOTS(1)
+      DO 15 I=1,IDIM
+      WRITE(NOM4(I),FMT='(I1,A3)')I,NOMI(1:3)
+ 15   CONTINUE
+
+      TYPE=' '
+      CALL ACMO(KINC,NOMI,TYPE,MCHPOI)
+      IF(TYPE.NE.'CHPOINT ')THEN
+C        Indice %m1:8 : ne contient pas un objet de type %m9:16
+         MOTERR( 1: 8) = 'INC '//NOMI
+         MOTERR( 9:16) = 'CHPOINT '
+         CALL ERREUR(800)
+      RETURN
+      ELSE
+      CALL LICHT(MCHPOI,IZTU1,TYPC,MELEM1)
+      ENDIF
+      NPTU=IZTU1.VPOCHA(/2)
+
+C*************************************************************************
+C Le domaine de definition est donne par le SPG  de la premiere inconnue
+C Les inconnues suivantes devront posseder ce meme pointeur
+C On verifie que les points de la zone sont tous inclus dans ce SPG
+
+      CALL KRIPAD(MELEM1,MLENTI)
+      IPADU=MLENTI
+
+      IF(IPAS.EQ.0)THEN
+      CALL VERPAD(MLENTI,MELEME,IRET)
+      IF(IRET.NE.0)THEN
+C     Indice %m1:8 : L'objet %m9:16 n'a pas le bon support géométrique
+         MOTERR(1: 8) = 'INC '//NOMI
+         MOTERR(9:16) = 'CHPOINT '
+         CALL ERREUR(788)
+      IPAS=0
+      RETURN
+      ENDIF
+      ENDIF
+
+C*************************************************************************
+C Lecture du coefficient
+C Type du coefficient :
+C IK1=0 CHPOINT IK1=1 scalaire  IK1=2 vecteur
+
+      CALL ACME(MTABX,'IARG',IARG)
+      IF(IARG.NE.1.AND.IDCEN.EQ.1.AND.
+     &   IARG.NE.3.AND.(IDCEN.EQ.2.OR.IDCEN.EQ.2)
+     &)THEN
+      WRITE(6,*)'Opérateur TOIMP : nombre d''arguments incorrect'
+C           Indice %m1:8 : nombre d'arguments incorrect
+            MOTERR(1:8) = 'IARG    '
+            CALL ERREUR(804)
+      RETURN
+      ENDIF
+
+      MZMU=IZTU1
+      MZUN=IZTU1
+      MZDT=IZTU1
+
+      IXV(1)=-MELEMC
+      IXV(2)=0
+      IXV(3)=1
+      CALL LEKCOF('Opérateur TOIMP :',
+     & MTABX,KINC,1,IXV,MTO,MZTO,NTAU,NC1,IKS,IRET)
+      IF(IRET.EQ.0)RETURN
+
+      IF(IKS.EQ.2)IKS=1
+
+
+      IF(IARG.GE.2)THEN
+
+C 2ème coefficient  UN , champ de vitesse transportant
+      IXV(1)=-MELEM1
+      IXV(2)=0
+      IXV(3)=1
+      CALL LEKCOF('Opérateur TOIM :',
+     & MTABX,KINC,2,IXV,MUN,MZUN,NPTU,NC2,IKU,IRET)
+      IF(IRET.EQ.0)GO TO 90
+      IF(IKU.EQ.2)IKU=1
+
+C 3ème coefficient  viscosité
+      IXV(1)=0
+      IXV(2)=1
+      IXV(3)=0
+      CALL LEKCOF('Opérateur TOIM :',
+     & MTABX,KINC,3,IXV,MMU,MZMU,NPT3,NC3,IKM,IRET)
+      IF(IRET.EQ.0)GO TO 90
+      ELSE
+      CALL LEKTAB(MTABX,'ARGS3',MMU)
+      CALL LICHT(MMU,MZMU,TYPC,IGEOM0)
+      MZMU.VPOCHA(1,1)=1.D0
+      IKM=1
+
+      ENDIF
+
+      IF(IARG.EQ.4)THEN
+C 4ème coefficient  Dt
+      IXV(1)=0
+      IXV(2)=1
+      IXV(3)=0
+      CALL LEKCOF('Opérateur TOIM :',
+     & MTABX,KINC,4,IXV,MDT,MZDT,NPT4,NC4,IKT,IRET)
+      IF(IRET.EQ.0)RETURN
+      DT=MZDT.VPOCHA(1,1)
+      ELSE
+      DT=0.D0
+
+      ENDIF
+
+C     write(6,*)' Fin lecture Arguments '
+C Fin lecture Arguments ************************************************
+
+
+      IF(KIMPL.EQ.0)THEN
+      NC=IZTU1.VPOCHA(/2)
+      TYPE='SOMMET'
+      CALL KRCHPT(TYPE,MELEM1,NC,IZG1,NOM4)
+
+      ELSE
+
+      NAT=2
+      NSOUPO=1
+      SEGACT MELEM1
+      N=MELEM1.NUM(/2)
+      NC=IZTU1.VPOCHA(/2)
+      NINKO=NC
+      SEGINI MCHPO1,MSOUP1,MPOVA1
+      MCHPO1.IFOPOI=IFOMOD
+      MCHPO1.MOCHDE=TITREE
+      MCHPO1.MTYPOI='SMBR'
+      MCHPO1.JATTRI(1)=2
+      MCHPO1.IPCHP(1)=MSOUP1
+      DO 177 N=1,NINKO
+      WRITE(NOM0,FMT='(I1,A7)')N,NOMI(1:7)
+      MSOUP1.NOCOMP(N)=NOM0(1:4)
+ 177  CONTINUE
+      MSOUP1.IGEOC=MELEM1
+      MSOUP1.IPOVAL=MPOVA1
+      IZG1=MCHPO1
+
+      ENDIF
+
+      CALL LICHT(IZG1,IZGG1,TYPC,IGEOM)
+
+      IF(IGEOM.NE.MELEM1)THEN
+      WRITE(6,*)' Opérateur TOIM'
+      WRITE(6,*)' Incompatibilité de SPG entre 1ères inconnues'
+      RETURN
+      ENDIF
+
+      SEGACT MELEME
+      NBSOUS=LISOUS(/1)
+      IF(NBSOUS.EQ.0)NBSOUS=1
+
+      NPTD=IZGG1.VPOCHA(/1)
+      K0=0
+      DO 1 LS=1,NBSOUS
+      IPT1=MELEME
+      IF(NBSOUS.NE.1)IPT1=LISOUS(LS)
+      SEGACT IPT1
+
+      NOM0 = NOMS(IPT1.ITYPEL)//'    '
+      CALL KALPBG(NOM0,'FONFORM ',IZFFM)
+      SEGACT IZFFM
+      IZHR=KZHR(1)
+      SEGACT IZHR*MOD
+      NES=GR(/1)
+      NPG=GR(/3)
+
+      NP  =IPT1.NUM(/1)
+      NBEL=IPT1.NUM(/2)
+
+      SEGINI PETROV
+
+      DEUPI=1.D0
+      IF(IAXI.NE.0)DEUPI=2.D0*XPI
+
+C Calcul du nombre de paquets de LRV éléments
+C
+      NNN=MOD(NBEL,LRV)
+      IF(NNN.EQ.0) THEN
+         NPACK=NBEL/LRV
+      ELSE
+         NPACK=1+(NBEL-NNN)/LRV
+      ENDIF
+      KPACKD=1
+      KPACKF=NPACK
+C
+C ******* BOUCLE SUR LES PAQUETS DE LRV ELEMENTS **********
+C
+      DO 7001 KPACK=KPACKD,KPACKF
+C
+C ======= A L'INTERIEUR DE CHAQUE PAQUET DE LRV ELEMENTS =======
+C
+C 1. Calcul des limites du paquet courant.
+         KDEB=1+(KPACK-1)*LRV
+         KFIN=MIN(NBEL,KDEB+LRV-1)
+C
+         DO 7002 K=KDEB,KFIN
+            KP=K-KDEB+1
+            NK=K0+K
+            NKM=(1-IKM)*(NK-1)+1
+            ANUK(KP)=MZMU.VPOCHA(NKM,1)
+ 7002    CONTINUE
+
+C     CB215821 : DT n'est pas utilise mais doit etre initialise sinon NAN
+      DT=0.D0
+      IF(IDCEN.EQ.2)THEN
+        DO 108 NC=1,IDIM
+          CALL SUPGEF(FN,GR,PG,XYZ,HR,PGSQ,RPG,AJ,
+     &    NES,NP,NPG,IAXI,XCOOR,
+     &    IPT1.NUM,KDEB,KFIN,LRV,IDCEN,CMD,IKOMP,
+     &    MZUN.VPOCHA(1,NC),IPADU.LECT,MZUN.VPOCHA,IPADU.LECT,NPTU,ANUK,
+     &    WT(1,1,1,NC),WS(1,1,1,NC),HK,PGSK,RPGK,AJK,AIRE,UIL,DUIL,
+     &    DTM1,DT,DTT1,DTT2,DIAEL,NUEL)
+ 108    CONTINUE
+      ELSE
+
+        CALL SUPGEF(FN,GR,PG,XYZ,HR,PGSQ,RPG,AJ,
+     &       NES,NP,NPG,IAXI,XCOOR,
+     &       IPT1.NUM,KDEB,KFIN,LRV,IDCEN,CMD,IKOMP,
+     &       MZUN.VPOCHA,IPADU.LECT,MZUN.VPOCHA,IPADU.LECT,NPTU,ANUK,
+     &       WT,WS,HK,PGSK,RPGK,AJK,AIRE,UIL,DUIL,
+     &       DTM1,DT,DTT1,DTT2,DIAEL,NUEL)
+      ENDIF
+
+      IF(NES.NE.IDIM)THEN
+      DO 7003 K=KDEB,KFIN
+
+      KP=K-KDEB+1
+      NK=K0+K
+      KA=1+(1-IKS)*(NK-1)
+
+      DO 50 I=1,NP
+      DO 50 N=1,IDIM
+      N1=1
+      IF(IDCEN.EQ.2)N1=N
+      FF1=0.D0
+      DO 51 L=1,NPG
+      DO 52 M=1,IDIM
+      FF1=FF1 + MZTO.VPOCHA(KA,M)*AJK(KP,N,M,L)*WT(KP,I,L,N1)*PGSK(KP,L)
+     &*DEUPI*RPGK(KP,L)
+ 52   CONTINUE
+ 51   CONTINUE
+
+      NF=LECT(IPT1.NUM(I,K))
+      IZGG1.VPOCHA(NF,N)=IZGG1.VPOCHA(NF,N)+FF1
+
+ 50   CONTINUE
+ 7003 CONTINUE
+
+      ELSEIF(NES.EQ.IDIM)THEN
+      DO 7004 K=KDEB,KFIN
+
+      KP=K-KDEB+1
+      NK=K0+K
+      KA=1+(1-IKS)*(NK-1)
+
+      DO 60 I=1,NP
+      DO 60 N=1,IDIM
+      N1=1
+      IF(IDCEN.EQ.2)N1=N
+      FF1=0.D0
+      DO 61 L=1,NPG
+      FF1=FF1 + MZTO.VPOCHA(KA,N)*WT(KP,I,L,N1)*PGSK(KP,L)
+     &*DEUPI*RPGK(KP,L)
+ 61   CONTINUE
+
+      NF=LECT(IPT1.NUM(I,K))
+      IZGG1.VPOCHA(NF,N)=IZGG1.VPOCHA(NF,N)+FF1
+
+ 60   CONTINUE
+ 7004 CONTINUE
+      ENDIF
+
+ 7001 CONTINUE
+
+      SEGDES MZTO,IPT1
+      K0=K0+NBEL
+
+      SEGSUP PETROV
+ 1    CONTINUE
+      SEGDES MELEME
+
+      NRIGE=7
+      NKID =9
+      NKMT =7
+      NMATRI=0
+      SEGINI MATRIK
+      CALL ECROBJ('MATRIK',MATRIK)
+      CALL ECROBJ('CHPOINT',IZG1)
+
+
+      SEGDES MELEME
+
+      SEGDES IZTU1
+      SEGDES IZG1,IZGG1
+      SEGDES LINCO
+      SEGSUP MLENTI
+      IPAS=1
+C     write(6,*)' FIN TOIMP '
+      RETURN
+ 90   CONTINUE
+      WRITE(6,*)' Interuption anormale de TOIMP '
+C        Option %m1:8 incompatible avec les données
+            MOTERR( 1: 8) = '  EF    '
+      CALL ERREUR(803)
+      RETURN
+ 1002 FORMAT(10(1X,1PE11.4))
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+

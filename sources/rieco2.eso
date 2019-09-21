@@ -1,0 +1,463 @@
+C RIECO2    SOURCE    CHAT      05/01/13    02:56:21     5004
+C RIECOM    SOURCE    BOB2      96/10/01    22:21:28     2307
+      SUBROUTINE RIECO2(NITER,EPSI,ZERO,
+     &                  VGRIL,
+     &                  GAMG,RG,PG,UNG,UTG,UVG,
+     &                  GAMD,RD,PD,UND,UTD,UVD,
+     &                  RR,UNR,UTR,UVR,RETR,PR,GAMR,LOGETD,
+     &                  LOGAN,LOGNC,MESERR)
+C
+C************************************************************************
+C
+C PROJET            :  CASTEM 2000
+C
+C NOM               :  RIECOM
+C
+C DESCRIPTION       :  Voir FLURIE
+C
+C                      Solution du problème de Riemann dans le
+C                      repaire (n,t) in x/t =  VGRIL
+C
+C                      Parametrisation de Smoller
+C                      (voir J. SMOLLER, "Shock Waves and Reaction
+C                      Diffusion Equations", Springer Verlag, 1983)
+C
+C LANGAGE           :  FORTRAN 77
+C
+C AUTEUR            :  P. GALON DRN/DMT/SEMT/TTMF
+C
+C************************************************************************
+C
+C APPELES
+C
+C RIECOM ---- RACC ---- WNVXC ---- VLH1
+C   |
+C   |
+C    -------- VLH1
+C   |
+C   |
+C    -------- VLF1
+C   |
+C   |
+C    -------- VLF3
+C
+C************************************************************************
+C
+C**** Entrées:
+C
+C     NMAX          =  nombre maximum d'itérations pour Newton-Rapson
+C
+C     EPSI          =  erreur tolérée pour Newton-Rapson
+C
+C     ZERO          =  tolérance d'egalite pour REAL*8
+C
+C     VGRIL         =  vitesse de la surface (ALE)
+C
+C     GAMG, GAMD    =  les "gamma" du gaz (gauche et droite)
+C
+C     RG, RD        =  les densités
+C
+C     PG, PD        =  les pressions
+C
+C     UNG, UND      =  les vitesses normales
+C
+C     UTG, UTD      =  les vitesses tangentielles
+C
+C**** Sorties:
+C
+C     RR        = rho(x/t = VGRIL)
+C
+C     UNR       = un(x/t = VGRIL)
+C
+C     UTR       = ut(x/t = VGRIL)
+C
+C     RETR      = rho*et(x/t = VGRIL)
+C
+C     PR        = p(x/t = VGRIL) (indispensable en sortie dans
+C                                 le cas du vide)
+C
+C     LOGETD     = .TRUE.  -> on est à droite de la discontinuité
+C                             de contact.
+C
+C                  .FALSE.  -> on est à gauche de la discontinuité
+C                             de contact.
+C
+C     GAMR      = gamma(x/t = VRILL)
+C
+C     LOGAN     = .TRUE. -> anomalie de programmation.
+C
+C     LOGNC     = .TRUE. -> Newton Rapson ne converge pas
+C
+C     MESERR    =  message d'erreur
+C
+C
+C************************************************************************
+C
+C HISTORIQUE (Anomalies et modifications éventuelles)
+C
+C HISTORIQUE :  6.1.98 ,   Modifié par  A. BECCANTINI, DRN/DMT/SEMT/TTMF
+C                          pour pouvoir traiter la formation du vide.
+C
+C
+C************************************************************************
+C
+C**** N.B.: toutes les variables sont DECLAREES!
+C
+C
+      IMPLICIT INTEGER(I-N)
+      INTEGER NITER
+      REAL*8 EPSI,ZERO,VGRIL
+     &      ,GAMG,RG,PG,UNG,UTG,UVG
+     &      ,GAMD,RD,PD,UND,UTD,UVD
+     &      ,RR,UNR,UTR,UVR,RETR,PR,GAMR
+     &      ,GM1G,GP1G,USGM1G,GM1D,GP1D,USGM1D
+     &      ,AUX,RETG,RETD,CG,CD,DC,DP,U1G,U1D,DU,CEL1,CEL2
+     &      ,U2G,U2D,CEL3
+     &      ,A1,A2,A3,X1,X2,X3
+     &      ,H1,H1P,VLF1,VLF3
+     &      ,PI,UI,RA1,R1,RA2,R2,C1,C2
+     &      ,FR1G, FR1D, FR2, FR3G, FR3D, TAU, XX
+
+      LOGICAL LOGAN,LOGNC,LOGETD
+      CHARACTER*(40) MESERR
+C
+C**** Initialisation de LOGNC, LOGAN,MESERR ne doit pas etre faite ici,
+C     mais avant, i.e.
+C
+C      LOGNC = .FALSE.
+C      LOGAN = .FALSE.
+C      MESERR = '                                        '
+C
+C
+C**** N.B. On suppose que la positivité de RG, RD, PG, PD a été
+C          déjà verifiée.
+C          Ceci est très important si on travaille en "NaNQ"
+C
+      GM1G   = GAMG - 1.0D0
+      GP1G   = GAMG + 1.0D0
+      USGM1G = 1.0D0 / GM1G
+      GM1D   = GAMD - 1.0D0
+      GP1D   = GAMD + 1.0D0
+      USGM1D = 1.0D0 / GM1D
+
+C
+C**** Calcul des energies totales.
+C
+      AUX  = 0.5D0 * RG * (UNG*UNG + UTG*UTG + UVG*UVG)
+      RETG = PG * USGM1G + AUX
+      AUX  = 0.5D0 * RD * (UND*UND + UTD*UTD + UVD*UVD)
+      RETD = PD * USGM1D + AUX
+C
+C**** Trois cas possibles:
+C
+C     a) etats egaux ou discontinuité de contact;
+C
+C     b) formation du vide
+C
+C     c) choc + discontinuité de contact + détente
+C
+      CG = SQRT(GAMG*PG/RG)
+      CD = SQRT(GAMD*PD/RD)
+      DC = MAX(CG,CD)
+      DP = MAX(RG,RD) * DC * DC
+C
+      U1G = UNG + 2.0D0 * USGM1G * CG
+      U1D = UND - 2.0D0 * USGM1D * CD
+      DU  = UNG - UND
+      CEL1 = ABS(DU)/DC
+      CEL2 = ABS(PG-PD)/DP
+C
+C**** NB : control adimensionalizé
+C
+      IF( (CEL1 .LT. ZERO) .AND. (CEL2 .LT. ZERO) ) THEN
+C
+C
+C******* Cas a) : PG = PD et UNG = UND
+C
+C
+         IF(VGRIL .LE. UND) THEN
+            RR=RG
+            UNR=UNG
+            UTR=UTG
+            UVR=UVG
+            RETR=RETG
+            PR = PG
+            GAMR = GAMG
+            LOGETD = .FALSE.
+         ELSE
+            RR=RD
+            UNR=UND
+            UTR=UTD
+            UVR=UVD
+            RETR=RETD
+            PR = PD
+            GAMR = GAMD
+            LOGETD = .TRUE.
+         ENDIF
+      ELSEIF((U1G-U1D) .LE. 0.0D0)THEN
+C
+C
+C******* Cas b) : formation de vide, connecté aux etats initiaux par
+C                 deux ondes de détente.
+C
+         U2G = UNG -CG
+         U2D = UND + CD
+         IF(VGRIL .LT. U2G)THEN
+            RR=RG
+            UNR=UNG
+            UTR=UTG
+            UVR=UVG
+            RETR=RETG
+            PR = PG
+            GAMR = GAMG
+            LOGETD = .FALSE.
+         ELSEIF(VGRIL .LT. U1G)THEN
+            CEL3 = (U1G-VGRIL)*GM1G/GP1G/CG
+C
+C********** Si VGRIL = U1G alors CEL3 = 0 (vide)
+C
+C           Si VGRIG = U2G alors  U1G-VGRIL = GP1G / GM1G * CG
+C
+C                                 CEL3 = 1
+C
+            UNR = U1G - ( 2.0D0 * USGM1G*  CEL3 * CG)
+            CEL3 = CEL3**(2.0D0*USGM1G)
+            RR = CEL3 * RG
+            CEL3 = CEL3**GAMG
+            PR = CEL3* PG
+            UTR= UTG
+            UVR=UVG
+            AUX = 0.5D0 *  RR * (UNR*UNR + UTR*UTR + UVR*UVR)
+            RETR = USGM1G * PR + AUX
+            GAMR = GAMG
+            LOGETD = .FALSE.
+         ELSEIF(VGRIL .LT. U1D)THEN
+            RR = 0.0D0
+C
+C********** UNR, UTR non definies: on fait une approximation,
+C           mais de toute façon RR=0 -> RR*UNR=RR*UTR=0
+C
+
+            UNR = 0.5D0*(U1D+U1G)
+            IF(VGRIL .LT. UNR)THEN
+              UTR = UTG
+              UVR=UVG
+              LOGETD = .FALSE.
+              GAMR = GAMG
+            ELSE
+              UTR = UTD
+              UVR = UVD
+              LOGETD = .TRUE.
+              GAMR = GAMD
+            ENDIF
+            RETR = 0.0D0
+            PR = 0.0D0
+         ELSEIF(VGRIL .LT. U2D)THEN
+            CEL3 = (VGRIL-U1D)*GM1D/GP1D/CD
+C
+C********** Si VGRIL = U1D alors CEL3 = 0 (vide)
+C
+C           Si VGRIG = U2D alors  VGRIL-U1D = GP1D / GM1D * CD
+C
+C                                 CEL3 = 1
+C
+            UNR = U1D + ( 2.0D0 * USGM1D*  CEL3 * CD)
+            CEL3 = CEL3**(2.0D0*USGM1D)
+            RR = CEL3 * RD
+            CEL3 = CEL3**GAMD
+            PR = CEL3* PD
+            UTR = UTD
+            UVR = UVD
+            AUX = 0.5D0 * RR * (UNR*UNR + UTR*UTR + UVR*UVR)
+            RETR = USGM1D * PR + AUX
+            LOGETD = .TRUE.
+            GAMR = GAMD
+         ELSE
+            RR = RD
+            UNR = UND
+            UTR = UTD
+            UVR = UVD
+            RETR = RETD
+            PR = PD
+            LOGETD = .TRUE.
+            GAMR = GAMD
+         ENDIF
+      ELSE
+C
+C
+C******* Cas c) : il n'y a pas la formation de vide.
+C
+C
+C
+C******* X1 = 1-ONDE  :  racine de la resolution Riemann
+C
+         A1=RD/RG
+         A2=PD/PG
+         A3=(UND-UNG)/CG
+         CALL RACC(EPSI,NITER,GAMG,GAMD,A1,A2,A3,X1,LOGNC,LOGAN,MESERR)
+         IF(LOGNC .OR. LOGAN) THEN
+            GOTO 9999
+         ENDIF
+         X3=X1+LOG(A2)
+         AUX=A1 / (VLF1(X1,GAMG)*VLF3(X3,GAMD))
+         X2=LOG(AUX)
+         IF(ABS(X1).LT.ZERO) X1=0.D0
+         IF(ABS(X2).LT.ZERO) X2=0.D0
+         IF(ABS(X3).LT.ZERO) X3=0.D0
+C
+         PI=PG*EXP(-X1)
+         CALL VLH1(H1,H1P,X1,GAMG)
+         UI=UNG+CG*H1
+         RA1 = VLF1(X1,GAMG)
+         RA2 = RA1 * EXP(X2)
+         R1 = RA1 * RG
+         R2 = RA2 * RG
+         C1=SQRT(GAMG*PI/R1)
+         C2=SQRT(GAMD*PI/R2)
+C
+C******* Les differentes pentes frontieres
+C
+         IF( (ABS(RA1-1.0D0) .LE. ZERO) .AND.
+     &       (X1.LT.0.0D0))  X1=0.D0
+         IF( (ABS(RA2-A1) .LE. ZERO) .AND.
+     &       (X3.LT.0.))     X3=0.D0
+C
+         IF(X1.LT.0.D0) THEN
+C
+C********** 1-ONDE : choc
+C
+            AUX = (R1*UI-RG*UNG) / (R1-RG)
+            FR1G = AUX
+            FR1D = AUX
+         ELSE
+C
+C********* 1-ONDE : detente
+C
+            FR1G=UNG-CG
+            FR1D=UI-C1
+         ENDIF
+         FR2 = UI
+         IF(X3.LT.0.D0) THEN
+C
+C******* 3-ONDE : choc
+C
+            AUX = (RD*UND-R2*UI) / (RD-R2)
+            FR3G = AUX
+            FR3D = AUX
+         ELSE
+C
+C******* 3-ONDE : detente
+C
+            FR3G=UI+C2
+            FR3D=UND+CD
+         ENDIF
+C
+C******* Position de la droite  x/t=VGRIL P/R aux differents cas
+C
+         IF(FR1G .GT. VGRIL) THEN
+C
+C******* ETAT : GAUCHE
+C
+            RR=RG
+            UNR = UNG
+            UTR = UTG
+            UVR = UVG
+            RETR=RETG
+            PR = PG
+            LOGETD = .FALSE.
+            GAMR = GAMG
+         ELSEIF(FR1D.GT.VGRIL) THEN
+C
+C********** ETAT : 1-DETENTE
+C
+            TAU=0.5D0*GM1G/GAMG
+            AUX = GM1G*(UNG-VGRIL)/(CG*GP1G) + 2.D0/GP1G
+            XX = -LOG(AUX)/TAU
+            IF(XX .LT. 0.0D0) THEN
+               LOGAN  = .TRUE.
+               MESERR= 'RIEMAN, subroutine riecom.eso           '
+               GOTO 9999
+            ENDIF
+            PI=PG*EXP(-XX)
+            RR=RG*EXP(-XX/GAMG)
+            UNR = UNG + 2.D0*CG*USGM1G * (1.D0-EXP(-TAU*XX))
+            UTR = UTG
+            UVR = UVG
+            RETR = PI*USGM1G + 0.5D0*RR*(UNR*UNR+UTR*UTR+UVR*UVR)
+            PR = PI
+            LOGETD = .FALSE.
+            GAMR = GAMG
+            ELSEIF(FR2.GT.VGRIL) THEN
+C
+C********** ETAT : INTERMEDIAIRE 1
+C
+               RR = R1
+               UNR = UI
+               UTR = UTG
+               UVR = UVG
+               RETR = PI*USGM1G + 0.5D0*RR*(UNR*UNR+UTR*UTR
+     &                                      +UVR*UVR)
+               PR = PI
+               LOGETD = .FALSE.
+               GAMR = GAMG
+            ELSEIF(FR3G.GT.VGRIL) THEN
+C
+C********** ETAT : INTERMEDIAIRE 2
+C
+               RR=R2
+               UNR = UI
+               UTR = UTD
+               UVR = UVD
+               RETR = PI*USGM1D + 0.5D0*RR*(UNR*UNR+UTR*UTR
+     &                                      +UVR*UVR)
+               PR = PI
+               LOGETD = .TRUE.
+               GAMR = GAMD
+            ELSEIF(FR3D.GT.VGRIL) THEN
+C
+C********** ETAT : 3-DETENTE
+C
+               TAU=0.5D0*GM1D/GAMD
+               AUX = 2.D0/GP1D - GM1D*(UI-VGRIL)/(C2*GP1D)
+               XX = LOG(AUX) / TAU
+               IF(XX.LT.0) THEN
+                  LOGAN = .TRUE.
+                  MESERR =
+     &                'RIEMAN, subroutine riecom.eso           '
+                  GOTO 9999
+               ENDIF
+               PI=PI*EXP(XX)
+               RR=R2*EXP(XX/GAMD)
+               UNR = UI + 2.D0*C2*USGM1D*(EXP(TAU*XX)-1.D0)
+               UTR = UTD
+               UVR = UVD
+               RETR = PI*USGM1D + 0.5D0*RR*(UNR*UNR+UTR*UTR
+     &                                      +UVR*UVR)
+               PR = PI
+               LOGETD = .TRUE.
+               GAMR = GAMD
+            ELSE
+C
+C********** ETAT : DROITE
+C
+               RR = RD
+               UNR = UND
+               UTR = UTD
+               UVR = UVD
+               RETR = RETD
+               PR =  PD
+               LOGETD = .TRUE.
+               GAMR = GAMD
+            ENDIF
+       ENDIF
+C
+ 9999  CONTINUE
+C
+      RETURN
+      END
+
+
+
+
+
+

@@ -1,0 +1,1570 @@
+C DELAUN    SOURCE    CB215821  17/11/30    21:15:52     9639
+      SUBROUTINE DELAUN(MPOVAL,IPT1,XBOI,IBOI,IPT2,LNBOIT,ITRC1,ILEA1)
+C----------------------------------------------------------------------C
+C     Triangulation d'un maillage de points (POI1), 1D, 2D ou 3D,      C
+C     suivant l'agorithme de DELAUNAY donne dans P.-L. George,         C
+C     Delaunay triangulation and meshing, Hermes, 1998, p. 41.         C
+C                                                                      C
+C     IPT1 = pointeur sur le maillage de POI1 en entree ;              C
+C            suppose ACTIF en ENTREE et en SORTIE                      C
+C     XBOI = rapport entre le "diametre" du nuage de points (IPT1) et  C
+C            la taille de la boite de triangulation ;                  C
+C     IBOI = indicateur permettant d'indiquer si on veut "garder" la   C
+C            boite de triangulation :                                  C
+C            - IBOI = 0 : on ne la garde pas (defaut) ;                C
+C            - IBOI = 1 : on la garde ;                                C
+C                                                                      C
+C     IPT2   = pointeur sur le maillage triangule en sortie            C
+C     LNBOIT = liste des noeuds formant la boite de triangulation      C
+C     ITRC1  = table contenant les centres des cercles circonscrits    C
+C     ILEA1  = table des d'adjacence de la triangulation               C
+C                                                                      C
+C----------------------------------------------------------------------C
+C Version V0 : centre et rayon cercles circons. calcules chaque fois   C
+C Version V1 : centre et rayon cercles circons. stockes dans SEGMENT   C
+C              MCIRCONS + elements adjacents stockes dans SEGMENT      C
+C              ILEA1                                                   C
+C----------------------------------------------------------------------C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+c
+-INC SMCHPOI
+-INC CCOPTIO
+-INC SMELEME
+-INC SMCOORD
+-INC CCGEOME
+-INC SMLENTI
+-INC SMTABLE
+      PARAMETER (ICMIN=1000)
+      PARAMETER (ZERO=1D-13)
+      DIMENSION LNBOIT(8)
+      DIMENSION XCMIMA(2,3),X0(4,3),XCMIL(3),XPI1(3),XCBJ(3),XG0(3)
+      LOGICAL BMOD,BHORS,BFF
+C
+      POINTEUR LCAVI.MLENTI,LBOUL.MLENTI,LBASE.MLENTI,LREF1.MLENTI
+      POINTEUR LEADJ.MLENTI,LNVADJ.MLENTI,LSUP.MLENTI,LSCP.MLENTI
+C
+      SEGMENT,MCIRCONS
+         REAL*8 TRC(NBE1,4)
+      ENDSEGMENT
+      POINTEUR ITRC1.MCIRCONS
+C
+      SEGMENT,MADJACEN
+         INTEGER LEAC(NBL1,IDIM+1,2)
+      ENDSEGMENT
+      POINTEUR ILEA1.MADJACEN
+C
+      SEGMENT,MLIAIS
+         INTEGER LIAS(NB1,NB1)
+      ENDSEGMENT
+      POINTEUR ITL1.MLIAIS
+C
+      SEGMENT RAYONOE
+         REAL*8 RAYN(NBNER)
+      ENDSEGMENT
+      POINTEUR IRN1.RAYONOE
+c
+C----------------------------------------------------------------------C
+C                               PARTIE 1                               C
+C          Construction de la boite englobant tous les points          C
+C----------------------------------------------------------------------C
+C
+C---- 1.1 Je determine la taille du maillage
+      SEGACT,MCOORD
+      IDIMP1=IDIM+1
+      IPT2=IPT1
+      IF ((IBOI.EQ.1).AND.(IPT1.LISREF(/1).NE.0)) THEN
+         IPT2=IPT1.LISREF(1)
+         SEGACT,IPT2
+      ENDIF
+      IREF1=(IPT1.NUM(1,1)-1)*IDIMP1
+      DDMAX=0.
+      DO I=1,IDIM
+         XCMIMA(1,I)=XCOOR(IREF1+I)
+         XCMIMA(2,I)=XCOOR(IREF1+I)
+         DO J=2,IPT1.NUM(/2)
+            IREFJ=(IPT1.NUM(1,J)-1)*IDIMP1
+            XCNJ1=XCOOR(IREFJ+I)
+            IF (XCNJ1.LT.XCMIMA(1,I)) XCMIMA(1,I)=XCNJ1
+            IF (XCNJ1.GT.XCMIMA(2,I)) XCMIMA(2,I)=XCNJ1
+         ENDDO
+         IF ((IBOI.EQ.1).AND.(IPT1.LISREF(/1).NE.0)) THEN
+            DO J=1,IPT2.NUM(/2)
+               IREFJ=(IPT2.NUM(1,J)-1)*IDIMP1
+               XCNJ1=XCOOR(IREFJ+I)
+               IF (XCNJ1.LT.XCMIMA(1,I)) XCMIMA(1,I)=XCNJ1
+               IF (XCNJ1.GT.XCMIMA(2,I)) XCMIMA(2,I)=XCNJ1
+            ENDDO
+         ENDIF
+         DDMAXI=0.5*(XCMIMA(2,I)-XCMIMA(1,I))
+         IF (DDMAXI.GT.DDMAX) DDMAX=DDMAXI
+      ENDDO
+C
+C---- 1.2 On construit la boite
+C     1.2.1 Points coins de la boite
+      DBOIT=XBOI*DDMAX
+      NBPTS0=XCOOR(/1)/IDIMP1
+      NBPTS=NBPTS0+(2**IDIM)
+      SEGADJ,MCOORD
+      IF (IDIM.EQ.1) THEN
+         XCMIL(1)=0.5*(XCMIMA(1,1)+XCMIMA(2,1))
+         IREF1=(NBPTS-2)*IDIMP1
+         IREF2=(NBPTS-1)*IDIMP1
+         XCOOR(IREF1+1)=XCMIL(1)-DBOIT
+         XCOOR(IREF2+1)=XCMIL(1)+DBOIT
+         XCOOR(IREF1+2)=0.
+         XCOOR(IREF2+2)=0.
+      ELSEIF (IDIM.EQ.2) THEN
+         DO I=1,IDIM
+            XCMIL(I)=0.5*(XCMIMA(1,I)+XCMIMA(2,I))
+         ENDDO
+         IREF1=(NBPTS-4)*IDIMP1
+         IREF2=(NBPTS-3)*IDIMP1
+         IREF3=(NBPTS-2)*IDIMP1
+         IREF4=(NBPTS-1)*IDIMP1
+         XCOOR(IREF1+1)=XCMIL(1)-DBOIT
+         XCOOR(IREF2+1)=XCMIL(1)+DBOIT
+         XCOOR(IREF3+1)=XCMIL(1)+DBOIT
+         XCOOR(IREF4+1)=XCMIL(1)-DBOIT
+         XCOOR(IREF1+2)=XCMIL(2)-DBOIT
+         XCOOR(IREF2+2)=XCMIL(2)-DBOIT
+         XCOOR(IREF3+2)=XCMIL(2)+DBOIT
+         XCOOR(IREF4+2)=XCMIL(2)+DBOIT
+         XCOOR(IREF1+3)=0.
+         XCOOR(IREF2+3)=0.
+         XCOOR(IREF3+3)=0.
+         XCOOR(IREF4+3)=0.
+      ELSEIF (IDIM.EQ.3) THEN
+         DO I=1,IDIM
+            XCMIL(I)=0.5*(XCMIMA(1,I)+XCMIMA(2,I))
+         ENDDO
+         IREF1=(NBPTS-8)*IDIMP1
+         IREF2=(NBPTS-7)*IDIMP1
+         IREF3=(NBPTS-6)*IDIMP1
+         IREF4=(NBPTS-5)*IDIMP1
+         IREF5=(NBPTS-4)*IDIMP1
+         IREF6=(NBPTS-3)*IDIMP1
+         IREF7=(NBPTS-2)*IDIMP1
+         IREF8=(NBPTS-1)*IDIMP1
+         XCOOR(IREF1+1)=XCMIL(1)-DBOIT
+         XCOOR(IREF2+1)=XCMIL(1)+DBOIT
+         XCOOR(IREF3+1)=XCMIL(1)+DBOIT
+         XCOOR(IREF4+1)=XCMIL(1)-DBOIT
+         XCOOR(IREF5+1)=XCMIL(1)-DBOIT
+         XCOOR(IREF6+1)=XCMIL(1)+DBOIT
+         XCOOR(IREF7+1)=XCMIL(1)+DBOIT
+         XCOOR(IREF8+1)=XCMIL(1)-DBOIT
+         XCOOR(IREF1+2)=XCMIL(2)-DBOIT
+         XCOOR(IREF2+2)=XCMIL(2)-DBOIT
+         XCOOR(IREF3+2)=XCMIL(2)+DBOIT
+         XCOOR(IREF4+2)=XCMIL(2)+DBOIT
+         XCOOR(IREF5+2)=XCMIL(2)-DBOIT
+         XCOOR(IREF6+2)=XCMIL(2)-DBOIT
+         XCOOR(IREF7+2)=XCMIL(2)+DBOIT
+         XCOOR(IREF8+2)=XCMIL(2)+DBOIT
+         XCOOR(IREF1+3)=XCMIL(3)-DBOIT
+         XCOOR(IREF2+3)=XCMIL(3)-DBOIT
+         XCOOR(IREF3+3)=XCMIL(3)-DBOIT
+         XCOOR(IREF4+3)=XCMIL(3)-DBOIT
+         XCOOR(IREF5+3)=XCMIL(3)+DBOIT
+         XCOOR(IREF6+3)=XCMIL(3)+DBOIT
+         XCOOR(IREF7+3)=XCMIL(3)+DBOIT
+         XCOOR(IREF8+3)=XCMIL(3)+DBOIT
+         XCOOR(IREF1+4)=0.
+         XCOOR(IREF2+4)=0.
+         XCOOR(IREF3+4)=0.
+         XCOOR(IREF4+4)=0.
+         XCOOR(IREF5+4)=0.
+         XCOOR(IREF6+4)=0.
+         XCOOR(IREF7+4)=0.
+         XCOOR(IREF8+4)=0.
+      ENDIF
+C
+C     1.2.2 Maillage de la boite
+      NBSOUS=0
+      NBREF=0
+      NNOE1=NBPTS-(2**IDIM)+1
+      IF (IDIM.EQ.1) THEN
+C        Creation des elements SEG2 en definissant les noeuds
+         NBNN=2
+         NBELEM=IPT1.NUM(/2)+1
+         SEGINI,IPT2
+         IPT2.ITYPEL=2
+         NBELE2=1
+         IPT2.NUM(1,1)=NNOE1
+         IPT2.NUM(2,1)=NNOE1+1
+C        Liste des numeros des noeuds de la boite
+         NNBOIT=2
+         LNBOIT(1)=NNOE1
+         LNBOIT(2)=NNOE1+1
+C        Initialisation du segment ILEA1 contenant la table de
+C        connectivite des elements de IPT2
+         NBL1=NBELEM
+         SEGINI,ILEA1
+         ILEA1.LEAC(1,1,1)= 0
+         ILEA1.LEAC(1,1,2)= 0
+         ILEA1.LEAC(1,2,1)= 0
+         ILEA1.LEAC(1,2,2)= 0
+      ELSEIF (IDIM.EQ.2) THEN
+C        Creation des elements TRI3 en definissant les noeuds
+         NBNN=3
+         NBELEM=IPT1.NUM(/2)*3
+         SEGINI,IPT2
+         IPT2.ITYPEL=4
+         NBELE2=2
+         IPT2.NUM(1,1)=NNOE1
+         IPT2.NUM(2,1)=NNOE1+1
+         IPT2.NUM(3,1)=NNOE1+3
+         IPT2.NUM(1,2)=NNOE1+1
+         IPT2.NUM(2,2)=NNOE1+2
+         IPT2.NUM(3,2)=NNOE1+3
+C        Liste des numeros des noeuds de la boite
+         NNBOIT=4
+         LNBOIT(1)=NNOE1
+         LNBOIT(2)=NNOE1+1
+         LNBOIT(3)=NNOE1+2
+         LNBOIT(4)=NNOE1+3
+C        Initialisation du segment ILEA1 contenant la table de
+C        connectivite des elements de IPT2
+         NBL1=NBELEM
+         SEGINI,ILEA1
+         ILEA1.LEAC(1,1,1)= 2
+         ILEA1.LEAC(1,1,2)= 2
+         ILEA1.LEAC(1,2,1)= 0
+         ILEA1.LEAC(1,2,2)= 0
+         ILEA1.LEAC(1,3,1)= 0
+         ILEA1.LEAC(1,3,2)= 0
+         ILEA1.LEAC(2,1,1)= 0
+         ILEA1.LEAC(2,1,2)= 0
+         ILEA1.LEAC(2,2,1)= 1
+         ILEA1.LEAC(2,2,2)= 1
+         ILEA1.LEAC(2,3,1)= 0
+         ILEA1.LEAC(2,3,2)= 0
+      ELSEIF (IDIM.EQ.3) THEN
+C        Creation des elements TET4 en definissant les noeuds
+         NBNN=4
+         NBELEM=IPT1.NUM(/2)*7
+         SEGINI,IPT2
+         IPT2.ITYPEL=23
+         NBELE2=5
+         IPT2.NUM(1,1)=NNOE1
+         IPT2.NUM(2,1)=NNOE1+1
+         IPT2.NUM(3,1)=NNOE1+3
+         IPT2.NUM(4,1)=NNOE1+4
+         IPT2.NUM(1,2)=NNOE1+1
+         IPT2.NUM(2,2)=NNOE1+2
+         IPT2.NUM(3,2)=NNOE1+3
+         IPT2.NUM(4,2)=NNOE1+6
+         IPT2.NUM(1,3)=NNOE1+1
+         IPT2.NUM(2,3)=NNOE1+4
+         IPT2.NUM(3,3)=NNOE1+5
+         IPT2.NUM(4,3)=NNOE1+6
+         IPT2.NUM(1,4)=NNOE1+3
+         IPT2.NUM(2,4)=NNOE1+4
+         IPT2.NUM(3,4)=NNOE1+6
+         IPT2.NUM(4,4)=NNOE1+7
+         IPT2.NUM(1,5)=NNOE1+1
+         IPT2.NUM(2,5)=NNOE1+3
+         IPT2.NUM(3,5)=NNOE1+4
+         IPT2.NUM(4,5)=NNOE1+6
+C        Liste des numeros des noeuds de la boite
+         NNBOIT=8
+         LNBOIT(1)=NNOE1
+         LNBOIT(2)=NNOE1+1
+         LNBOIT(3)=NNOE1+2
+         LNBOIT(4)=NNOE1+3
+         LNBOIT(5)=NNOE1+4
+         LNBOIT(6)=NNOE1+5
+         LNBOIT(7)=NNOE1+6
+         LNBOIT(8)=NNOE1+7
+C        Initialisation du segment ILEA1 contenant la table de
+C        connectivite des elements de IPT2
+         NBL1=NBELEM
+         SEGINI,ILEA1
+         ILEA1.LEAC(1,1,1)= 5
+         ILEA1.LEAC(1,1,2)= 4
+         ILEA1.LEAC(1,2,1)= 0
+         ILEA1.LEAC(1,2,2)= 0
+         ILEA1.LEAC(1,3,1)= 0
+         ILEA1.LEAC(1,3,2)= 0
+         ILEA1.LEAC(1,4,1)= 0
+         ILEA1.LEAC(1,4,2)= 0
+         ILEA1.LEAC(2,1,1)= 0
+         ILEA1.LEAC(2,1,2)= 0
+         ILEA1.LEAC(2,2,1)= 5
+         ILEA1.LEAC(2,2,2)= 3
+         ILEA1.LEAC(2,3,1)= 0
+         ILEA1.LEAC(2,3,2)= 0
+         ILEA1.LEAC(2,4,1)= 0
+         ILEA1.LEAC(2,4,2)= 0
+         ILEA1.LEAC(3,1,1)= 0
+         ILEA1.LEAC(3,1,2)= 0
+         ILEA1.LEAC(3,2,1)= 0
+         ILEA1.LEAC(3,2,2)= 0
+         ILEA1.LEAC(3,3,1)= 5
+         ILEA1.LEAC(3,3,2)= 2
+         ILEA1.LEAC(3,4,1)= 0
+         ILEA1.LEAC(3,4,2)= 0
+         ILEA1.LEAC(4,1,1)= 0
+         ILEA1.LEAC(4,1,2)= 0
+         ILEA1.LEAC(4,2,1)= 0
+         ILEA1.LEAC(4,2,2)= 0
+         ILEA1.LEAC(4,3,1)= 0
+         ILEA1.LEAC(4,3,2)= 0
+         ILEA1.LEAC(4,4,1)= 5
+         ILEA1.LEAC(4,4,2)= 1
+         ILEA1.LEAC(5,1,1)= 4
+         ILEA1.LEAC(5,1,2)= 4
+         ILEA1.LEAC(5,2,1)= 3
+         ILEA1.LEAC(5,2,2)= 3
+         ILEA1.LEAC(5,3,1)= 2
+         ILEA1.LEAC(5,3,2)= 2
+         ILEA1.LEAC(5,4,1)= 1
+         ILEA1.LEAC(5,4,2)= 1
+      ENDIF
+C
+C---- 1.3 Initialisation du segment contenant les rayons et centres
+C         de la triangulation :
+      IF (IDIM.NE.1) THEN
+         NBE1=IPT2.NUM(/2)
+         SEGINI,ITRC1
+         NBNER  = LNBOIT(NNBOIT)
+         SEGINI,IRN1
+C
+         if (MPOVAL .ne. 0) then
+            DO I=1,IPT1.NUM(/2)
+               IRN1.RAYN(IPT1.NUM(1,I))= MPOVAL.VPOCHA(I,1)
+            END DO
+         endif
+C
+         DO I0=1,NBELE2
+C           BCIRCO renvoie le centre et le rayon de l element considere
+C
+            CALL BCIRCO(IRN1,IPT2,I0,XCBJ,XRBJ)
+C
+            ITRC1.TRC(I0,1)=XRBJ
+            DO J0=1,IDIM
+               ITRC1.TRC(I0,J0+1)=XCBJ(J0)
+            ENDDO
+         ENDDO
+      ENDIF
+C
+C
+C
+C
+C----------------------------------------------------------------------C
+C                               PARTIE 2                               C
+C                      Triangulation incrementale                      C
+C----------------------------------------------------------------------C
+C
+      JG=1
+      SEGINI,LSUP
+C     On boucle sur tous les points a trianguler
+      NBSOUS=0
+      NBREF=0
+      NBNN=IPT2.NUM(/1)
+      DO I=1,IPT1.NUM(/2)
+C         WRITE(6,*)
+C         WRITE(6,*) 'Iteration I=',I,' /',IPT1.NUM(/2)
+C
+C------- 2.1 Construction de la base
+C
+C        Je tire un point a ajouter a la triangulation
+         NPI1=IPT1.NUM(1,I)
+C        XPI1 : vecteur contenant les coordonnees du point
+         DO J=1,IDIM
+            XPI1(J)=XCOOR((NPI1-1)*IDIMP1+J)
+         ENDDO
+C
+C        2.1.1 Recherche d'un element de la base (NBASE1)
+C        Je demarre avec le dernier elem. de IPT2 (NEL0) et cherche si
+C        NPI1 est dedans. Si oui, c'est gagne, sinon :
+C        je determine le voisin de NEL0 oriente vers NPI1
+C        => nouveau NEL0, puis je recommence jusqu'a y arriver
+         NEL0=NBELE2
+         NBASE=1
+C        Cas particulier de la dimension 1
+         IF (IDIM.EQ.1) THEN
+            DO J=1,NBELE2
+C              Coordonnees des noeuds A et B de l'element NEL0
+C              A est a gauche et B est a droite
+               NREFA=IPT2.NUM(1,NEL0)
+               NREFB=IPT2.NUM(2,NEL0)
+               XA=XCOOR((NREFA-1)*IDIMP1+1)
+               XB=XCOOR((NREFB-1)*IDIMP1+1)
+C              Cas ou NPI1 est confondu avec A ou B
+               X1=ABS(XPI1(1))
+               IF (X1.LT.ZERO) X1=1.
+               DTEST1=ABS(XPI1(1)-XA)/X1
+               DTEST2=ABS(XPI1(1)-XB)/X1
+               IF ((DTEST1.LT.ZERO).OR.(DTEST2.LT.ZERO)) THEN
+                  NBNN=IPT2.NUM(/1)
+                  NBELEM=NBELE2
+                  NBSOUS=0
+                  NBREF=0
+                  SEGADJ,IPT2
+C                 Erreur de triangulation : vérifiez qu'il n'y a pas de
+C                 points confondus
+                  CALL ERREUR(846)
+                  GOTO 2501
+C              Cas ou le NPT1 est entre A et B, on a trouve la base
+               ELSEIF ((XPI1(1).GT.XA).AND.(XPI1(1).LT.XB)) THEN
+                  NBASE1=NEL0
+                  GOTO 2381
+C              Si NPI1 est a gauche de A, on va chercher le voisin
+               ELSEIF (XPI1(1).LT.XA) THEN
+                  NEL0=ILEA1.LEAC(NEL0,2,1)
+C              Si NPI1 est a droite de B, on va chercher le voisin
+               ELSEIF (XPI1(1).GT.XB) THEN
+                  NEL0=ILEA1.LEAC(NEL0,1,1)
+               ENDIF
+            ENDDO
+C           Si l'on passe ici, c'est que l'on a pas trouve NBASE1 !
+            NBNN=IPT2.NUM(/1)
+            NBELEM=NBELE2
+            NBSOUS=0
+            NBREF=0
+            SEGADJ,IPT2
+C           Erreur de triangulation : vérifiez qu'il n'y a pas de
+C           points confondus
+            CALL ERREUR(846)
+            GOTO 2501
+         ENDIF
+C        Cas generaux en dimension 2 et 3
+         JG=1
+         SEGINI,LSCP
+         NEL00=NEL0
+         NEL000=NEL0
+         DO J=1,NBELE2
+            NCP=0
+C           Coordonnees des noeuds de l'element NEL0
+            DO K=1,IDIMP1
+               NREF0=IPT2.NUM(K,NEL0)
+               DO KK=1,IDIM
+                  X0(K,KK)=XCOOR((NREF0-1)*IDIMP1+KK)
+               ENDDO
+            ENDDO
+C           Coordonnees du barycentre G de NEL0
+            DO KK=1,IDIM
+               XSOM=0.
+               DO K=1,IDIMP1
+                  XSOM=XSOM+X0(K,KK)
+               ENDDO
+               XG0(KK)=XSOM/(IDIMP1)
+            ENDDO
+            IK1=0
+            IK2=0
+            IK3=0
+C           En dimension 2
+            IF (IDIM.EQ.2) THEN
+C              On effectue le meme test sur chaque cote
+               DO K=1,3
+                  IF (K.EQ.1) THEN
+                     NA=2
+                     NB=3
+                  ELSEIF (K.EQ.2) THEN
+                     NA=1
+                     NB=3
+                  ELSEIF (K.EQ.3) THEN
+                     NA=1
+                     NB=2
+                  ENDIF
+C                 Normale au cote AB du triangle
+                  XN=X0(NA,2)-X0(NB,2)
+                  YN=X0(NB,1)-X0(NA,1)
+                  XXN=SQRT((XN**2)+(YN**2))
+                  XN=XN/XXN
+                  YN=YN/XXN
+C                 On teste si NPI1 est du meme cote que G par rapport a
+C                 la droite (AB)
+                  PS1=(XN*(XPI1(1)-X0(NA,1)))+(YN*(XPI1(2)-X0(NA,2)))
+                  XX0=SQRT(((XPI1(1)-X0(NA,1))**2)+
+     &                 ((XPI1(2)-X0(NA,2))**2))
+                  PS11=PS1/XX0
+                  IF (ABS(PS11).LT.ZERO) THEN
+                     NSCP=K
+                     NCP=1
+                     NBASE=2
+                     GOTO 2111
+                  ENDIF
+                  PS2=(XN*(XG0(1)-X0(NA,1)))+(YN*(XG0(2)-X0(NA,2)))
+                  IF ((SIGN(1D0,PS1)).EQ.(SIGN(1D0,PS2))) THEN
+                     GOTO 2111
+                  ELSE
+                     NADJ0=K
+                     GOTO 2112
+                  ENDIF
+2111              CONTINUE
+                  IF (K.EQ.1) IK1=1
+                  IF (K.EQ.2) IK2=1
+                  IF (K.EQ.3) IK3=1
+               ENDDO
+               IF ((IK1.EQ.1).AND.(IK2.EQ.1).AND.(IK3.EQ.1)) THEN
+C                 NPI1 est dans NEL0, on a trouve un element de la base
+                  NBASE1=NEL0
+                  GOTO 2115
+               ENDIF
+2112           CONTINUE
+C              NPI1 et G ne sont pas du meme cote par rapport au cote
+C              vu par le noeud NADJ0 de NEL0 => on passe a l'element
+C              voisin NEL1
+               IF (J.GE.3) NEL000=NEL00
+               IF (J.GE.2) NEL00=NEL0
+               NEL0=ILEA1.LEAC(NEL0,NADJ0,1)
+               IF (NEL0.EQ.NEL00) THEN
+C                 PRINT*,'Erreur dans la table des elements adjacents'
+C                 PRINT*,'L''element',NEL0,'est voisin de lui meme !'
+                  CALL ERREUR(846)
+                  GOTO 2501
+               ENDIF
+               IF (NEL0.EQ.NEL000) THEN
+C                 PRINT*,'Erreur dans la construction du maillage'
+C                 PRINT*,'Les elements',NEL0,NEL00,'se chevauchent !'
+                  CALL ERREUR(846)
+                  GOTO 2501
+               ENDIF
+            ENDIF
+C           En dimension 3
+            IF (IDIM.EQ.3) THEN
+               IK4=0
+C              On effectue le test sur chaque face
+               DO K=1,4
+                  IF (K.EQ.1) THEN
+                     NA=2
+                     NB=3
+                     NC=4
+                  ELSEIF (K.EQ.2) THEN
+                     NA=1
+                     NB=3
+                     NC=4
+                  ELSEIF (K.EQ.3) THEN
+                     NA=1
+                     NB=2
+                     NC=4
+                  ELSEIF (K.EQ.4) THEN
+                     NA=1
+                     NB=2
+                     NC=3
+                  ENDIF
+C                 Normale au plan ABC du triangle (n = AB^AC)
+                  XN=((X0(NB,2)-X0(NA,2))*(X0(NC,3)-X0(NA,3))) -
+     &               ((X0(NB,3)-X0(NA,3))*(X0(NC,2)-X0(NA,2)))
+                  YN=((X0(NB,3)-X0(NA,3))*(X0(NC,1)-X0(NA,1))) -
+     &               ((X0(NB,1)-X0(NA,1))*(X0(NC,3)-X0(NA,3)))
+                  ZN=((X0(NB,1)-X0(NA,1))*(X0(NC,2)-X0(NA,2))) -
+     &               ((X0(NB,2)-X0(NA,2))*(X0(NC,1)-X0(NA,1)))
+                  XXN=SQRT((XN**2)+(YN**2)+(ZN**2))
+                  XN=XN/XXN
+                  YN=YN/XXN
+                  ZN=ZN/XXN
+C                 On teste si NPI1 est du meme cote que G par rapport au
+C                 plan ABC
+                  PS1=(XN*(XPI1(1)-X0(NA,1))) +
+     &                (YN*(XPI1(2)-X0(NA,2))) +
+     &                (ZN*(XPI1(3)-X0(NA,3)))
+                  XX0=SQRT(((XPI1(1)-X0(NA,1))**2) +
+     &                     ((XPI1(2)-X0(NA,2))**2)+
+     &                     ((XPI1(3)-X0(NA,3))**2))
+                  PS11=PS1/XX0
+                  IF (ABS(PS11).LT.ZERO) THEN
+                     NCP=NCP+1
+                     JG=NCP
+                     SEGADJ,LSCP
+                     LSCP.LECT(NCP)=K
+                     GOTO 2113
+                  ENDIF
+                  PS2=(XN*(XG0(1)-X0(NA,1))) +
+     &                (YN*(XG0(2)-X0(NA,2))) +
+     &                (ZN*(XG0(3)-X0(NA,3)))
+                  IF ((SIGN(1D0,PS1)).EQ.(SIGN(1D0,PS2))) THEN
+                     GOTO 2113
+                  ELSE
+                     GOTO 2114
+                  ENDIF
+2113              CONTINUE
+                  IF (K.EQ.1) IK1=1
+                  IF (K.EQ.2) IK2=1
+                  IF (K.EQ.3) IK3=1
+                  IF (K.EQ.4) IK4=1
+               ENDDO
+               IF ((IK1.EQ.1).AND.(IK2.EQ.1).AND.
+     &             (IK3.EQ.1).AND.(IK4.EQ.1)) THEN
+C                 NPI1 est bien dans NEL0, on a donc trouve la base
+                  NBASE1=NEL0
+                  GOTO 2115
+               ENDIF
+2114           CONTINUE
+C              NPI1 et G ne sont pas du meme cote par rapport au plan
+C              vu par le noeud NADJ0 de NEL0 => on passe a l'element
+C              adjacent a NEL0 vu par le noeud K
+               IF (J.GE.3) NEL000=NEL00
+               IF (J.GE.2) NEL00=NEL0
+               NEL0=ILEA1.LEAC(NEL0,K,1)
+               IF (NEL0.EQ.NEL00) THEN
+C                 PRINT*,'Erreur dans la table des elements adjacents'
+C                 PRINT*,'L''element',NEL0,'est voisin de lui meme !'
+                  CALL ERREUR(846)
+                  GOTO 2501
+               ENDIF
+               IF (NEL0.EQ.NEL000) THEN
+C                 PRINT*,'Erreur dans la construction du maillage'
+C                 PRINT*,'Les elements',NEL0,NEL00,'se chevauchent !'
+                  CALL ERREUR(846)
+                  GOTO 2501
+               ENDIF
+            ENDIF
+         ENDDO
+C        Si l'on passe ici, c'est que l'on a pas trouve NBASE1 !
+         NBNN=IPT2.NUM(/1)
+         NBELEM=NBELE2
+         NBSOUS=0
+         NBREF=0
+         SEGADJ,IPT2
+C        Erreur de triangulation : vérifiez qu'il n'y a pas de points
+C        confondus
+         CALL ERREUR(846)
+         GOTO 2501
+2115     CONTINUE
+C        Test si NPI1 n'est pas confondu avec un des noeuds de NBASE1
+         DO J=1,IDIMP1
+            NREFJ=IPT2.NUM(J,NBASE1)
+            NC=0
+            DO JJ=1,IDIM
+               X1=ABS(XPI1(JJ))
+               IF (X1.LT.ZERO) X1=1.
+               DTEST=ABS(XPI1(JJ)-XCOOR((NREFJ-1)*IDIMP1+JJ))/X1
+               IF (DTEST.LT.ZERO) NC=NC+1
+            ENDDO
+            IF (NC.EQ.IDIM) THEN
+               NBNN=IPT2.NUM(/1)
+               NBELEM=NBELE2
+               NBSOUS=0
+               NBREF=0
+               SEGADJ,IPT2
+C              Erreur de triangulation : vérifiez qu'il n'y a pas de
+C              points confondus
+               CALL ERREUR(846)
+               GOTO 2501
+            ENDIF
+         ENDDO
+C
+C        2.1.2 Ajout eventuel d'autres elements a la base
+C        LBASE : liste des numeros des elements de IPT2 appartenant a
+C                la base, taille initialisee a NBASE
+         JG=NBASE
+         SEGINI,LBASE
+         LBASE.LECT(1)=NBASE1
+C        Ajout des elments supplementaires a LBASE si necessaire
+         IF (NCP.NE.0) THEN
+C           En dimension 2, un seul adjacent est ajoute a LBASE, celui
+C           partageant le cote
+            IF (IDIM.EQ.2) THEN
+               LBASE.LECT(2)=ILEA1.LEAC(NBASE1,NSCP,1)
+C           En dimension 3 plusieurs cas sont possibles
+            ELSEIF (IDIM.EQ.3) THEN
+C              Cas ou NPI1 est sur un des 4 plans
+               IF (NCP.EQ.1) THEN
+C                 On recupere l'adjacent partageant le plan
+                  NBASE=2
+                  JG=NBASE
+                  SEGADJ,LBASE
+                  LBASE.LECT(2)=ILEA1.LEAC(NBASE1,LSCP.LECT(1),1)
+C              Cas ou NPI1 est sur une des aretes
+               ELSEIF (NCP.EQ.2) THEN
+C                 On recupere tous les elements partageant l'arete
+                  NA=1
+                  NB=2
+                  NC=LSCP.LECT(1)
+                  ND=LSCP.LECT(2)
+                  NREFC=IPT2.NUM(NC,NBASE1)
+                  NREFD=IPT2.NUM(ND,NBASE1)
+                  DO L=1,4
+                     IF ((NA.EQ.NC).OR.(NA.EQ.ND).OR.(NA.EQ.NB)) NA=NA+1
+                     IF ((NB.EQ.NC).OR.(NB.EQ.ND).OR.(NB.EQ.NA)) NB=NB+1
+                  ENDDO
+                  NREFA=IPT2.NUM(NA,NBASE1)
+                  NREFB=IPT2.NUM(NB,NBASE1)
+                  N1=NBASE1
+                  DO L=1,100
+                     N2=ILEA1.LEAC(N1,NC,1)
+                     ND=ILEA1.LEAC(N1,NC,2)
+                     IF (N2.EQ.NBASE1) GOTO 2121
+                     NBASE=NBASE+1
+                     JG=NBASE
+                     SEGADJ,LBASE
+                     LBASE.LECT(NBASE)=N2
+                     DO M=1,4
+                        IF (IPT2.NUM(M,N2).EQ.NREFA) NA=M
+                        IF (IPT2.NUM(M,N2).EQ.NREFB) NB=M
+                        IF (IPT2.NUM(M,N2).EQ.NREFD) NC=M
+                     ENDDO
+                     NREFD=IPT2.NUM(ND,N2)
+                     N1=N2
+                  ENDDO
+2121              CONTINUE
+C              Cas ou NPI1 est confondu avec un des sommets
+               ELSEIF (NCP.EQ.3) THEN
+                  NBNN=IPT2.NUM(/1)
+                  NBELEM=NBELE2
+                  NBSOUS=0
+                  NBREF=0
+                  SEGADJ,IPT2
+C                 Erreur de triangulation : vérifiez qu'il n'y a pas de
+C                 points confondus
+                  CALL ERREUR(846)
+                  GOTO 2501
+               ENDIF
+            ENDIF
+         ENDIF
+C
+C------- 2.2 Construction de la cavite
+C
+C        2.2.1 Construction de la cavite (MELEME IPT3)
+C        par adjacence a partir de l'element NBASE1 de la base
+C
+C        LCAVI : liste des numeros des elements de IPT2 appartenant a
+C                la cavite, taille initialisee a NBELE2
+         JG=NBELE2
+         SEGINI,LCAVI
+C        Le premier element de la cavite est NBASE1
+         LCAVI.LECT(1)=NBASE1
+C        NCAVI : nombre d'elements dans la cavite (toujours a jour !)
+         NCAVI=1
+C        Initialisation de la cavite IPT3 a NBELE2
+         NBELEM=NBELE2
+         NBNN=IPT2.NUM(/1)
+         SEGINI,IPT3
+         IPT3.ITYPEL=IPT2.ITYPEL
+         DO K=1,IPT3.NUM(/1)
+            IPT3.NUM(K,NCAVI)=IPT2.NUM(K,NBASE1)
+         ENDDO
+C        Parcours des adjacents de maniere recursive jusqu'a stabilite
+         ITRA=1
+         DO J=1,NBELE2
+C           Element a traiter de la liste LCAVI
+            NEJ=LCAVI.LECT(ITRA)
+            IF ((NEJ.EQ.0).OR.(J.EQ.NBELE2)) GOTO 2213
+C           On prend les elements adjacents de NEJ
+            DO K=1,IDIMP1
+               NEAJ=ILEA1.LEAC(NEJ,K,1)
+C              On verifie qu'il y a bien un element adjacent
+               IF (NEAJ.EQ.0) GOTO 2212
+C              On verifie que NEAJ n'est pas deja dans LCAVI
+               DO L=1,LCAVI.LECT(/1)
+                  IF (LCAVI.LECT(L).EQ.0) GOTO 2211
+                  IF (LCAVI.LECT(L).EQ.NEAJ) GOTO 2212
+               ENDDO
+2211           CONTINUE
+C              XRBJ    : rayon de la boule circonscrite a l'elem. NEAJ
+C              XCBJ(i) : ieme coordonnee de son centre
+               XRBJ=ITRC1.TRC(NEAJ,1)
+               DO L=1,IDIM
+                  XCBJ(L)=ITRC1.TRC(NEAJ,L+1)
+               ENDDO
+C              DIJ1 : distance de NPI1 au centre de la boule de
+C                     l'element considere
+               DIJ1=0.
+               DO L=1,IDIM
+                  DIJ1=DIJ1+((XPI1(L)-XCBJ(L))**2)
+               ENDDO
+C
+               IF (MPOVAL .NE. 0)
+     &         DIJ1 = DIJ1 - ((IRN1.RAYN(IPT1.NUM(1,I)))**2)
+C
+               DIJ1=(DIJ1/(XRBJ**2))-1.
+C              Si NEAJ est un nouvel element de la cavite,
+               IF (DIJ1.LT.ZERO) THEN
+C                 alors on l'ajoute a LCAVI et on incremente NCAVI
+                  NCAVI=NCAVI+1
+                  LCAVI.LECT(NCAVI)=NEAJ
+C                 et on remplis IPT3 avec ce nouvel element
+                  DO L=1,IPT3.NUM(/1)
+                     IPT3.NUM(L,NCAVI)=IPT2.NUM(L,NEAJ)
+                  ENDDO
+               ENDIF
+2212           CONTINUE
+            ENDDO
+            ITRA=ITRA+1
+         ENDDO
+2213     CONTINUE
+C        Ajustement de LCAVI et IPT3 a la bonne taille si besoin
+         IF (LCAVI.LECT(/1).GT.NCAVI) THEN
+            JG=NCAVI
+            SEGADJ,LCAVI
+            NBNN=IPT3.NUM(/1)
+            NBELEM=NCAVI
+            SEGADJ,IPT3
+         ENDIF
+         NBELE3=IPT3.NUM(/2)
+C
+C        2.2.2 Verification : la cavite doit etre connexe, chaque
+C        element doit avoir au moins un element adjacent, c'est a dire
+C        partageant un cote/face. De plus, un cote/face ne peut etre
+C        commun qu'a deux elements au plus.
+C        On determine egalement le contour/enveloppe, IPT4, de la cavite
+         NNBELE2=NBELE2
+2221     CONTINUE
+         NBELE2=NNBELE2
+         NNCON=0
+         JG=IDIM
+         SEGINI,LREF1
+         NBNN=IPT3.NUM(/1)-1
+         NBELEM=NBELE3*3
+         SEGINI,IPT4
+         IF (IDIM.EQ.2) IPT4.ITYPEL=2
+         IF (IDIM.EQ.3) IPT4.ITYPEL=4
+         NBELE4=0
+C        On parcoure les elements de la cavite
+         DO I1=1,IPT3.NUM(/2)
+C           Nombre d'adjacents a l'element I1
+C           un element est adjacent s'il partage un cote/face
+            NVI1=0
+C           On parcoure les 3/4 cotes/faces de l'element I1
+            DO I2=1,IPT3.NUM(/1)
+C              Nombre d'adjacents a la face I2 (1 ou 0)
+               NVI2=0
+               IF (IDIM.EQ.2) THEN
+                  IF (I2.EQ.1) THEN
+                     LREF1.LECT(1)=IPT3.NUM(2,I1)
+                     LREF1.LECT(2)=IPT3.NUM(3,I1)
+                  ELSEIF (I2.EQ.2) THEN
+                     LREF1.LECT(1)=IPT3.NUM(1,I1)
+                     LREF1.LECT(2)=IPT3.NUM(3,I1)
+                  ELSEIF (I2.EQ.3) THEN
+                     LREF1.LECT(1)=IPT3.NUM(1,I1)
+                     LREF1.LECT(2)=IPT3.NUM(2,I1)
+                  ENDIF
+               ELSEIF (IDIM.EQ.3) THEN
+                  IF (I2.EQ.1) THEN
+                     LREF1.LECT(1)=IPT3.NUM(2,I1)
+                     LREF1.LECT(2)=IPT3.NUM(3,I1)
+                     LREF1.LECT(3)=IPT3.NUM(4,I1)
+                  ELSEIF (I2.EQ.2) THEN
+                     LREF1.LECT(1)=IPT3.NUM(1,I1)
+                     LREF1.LECT(2)=IPT3.NUM(3,I1)
+                     LREF1.LECT(3)=IPT3.NUM(4,I1)
+                  ELSEIF (I2.EQ.3) THEN
+                     LREF1.LECT(1)=IPT3.NUM(1,I1)
+                     LREF1.LECT(2)=IPT3.NUM(2,I1)
+                     LREF1.LECT(3)=IPT3.NUM(4,I1)
+                  ELSEIF (I2.EQ.4) THEN
+                     LREF1.LECT(1)=IPT3.NUM(1,I1)
+                     LREF1.LECT(2)=IPT3.NUM(2,I1)
+                     LREF1.LECT(3)=IPT3.NUM(3,I1)
+                  ENDIF
+               ENDIF
+               DO I11=1,IPT3.NUM(/2)
+                  NNCI11=0
+                  IF (I11.EQ.I1) GOTO 2222
+                  DO I22=1,IPT3.NUM(/1)
+                     NREFX=IPT3.NUM(I22,I11)
+                     DO K=1,IDIM
+                        IF (NREFX.EQ.LREF1.LECT(K)) THEN
+                           NNCI11=NNCI11+1
+                        ENDIF
+                     ENDDO
+                  ENDDO
+                  IF (NNCI11.EQ.IDIM) THEN
+                     NVI2=NVI2+1
+                     NVI1=NVI1+1
+                  ENDIF
+2222              CONTINUE
+               ENDDO
+C              Cas ou I1 a plus de 1 voisin sur la face I2
+               IF (NVI2.GT.1) THEN
+                  NBNN=IPT2.NUM(/1)
+                  NBELEM=NBELE2
+                  NBSOUS=0
+                  NBREF=0
+                  SEGADJ,IPT2
+C                 Erreur de triangulation : vérifiez qu'il n'y a pas de
+C                 points confondus
+                  CALL ERREUR(846)
+                  GOTO 2501
+               ENDIF
+C              Si la face I2 n'est que sur l'element I1, alors on
+C              l'ajoute au maillage du contour/enceloppe de la cavite
+               IF (NVI2.EQ.0) THEN
+                  NBELE4=NBELE4+1
+                  IF (IPT4.NUM(/2).LT.NBELE4) THEN
+                     NBNN=IPT4.NUM(/1)
+                     NBELEM=IPT4.NUM(/2)+100
+                     SEGADJ,IPT4
+                  ENDIF
+                  DO K=1,IPT4.NUM(/1)
+                     IF (IDIM.EQ.2) THEN
+                        IF (I2.EQ.1) THEN
+                           IPT4.NUM(1,NBELE4)=IPT3.NUM(2,I1)
+                           IPT4.NUM(2,NBELE4)=IPT3.NUM(3,I1)
+                        ELSEIF (I2.EQ.2) THEN
+                           IPT4.NUM(1,NBELE4)=IPT3.NUM(1,I1)
+                           IPT4.NUM(2,NBELE4)=IPT3.NUM(3,I1)
+                        ELSEIF (I2.EQ.3) THEN
+                           IPT4.NUM(1,NBELE4)=IPT3.NUM(1,I1)
+                           IPT4.NUM(2,NBELE4)=IPT3.NUM(2,I1)
+                        ENDIF
+                     ELSEIF (IDIM.EQ.3) THEN
+                        IF (I2.EQ.1) THEN
+                           IPT4.NUM(1,NBELE4)=IPT3.NUM(2,I1)
+                           IPT4.NUM(2,NBELE4)=IPT3.NUM(3,I1)
+                           IPT4.NUM(3,NBELE4)=IPT3.NUM(4,I1)
+                        ELSEIF (I2.EQ.2) THEN
+                           IPT4.NUM(1,NBELE4)=IPT3.NUM(1,I1)
+                           IPT4.NUM(2,NBELE4)=IPT3.NUM(3,I1)
+                           IPT4.NUM(3,NBELE4)=IPT3.NUM(4,I1)
+                        ELSEIF (I2.EQ.3) THEN
+                           IPT4.NUM(1,NBELE4)=IPT3.NUM(1,I1)
+                           IPT4.NUM(2,NBELE4)=IPT3.NUM(2,I1)
+                           IPT4.NUM(3,NBELE4)=IPT3.NUM(4,I1)
+                        ELSEIF (I2.EQ.4) THEN
+                           IPT4.NUM(1,NBELE4)=IPT3.NUM(1,I1)
+                           IPT4.NUM(2,NBELE4)=IPT3.NUM(2,I1)
+                           IPT4.NUM(3,NBELE4)=IPT3.NUM(3,I1)
+                        ENDIF
+                     ENDIF
+                  ENDDO
+               ENDIF
+            ENDDO
+C           Cas ou I1 n'a aucun voisin => cavite non connexe, on retire
+C           l'element de la cavite
+            IF (NVI1.EQ.0) THEN
+               IF (NBELE3.NE.1) THEN
+                  NNCON=1
+                  NESUP=LCAVI.LECT(I1)
+               ENDIF
+            ENDIF
+         ENDDO
+         NBNN=IPT4.NUM(/1)
+         NBELEM=NBELE4
+         SEGADJ,IPT4
+         IF (NNCON.EQ.1) GOTO 2341
+C
+C        2.2.3 Verification : la cavite et son contour/enveloppe doivent
+C        avoir le meme nombre de noeuds
+         CALL ECROBJ('MAILLAGE',IPT3)
+         IF (IERR.NE.0) RETURN
+         CALL NBNO
+         SEGACT,IPT3
+         CALL LIRENT(NBNO3,1,IRETOU)
+         CALL ECROBJ('MAILLAGE',IPT4)
+         IF (IERR.NE.0) RETURN
+         CALL NBNO
+         SEGACT,IPT4
+         CALL LIRENT(NBNO4,1,IRETOU)
+         IF (NBNO3.NE.NBNO4) THEN
+            NBNN=IPT2.NUM(/1)
+            NBELEM=NBELE2
+            NBSOUS=0
+            NBREF=0
+            SEGADJ,IPT2
+C           Erreur de triangulation : vérifiez qu'il n'y a pas de
+C           points confondus
+            CALL ERREUR(846)
+            GOTO 2501
+         ENDIF
+C
+C------- 2.3 Construction de la boule
+C
+C        2.3.1 Construction de la liste des elements de la boule LBOUL
+C        La boule est formee par les elements construits en joignant
+C        NPI1 aux elements du contour de la cavite.
+         NBOUL=NBELE4
+         JG=NBOUL
+         SEGINI,LBOUL
+C        Nouveau nombre d'elements de la triangulation
+         NEW2=NBELE2-NCAVI+NBOUL
+C        On regarde si le nombre d'elements dans la cavite est inferieur
+C        au nombre d'elements de son contour/enveloppe car il faudra un
+C        traitement special lors de la creation de la boule
+         N43=NBELE4-NBELE3
+C        Cas general ou l'on va ajouter de nouveaux elements a IPT2
+         IF (N43.GE.0) THEN
+            DO J=1,NBOUL
+C              Les premiers elements de LBOUL sont ceux de LCAVI
+               IF (J.LE.NCAVI) THEN
+                  LBOUL.LECT(J)=LCAVI.LECT(J)
+C              et je complete LBOUL avec les nouveaux numeros d'elements
+               ELSE
+                  LBOUL.LECT(J)=NBELE2+1
+                  NBELE2=NBELE2+1
+               ENDIF
+            ENDDO
+C           J'ajuste IPT2, ITRC1 et ILEA1 si besoin
+            IF (NEW2.GT.IPT2.NUM(/2)) THEN
+               NBNN=IPT2.NUM(/1)
+               NBELEM=NBELE2+ICMIN
+               SEGADJ,IPT2
+               NBE1=NBELEM
+               SEGADJ,ITRC1
+               NBL1=NBELEM
+               SEGADJ,ILEA1
+            ENDIF
+C        Cas particulier ou l'on va enlever des elements a IPT2
+         ELSE
+            NSUP=NCAVI-NBOUL
+            JG=NSUP
+            SEGINI,LSUP
+C           LBOUL est fait des NBOUL premiers elements de LCAVI
+            DO J=1,NCAVI
+               NELJ=LCAVI.LECT(J)
+               IF (J.LE.NBOUL) THEN
+                  LBOUL.LECT(J)=NELJ
+               ELSE
+                  LSUP.LECT(J-NBOUL)=NELJ
+C                 Mise a zero des numeros des noeuds de l'element NELJ
+                  DO K=1,IPT2.NUM(/1)
+                     IPT2.NUM(K,NELJ)=0
+                  ENDDO
+               ENDIF
+            ENDDO
+         ENDIF
+         NBELE2=NEW2
+C
+C        2.3.2 Je recherche les elements exterieurs a la cavite
+C        partageant une face de l'enveloppe IPT4, pour cela on regarde
+C        les elements de IPT3 et leurs adjacents grace a la table de
+C        connectivite
+         JG=NBELE4
+         SEGINI,LEADJ
+         SEGINI,LNVADJ
+         JG=IDIM
+         SEGINI,LREF1
+C        On parcoure les elements II de IPT4 du contour/enveloppe
+         DO II=1,NBELE4
+C           Numeros des noeuds JJ de l'element II
+            DO JJ=1,IDIM
+               LREF1.LECT(JJ)=IPT4.NUM(JJ,II)
+            ENDDO
+C           On parcoure les elements J de IPT3 de la cavite
+            DO J=1,NBELE3
+               NCOM=0
+               NSOM=0
+               DO K=1,IDIMP1
+                  NREFX=IPT3.NUM(K,J)
+C                 Test si le noeud K de l'element J est commun a II
+                  DO L=1,IDIM
+                     IF (NREFX.EQ.LREF1.LECT(L)) THEN
+                        NCOM=NCOM+1
+                        NSOM=NSOM+K
+                     ENDIF
+                  ENDDO
+C                 Si l'on a trouve l'element appuye sur la face II
+                  IF (NCOM.EQ.IDIM) THEN
+                     NELK2=LCAVI.LECT(J)
+                     GOTO 2321
+                  ENDIF
+               ENDDO
+            ENDDO
+2321        CONTINUE
+C           Determination du numero du noeud voyeur dans IPT2
+            IF (IDIM.EQ.2) NNOK2=6-NSOM
+            IF (IDIM.EQ.3) NNOK2=10-NSOM
+            LEADJ.LECT(II)=ILEA1.LEAC(NELK2,NNOK2,1)
+            LNVADJ.LECT(II)=ILEA1.LEAC(NELK2,NNOK2,2)
+         ENDDO
+C
+C        2.3.3 Verification : le contour/enveloppe de la cavite doit
+C        etre etoile par rapport au point NPI1
+         NESUP=0
+         IF (IDIM.EQ.3) THEN
+            DO J=1,NBELE4
+               NA=IPT4.NUM(1,J)
+               NB=IPT4.NUM(2,J)
+               NC=IPT4.NUM(3,J)
+               XA=XCOOR((NA-1)*(IDIM+1)+1)
+               YA=XCOOR((NA-1)*(IDIM+1)+2)
+               ZA=XCOOR((NA-1)*(IDIM+1)+3)
+               XB=XCOOR((NB-1)*(IDIM+1)+1)
+               YB=XCOOR((NB-1)*(IDIM+1)+2)
+               ZB=XCOOR((NB-1)*(IDIM+1)+3)
+               XC=XCOOR((NC-1)*(IDIM+1)+1)
+               YC=XCOOR((NC-1)*(IDIM+1)+2)
+               ZC=XCOOR((NC-1)*(IDIM+1)+3)
+C              Normale au plan ABC : n = AB^AC
+               XN=((YB-YA)*(ZC-ZA))-((ZB-ZA)*(YC-YA))
+               YN=((ZB-ZA)*(XC-XA))-((XB-XA)*(ZC-ZA))
+               ZN=((XB-XA)*(YC-YA))-((YB-YA)*(XC-XA))
+               XXN=SQRT((XN**2)+(YN**2)+(ZN**2))
+               XN=XN/XXN
+               YN=YN/XXN
+               ZN=ZN/XXN
+C              Test si NPI1 est dans le plan ABC
+               PS1=(XN*(XPI1(1)-XA))+(YN*(XPI1(2)-YA))+(ZN*(XPI1(3)-ZA))
+               XX0=SQRT(((XPI1(1)-XA)**2)+((XPI1(2)-YA)**2)+
+     &              ((XPI1(3)-ZA)**2))
+               PS11=PS1/XX0
+               IF (ABS(PS11).LT.ZERO) THEN
+                  NESUP=ILEA1.LEAC(LEADJ.LECT(J),LNVADJ.LECT(J),1)
+                  GOTO 2341
+               ENDIF
+C              Point D voyant la face ABC mais situe hors de la cavite
+               IF (LEADJ.LECT(J).EQ.0) GOTO 2331
+               ND=IPT2.NUM(LNVADJ.LECT(J),LEADJ.LECT(J))
+               XD=XCOOR((ND-1)*(IDIM+1)+1)
+               YD=XCOOR((ND-1)*(IDIM+1)+2)
+               ZD=XCOOR((ND-1)*(IDIM+1)+3)
+C              Test si NPI1 est du meme cote que D par rapport au plan
+C              ABC
+               PS2=(XN*(XD-XA)) + (YN*(YD-YA)) + (ZN*(ZD-ZA))
+               XX0=SQRT(((XD-XA)**2)+((YD-YA)**2)+((ZD-ZA)**2))
+               PS22=PS2/XXN
+               IF (ABS(PS22).LT.ZERO) PS2=0.
+               IF ((SIGN(1D0,PS1)).EQ.(SIGN(1D0,PS2))) THEN
+                  NESUP=ILEA1.LEAC(LEADJ.LECT(J),LNVADJ.LECT(J),1)
+                  GOTO 2341
+               ELSE
+                  GOTO 2331
+               ENDIF
+2331           CONTINUE
+            ENDDO
+         ENDIF
+C
+C        2.3.4 Suppression d'un element (NESUP) de la cavite
+2341     CONTINUE
+         IF (NESUP.NE.0) THEN
+C           Test si NESUP est dans la base, pas touche a la base !
+            DO K=1,NBASE
+               IF (LBASE.LECT(K).EQ.NESUP) THEN
+                  NBNN=IPT2.NUM(/1)
+                  NBELEM=NBELE2
+                  NBSOUS=0
+                  NBREF=0
+                  SEGADJ,IPT2
+C                 Erreur de triangulation : vérifiez qu'il n'y a pas de
+C                 points confondus
+                  CALL ERREUR(846)
+                  GOTO 2501
+               ENDIF
+            ENDDO
+            NBNN=IPT3.NUM(/1)
+            NBELEM=NBELE3-1
+            SEGINI,IPT5
+            IPT5.ITYPEL=IPT3.ITYPEL
+C           Suppression de l'element NESUP le la liste LCAVI
+            NS=0
+            IF (LCAVI.LECT(NCAVI).EQ.NESUP) THEN
+               NCAVI=NCAVI-1
+               NS=1
+               DO JJ=1,NCAVI
+                  DO KK=1,IPT3.NUM(/1)
+                     IPT5.NUM(KK,JJ)=IPT3.NUM(KK,JJ)
+                  ENDDO
+               ENDDO
+            ELSE
+               DO K=1,NCAVI-1
+                  IF (LCAVI.LECT(K).EQ.NESUP) THEN
+                     NS=NS+1
+                     NCAVI=NCAVI-1
+                  ENDIF
+                  LCAVI.LECT(K)=LCAVI.LECT(K+NS)
+                  DO KK=1,IPT3.NUM(/1)
+                     IPT5.NUM(KK,K)=IPT3.NUM(KK,K+NS)
+                  ENDDO
+               ENDDO
+            ENDIF
+C           Ajustement de la liste LCAVI
+            JG=NCAVI
+            SEGADJ,LCAVI
+            SEGSUP,IPT3
+            IPT3=IPT5
+            NBELE3=NCAVI
+C           On repart calculer le contour/enveloppe de la cavite
+            GOTO 2221
+         ENDIF
+C
+C        2.3.5 Je parcours les elements du contour/enveloppe pour
+C        construire le maillage de la boule
+         DO J=1,NBELE4
+            JEL=LBOUL.LECT(J)
+C           Attribution des premiers noeuds des nouveux elements
+C           de IPT2 : on choisi ceux du contour IPT4
+            DO K=1,IPT4.NUM(/1)
+               IPT2.NUM(K,JEL)=IPT4.NUM(K,J)
+            ENDDO
+C           Attribution du dernier noeud des nouveaux elements de IPT2 :
+C           il s'agit de NPI1 au entre de la cavite
+            IPT2.NUM(IDIMP1,JEL)=NPI1
+C           Mise a jour de la table de connectivite (partie 1 sur 2)
+C           uniquement sur les derniers noeuds (IDIMP1) des elements de
+C           la boule (adjacents extexrieurs a la boule).
+C           Pour cela, on utilise LEADJ et LNVADJ calcules juste avant
+            ILEA1.LEAC(JEL,IDIMP1,1)=LEADJ.LECT(J)
+            ILEA1.LEAC(JEL,IDIMP1,2)=LNVADJ.LECT(J)
+            IF (LEADJ.LECT(J).NE.0) THEN
+               ILEA1.LEAC(LEADJ.LECT(J),LNVADJ.LECT(J),1)=JEL
+               ILEA1.LEAC(LEADJ.LECT(J),LNVADJ.LECT(J),2)=IDIMP1
+            ENDIF
+C           et je rajoute au segment ITRC1 ce qu'il faut :
+C
+            CALL BCIRCO(IRN1,IPT2,JEL,XCBJ,XRBJ)
+C
+            ITRC1.TRC(JEL,1)=XRBJ
+            DO K=1,IDIM
+               ITRC1.TRC(JEL,K+1)=XCBJ(K)
+            ENDDO
+         ENDDO
+C
+C        2.3.6 Mise a jour de la table de connectivite (partie 2 sur 2)
+C        On parcoure les elements de la boule et on determine toutes les
+C        elements adjacents internes a la boule
+         JG=IDIM-1
+         SEGINI,LREF1
+         DO K=1,NBOUL
+            NELK=LBOUL.LECT(K)
+C           On recherche l'adjacent de NELK vu par le noeud M
+            DO M=1,IDIM
+C              Numeros des noeuds de l'element NELK a observer
+               IF (IDIM.EQ.2) THEN
+                  IF (M.EQ.1) THEN
+                     LREF1.LECT(1)=IPT2.NUM(2,NELK)
+                  ELSEIF (M.EQ.2) THEN
+                     LREF1.LECT(1)=IPT2.NUM(1,NELK)
+                  ENDIF
+               ENDIF
+               IF (IDIM.EQ.3) THEN
+                  IF (M.EQ.1) THEN
+                     LREF1.LECT(1)=IPT2.NUM(2,NELK)
+                     LREF1.LECT(2)=IPT2.NUM(3,NELK)
+                  ELSEIF (M.EQ.2) THEN
+                     LREF1.LECT(1)=IPT2.NUM(1,NELK)
+                     LREF1.LECT(2)=IPT2.NUM(3,NELK)
+                  ELSEIF (M.EQ.3) THEN
+                     LREF1.LECT(1)=IPT2.NUM(1,NELK)
+                     LREF1.LECT(2)=IPT2.NUM(2,NELK)
+                  ENDIF
+               ENDIF
+C              On parcoure les autres elements de la boule
+               NNOKK=0
+               DO KK=1,NBOUL
+                  NELKK=LBOUL.LECT(KK)
+                  IF (NELKK.EQ.NELK) GOTO 2361
+                  NCOM=1
+                  NSOMKK=IDIMP1
+C                 On parcoure les 2/3 premiers noeuds LL de NELKK
+                  DO LL=1,IDIM
+                     NREFX=IPT2.NUM(LL,NELKK)
+C                    Test si le noeud LL de NELKK est commun a NELK
+                     DO L=1,IDIM-1
+                        IF (NREFX.EQ.LREF1.LECT(L)) THEN
+                           NCOM=NCOM+1
+                           NSOMKK=NSOMKK+LL
+                        ENDIF
+                     ENDDO
+C                    Test si NELKK est bien un element adjacent a NELK
+                     IF (NCOM.EQ.IDIM) GOTO 2362
+                  ENDDO
+2361              CONTINUE
+               ENDDO
+2362           CONTINUE
+C              Determination du numero du noeud de voyeur de K dans IPT2
+               IF (IDIM.EQ.2) NNOKK=6-NSOMKK
+               IF (IDIM.EQ.3) NNOKK=10-NSOMKK
+               ILEA1.LEAC(NELK,M,1)=NELKK
+               ILEA1.LEAC(NELK,M,2)=NNOKK
+            ENDDO
+         ENDDO
+C
+C        2.3.7 Renumerotation et nettoyage des elements de IPT2 dans le
+C        cas particulier ou le nombre d'elements a diminue
+         IF (N43.LT.0) THEN
+            DO J=1,IPT2.NUM(/2)
+C              Determination du nombre d'elements a decaler
+               NDEC=0
+               DO K=1,NSUP
+C                 Si l'element examine n'est plus dans la triangulation
+C                 alors on ne fait rien
+                  IF (J.EQ.LSUP.LECT(K)) GOTO 2371
+                  IF (J.GE.LSUP.LECT(K)) NDEC=NDEC+1
+               ENDDO
+C              Nouveau numero que portera l'element J
+               JJ=J-NDEC
+C              Renumerotation dans IPT2
+               DO K=1,IPT2.NUM(/1)
+                  IPT2.NUM(K,JJ)=IPT2.NUM(K,J)
+               ENDDO
+C              Renumerotation dans ILEA1
+               DO K=1,IDIMP1
+                  IOLDVJK=ILEA1.LEAC(J,K,1)
+C                 Determination du nombre d'elements a decaler
+                  NDEC2=0
+                  DO KK=1,NSUP
+                     IF (IOLDVJK.EQ.LSUP.LECT(KK)) THEN
+                        NBNN=IPT2.NUM(/1)
+                        NBELEM=NBELE2
+                        NBSOUS=0
+                        NBREF=0
+                        SEGADJ,IPT2
+C                       Erreur de triangulation : vérifiez qu'il n'y a
+C                       pas de points confondus
+                        CALL ERREUR(846)
+                        GOTO 2501
+                     ENDIF
+                     IF (IOLDVJK.GE.LSUP.LECT(KK)) NDEC2=NDEC2+1
+                  ENDDO
+                  NEWVJK=IOLDVJK-NDEC2
+                  ILEA1.LEAC(JJ,K,1)=NEWVJK
+                  ILEA1.LEAC(JJ,K,2)=ILEA1.LEAC(J,K,2)
+               ENDDO
+C              Renumerotation dans ITCR1
+               ITRC1.TRC(JJ,1)=ITRC1.TRC(J,1)
+               DO K=1,IDIM
+                  ITRC1.TRC(JJ,K+1)=ITRC1.TRC(J,K+1)
+               ENDDO
+2371           CONTINUE
+            ENDDO
+            NBNN=IPT2.NUM(/1)
+            NBELEM=NBELE2
+            SEGADJ,IPT2
+            NBL1=NBELE2
+            SEGADJ,ILEA1
+            NBE1=NBELE2
+            SEGADJ,ITRC1
+         ENDIF
+         SEGSUP,IPT3,IPT4
+C
+C        2.3.8 Cas particulier de la dimension 1, on ajoute le point
+C        NPI1 au maillage
+2381     IF (IDIM.EQ.1) THEN
+C           Nouveau nombre d'element dans IPT2
+            NEW2=NBELE2+1
+C           J'ajuste IPT2, ITRC1 et ILEA1 si besoin
+            IF (NEW2.GT.IPT2.NUM(/2)) THEN
+               NBNN=IPT2.NUM(/1)
+               NBELEM=NBELE2+ICMIN
+               SEGADJ,IPT2
+               NBE1=NBELEM
+               SEGADJ,ITRC1
+               NBL1=NBELEM
+               SEGADJ,ILEA1
+            ENDIF
+            NBELE2=NEW2
+C           Modification de IPT2 pour ajouter un element
+            IPT2.NUM(1,NBASE1)=NREFA
+            IPT2.NUM(2,NBASE1)=NPI1
+            IPT2.NUM(1,NBELE2)=NPI1
+            IPT2.NUM(2,NBELE2)=NREFB
+C           Mise a jour de la table de connectivite ILEA1
+            NED=ILEA1.LEAC(NBASE1,1,1)
+            ILEA1.LEAC(NBASE1,1,1)=NBELE2
+            ILEA1.LEAC(NBASE1,1,2)=2
+            ILEA1.LEAC(NBELE2,2,1)=NBASE1
+            ILEA1.LEAC(NBELE2,2,2)=1
+            IF (NED.EQ.0) THEN
+               ILEA1.LEAC(NBELE2,1,1)=0
+               ILEA1.LEAC(NBELE2,1,2)=0
+            ELSE
+               ILEA1.LEAC(NBELE2,1,1)=NED
+               ILEA1.LEAC(NBELE2,1,2)=2
+               ILEA1.LEAC(NED,2,1)=NBELE2
+               ILEA1.LEAC(NED,2,2)=1
+            ENDIF
+         ENDIF
+      ENDDO
+C     Ajustement final de IPT2, ITRC1 et ILEA1
+      IF (IDIM.NE.1) THEN
+         NBNN=IPT2.NUM(/1)
+         NBELEM=NBELE2
+         SEGADJ,IPT2
+         NBE1=NBELE2
+         SEGADJ,ITRC1
+         NBL1=NBELE2
+         SEGADJ,ILEA1
+      ENDIF
+C
+C
+C------- 2.4 Retour du maillage dans le cas ou l'on garde la boite
+C     Si IBOI egal a 1, on renvoie IPT2 (maillage avec boite)
+2501  CONTINUE
+      IF (IERR.NE.0) GOTO 999
+      IF (IBOI.EQ.1) THEN
+         IF (IDIM.NE.1) THEN
+            SEGSUP,LBASE,LCAVI,LBOUL,LREF1,LEADJ,LNVADJ
+            SEGSUP,LSUP,LSCP
+            SEGDES,IPT2
+         ENDIF
+         GOTO 999
+      ENDIF
+C
+C
+C
+C----------------------------------------------------------------------C
+C                               PARTIE 3                               C
+C      Elimination des elements appuyes sur les coins de la boite      C
+C----------------------------------------------------------------------C
+C
+C------- 3.1 Suppression des elements touchant les noeuds de la boite
+C     Je parcours les noeuds de la boite en cherchant les elements du
+C     maillage IPT2 qui en contiennent. Ceux qui n'en contiennent pas
+C     sont recopies dans IPT3, qui sera le maillage de sortie :
+      NBSOUS=0
+      NBREF=0
+      NBNN=IPT2.NUM(/1)
+      NBELEM=NBELE2
+      SEGINI,IPT3
+      IPT3.ITYPEL=IPT2.ITYPEL
+      NBELE3=0
+      DO I=1,NBELE2
+         DO J=1,IPT2.NUM(/1)
+            NPI2=IPT2.NUM(J,I)
+            DO K=1,NNBOIT
+               IF (NPI2.EQ.LNBOIT(K)) GOTO 3101
+            ENDDO
+         ENDDO
+         NBELE3=NBELE3+1
+         DO J=1,IPT2.NUM(/1)
+            IPT3.NUM(J,NBELE3)=IPT2.NUM(J,I)
+         ENDDO
+3101     CONTINUE
+      ENDDO
+      NBNN=IPT3.NUM(/1)
+      NBELEM=NBELE3
+      SEGADJ,IPT3
+C
+C------- 3.2 Cas ou IPT3 ne contient pas d'elements.
+      IF (IPT3.NUM(/2).EQ.0) THEN
+C        En dimension 2, cela veut dire que les points de IPT1 sont
+C        alignes. On va alors rendre le maillage des lignes ne touchant
+C        pas les noeuds de la boite
+         IF (IDIM.EQ.2) GOTO 3203
+C        En dimension 3, cela veut dire que les points sont coplanaires.
+C        On refait la meme operation pour rendre le maillage faces ne
+C        touchant pas les noeuds de la boite
+         JG=IDIM
+         SEGINI,LREF1
+         JG=IPT2.NUM(/2)
+         SEGINI,LSUP
+         NBSOUS=0
+         NBREF=0
+         NBNN=IDIM
+         NBELEM=NBELE2
+         SEGINI,IPT3
+C        On va rendre un maillage de TRI3
+         IPT3.ITYPEL=4
+         NBELE3=0
+C        Boucle sur les elements de la triangulation avec la boite
+         DO I=1,NBELE2
+            NNS=0
+            NSOM=0
+            NEL=0
+C           On regarde si le noeud J de l'element I fait partie de ceux
+C           de la boite
+            DO J=1,IPT2.NUM(/1)
+               NPI2=IPT2.NUM(J,I)
+               DO K=1,NNBOIT
+                  IF (NPI2.EQ.LNBOIT(K)) THEN
+                     NNS=NNS+1
+                     NSOM=J
+                     NEL=ILEA1.LEAC(I,J,1)
+                  ENDIF
+               ENDDO
+            ENDDO
+C           Si l'element I n'a qu'un noeud faisant partie de ceux de la
+C           boite, alors on cree l'element appuyes sur ses autres noeuds
+            IF (NNS.EQ.1) THEN
+               DO K=1,LSUP.LECT(/1)
+                  IF (LSUP.LECT(K).EQ.0) GOTO 3201
+                  IF (I.EQ.LSUP.LECT(K)) THEN
+                     GOTO 3202
+                  ENDIF
+               ENDDO
+3201           CONTINUE
+               NBELE3=NBELE3+1
+               LSUP.LECT(NBELE3)=NEL
+               IF (NSOM.EQ.1) THEN
+                  LREF1.LECT(1)=2
+                  LREF1.LECT(2)=3
+                  LREF1.LECT(3)=4
+               ELSEIF (NSOM.EQ.2) THEN
+                  LREF1.LECT(1)=1
+                  LREF1.LECT(2)=3
+                  LREF1.LECT(3)=4
+               ELSEIF (NSOM.EQ.3) THEN
+                  LREF1.LECT(1)=1
+                  LREF1.LECT(2)=2
+                  LREF1.LECT(3)=4
+               ELSEIF (NSOM.EQ.4) THEN
+                  LREF1.LECT(1)=1
+                  LREF1.LECT(2)=2
+                  LREF1.LECT(3)=3
+               ENDIF
+               DO J=1,IPT3.NUM(/1)
+                  IPT3.NUM(J,NBELE3)=IPT2.NUM(LREF1.LECT(J),I)
+               ENDDO
+            ENDIF
+3202        CONTINUE
+         ENDDO
+         NBNN=IPT3.NUM(/1)
+         NBELEM=NBELE3
+         SEGADJ,IPT3
+      ENDIF
+C
+C     Cas ou les points de IPT1 sont alignes. On change le maillage en
+C     lignes et ne garde que les lignes ne touchant pas les noeuds de la
+C     boite
+3203  CONTINUE
+      IF (IPT3.NUM(/2).EQ.0) THEN
+         CALL ECROBJ('MAILLAGE',IPT2)
+         CALL CHANLG
+         CALL LIROBJ('MAILLAGE',IPT4,1,IRETOU)
+         IF (IERR.NE.0) RETURN
+         SEGACT,IPT4
+         NBELE4=IPT4.NUM(/2)
+         NBSOUS=0
+         NBREF=0
+         NBNN=IPT4.NUM(/1)
+         NBELEM=NBELE4
+         SEGINI,IPT3
+C        On va rendre un maillage de SEG2
+         IPT3.ITYPEL=IPT4.ITYPEL
+         NBELE3=0
+C        Boucle sur les lignes de la triangulation avec la boite
+         DO I=1,NBELE4
+            NNS=0
+C           On regarde si les noeuds l'element I font partie de ceux de
+C           la boite
+            DO J=1,IPT4.NUM(/1)
+               NPI4=IPT4.NUM(J,I)
+               DO K=1,NNBOIT
+                  IF (NPI4.EQ.LNBOIT(K)) THEN
+                     NNS=NNS+1
+                  ENDIF
+               ENDDO
+            ENDDO
+C           Si l'element I n'a aucun noeud faisant partie de ceux de la
+C           boite, alors on cree l'element appuyes sur ses noeuds
+            IF (NNS.EQ.0) THEN
+               NBELE3=NBELE3+1
+               IPT3.NUM(1,NBELE3)=IPT4.NUM(1,I)
+               IPT3.NUM(2,NBELE3)=IPT4.NUM(2,I)
+            ENDIF
+         ENDDO
+         NBNN=IPT3.NUM(/1)
+         NBELEM=NBELE3
+         SEGADJ,IPT3
+         SEGDES,IPT4
+      ENDIF
+C
+C     Un peu de menage avant de quitter
+      IF (IDIM.EQ.1) THEN
+         SEGSUP,LSUP
+         SEGDES,IPT2
+      ELSE
+         SEGDES,IPT3
+         SEGSUP,IPT2,LBASE,LCAVI,LBOUL,LREF1,LEADJ,LNVADJ
+         SEGSUP,LSUP,LSCP
+      ENDIF
+      IPT2=IPT3
+      NBPTS=NBPTS0
+      SEGADJ,MCOORD
+C
+999   RETURN
+      END
+
+
+
+
+
+
+
+
+

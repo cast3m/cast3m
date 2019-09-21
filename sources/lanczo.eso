@@ -1,0 +1,770 @@
+C LANCZO    SOURCE    PV        15/11/25    21:15:11     8707
+      SUBROUTINE LANCZO (IPRIGI,IPMASS,Nbmode,NMOD,nvecma,Nmodopt,
+     $    xktale,iflu,nbonve,iplval,iphi,IPERM,icycle,Northo)
+
+************************************************************************
+*
+*                             L A N C Z O
+*                             -----------
+*
+* FONCTION:
+* ---------
+*
+*     APPELE PAR LE SOUS-PROGRAMME "SIMUL1".
+*     DETERMINE D'UNE SUITE DE 'CHPOINTS' X K-ORTHOGONAUX
+*     PAR L'ALGORITHME DE LANCZOS
+*     ET RESOLUTION DU PROBLEME REDUIT TRIDIAGONAL ASSOCIE
+*
+* MODE D'APPEL:
+* -------------
+*
+*     CALL LANCZO (IPRIGI,IPMASS,Nbmode,NMOD,nvecma,Nmodopt,
+*     $    xktale,iflu,nbonve,iplval,iphi,IPERM,icycle,ortho)
+*
+* PARAMETRES :   (E)=ENTREE   (S)=SORTIE
+* -----------
+*
+*     IPRIGI  ENTIER    (E)  POINTEUR SUR LA MATRICE DE RIGIDITE K-W^2m
+*                            (OBJET 'RIGIDITE') EVENTUELLEMENT DECALEE.
+*     IPMASS  ENTIER    (E)  POINTEUR SUR LA MATRICE MASSE M
+*                            (OBJET 'RIGIDITE').
+*     Nbmode  ENTIER    (E)  NOMBRE DE MODES PROPRES DEMANDES PAR
+*                            L'UTILISATEUR.
+*     NMOD    ENTIER    (E)  NOMBRE DE MODES VISES POUR CE CYCLE
+*     nvecma  ENTIER    (E)  NOMBRE DE VECTEURS X MAXIMUM
+*     Nmodopt ENTIER  (E/S)  NOMBRE DE MODES OPTIMUM % tcpu
+*     xktale  REEL      (E)  temps pour decomposer la matrice K'=LDLT
+*                       (S)  temps passé dans Lanczos
+*     iflu    ENTIER    (E)  =1 si terme en PI (meca flu)
+*     nbonve  ENTIER    (S)  NOMBRE DE MODES ESTIMES CONVERGES
+*     iplval  ENTIER    (S)  POINTEUR VERS LES VALEURS PROPRES CONVERGEES
+*     iphi    ENTIER    (S)  POINTEUR VERS LES VECTEURS PROPRES CONVERGES
+*     IPERM   ENTIER    (S)  POINTEUR VERS LE TABLEAU DES PERMUTATIONS SI
+*                            LES MODES (iplval et iphi) SONT RANGES DANS
+*                            UN ORDRE DIFFERENT DE 1 2 3 ... nbonve
+*     icycle  ENTIER    (E)  NUMERO DU CYCLE EN COURS
+*     Northo  ENTIER    (E)  PAR RAPPORT A COMBIEN de MODES FAUT-IL
+*                            M-ORTHOGONALISER LES VECTEURS X^i
+*
+*
+* MODE DE FONCTIONNEMENT:
+* -----------------------
+*
+*  explications donnes dans le corps du programme
+*  pour + de detail, voir [BATHE] page 952 (ou autre ref.)
+*
+* DESCRIPTION DES VARIABLES : cf. commentaires au cours du programme
+* --------------------------
+*
+* CREATION, MODIFICATIONS :
+* ------------------------
+*
+* CREATION : PASCAL MANIGOT        22 AVRIL 1985
+* REFONTE  : THIERRY CHARRAS, BENOIT PRABEL 2010
+*
+* LANGAGE : ESOPE (FORTRAN77)
+*
+************************************************************************
+*
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCREEL
+-INC CCOPTIO
+-INC CCHAMP
+-INC SMLREEL
+-INC SMVECTD
+-INC SMLENTI
+-INC SMRIGID
+-INC SMCHPOI
+      pointeur mvect4.mvectd,mvect5.mvectd,mvect6.mvectd,mvect7.mvectd
+      pointeur mlent4.mlenti,mlent5.mlenti,mlent6.mlenti,mlent7.mlenti
+      pointeur mlen10.mlenti,mlre10.mlreel,mlen11.mlenti,mlre11.mlreel
+      segment idemen(0)
+*
+*     REGOUPEMENT DE RENSEIGNEMENTS POUR "LANCZO" et "SIMUL.":
+      COMMON/CLANCZ/ IPV1,IPMV1,IPLMOX,IPLMOY
+      COMMON/CSIMUL/ W2SHIF,XPREC21,mvecri,IPVECX,IPVECZ,IPMZ,IPFREZ
+*
+      REAL*8 W2SHIF,XPREC21,XORTHO,xKTKx2
+      PARAMETER (DEUXPI = (2.D0*XPI))
+*
+      LOGICAL CONV,ortho,quit1,PRESQ
+      POINTEUR IPLA.MLREEL,IPLB.MLREEL,iplc.mlreel
+      POINTEUR iplas.mlreel,iplbs.mlreel
+
+*
+* ----quelques initialisations -------
+*
+      xktlan = 0.D0
+      yktort = 0.D0
+*    -on teste l efficacite (temps CPU) toutes les itest iterations
+      itest = 20
+      itest0 = itest
+      Nvecopt = nvecma
+*
+*    -NOMBRV = nbre de vecteurs estimes necessaires pour le calcul des
+*     NMOD modes demandes
+      NOMBRV = (2*NMOD) + 8
+      NOMBRV = MIN(NOMBRV,nvecma)
+*     nvectm = borne sup de ce nombre
+      nvectm = 2*nombrv
+      nvectm = MIN(nvectm,nvecma)
+
+*    -on M-orthogonalise par % aux Northo modes les + proches
+c       Northo = min(NMOD,(nvecma/3))
+      ortho = (icycle.ne.1).and.(Northo.gt.0)
+
+*    -on va tester la convergence apres le calcul de NMBRV1 vecteurs
+*     (cette valeur est augmentée de 10% a chaque fois qu'on n'a pas convergée)
+      NMBRV1 = NOMBRV*0.8
+      NMBRV1 = min(NMBRV1,nvecma)
+      if (iimpi.ge.6) then
+       write(6,*) 'lanczo:'
+       write(6,*) ' nbre vect estimés necessaires',NOMBRV,' - ',nvectm
+       write(6,*) ' pour le calcul de ',NMOD,' modes'
+       write(6,*) ' on teste la convergence tous les ',NMBRV1,' itérés'
+       write(6,*) ' on  orthogonalise par % a ',Northo,' modes'
+      endif
+*    -nombre de vecteurs ayant convergés /max atteint
+      nbonve=0
+      nbonmax=0
+*    -detecte que la re-orthogonalisation a quasi-annulé le vecteur courant
+c       RLIM=1.D-3
+      RLIM=sqrt(XPREC21)
+      quit1 = .false.
+      iquit1=0
+c     on considere qu il faut reorthognaliser si le produit scalaire
+*     est > XORTHO (avec **1.6 XORTHO=3E-13 si xprec21=1.5E-8)
+c      XORTHO = 1.D-12
+c       XORTHO = XPREC21**1.5 ne suffit pas
+       XORTHO = XPREC21**1.6
+
+*    -initialisation de listentier vers chpoint/vecteur X et KX
+      jg = nombrv
+      segini mlent3,mlent4
+*    -initialisation de listreel alpha et beta et sign(xtKx)
+      segini ipla,iplb,iplc,iplas,iplbs
+      s1=1.d0
+      s0=1.d0
+
+*    -passage chpoint->vecteur: y^0 = IPV1 -> ivev1 , r^1 = M*y^0 = IPMV1 -> ivemv1
+      mrigid=iprigi
+      segact,mrigid
+      icholi=ichole
+      mvecri=ivecri
+      segdes mrigid
+      call chv3(icholi,IPV1,ivev1,1)
+      mvect1=ivev1
+      segact mvect1*mod
+      inc = mvect1.vectbb(/1)
+
+
+*    -eventuellement, initialisation du vecteur de départ y^0
+*     dans un s.e. M-orthogonal aux modes deja convergés
+      if (ortho) then
+*      -recup
+        mlent6 = IPVECZ
+        mlent7 = IPMZ
+        mlree1 = IPFREZ
+c         write(6,*) 'IPFREZ,IPMZ,IPVECZ=',IPFREZ,IPMZ,IPVECZ
+        if (mlree1.gt.0)  then
+*      -on cherche les modes deja convergés les + proches du shift actuel
+          FRSHIF = (sqrt(W2SHIF)) / DEUXPI
+          segact,mlree1
+          JG1=mlree1.prog(/1)
+          Northo=min(Northo,JG1)
+          JGsave=JG
+          JG=JG1
+          segini,mlen10,mlen11
+          segini,mlre10,mlre11
+          JG=JGsave
+          do j1=1,JG1
+            mlen10.lect(j1)=j1
+            FRj1 = mlree1.prog(j1)
+            mlre10.prog(j1)=abs(FRSHIF-FRj1)
+          enddo
+          call triflo(mlre10.prog(1),mlre11.prog(1),
+     $          mlen10.lect(1),mlen11.lect(1),jg1)
+*         mlen10(j1)= j10 siginifie que j10 est le j1ieme + proche mode
+          segsup,mlre10,mlre11,mlen11
+          if (iimpi.ge.6) then
+           write(6,*)'Lanczos: M-orthog de y^0 par rapport a Z '
+           write(6,*)'i=',(mlen10.lect(iou),iou=1,Northo)
+           write(6,*)'f=',(mlree1.prog(mlen10.lect(iou)),iou=1,Northo)
+          endif
+          segdes,mlree1
+*      -M-orthogonalisation % aux modes deja convergés
+          call dtchpo(ipv1)
+          call dtchpo(ipmv1)
+          segact,mlent6,mlent7
+c           JG0 = mlent6.LECT(/1)
+c           do jpo=1,JG0
+          do j1=1,Northo
+             jpo=mlen10.lect(j1)
+*            on recupere  x^j  et  r^j = M*z^j / (z^j*M*z^j)
+             mvect6= mlent6.lect(jpo)
+             mvect7= mlent7.lect(jpo)
+             segact mvect6,mvect7
+*            on calcule xtru = y^i * r^j
+             xtru = 0.D0
+             do iou=1,inc
+                xtru= xtru + (mvect7.vectbb(iou)*mvect1.vectbb(iou))
+             enddo
+c              if(abs(xtru).lt.1.D-12) go to 88
+             if(abs(xtru).lt.XORTHO) go to 88
+*            y^i = y^i - xtru * z^{j}  et idem pour Ky^i
+             do iou=1,inc
+                mvect1.vectbb(iou) = mvect1.vectbb(iou)
+     $                             - (xtru*mvect6.vectbb(iou))
+             enddo
+   88        continue
+             segdes mvect6,mvect7
+c            mis en commentaire car on reothogonalise chaque vecteur x
+c            finalement, on ne reorthogonalise que le vecteur y^0
+          enddo
+          segdes,mlent6,mlent7
+          segsup,mlen10
+          call crech2(IPV1,mvect1,mvecri,1)
+          CALL MUCPRI(IPV1,IPMASS,IPMV1)
+        endif
+      endif
+*     creation du second membre initial
+      call chv2(icholi,IPMV1,ivemv1,1)
+      mvect2=ivemv1
+      segact mvect2*mod
+
+c     menage
+      call dtchpo(IPV1)
+      segsup,mvect1,mvect2
+
+*    -preparation a la resolution
+      segini,idemen
+      idemen(**)=0
+      NOID=0
+      NOEN=1
+*
+      if(iimpi.ge.6)
+     $ write(6,*) '-------------------------------------------------'
+*
+*-----Boucle iterative ----------------------------------------------*
+*
+      DO 100 IB100=1,(nvecma+1)
+
+*       -initialisation du temps cpu
+         if (IB100.eq.itest)  then
+            call gibtem(xkt)
+            xktlan = xktlan + xkt
+         endif
+
+*       -numero des vecteurs en jeu
+         NUMV = IB100
+         NUMV1 = NUMV - 1
+         if(iimpi.ge.6)
+     $   write(6,*) ' lanczo: -------i=',NUMV,'/' ,(nvecma+1),'--',rnm
+
+*       -MISE A ZERO DES TERMES EN PI POUR LES ELTS LIQUIDES
+         ipmv11 = ipmv1
+         CALL ANCHPO(ipmv11,NOMDU(15),ipmv1)
+         CALL DTCHPO(ipmv11)
+
+*       -resolution de K*y^i = M*x^i  (ou =  K*y^1=My^0 si i=1)
+         IDEMEN(1)=ipmv1
+         CALL RESOU1 (IPRIGI,IDEMEN,NOID,NOEN,1.D-18,0)
+         if (iflu.eq.1) then
+           mrigid=iprigi
+           segact mrigid
+           icholi=ichole
+           mvecri=ivecri
+           segdes mrigid
+         endif
+         SEGACT IDEMEN*mod
+         IPV2 = IDEMEN(1)
+         call dtchpo(ipmv1)
+
+*        y^i: passage chpo -> vecteur
+         call chv3(icholi,ipv2,mvect3,1)
+         call dtchpo(ipv2)
+         segact mvect3*mod
+
+*       -Application des coef beta et alpha
+*        y^i = y^i - beta_{i-1} * x^{i-1}
+         if (numv.gt.2) then
+           mvect2=mlent3.lect(numv-2)
+           b1s0=b1*s0
+           do iou=1,inc
+              mvect3.vectbb(iou) = mvect3.vectbb(iou)
+     $                           - (b1s0 * mvect2.vectbb(iou))
+           enddo
+         endif
+
+*        y^i = y^i - alpha_{i} * x^{i}
+         if (numv.gt.1) then
+           mvect1 = mlent3.lect(numv1)
+           mvect4 = mlent4.lect(numv1)
+           a1s1=a1*s1
+           do iou=1,inc
+              mvect3.vectbb(iou) = mvect3.vectbb(iou)
+     $                           - (a1s1 * mvect1.vectbb(iou))
+           enddo
+         endif
+         s0=s1
+
+*       -calcul de K * y^i
+         call crech2(ipv1,mvect3,mvecri,1)
+         call mucpri(ipv1,IPRIGI,ipkv1)
+         call chv2 (icholi,ipkv1,mvect4,1)
+         segact,mvect3*mod
+         segact,mvect4
+*        comme on n'utilise que mvect3 et mvect4 , on detruit:
+         call dtchpo(ipv1)
+         call dtchpo(ipkv1)
+
+*       -calcul de coe = y^i * K * y^i
+         coe=0.D0
+         do iou=1,inc
+            coe= coe + mvect4.vectbb(iou)*mvect3.vectbb(iou)
+         enddo
+         segsup,mvect4
+
+         unval = sqrt(abs(1.d0/coe))
+         s1    = abs(1.d0/coe)*coe
+         xtrx  = sign(1.d0,coe)
+         xtrx1 = xtrx
+
+*       -on commence par K-normaliser y^i  (est-ce vraiment utile ?)
+c          if ((coe.lt.XORTHO).and.(numv.ne.1)) then
+c             NV = numv
+c             WRITE(IOIMP,2000) NV,coe
+c 2000        FORMAT(/3X,'OPERATEUR VIBRA OPTION SIMULTANE',
+c      C      /3X,'DIFFICULTE POUR NORMALISER  LE ',I5,
+c      C      ' IEME VECTEUR ',/3X,'NORME PAR',
+c      C      ' RAPPORT A LA NORME INITIALE ',E12.5)
+c *           on force l algo a faire les tests de convergence
+c *           si on a trouvé des modes -> on quitte lanczos
+c *           sinon on redémarre avec un nouveau vecteur (permis 1 fois)
+c             quit1 = .true.
+c             iquit1 = iquit1 + 1
+c          endif
+         do iou=1,inc
+            mvect3.vectbb(iou) = mvect3.vectbb(iou)*unval
+         enddo
+
+c        xktre1 = TCPU pour resoudre + normaliser (lineaire avec numv)
+         if (IB100.eq.itest) then
+            call gibtem(xktre1)
+            xktlan = xktlan + xktre1
+         endif
+
+         i08 = 0
+         nort = 0
+   08    continue
+         i08 = i08 + 1
+         xtrum = 0.D0
+         xtrum2 = 0.D0
+
+*       -K-orthogonalisation % aux précedents (si ce n est pas le 1er passage)
+         if (numv.gt.1) then
+           xtrx1 = xtrx
+           do ipo=1,numv1
+*            on recupere  x^j  ,  r^j = K*x^j  et s^j = sign(x^j*K*x^j)
+             mvect1 = mlent3.lect(ipo)
+             mvect2 = mlent4.lect(ipo)
+             utru   = iplc.prog(ipo)
+*            on calcule xtru = y^i * r^j = y^i*K*x^j
+             xtru = 0.D0
+             do iou=1,inc
+                xtru = xtru + (mvect2.vectbb(iou)*mvect3.vectbb(iou))
+             enddo
+             xxtru = -1.D0 *xtru/utru
+             xtrum = xtrum + abs(xxtru)
+             xtrum2 = max(xtrum2,(abs(xxtru)))
+*            re-K-orthogonalisation selective (=si correction xxtru > 5.D-12)
+c              if(abs(xxtru).lt.1.D-12) go to 18
+             if(abs(xxtru).lt.XORTHO) go to 18
+             nort = nort + 1
+*            y^i = y^i - (xtru/utru)*x^{j}
+             do iou=1,inc
+                mvect3.vectbb(iou) = mvect3.vectbb(iou)
+     $                             + (xxtru*mvect1.vectbb(iou))
+             enddo
+             xtrx1=xtrx1-((xtru*xtru)/utru)
+   18        continue
+          enddo
+         endif
+
+         if(iimpi.ge.7) write(6,*) xtrum,xtrum2
+c c          if(xtrum.ge.XORTHO) goto 08 => explose
+c          if(xtrum.ge.XPREC21) goto 08
+c c          if(xtrum.ge.rlim) goto 08
+c c          if(xtrum.ge.0.707) goto 08
+c c        bp: l'algo redémarrerait-il avec un nouveau vecteur?
+c bp29/10/2010: avec XPREC21 comme precision, on constate qu'1 ou 2 boucle
+c d'orthogonalisation suffit, mais pour eviter de tourner en rond,
+c on limite a 2 passages
+         if (xtrum.ge.XPREC21) then
+            if(i08.lt.2)  goto 08
+            WRITE(IOIMP,1088) numv,xtrum
+1088        FORMAT(/3X,'OPERATEUR VIBRA OPTION SIMULTANE',
+     C      /3X,'DIFFICULTE POUR ORTHOGONALISER LE',I5,' IEME VECTEUR',
+     C      /3X,'SOMME DES PRODUITS SCALAIRE ',E12.5)
+*           on force l algo a faire les tests de convergence
+*           si on a trouvé des modes -> on quitte lanczos
+*           sinon on redémarre avec un nouveau vecteur (permis 1 fois)
+            quit1 = .true.
+            iquit1 = iquit1 + 1
+         endif
+
+
+c *       -M-orthogonalisation % aux modes deja convergés
+c          if (ortho) then
+c c           JG0 = mlent6.LECT(/1)
+c c           do jpo=1,JG0
+c           do j1=1,Northo
+c              jpo=mlen10.lect(j1)
+c *            on recupere  x^j  et  r^j = M*z^j / (z^j*M*z^j)
+c              mvect6= mlent6.lect(jpo)
+c              mvect7= mlent7.lect(jpo)
+c c deja fait             segact mvect6,mvect7
+c *            on calcule xtru = y^i * r^j
+c              xtru = 0.D0
+c              do iou=1,inc
+c                 xtru= xtru + (mvect7.vectbb(iou)*mvect3.vectbb(iou))
+c              enddo
+c c              if(abs(xtru).lt.1.D-12) go to 28
+c              if(abs(xtru).lt.XORTHO) go to 28
+c *            y^i = y^i - xtru * z^{j}  et idem pour Ky^i
+c              do iou=1,inc
+c                 mvect3.vectbb(iou) = mvect3.vectbb(iou)
+c      $                             - (xtru*mvect6.vectbb(iou))
+c              enddo
+c    28        continue
+c c              segdes mvect6,mvect7
+c c            mis en commentaire car on reothogonalise chaque vecteur x
+c           enddo
+c c           segdes,mlent6,mlent7
+c          endif
+c
+c bp 27/10/2010 : finalement, on ne reorthogonalise que le vecteur y^0
+c                 car semble etre trop contraignant pour lanczo
+
+
+c        xktort = TCPU pour orthogonaliser (proport à numv*numv1)
+         if (IB100.eq.itest) then
+            call gibtem(xktort)
+            xktlan = xktlan + xktort
+         endif
+
+*       -re-calcul de r^{i+1} = K*y^i
+         call crech2(ipv1,mvect3,mvecri,1)
+         call mucpri(ipv1,IPRIGI,ipkv1)
+         call chv2 (icholi,ipkv1,mvect4,1)
+         segact,mvect3*mod
+         segact mvect4*mod
+
+*         calcul de xtrx2 = y^i * K * y^i apres re-orthog
+          xtrx2 = 0.D0
+          do iou=1,inc
+            xtrx2 = xtrx2 + (mvect3.vectbb(iou)*mvect4.vectbb(iou))
+          enddo
+
+*        -on verifie que l orthogonalisation ne change pas trop le vecteur
+c         (ce qui devrait etre vrai en arithmétique exacte pour les vecteurs non redémarrés)
+          rnm = abs(xtrx2/xtrx)
+          if ((rnm.lt.rlim).and.(numv.ne.1)) then
+            NV = numv
+            WRITE(IOIMP,1000) NV,RNM
+1000        FORMAT(/3X,'OPERATEUR VIBRA OPTION SIMULTANE',
+     C      /3X,'DIFFICULTE POUR ORTHOGONALISER LE ',I5,
+     C      ' IEME VECTEUR ',/3X,'NORME APRES ORTHOGONALISATION PAR',
+     C      ' RAPPORT A LA NORME INITIALE ',E12.5)
+*           on force l algo a faire les tests de convergence
+*           si on a trouvé des modes -> on quitte lanczos
+*           sinon on redémarre avec un nouveau vecteur (permis 1 fois)
+            quit1 = .true.
+            iquit1 = iquit1 + 1
+          endif
+
+*        -K-normalisation :
+          coef=1.D0/sqrt(abs(xtrx2))
+          call mulpar(mvect3,mvect4,IPV1,IPKV1,coef)
+          call DTCHPO(IPKV1)
+
+          s1=sign(1.D0,xtrx2)
+
+*       -on recrée les chpoints x^{i+1} et K*x^{i+1} à partir des vecteurs modifiés
+c
+c        -evaluation du TCPU + optimisation du nbre de vecteurs utilisés
+          if (IB100.eq.itest) then
+c           xktres = TCPU pour resoudre + normaliser (lineaire avec numv)
+            call gibtem(xktre2)
+            xktlan = xktlan + xktre2
+            xktres = xktre0 + xktre1 + xktre2
+            itest = int(1.2*itest) + 1
+
+            if (IB100.eq.itest0) then
+              yktort = xktort / numv1
+            else
+              yktort = 0.5*(yktort + (xktort / numv1))
+            endif
+
+c           si xktort pas tres representatif, on le remplace
+            if(xktort.le.1.)   xktort = numv1*yktort
+c
+c           si orthog. ne coute pas cher, on la retestera + tard
+            if (xktort.lt.0.6.or.IB100.eq.itest0) then
+*
+             if (iimpi.ge.7) then
+             WRITE(6,1008) IB100,xktale,xktres,xktort,nort,xopt,Nmodopt
+1008         FORMAT('IB100,xktale,xktres,xktort,nort,xopt,Nmodopt =',
+     C       I5,' ',E10.5,' ',E10.5,' ',E10.5,' ',I5,' ',E10.5,' ',I5)
+             endif
+
+c           sinon calcul du nombre de vecteurs optimal %TCPU (=nopt)
+            else
+c bp : on va moyenner yktort pour le rendre moins sensible et variable
+              xkt0 = (1.*xktale) + (8.*xktres) + (32.*yktort)
+              xkt2 = (4.*yktort) + (2.*xktort/real(nort+numv1))
+*      xopt = sqrt(xkt0/xkt2) -> prise en compte du rebouchage de trou dans 50% des cas (*1.5)
+              xopt = 1.5*sqrt(xkt0/xkt2)
+              Nmodopt = INT(xopt) + 1
+              Nvecopt = (2*Nmodopt) +  8
+
+              if (iimpi.ge.7) then
+             WRITE(6,1009) IB100,xktale,xktres,xktort,nort,xopt,Nmodopt
+1009         FORMAT('IB100,xktale,xktres,xktort,nort,xopt,Nmodopt =',
+     C       I5,' ',E10.5,' ',E10.5,' ',E10.5,' ',I5,' ',E10.5,' ',I5)
+              endif
+
+c             si on pensait ne faire qu'1 cycle et que l on veut moins
+c             de modes que l optimum, alors on n a pas interet a cycler
+              if (Nbmode.eq.Nmod.and.Nmodopt.gt.int(Nbmode*0.8)) then
+                Nmodopt = Nmod
+                Nvecopt = NOMBRV
+c             sinon on propose de cycler avec les valeurs optimisées:
+              else
+                Nmodopt = min(Nmodopt,Nvecma)
+cbp: l'ajustement du nombre de modes calculés ne concerne que le 1er cycle*
+c    sinon pb lorsque l on bouche les trous....
+                if (icycle.eq.1) then
+c               il n y a pas d interet a calculer + de mode que demandé
+                Nmod = min(Nmod,Nmodopt)
+                Nvecopt= min(Nvecopt,Nvecma)
+                NOMBRV = Nvecopt
+                NMBRV1 = int(0.8*NOMBRV)
+      if (iimpi.ge.6) then
+       write(6,*) ' nbre vect estimés necessaires',NOMBRV
+       write(6,*) ' pour le calcul de ',NMOD,' modes'
+       write(6,*) ' on teste la convergence tous les ',NMBRV1,' itérés'
+      endif
+                endif
+              endif
+
+            endif
+          endif
+
+c        initialisation du TCPU
+         if (IB100.eq.(itest-1)) then
+            call gibtem(xkt)
+            xktlan = xktlan + xkt
+          endif
+
+*        on evite les erreurs d'arrondi pour s^{i+1}
+         s1=sign(1.d0,s1)
+
+*        on stocke x^{i+1} et  r^{i+1} = K*x^{i+1}
+         if (numv.ge.mlent3.lect(/1)) then
+           jg= (numv+1) *1.2
+           segadj mlent3,mlent4,ipla,iplb,iplc,iplas,iplbs
+         endif
+         mlent3.lect(numv)=mvect3
+         mlent4.lect(numv)=mvect4
+         iplc.prog(numv)=s1
+
+*  calcul de a1 (alpha_i) et b1 (beta_i)
+         call mucpri(ipv1,ipmass,ipmv1)
+         call DTCHPO(IPV1)
+         call chv2(icholi,ipmv1,mvect5,1)
+         segact,mvect5
+         a1=0.d0
+         b1=0.d0
+*        alpha_i = y^i*K*x^i = x^i*M*K^-1*K*x^i = x^i*M*x^i
+         do iou=1,inc
+            a1=a1 + mvect3.vectbb(iou)*mvect5.vectbb(iou)
+         enddo
+         ipla.prog(numv)=a1
+*        alpha_i * s_i = (x^i * M * x^i) * sign(y^i * K * y^i)
+*        on ajoute le signe s_i car x^i = yb/ |yb*K*yb|^0.5
+*        donc x^i*K*x^i = yb*K*yb / |yb*K*yb|^0.5 = sign(yb*K*yb)
+         dp = a1*s1
+         a1s1=dp
+         iplas.prog(numv)=dp
+*        beta_i = y^i*K*x^{i-1} = x^{i}*M*x^{i-1}
+         if (numv.gt.1) then
+           mvect1 = mlent3.lect(numv1)
+           do iou=1,inc
+             b1=b1 + mvect1.vectbb(iou)*mvect5.vectbb(iou)
+           enddo
+           dp=b1*b1 *s0*s1
+           iplbs.prog(numv1)=dp
+           iplb.prog(numv1)=b1
+         endif
+         segsup,mvect5
+
+
+c        xktres = TCPU pour resoudre + normaliser (lineaire avec numv)
+         if (IB100.eq.(itest-1)) then
+            call gibtem(xktre0)
+            xktlan = xktlan + xktre0
+         endif
+
+*       -Resolution du probleme projete : [T]*Phi = 1/lambda*[D]*Phi
+*        avec D =X*K*X = diag(s_i)  = [s_1 0 ... ; 0 s_2 0 ... ; ...]
+*        et T = X*M*X = [a_1 b_1 0  0 ... ; b_1 a_2 b_2 0 ... ; ...]
+         IF ((quit1).or.(NUMV .GE. nmbrv1)) THEN
+
+c *        ajout bp 22/10/2010
+c *        calcul de xKTKx2 = ||r^{i+1}||_2^2 = ||K*x^{i+1}||_2^2
+c          xKTKx2 = 0.D0
+c          do iou=1,inc
+c             xKTKx2 = xKTKx2 + mvect4.vectbb(iou)*mvect4.vectbb(iou)
+c          enddo
+c          write(6,*) 'lanczo : ||K*x^{i+1}||_2^2=',xKTKx2
+c *        fin ajout bp 22/10/2010
+
+           call simu21(ipla,iplb,iplc,NMOD,conv,nbonve,numv1,
+     $                 iplval,iphi,IPERM,XPREC21)
+
+           if (iimpi.ge.6) then
+             write(6,*) 'lanczo: CONV=',CONV,'  car'
+             write(6,*) 'pour ',numv,'vecteurs /',nvectm,'maxi'
+             write(6,*) 'on a ',nbonve,'valeurs ok /',NMOD
+           endif
+
+c c          si le nombre de bon modes diminue trop,
+c c          c'est qu'on aurait (probablement) du s'arreter plus tot ...
+c            if (nbonve.ge.nbonmax) then
+c               nbonmax= nbonve
+c               numbon = numv1
+c            endif
+c            if (nbonmax.gt.0) then
+c              nbonmin=0.7*nbonmax
+c              nbonmin=max(2,nbonmin)
+c              if (nbonve.le.nbonmin) then
+c                call simu21(ipla,iplb,iplc,NMOD,conv,nbonve,numbon,
+c      $                     iplval,iphi,IPERM,XPREC21)
+c                goto 110
+c              endif
+c            endif
+c bp (18/112010): cette strategie pose pb lors des permiers appels a
+c simu21. on doit pouvoir eviter de rencontrer le cas du nombre de bon
+c modes qui diminue autrement (grace au nbre d inconnues independantes)
+
+           NOMBRV = NUMV
+* on a atteint nvectm vecteurs sans converger: peut on augmenter nvectm?
+           if(numv.ge.nvectm.and.nbonve.lt.NMOD)
+     $           nvectm=min(int(1.5*nvectm),nvecma)
+
+* on n a pas trouvé 1 seul mode: vraiment pas de chance (ou mauvais shift?)
+* => on essaie de redémarrer avec un nouveau vecteur
+c            if (nbonve.lt.1.and.quit1.and.iquit1.lt.2) then
+           if (nbonve.lt.1.and.quit1.and.iquit1.lt.2) then
+              call aleat1 (IPRIGI,IPV1)
+              CALL MUCPRI (IPV1,IPMASS,IPMV1)
+c             ajout bp 17.12.2010
+              write(6,*) 'lanczo: appel a initfl'
+              CALL INITFL (IPRIGI,IPMASS,IPMV1,IPV1,IFLU)
+           endif
+
+c          on a usé la 2eme chance : on ne doit plus iterer
+           if(quit1.and.iquit1.ge.2)   goto 110
+
+* on quitte le processus lorsqu on a convergé ou atteint nvectm vecteurs
+*          convergence?
+           CONV = (CONV.or.(nbonve.ge.NMOD))
+
+* si on a convergé sur NMOD et on a quasiment atteint le nombre total de
+* modes Nbmode, alors on n a pas interet a cycler
+           PRESQ = (nbonve.ge.int(0.8*Nbmode)).and.(nbonve.lt.Nbmode)
+           if(CONV.and.PRESQ.and.numv.lt.(0.8*nvectm))  goto 99
+
+c          on a cvgé pour ce cycle ou atteint de nombre max de vecteurs :
+c          on ne peut plus iterer
+c            if(quit1.or.CONV.or.numv.ge.nvectm)   goto 110
+           if(CONV.or.numv.ge.nvectm)   goto 110
+
+   99      continue
+           NMBRV1 = NUMV + (int(0.1*NMBRV1) + 1)
+
+         ENDIF
+
+  100 continue
+*-----fin de la Boucle iterative --------------------------------------*
+*
+  110 continue
+
+      if (iimpi.ge.6) then
+        WRITE(6,*) '----------------- Lanczos -----------------'
+        WRITE(IOIMP,1990) NUMV,nvecma,NBonve,NMOD
+1990    FORMAT(2X,'NOMBRE DE VECTEURS DE BASE',I5,' /',I5,' MAX'
+     C  ,/2X,'NOMBRE DE MODES TROUVES',I5,' /',I5,' DEMANDES')
+      endif
+
+*
+*----- MENAGE  --------------------------------------*
+*
+c *    -on desactive  x^j  et  r^j = M*z^j / (z^j*M*z^j)
+c       if (ortho) then
+c        do j1=1,Northo
+c           jpo=mlen10.lect(j1)
+c           mvect6= mlent6.lect(jpo)
+c           mvect7= mlent7.lect(jpo)
+c           segdes,mvect6,mvect7
+c        enddo
+c        segdes,mlent6,mlent7
+c        segsup,mlen10
+c       endif
+
+*    -on ne garde que les listentier vers les chpoints/vecteurs X et MX
+      jg=numv
+      segadj,mlent3
+*     on detruit ici les alpha*s(IPTTA=iplas), beta*s(ipttb=iplbs)
+      CALL DTLREE(iplas)
+      CALL DTLREE(iplbs)
+      CALL DTLREE(ipla)
+      CALL DTLREE(iplb)
+      CALL DTLREE(iplc)
+
+*    -on supprime les vecteurs MX et KX
+      do iou=1,mlent4.lect(/1)
+       mvect1=mlent4.lect(iou)
+       segsup,mvect1
+      enddo
+      segsup,mlent4
+
+*     on passe mlent3 a travers IPVECX
+      IPVECX=mlent3
+
+      segsup,idemen
+
+      call gibtem(xkt)
+      xktlan = xktlan + xkt
+      if(iimpi.ge.6)  write(6,*) 'temps passe dans Lanczos=',xktlan
+      xktale = xktlan
+
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+

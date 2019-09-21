@@ -1,0 +1,1243 @@
+$$$$ DECONV
+* DECONV    PROCEDUR  WANG      16/01/21    21:15:08     8787
+'DEBPROC' DECONV COUCHE*'TABLE' FOND_SOL*'MAILLAGE' SOL/'MAILLAGE'
+                  MOD_SOL DIR*'MOT' GAMMAO*'EVOLUTIO' F1*'FLOTTANT'
+                  F2*'FLOTTANT' FC/'FLOTTANT' TYP_F/'MOT'
+                  P_GAMMA/'TABLE' ;
+************************************************************************
+*
+*                            D E C O N V
+*                           -------------
+*
+* FONCTION:
+* ---------
+*
+* Cette procédure permet d'effectuer des calculs d'interaction sol-
+* structure (ISS) en 2D (déformation plane ou mode Fourier 0
+* (mouvement vertical) et 1 (mouvement horizontal)) par la méthode
+* des éléments finis
+*
+* PHRASE D'APPEL (EN GIBIANE):
+* ----------------------------
+*
+*   TABRESU =  DECONV COUCHE FOND_SOL MOD_SOL (SOL) DIR
+*                     GAMMAO F1 F2 (FC) (TYP_F) (P_GAMMA)
+*
+* OPERANDES:
+* ----------
+*
+*   COUCHE 'TABLE' : table à double indice
+*
+*     COUCHE.I.'indice' : données pour la ième couche du sol
+*
+*       indice 'FRONTIERE'       'MAILLAGE' : frontière verticale
+*       indice 'MASSE_VOLUMIQUE' 'FLOTTANT' : masse volumique
+*       indice 'POISSON'         'FLOTTANT' : coefficient de Poisson
+*       indice 'YOUNG'           'FLOTTANT' : module d'Young
+*       indice 'AMORTISSEMENT    'FLOTTANT' : amortissement réduit
+*
+*   FOND_SOL 'MAILLAGE' : frontière horizontale inférieure du sol
+*   MOD_SOL  'MMODEL'   : modèle du sol proche
+*   SOL      'MAILLAGE' : maillage du sol proche, facultatif
+*   DIR      'MOT'      : direction de l'accélération sismique GAMMAO
+*                        'HORI' pour la direction horizontale
+*                        'VERT' pour la direction verticale
+*   GAMMAO   'EVOLUTIO' : Signal sismique (accélérogramme) d'entrée pour
+*                         la déconvolution, défini par défaut à la surface
+*                         libre du sol, sinon, renseigner la table P_GAMMA
+*   F1, F2   'FLOTTANT' : fréquences sur lesquelles l'amortissement
+*                       : réduit est ajusté suivant le modèle de
+*                         RAYLEIGH
+*   FC       'FLOTTANT' : fréquence de coupure pour la déconvolution,
+*                         par défaut  FC = 50 Hz
+*   TYP_F    'MOT'      : type de frontière :  'WHITE' (par défaut)
+*                                              'LYSMER'
+*   P_GAMMA  'TABLE'    : Description des accélérogrammes d'entrée et de
+*                         sortie pour la déconvolution (facultatif)
+*     indice 'ENTREE'   :'TABLE' : description de la nature de l'accélérogramm
+*                         GAMMAO autre que sur la surface libre (facultatif)
+*      sous-indice 'NATURE'   : Nature du point de contrôle :
+*                              'MOT' INSIDE : profondeur du sol
+*                              'MOT' OUTCROP : outcrop du bedrock
+*      sous-indice 'CONTROLE' :'MAILLAGE': point de contrôle sur la frontière
+*                               verticale si sous-indice 'NATURE' = 'INSIDE'
+*     indice 'I'        :'MAILLAGE': Ième (i = 1, 2, 3,...) points sur la
+*                         frontière verticale pour lesquels on désire sortir
+*                         l'accélérogramme en champ libre (résultats de
+*                         déconvolution)
+*
+* RESULTATS:
+* ----------
+*   TABRESU 'TABLE' :  table qui contient les résultats du calcul
+*
+*     indice 'CHAR'  'CHARGEMENT' : excitation sur la frontière du sol
+*     indice 'AMOR'  'RIGIDITE'   : frontière absorbante de type TYP_F
+*     indice 'DEFO'  'EVOLUTIO'   : déformation maximale en fonction
+*                                   de la profondeur
+*     indice 'ACCE'  'TABLE'      : table qui contient les accélérations
+*                                   obtenues par la déconvolution
+*        sous-indice  I             accélération du point I défini dans la
+*                                   table P_GAMMA
+*        sous-indice 'OUTCROP'      accélération du outcrop de bedrock
+*
+*     indice 'PAS'   'FLOTTANT'
+*     indice 'FCDYN' 'FLOTTANT'   : pas de temps et fréquence de coupure
+*                                   à utiliser pour le calcul de
+*                                   l'interaction sol-structure
+*                                   à l'aide de la procédure DYNAMIC
+*
+* PROCEDURES APPELEES :
+* -------------------
+*    'FRONABS'
+*
+*
+* AUTEUR, DATE DE CREATION ET DE MODIFICATION:
+* --------------------------------------------
+*
+*     F. WANG   11/06/1992 : Création, mouvement horizontal.
+*     F. WANG   17/09/1996 : Mise à jour.
+*     F. WANG   16/02/1999 : Modification, mouvement vertical
+*     F. WANG   04/09/2008 : Optimisation du pas de calcul,
+*                            correction d'un plantage lié à la
+*                            profondeur de la déconvolutiobn,
+*                            Vérification du maillage de frontière.
+*     F. WANG   07/10/2010 : Mise à zéro des vitesses initiales
+*                            au sens moyen sur les 100 premiers pas
+*                            éliminant ainsi la rotation du bloc de sol,
+*                            Changement de format du chargement réduisant
+*                            largement le temps de calcul dynamique
+*     F. WANG   20/02/2013 : Ajout des options concernant le signal
+*                            d'entrée : PROFOND et OUTCROP
+*                            Ajout du signal de sortie outcrop de bedrock
+*     F. WANG   04/01/2016   Changement du mot-clé 'PROFOND' en 'INSIDE'
+*                            pour être compatible avec la procedure
+*                            DECONV3D
+*                            Correction de bug dans le tracé de
+*                            l'evolution de la déformation maximale
+************************************************************************
+
+*   Maillage de la frontière du sol : élément SEG3 seulement
+*   Types d'éléments de sol QUA8 + TRI6
+
+ NB_COU = 'DIME' COUCHE;
+ FRSOL  =  FOND_SOL;
+
+ I = 1;
+'REPE' BCL0 NB_COU;
+ FRSOL = FRSOL 'ET' COUCHE.I.'FRONTIERE';
+ I = I + 1;
+'FIN' BCL0;
+
+ LTYPF = 'ELEM' FRSOL 'TYPE';
+
+'SI' ((DIME LTYPF) > 1);
+'SAUT' 2 'LIGNE' ;
+'MESS' '***** ARRET DE LA PROCEDURE DECONV        *****';
+'MESS' '***** LA FRONTIERE DOIT ETRE DE TYPE SEG3 *****';
+'MESS' '***** LE SOL DOIT DE TYPE QUA8 OU TRI6    *****';
+'SAUT' 2 'LIGNE';
+'QUIT' DECONV;
+
+'SINON';
+ TYPF1 = 'EXTR' LTYPF 1;
+  'SI' ('NEG' TYPF1 'SEG3');
+  'SAUT' 2 'LIGNE' ;
+  'MESS' '***** ARRET DE LA PROCEDURE DECONV        *****';
+  'MESS' '***** LA FRONTIERE DOIT ETRE DE TYPE SEG3 *****';
+  'MESS' '***** LE SOL DOIT DE TYPE QUA8 OU TRI6    *****';
+  'SAUT' 2 'LIGNE';
+  'QUIT' DECONV;
+  'FINSI';
+'FINSI';
+
+'SI' ( 'NON' ( 'EXIS' TYP_F ) ) ;
+ TYP_F = 'WHITE'                ;
+'FINSI'                         ;
+
+'SAUT' 5 'LIGNE'                                                    ;
+'MESS' '**********************************************************' ;
+'MESS' '*                                                        *' ;
+'MESS' '*    CALCUL DU CHAMP SISMIQUE INCIDENT PAR LA METHODE    *' ;
+'MESS' '*                   DE LA DECONVOLUTION                  *' ;
+'MESS' '*                                                        *' ;
+'MESS' '**********************************************************' ;
+'SAUT' 2 'LIGNE'                                                    ;
+'MESS' 'CARACTERISTIQUES MECANIQUES DU SOL'                         ;
+
+ NB_COU = 'DIME' COUCHE                                             ;
+ I = 0                                                              ;
+'REPE' BOUCL0 NB_COU                                                ;
+ I = I + 1                                                          ;
+ E_I  = COUCHE.I.'YOUNG'                                            ;
+ NU_I = COUCHE.I.'POISSON'                                          ;
+ COUCHE.I.'MODULE_G'  = E_I / ( 2. * ( 1. + NU_I ) )                ;
+ CS_I = ( COUCHE.I.'MODULE_G' / COUCHE.I.'MASSE_VOLUMIQUE' ) ** .5  ;
+ CP_I = ((2.0 * (1.0 - NU_I))/(1.0 - (2.0 * NU_I))) ** 0.5          ;
+ CP_I = CP_I * CS_I                                                 ;
+ COUCHE.I.'FRONTIERE' = 'ORDO' COUCHE.I.'FRONTIERE'                 ;
+
+ P_INI = ( COUCHE.I.'FRONTIERE' ) 'POINT' 'INITIAL'                 ;
+ P_FIN = ( COUCHE.I.'FRONTIERE' ) 'POINT' 'FINAL'                   ;
+ Z_INI = 'COOR' 2 P_INI                                             ;
+ Z_FIN = 'COOR' 2 P_FIN                                             ;
+ COUCHE.I.'EPAISSEUR' = 'ABS' ( Z_INI - Z_FIN )                     ;
+
+'SAUT' 'LIGNE'                                                      ;
+'MESS' 'COUCHE NUMERO ' I                                           ;
+'SAUT' 'LIGNE'                                                      ;
+'MESS' 'EPAISSEUR DE LA COUCHE   H  ' COUCHE.I.'EPAISSEUR'          ;
+'MESS' 'MODULE D"YOUNG           E  ' COUCHE.I.'YOUNG'              ;
+'MESS' 'MASSE VOLUMIQUE          RHO' COUCHE.I.'MASSE_VOLUMIQUE'    ;
+'MESS' 'COEFFICIENT DE POISSON   NU ' COUCHE.I.'POISSON'            ;
+'MESS' 'VITESSE DES ONDES S      CS ' CS_I                          ;
+'MESS' 'VITESSE DES ONDES P      CP ' CP_I                          ;
+'MESS' 'AMORTISSEMENT EQUIVALENT KSI' COUCHE.I.'AMORTISSEMENT'      ;
+'FIN' BOUCL0                                                        ;
+
+******************* Construction d'une colonne de sol ******************
+*
+*       La colonne est construite a l'extérieur de la frontière.
+*   Dans le cas de PLANDEFO , elle est :
+*
+*      - a droite pour la frontière droite ( X > 0 )
+*      - a gauche pour la frontière gauche ( X < 0 )
+*
+************************************************************************
+
+'SAUT' 3 'LIGNE'                                            ;
+'MESS' 'CONSTRUCTION D"UNE COLONNE DE SOL'                  ;
+ AXP = 'CHAN' ( COUCHE. 1 . 'FRONTIERE' ) 'POI1'            ;
+ NOEU1 =  AXP 'POINT' 1                                     ;
+ NOEU2 =  AXP 'POINT' 2                                     ;
+ XF    = 'COOR' 1 NOEU1                                     ;
+ Z1    = 'COOR' 2 NOEU1                                     ;
+ Z2    = 'COOR' 2 NOEU2                                     ;
+ DZ    = 'ABS' ( Z1 - Z2 )                                  ;
+    'SI' ( 0.0 > XF )                                       ;
+     DZ = DZ * ( -1 )                                       ;
+    'FINSI'                                                 ;
+ VEC_H =  DZ  0.                                            ;
+
+'OPTI' 'ELEM' 'QUA8'                                        ;
+'TITR' 'COLONNE DE SOL POUR LA DECONVOLUTION ( EN ROSE )'   ;
+
+ COLONN = 'TABLE'  ;
+ COLMOD = 'TABLE'  ;
+ COLMAT = 'TABLE'  ;
+ COLMAS = 'TABLE'  ;
+ COLRIG = 'TABLE'  ;
+ COLBLO = 'TABLE'  ;
+ COLAMO = 'TABLE'  ;
+
+ TYP_MODE = 'MOT' ('VALEUR' 'MODE')             ;
+'SI' ( 'EGA' TYP_MODE 'FOUR' )                  ;
+   'SI' ( 'EGA' DIR 'HORI' )                    ;
+    BMOT = 'MOT' 'UZ'                           ;
+   'SINON'                                      ;
+   'SI' ( 'EGA' DIR 'VERT' )                    ;
+    BMOT = 'MOT' 'UR'                           ;
+   'FINSI'                                      ;
+   'FINSI'                                      ;
+'SINON'                                         ;
+'SI' ( 'EGA' TYP_MODE 'PLANDEFO' )              ;
+   'SI' ( 'EGA' DIR 'HORI' )                    ;
+    BMOT = 'MOT' 'UY'                           ;
+   'SINON'                                      ;
+   'SI' ( 'EGA' DIR 'VERT' )                    ;
+    BMOT = 'MOT' 'UX'                           ;
+   'FINSI'                                      ;
+   'FINSI'                                      ;
+'FINSI'                                         ;
+'FINSI'                                         ;
+
+'SI' ( 'NON' ( 'EXIS' F1 ) )                    ;
+ F1    = 1.0                                    ;
+ F2    = 25.0                                   ;
+'FINSI'                                         ;
+'MESS' 'AMORTISSEMENT DE RAYLEIGH POUR LE SOL'  ;
+'MESS' 'F1 = ' F1 'Hz      F2 = ' F2 'Hz'       ;
+ ALPHA =  PI * 4 * F1 * F2 / ( F1 + F2 )        ;
+ BETA  =  1 / ( PI * ( F1 + F2 ) )              ;
+
+  I = 0                                                           ;
+ 'REPE' BOUCL1 NB_COU                                             ;
+  I = I + 1                                                       ;
+  KSI =  COUCHE.I.'AMORTISSEMENT'                                 ;
+  COLONN.I = ( COUCHE.I.'FRONTIERE' ) 'TRANS' 1  VEC_H            ;
+  COLMOD.I = 'MODE' ( COLONN.I ) 'MECANIQUE' 'ELASTIQUE'
+             'ISOTROPE' 'QUA8'                                    ;
+  COLMAT.I = 'MATE' ( COLMOD.I ) 'YOUNG' ( COUCHE.I.'YOUNG' )
+             'NU' ( COUCHE.I.'POISSON' )
+             'RHO' ( COUCHE.I.'MASSE_VOLUMIQUE' )                 ;
+  COLMAS.I = 'MASS' ( COLMOD.I ) ( COLMAT.I )                     ;
+  COLRIG.I = 'RIGI' ( COLMOD.I ) ( COLMAT.I )                     ;
+  COLBLO.I = 'BLOQ' BMOT ( COLONN.I )                             ;
+  COLAMO.I =  KSI * (( ALPHA * ( COLMAS.I ) ) 'ET'
+             ( BETA * ( COLRIG.I 'ET' COLBLO.I )))                ;
+
+       'SI' ( I 'EGA' 1 )           ;
+        FRON = COUCHE.I.'FRONTIERE' ;
+        COL1 = COLONN.I             ;
+        MOD1 = COLMOD.I             ;
+        MAT1 = COLMAT.I             ;
+        MAS1 = COLMAS.I             ;
+        RIG1 = COLRIG.I             ;
+        BLO1 = COLBLO.I             ;
+        AMO1 = COLAMO.I             ;
+  'SINON'                                    ;
+   FRON = FRON 'ET' ( COUCHE.I.'FRONTIERE' ) ;
+   COL1 = COL1 'ET' ( COLONN.I )   ;
+   MOD1 = MOD1 'ET' ( COLMOD.I )   ;
+   MAT1 = MAT1 'ET' ( COLMAT.I )   ;
+   MAS1 = MAS1 'ET' ( COLMAS.I )   ;
+   RIG1 = RIG1 'ET' ( COLRIG.I )   ;
+   BLO1 = BLO1 'ET' ( COLBLO.I )   ;
+   AMO1 = AMO1 'ET' ( COLAMO.I )   ;
+  'FINSI'                          ;
+  'FIN' BOUCL1                     ;
+
+'ELIM' COL1 0.01                       ;
+ COL1 = COL1 'COUL' 'ROSE'             ;
+ RIGT = RIG1 'ET' BLO1                 ;
+'SI' ( 'EXIS' SOL )                    ;
+'TRAC' ( SOL 'ET' COL1 ) 'FACE' 'NCLK' ;
+'SINON'                                ;
+'TRAC'  COL1  'FACE' 'NCLK'            ;
+'FINSI'                                ;
+
+*   Renumérotation des noeuds sur la frontière :  TASSER "FRON"
+
+'TASS'  FRON           ;
+ NB_NOEU = 'NBNO' FRON ;
+
+*   Amortisseurs à la base de la colonne
+
+'SAUT' 'LIGNE'                                              ;
+'MESS' 'AMORTISSEURS A LA BASE DE LA COLONNE'               ;
+ BAS_ABS = 'TABLE'                                          ;
+ P_INI = ( COUCHE.NB_COU.'FRONTIERE' ) 'POINT' 'INITIAL'    ;
+ P_FIN = ( COUCHE.NB_COU.'FRONTIERE' ) 'POINT' 'FINAL'      ;
+ Z_INI = 'COOR' 2 P_INI                                     ;
+ Z_FIN = 'COOR' 2 P_FIN                                     ;
+ DZ    = Z_INI - Z_FIN                                      ;
+  'SI' ( DZ > 0.0 )                                         ;
+   P_BAS = P_FIN                                            ;
+   BAS_ABS.'FRONTIERE'  = 'COTE' 2 ( COLONN.NB_COU )        ;
+  'SINON'                                                   ;
+   P_BAS = P_INI                                            ;
+   BAS_ABS.'FRONTIERE'  = 'COTE' 4 ( COLONN.NB_COU )        ;
+  'FINSI'                                                   ;
+
+ BAS_ABS.'YOUNG'           = COUCHE.NB_COU.'YOUNG'          ;
+ BAS_ABS.'POISSON'         = COUCHE.NB_COU.'POISSON'        ;
+ BAS_ABS.'MASSE_VOLUMIQUE' = COUCHE.NB_COU.'MASSE_VOLUMIQUE';
+ TYP_FRO = 'MOT' 'LYSMER'                                   ;
+
+'SI' ( 'EGA' DIR 'HORI' ) ;
+ NHAR = 1                 ;
+'SINON'                   ;
+'SI' ( 'EGA' DIR 'VERT' ) ;
+ NHAR = 0                 ;
+'FINSI'                   ;
+'FINSI'                   ;
+
+ AMO_BAS = FRONABS BAS_ABS TYP_FRO NHAR ;
+'LIST' AMO_BAS                          ;
+ AMOT  = AMO_BAS 'ET' AMO1              ;
+
+*     Accès aux noeuds sur la frontière
+
+ P_INI = ( COUCHE. 1 . 'FRONTIERE' ) 'POINT' 'INITIAL' ;
+ P_FIN = ( COUCHE. 1 . 'FRONTIERE' ) 'POINT' 'FINAL'   ;
+
+ Z_INI = 'COOR' 2 P_INI ;
+ Z_FIN = 'COOR' 2 P_FIN ;
+ DZ    =  Z_INI - Z_FIN ;
+   'SI'  ( DZ > 0.0 )   ;
+    P_SUR  = P_INI      ;
+   'SINON'              ;
+    P_SUR  = P_FIN      ;
+   'FINSI'              ;
+
+NUM_SUR  = 'NOEUD' P_SUR  ;
+NUM_BAS  = 'NOEUD' P_BAS  ;
+
+ POI_FRO = 'TABLE'      ;
+ I = 0                  ;
+'REPE' BOUCL2 NB_NOEU   ;
+ I = I + 1              ;
+ POI_FRO.I = 'NOEU' I   ;
+'FIN'  BOUCL2           ;
+
+
+******************   Réponse dynamique de la colonne   *****************
+*
+*  Pour éviter des problèmes de précision liés à l'interpolation du
+*  chargement produit par cette procédure, le pas de temps utilisé ici
+*  pour la déconvolution sera également utilisé pour le calcul d'ISS.
+*
+*  Le pas de temps est égale à 1/2, 1/4, 1/8, ... de celui de GAMMAO
+*  pour éviter des erreurs d'interpolation sur le signal d'entrée. Il
+*  doit être défini de sorte que la fréquence de coupure utilisée dans
+*  la procédure DYNAMIC est au moins 4 fois FC.
+*
+*  Durée de calcul
+*
+*  sol monocouche  : 3  aller-retours onde S
+*  sol multicouche : 5  aller-retours onde S (prise en compte des
+*                       réflections sur les interfaces des couches)
+*
+************************************************************************
+
+*      Fréquence de coupure  FC
+
+'SI' ( 'NON' ( 'EXIS' FC ) )               ;
+ FC = 50.0                                 ;
+'FINSI'                                    ;
+'SAUT' 'LIGNE'                             ;
+'MESS' 'FREQUENCE DE COUPURE = ' FC 'Hz'   ;
+
+'SAUT' 3 'LIGNE'                                               ;
+'MESS' 'REPONSE DYNAMIQUE DE LA COLONNE'                       ;
+'SAUT' 'LIGNE'                                                 ;
+ T_GAMO = 'EXTR' GAMMAO 'ABSC'                                 ;
+ A_GAMO = 'EXTR' GAMMAO 'ORDO'                                 ;
+ NP     = 'DIME' T_GAMO                                        ;
+ TEM1   = 'EXTR' T_GAMO 1                                      ;
+ TEM2   = 'EXTR' T_GAMO 2                                      ;
+ TEMNP  = 'EXTR' T_GAMO NP                                     ;
+ PAS_TEM  = TEM2 - TEM1                                        ;
+ PAS_2FC  = 1.0 / ( 8 * FC )                                   ;
+
+ IDIV = 0                                                      ;
+'REPE' BB1                                                     ;
+ ERR = (( PAS_TEM / ( 2**IDIV )) - PAS_2FC ) / PAS_2FC         ;
+'SI' ( ERR < 0.01 )                                            ;
+'QUIT' BB1                                                     ;
+'FINSI'                                                        ;
+ IDIV = IDIV + 1                                               ;
+'FIN' BB1                                                      ;
+ PAS_TEM = PAS_TEM / (2**IDIV)                                 ;
+
+
+'SI' ( NB_COU 'EGA' 1 )                                      ;
+ G = ( COUCHE. 1 . 'MODULE_G' )                              ;
+ CS = ( G / ( COUCHE. 1 . 'MASSE_VOLUMIQUE' )  ) ** 0.5      ;
+ DUREE  = 6.0 * ( COUCHE. 1 . 'EPAISSEUR' ) / CS             ;
+
+'SINON'                                                      ;
+ DUREE = 0.0                                                 ;
+ I = 0                                                       ;
+'REPE' BOUCD NB_COU                                          ;
+ I = I + 1                                                   ;
+ G = ( COUCHE.I.'MODULE_G' )                                 ;
+ CS = ( G / ( COUCHE.I.'MASSE_VOLUMIQUE' )  ) ** 0.5         ;
+ DUREE = DUREE + ( 10.0 * ( COUCHE.I.'EPAISSEUR' ) / CS )    ;
+'FIN' BOUCD                                                  ;
+'FINSI'                                                      ;
+
+*  Impulsion de force horizontale à la base de la colonne
+*  Sa transformé de Fourier doit être non nulle dans
+*  l'intervalle (0, FC). On a DT = 7 *  PAS_TEM
+
+'SAUT'  'LIGNE'                                             ;
+'MESS'  'FORCE APPLIQUEE A LA BASE DE LA COLONNE'           ;
+'TITRE' 'FORCE APPLIQUEE A LA BASE DE LA COLONNE'           ;
+ DT       = 7 * PAS_TEM                                     ;
+ NT       = 600                                             ;
+ L_TIM    = 'PROG' 0.0 'PAS' DT 'NPAS' NT                   ;
+ L_FOR    = 'PROG' 0.  1.E5   0.  -1.E5   597 * 0.          ;
+ EV_FOR   = 'EVOL' 'MANU' 'TEMPS(S)' L_TIM 'FORCE(N)' L_FOR ;
+
+ DUREE  =  DUREE + ( 4. * DT )                              ;
+'SI' ( DUREE < ( 8. * DT ) )                                ;
+ DUREE  =  8. * DT                                          ;
+'FINSI'                                                     ;
+ NB_PAS = 'ENTI' ( DUREE / PAS_TEM )                        ;
+ DUREE  =  NB_PAS * PAS_TEM                                 ;
+'DESS' EV_FOR XBOR 0.0 DUREE 'NCLK'                         ;
+'SAUT' 'LIGNE'                                              ;
+'MESS' 'CALCUL DYNAMIQUE POUR LA DECONVOLUTION'             ;
+'MESS' 'PAS DE CALCUL = ' PAS_TEM '      DUREE = ' DUREE    ;
+
+'SI' ( 'EGA' TYP_MODE 'FOUR' )                                    ;
+   'SI' ( 'EGA' DIR 'HORI' )                                      ;
+    FOR_P = 'PRES' 'MASS' COLMOD.NB_COU 1.0 BAS_ABS.'FRONTIERE'   ;
+    FOR_BAS = ( 'EXCO' 'FZ' FOR_P 'FR' ) 'ET' ( -1.0 *
+              ( 'EXCO' 'FZ' FOR_P 'FT' ) )                        ;
+   'SINON'                                                        ;
+   'SI' ( 'EGA' DIR 'VERT' )                                      ;
+    FOR_BAS = 'PRES' 'MASS' COLMOD.NB_COU 1.0 BAS_ABS.'FRONTIERE' ;
+   'FINSI'                                                        ;
+   'FINSI'                                                        ;
+'SINON'                                                           ;
+'SI' ( 'EGA' TYP_MODE 'PLANDEFO' )                                ;
+   'SI' ( 'EGA' DIR 'HORI' )                                      ;
+    FOR_P = 'PRES' 'MASS' COLMOD.NB_COU 1.0 BAS_ABS.'FRONTIERE'   ;
+    FOR_BAS = 'EXCO' 'FY' FOR_P 'FX'                              ;
+   'SINON'                                                        ;
+   'SI' ( 'EGA' DIR 'VERT' )                                      ;
+    FOR_BAS = 'PRES' 'MASS' COLMOD.NB_COU 1.0 BAS_ABS.'FRONTIERE' ;
+   'FINSI'                                                        ;
+   'FINSI'                                                        ;
+'FINSI'                                                           ;
+'FINSI'                                                           ;
+ CHA_BAS = 'CHAR' FOR_BAS EV_FOR                                  ;
+'LIST' FOR_BAS                                                    ;
+
+'SI' ( 'EGA' TYP_MODE 'FOUR' )                               ;
+     CH_DEPI = 'MANU' 'CHPO' 3 COL1  'UR' 0. 'UT' 0. 'UZ' 0. ;
+     CH_VITI = 'MANU' 'CHPO' 3 COL1  'UR' 0. 'UT' 0. 'UZ' 0. ;
+'SINON'                                                      ;
+'SI' ( 'EGA' TYP_MODE 'PLANDEFO' )                           ;
+     CH_DEPI = 'MANU' 'CHPO' 2 COL1  'UX' 0. 'UY' 0.         ;
+     CH_VITI = 'MANU' 'CHPO' 2 COL1  'UX' 0. 'UY' 0.         ;
+'FINSI'                                                      ;
+'FINSI'                                                      ;
+
+LINST = 'PROG' TEM1 'PAS' PAS_TEM 'NPAS' ( NB_PAS - 1 )      ;
+FCDYN = 1.0 / ( 4 * PAS_TEM )                                ;
+
+TAB_DYN        = 'TABLE' ;
+TAB_DYN.'DEBU' = TEM1    ;
+TAB_DYN.'VITE' = CH_VITI ;
+TAB_DYN.'DEPL' = CH_DEPI ;
+TAB_DYN.'CHAR' = CHA_BAS ;
+TAB_DYN.'RIGI' = RIGT    ;
+TAB_DYN.'MASS' = MAS1    ;
+TAB_DYN.'AMOR' = AMOT    ;
+TAB_DYN.'INST' = LINST   ;
+TAB_DYN.'FREQ' = FCDYN   ;
+
+'TEMP'                                          ;
+ RESU = DYNAMIC TAB_DYN                         ;
+'SAUT' 'LIGNE'                                  ;
+'MESS' 'FIN DE CALCUL DYNAMIQUE SUR LA COLONNE' ;
+'MENA'                                          ;
+'TASS' FRON                                     ;
+'TEMP'                                          ;
+
+*   Déplacements, vitesses, déformations et réactions    *
+
+'SI' ( 'EGA' TYP_MODE 'FOUR')        ;
+   'SI' ( 'EGA' DIR 'HORI' )         ;
+    UMOT = 'MOT' 'UR'                ;
+    EMOT = 'MOT' 'GARZ'              ;
+    FMOT = 'MOT' 'FZ'                ;
+   'SINON'                           ;
+   'SI' ( 'EGA' DIR 'VERT' )         ;
+    UMOT = 'MOT' 'UZ'                ;
+    EMOT = 'MOT' 'EPZZ'              ;
+    FMOT = 'MOT' 'FR'                ;
+   'FINSI'                           ;
+   'FINSI'                           ;
+
+'SINON'                              ;
+'SI' ( 'EGA' TYP_MODE 'PLANDEFO' )   ;
+   'SI' ( 'EGA' DIR 'HORI' )         ;
+    UMOT = 'MOT' 'UX'                ;
+    EMOT = 'MOT' 'GAXY'              ;
+    FMOT = 'MOT' 'FY'                ;
+   'SINON'                           ;
+   'SI' ( 'EGA' DIR 'VERT' )         ;
+    UMOT = 'MOT' 'UY'                ;
+    EMOT = 'MOT' 'EPYY'              ;
+    FMOT = 'MOT' 'FX'                ;
+   'FINSI'                           ;
+   'FINSI'                           ;
+'FINSI'                              ;
+'FINSI'                              ;
+
+'SAUT' 3 'LIGNE'                                                    ;
+'MESS' 'FONCTION DE TRANSFERT POUR LES DEPLACEMENTS, LES VITESSES,' ;
+'MESS' 'LES DEFORMATIONS DE CISAILLEMENT ET LES REACTIONS '         ;
+
+U_FRON = 'TABLE' ;
+V_FRON = 'TABLE' ;
+E_FRON = 'TABLE' ;
+R_FRON = 'TABLE' ;
+  J = 0                 ;
+ 'REPE' BOUCL3 NB_NOEU  ;
+  J = J + 1             ;
+  U_FRON.J = 'PROG' 0.0 ;
+  V_FRON.J = 'PROG' 0.0 ;
+  E_FRON.J = 'PROG' 0.0 ;
+  R_FRON.J = 'PROG' 0.0 ;
+ 'FIN' BOUCL3           ;
+
+ L_TEM = 'PROG' 0.0                                   ;
+ I_TEM = 1                                            ;
+'REPE' BOUCL4  ( NB_PAS - 1 )                         ;
+ I_TEM = I_TEM + 1                                    ;
+ L_TEM = L_TEM 'ET' ( 'PROG' ( RESU.I_TEM.'TEMP' ) )  ;
+ CHD_I = RESU.I_TEM.'DEPL'                            ;
+ CHV_I = RESU.I_TEM.'VITE'                            ;
+ CHE_I ='CHAN' 'CHPO' MOD1 ( 'EPSI' MOD1 CHD_I MAT1 ) ;
+ CHR_I ='REAC' BLO1 CHD_I                             ;
+
+ J = 0                   ;
+'REPE' BOUCL4_1 NB_NOEU  ;
+ J = J + 1               ;
+ U_FRON.J = U_FRON.J 'ET' ('PROG' ('EXTR' CHD_I POI_FRO.J UMOT)) ;
+ V_FRON.J = V_FRON.J 'ET' ('PROG' ('EXTR' CHV_I POI_FRO.J UMOT)) ;
+ E_FRON.J = E_FRON.J 'ET' ('PROG' ('EXTR' CHE_I POI_FRO.J EMOT)) ;
+ R_FRON.J = R_FRON.J 'ET' ('PROG' ('EXTR' CHR_I POI_FRO.J FMOT)) ;
+'FIN' BOUCL4_1 ;
+'FIN' BOUCL4   ;
+
+*      TFR de l'accélération GAMMAO
+
+'TITRE' 'TFR DE L ACCELEROGRAMME GAMMAO'      ;
+ NP = 'DIME' ( 'EXTR' GAMMAO 'ABSC' )         ;
+ XX = ( LOG NP ) / ( LOG 2 )                  ;
+ NN = 'ENTI' XX                               ;
+'SI' ( XX > ( 1.0 * NN ) )                    ;
+ NN = NN + 1                                  ;
+'FINSI'                                       ;
+
+ TF_GAMO = 'TFR'  NN GAMMAO 'MOPH'            ;
+ FR_GAMO = 'EXTR' TF_GAMO   'ABSC'            ;
+ MO_GAMO = 'EXTR' TF_GAMO 'ORDO' 1            ;
+ PH_GAMO = 'EXTR' TF_GAMO 'ORDO' 2            ;
+ NFREQ   = 'DIME' FR_GAMO                     ;
+ DFREQ   = 'EXTR' FR_GAMO 2                   ;
+ FREQN   = 'EXTR' FR_GAMO NFREQ               ;
+ MODUN   = 'EXTR' MO_GAMO NFREQ               ;
+
+'SI' ( IDIV NEG 0 )                           ;
+ NN = NN + IDIV                               ;
+'REMP' MO_GAMO NFREQ ( MODUN / 2.0 )          ;
+
+ NFREQ1  = (2**(NN - 1)) + 1                                ;
+ FR_GAMO = 'PROG' 0.0 'PAS' DFREQ 'NPAS' ( NFREQ1 - 1 )     ;
+LIST ( DIME FR_GAMO ) ;
+ MO_GAMO = MO_GAMO 'ET' ('PROG' (NFREQ1 - NFREQ ) * 0.0)    ;
+LIST ( DIME MO_GAMO ) ;
+ PH_GAMO = PH_GAMO 'ET' ('PROG' (NFREQ1 - NFREQ ) * 0.0)    ;
+LIST ( DIME PH_GAMO ) ;
+ TF_GAMO = 'EVOL' 'COMP' 'MOPH' 'FREQ(HZ)' FR_GAMO 'MODULE'
+            MO_GAMO 'PHASE' PH_GAMO                         ;
+'FINSI' ;
+
+*-------------------- Début de modif 1 du 20/02/2013 -------------------
+
+*      TFR du déplacement de contrôle
+
+'TITRE' 'TFR DU DEPLACEMENT DE CONTROLE'                ;
+ OMEGA2 = ( FR_GAMO * 2. * PI ) ** 2                    ;
+'REMP' OMEGA2 1 1.0                                     ;
+ MOD    = MO_GAMO / ( OMEGA2 * ( -1 ) )                 ;
+'REMP' MOD 1 0.0                                        ;
+ TF_DEPLO = 'EVOL' 'COMP' 'MOPH' 'FREQ(HZ)' FR_GAMO
+            'MODULE' MOD 'PHASE' PH_GAMO                ;
+
+*  TFR du déplacement du outcrop de bedrock sous l'impulsion
+*  Calcul de vitesse VOUT à partir de l'impulsion à la base F et
+*  l'amortissement à la base C (VOUT = F/C, sur une unité de surface)
+
+ G  = ( COUCHE.NB_COU.'MODULE_G' )                      ;
+ RO = ( COUCHE.NB_COU.'MASSE_VOLUMIQUE' )               ;
+ NU = ( COUCHE.NB_COU.'POISSON')                        ;
+ CS = ( G / RO ) ** 0.5                                 ;
+ CP = ((2.0 * (1.0 - NU))/(1.0 - (2.0 * NU))) ** 0.5    ;
+ CP = CP * CS                                           ;
+
+'SI'( 'EGA' DIR 'HORI')                                 ;
+ VOUT =  EV_FOR / (RO * CS)                             ;
+'SINON'                                                 ;
+'SI'( 'EGA' DIR 'VERT')                                 ;
+ VOUT = EV_FOR / (RO * CP)                              ;
+'FINSI'                                                 ;
+'FINSI'                                                 ;
+'TITR' 'VITESSE OUTCROP SOUS L IMPULSION'               ;
+ VOUT = 'EVOL' 'MANU' L_TEM ('IPOL' L_TEM VOUT)         ;
+ TF_VOUT = 'TFR' NN  VOUT 'REIM'                        ;
+
+'TITR' 'TFR DEPLACEMENT OUTCROP SOUS L IMPULSION'       ;
+ LF_VOUT = EXTR TF_VOUT ABSC                            ;
+ IOMEGA = 2.*PI*LF_VOUT                                 ;
+'REMP' IOMEGA 1 1.0                                     ;
+ EVIOMEGA = EVOL COMP 'REIM' LF_VOUT (LF_VOUT*0) IOMEGA ;
+ TF_UOUT = TF_VOUT / EVIOMEGA                           ;
+ RIMP TF_UOUT                                           ;
+
+*     Fonction de transfert / point de contrôle
+
+H_DEPL = 'TABLE' ;
+H_VITE = 'TABLE' ;
+H_EPSI = 'TABLE' ;
+H_REAC = 'TABLE' ;
+
+* Point de contrôle en surface libre (option par défaut)
+
+'TITRE'  'DEPLACEMENT DE CONTROLE'                          ;
+ UO    = 'EVOL' 'MANU' 'TEMPS'  L_TEM 'DEPL' U_FRON.NUM_SUR ;
+ TF_UO = 'TFR' NN UO 'MOPH'                                 ;
+
+* Remplacer le début zéro de TF_UOUT par celui de TF_UO
+
+UOM  = EXTR (EXTR TF_UO  ORDO 1) 1 ;
+UOP  = EXTR (EXTR TF_UO  ORDO 2) 1 ;
+LF_OUT = EXTR TF_UOUT ABSC   ;
+LM_OUT = EXTR TF_UOUT ORDO 1 ;
+LP_OUT = EXTR TF_UOUT ORDO 2 ;
+REMP LM_OUT 1 UOM ;
+REMP LP_OUT 1 UOP ;
+TF_UOUT = 'EVOL' 'COMP' 'MOPH' 'FREQ(HZ)' LF_OUT
+          'MODULE' LM_OUT 'PHASE' LP_OUT  ;
+
+'SI' ('EXIS' P_GAMMA ) ;
+'SI' ('EXIS' P_GAMMA 'ENTREE') ;
+
+* Option point de contrôle "INSIDE"
+
+   'SI' (EGA 'INSIDE' P_GAMMA.ENTREE.NATURE);
+    NUM_CTR = 'NOEU' P_GAMMA.ENTREE.CONTROLE;
+    UO    = 'EVOL' 'MANU' 'TEMPS'  L_TEM 'DEPL' U_FRON.NUM_CTR ;
+    TF_UO = 'TFR' NN UO 'MOPH' ;
+   'FINSI' ;
+
+* Option point de contrôle "OUTCROP" de bedrock
+
+   'SI' (EGA 'OUTCROP' P_GAMMA.ENTREE.NATURE) ;
+    TF_UO = TF_UOUT ;
+   'FINSI' ;
+'FINSI' ;
+'FINSI' ;
+
+*--------------------- Fin de modif 1 du 20/02/2013 --------------------
+
+*     Elimination des zéros dans TF_UO
+
+LABS   = 'PROG' 0.0  FC    (FC + DFREQ) 9000.0       ;
+LFIL1  = 'PROG' 1.0  1.0    0.0         0.0          ;
+LFIL2  = 'PROG' 0.0  0.0    0.0         0.0          ;
+LFIL3  = 'PROG' 0.0  0.0    1.0         1.0          ;
+
+LFIL1  = 'IPOL' FR_GAMO LABS LFIL1                   ;
+LFIL2  = 'IPOL' FR_GAMO LABS LFIL2                   ;
+LFIL3  = 'IPOL' FR_GAMO LABS LFIL3                   ;
+
+EVFIL  = 'EVOL' 'COMP' 'MOPH' FR_GAMO LFIL1 LFIL2    ;
+EVADD  = 'EVOL' 'COMP' 'MOPH' FR_GAMO LFIL3 LFIL2    ;
+
+TF_UO = TF_UO * EVFIL                                ;
+TF_UO = TF_UO + EVADD                                ;
+
+
+TF_GAMO  = TF_GAMO  * EVFIL                          ;
+TF_DEPLO = TF_DEPLO * EVFIL                          ;
+
+'TITR'  'ACCELERATION FILTREE AU POINT DE CONTROLE'  ;
+ GAMMAO   = 'TFRI' TF_GAMO                           ;
+dess GAMMAO mima 'NCLK';
+'TITR'  'DEPLACEMENT FILTREE AU POINT DE CONTROLE'   ;
+ DEPLO    = 'TFRI' TF_DEPLO                          ;
+
+'TITRE' 'DEPLACEMENT A LA BASE'                             ;
+ UB   = 'EVOL' 'MANU' 'TEMPS'  L_TEM 'DEPL' U_FRON.NUM_BAS  ;
+'TITRE' 'VITESSE A LA BASE'                                 ;
+ VO   = 'EVOL' 'MANU' 'TEMPS'  L_TEM 'VITE' V_FRON.NUM_BAS  ;
+'TITRE' 'DEFORMATION A LA BASE'                             ;
+ EO   = 'EVOL' 'MANU' 'TEMPS'  L_TEM 'EPSI' E_FRON.NUM_BAS  ;
+'TITRE' 'REACTION A LA BASE'                                ;
+ RO   = 'EVOL' 'MANU' 'TEMPS'  L_TEM 'REAC' R_FRON.NUM_BAS  ;
+
+ J = 0                                                ;
+'REPE' BOUCL5 NB_NOEU                                 ;
+ J = J + 1                                            ;
+'TITRE'  'FONCTION DE TRANSFERT  HU    DU NOEUD ' J   ;
+ U_J   = 'EVOL' 'MANU' 'TEMPS'  L_TEM 'DEPL' U_FRON.J ;
+ TF_UJ = 'TFR' NN  U_J 'MOPH'                         ;
+ H_DEPL.J = TF_UJ / TF_UO                             ;
+
+'TITRE'  'FONCTION DE TRANSFERT  HV    DU NOEUD' J    ;
+ V_J   = 'EVOL' 'MANU' 'TEMPS'  L_TEM 'VITE' V_FRON.J ;
+ TF_VJ = 'TFR' NN  V_J 'MOPH'                         ;
+ H_VITE.J = TF_VJ / TF_UO                             ;
+
+'TITRE' 'FONCTION DE TRANSFERT   HE    DU NOEUD' J    ;
+ E_J   = 'EVOL' 'MANU' 'TEMPS'  L_TEM 'EPSI' E_FRON.J ;
+ TF_EJ = 'TFR' NN  E_J 'MOPH'                         ;
+ H_EPSI.J = TF_EJ / TF_UO                             ;
+
+'TITRE' 'FONCTION DE TRANSFERT   HR    DU NOEUD' J    ;
+ R_J   = 'EVOL' 'MANU' 'TEMPS'  L_TEM 'REAC' R_FRON.J ;
+ TF_RJ = 'TFR' NN  R_J 'MOPH'                         ;
+ H_REAC.J = TF_RJ / TF_UO                             ;
+
+'FIN' BOUCL5  ;
+'MENA'        ;
+'TASS' FRON   ;
+
+*-------------------- Début de modif 2 du 20/02/2013 -------------------
+
+*     Accélération après déconvolution
+
+'SAUT' 2 'LIGNE'                       ;
+'MESS' 'ACCELERATION DU CHAMP LIBRE'   ;
+'SI' ( 'EXIS' P_GAMMA )                ;
+   NB_GAM = 'DIME' P_GAMMA             ;
+   GAMMA  = 'TABLE'                    ;
+
+  'SI' ( 'EXIS' P_GAMMA 'ENTREE' )     ;
+   NB_GAM = NB_GAM - 1                 ;
+  'FINSI'                              ;
+
+  'SI' (NB_GAM > 0)                    ;
+   K = 0                               ;
+  'REPE' BOUCL6 NB_GAM                 ;
+   K = K + 1                           ;
+   NUM_P  = 'NOEU' P_GAMMA.K           ;
+   HU     =  H_DEPL.NUM_P              ;
+  'TITRE' 'ACCELERATION DU POINT' K                      ;
+   TF_GAM   = HU * TF_GAMO                               ;
+   GAMMA.K  = 'TFRI' TF_GAM                              ;
+   GAMMA.K  = CHTITR ( GAMMA.K ) 'TEMPS' 'ACCE(M/S*S)'   ;
+  'FIN' BOUCL6                                           ;
+  'FINSI'                                                ;
+
+   HU     = TF_UOUT / TF_UO                                    ;
+  'TITRE' 'ACCELERATION OUTCROP DE BEDROCK'                    ;
+   TF_GAM   = HU * TF_GAMO                                     ;
+   GAMMA.OUTCROP  = 'TFRI' TF_GAM                              ;
+   GAMMA.OUTCROP  = CHTITR GAMMA.OUTCROP 'TEMPS' 'ACCE(M/S*S)' ;
+'FINSI' ;
+
+*--------------------- Fin de modif 2 du 20/02/2013 --------------------
+
+'SAUT' 'LIGNE'                             ;
+'MESS' 'VITESSE, DEFORMATION ET REACTION'  ;
+
+ J = 0                                     ;
+'REPE' BOUCL7 NB_NOEU                      ;
+ J = J + 1                                 ;
+
+*    Vitesse compatible avec GAMMAO
+
+'TITRE' 'VITESSE DU NOEUD' J               ;
+ TF_VITE  = ( H_VITE.J ) * TF_DEPLO        ;
+ V_FRON.J = 'TFRI' TF_VITE                 ;
+
+*    On met la vitesse initiale (moyenne sur NV point) à zéro
+
+ NV = 70                                             ;
+ LT     = 'EXTR' ( V_FRON.J ) 'ABSC'                 ;
+ LY     = 'EXTR' ( V_FRON.J ) 'ORDO'                 ;
+
+ Y1 = 0                                              ;
+ IV = 1                                              ;
+'REPE' BV NV                                         ;
+ Y1 = Y1 + ('EXTR' LY IV)                            ;
+ IV = IV + 1                                         ;
+'FIN' BV                                             ;
+ Y1 = Y1 / NV ;
+
+ NY     = 'DIME' LY                                  ;
+ LY1    = 'PROG' NY * Y1                             ;
+ LY     =  LY - LY1                                  ;
+ V_FRON.J = 'EVOL' 'MANU' 'TEMPS' LT 'VITE(M/S)' LY  ;
+
+*    Déformation
+
+'TITRE' 'DEFORMATION AU NOEUD' J                    ;
+ TF_EPSI  = H_EPSI.J * TF_DEPLO                     ;
+ E_FRON.J = 'TFRI' TF_EPSI                          ;
+
+*    Réactions des appuis verticaux
+
+'TITRE' 'REACTION VERTICALE AU NOEUD' J             ;
+ TF_REAC  = ( H_REAC.J ) * TF_DEPLO                 ;
+ R_FRON.J = 'TFRI' TF_REAC                          ;
+
+*    On met la réaction intiale à zéro
+
+LT     = 'EXTR' ( R_FRON.J ) 'ABSC'                 ;
+LY     = 'EXTR' ( R_FRON.J ) 'ORDO'                 ;
+Y1     = 'EXTR' LY 1                                ;
+NY     = 'DIME' LY                                  ;
+LY1    = 'PROG' NY * Y1                             ;
+LY     =  LY - LY1                                  ;
+R_FRON.J = 'EVOL' 'MANU' 'TEMPS' LT 'REAC' LY       ;
+
+'FIN'  BOUCL7                                       ;
+************************************************************************
+
+*    Force d'amortissement à la base
+
+'SAUT' 'LIGNE'                                       ;
+'MESS' 'FORCE D"AMORTISSEMENT A LA BASE : LYSMER'    ;
+'TITR' 'CONTRAINTE D"AMORTISSEMENT A LA BASE'        ;
+ G  = ( COUCHE.NB_COU.'MODULE_G' )                   ;
+ RO = ( COUCHE.NB_COU.'MASSE_VOLUMIQUE' )            ;
+ NU = ( COUCHE.NB_COU.'POISSON')                     ;
+ CS = ( G / RO ) ** 0.5                              ;
+ CP = ((2.0 * (1.0 - NU))/(1.0 - (2.0 * NU))) ** 0.5 ;
+ CP = CP * CS                                        ;
+
+'SI'( 'EGA' DIR 'HORI')                              ;
+ SIG_AMO =  RO * CS * V_FRON.NUM_BAS                 ;
+ SIG_AMO =  CHTITR SIG_AMO 'TEMPS(S)' 'SIGMA(PA)'    ;
+
+'SINON'                                              ;
+'SI'( 'EGA' DIR 'VERT')                              ;
+ SIG_AMO =  RO * CP * V_FRON.NUM_BAS                 ;
+ SIG_AMO =  CHTITR SIG_AMO 'TEMPS(S)' 'SIGMA(PA)'    ;
+'FINSI'                                              ;
+'FINSI'                                              ;
+
+*    Contrainte à la base
+
+'MESS' 'CONTRAINTE A LA BASE'                              ;
+'MESS'                                                     ;
+'TITR' 'IMPULSION A LA BASE'                               ;
+ EV_FOR = 'EVOL' 'MANU' L_TEM ( 'IPOL' L_TEM L_TIM L_FOR ) ;
+
+'TITR' 'TFR DE L"IMPULSION'                                ;
+ TF_FOR = 'TFR' NN  EV_FOR 'MOPH'                          ;
+'TITR' 'FONCTION DE TRANSFERT DE L"IMPULSION'              ;
+ HS     = TF_FOR / TF_UO                                   ;
+ TF_SIG =  HS * TF_DEPLO                                   ;
+
+'TITR' 'CONTRAINTE A LA BASE'                              ;
+ SIG_H  = ( 'TFRI' TF_SIG  ) - SIG_AMO                     ;
+
+*   On met la contrainte initiale à zéro
+
+LT     = 'EXTR' SIG_H 'ABSC'                        ;
+LY     = 'EXTR' SIG_H 'ORDO'                        ;
+Y1     = 'EXTR' LY 1                                ;
+NY     = 'DIME' LY                                  ;
+LY1    = 'PROG' NY * Y1                             ;
+LY     =  LY - LY1                                  ;
+
+SIG_H  = 'EVOL' 'MANU' 'TEMPS(S)' LT 'SIGMA(PA)' LY ;
+
+'MENA'                                              ;
+'TASS' FRON                                         ;
+************************************************************************
+***              FRONTIERE ABSORBANTE DU SOL PROCHE                  ***
+************************************************************************
+'SAUT' 3 'LIGNE'                            ;
+'MESS' 'FRONTIERE ABSORBANTE DU SOL PROCHE' ;
+'SAUT' 'LIGNE'                              ;
+'MESS' 'FRONTIERE VERTICALE DU SOL '        ;
+
+'SI' ( 'EGA' DIR 'HORI' ) ;
+ NHAR = 1                 ;
+'SINON'                   ;
+'SI' ( 'EGA' DIR 'VERT' ) ;
+ NHAR = 0                 ;
+'FINSI'                   ;
+'FINSI'                   ;
+
+ I = 0                                                ;
+'REPE' BOUCL8 NB_COU                                  ;
+ I = I + 1                                            ;
+'SI' ( I 'EGA' 1 )                                    ;
+ AM_V = FRONABS ( COUCHE. I ) TYP_F NHAR              ;
+'SINON'                                               ;
+ AM_V = AM_V 'ET' ( FRONABS ( COUCHE. I ) TYP_F NHAR );
+'FINSI'                                               ;
+'FIN' BOUCL8                                          ;
+
+'MESS' 'FRONTIERE HORIZONTALE DU SOL'                 ;
+ BAS_ABS.'FRONTIERE' = FOND_SOL                       ;
+ AM_H = FRONABS BAS_ABS TYP_F NHAR                    ;
+ AMO1 = AM_V 'ET' AM_H                                ;
+
+************************************************************************
+***         CHARGEMENT SISMIQUE SUR LA FRONTIERE HORIZONTALE         ***
+************************************************************************
+
+'SAUT' 3 'LIGNE'                                          ;
+'MESS' 'CHARGEMENT SISMIQUE SUR LA FRONTIERE HORIZONTALE' ;
+
+*    FO : forces nodales équivalentes de la contrainte
+
+'SI' ( 'EGA' TYP_MODE 'FOUR' )                                  ;
+   'SI' ( 'EGA' DIR 'HORI' )                                    ;
+    FOR_P = 'PRES' 'MASS' MOD_SOL 1.0 BAS_ABS.'FRONTIERE'       ;
+    FOR_H = ( 'EXCO' 'FZ' FOR_P 'FR' ) 'ET' ( -1.0 *
+            ( 'EXCO' 'FZ' FOR_P 'FT' ) )                        ;
+   'SINON'                                                      ;
+   'SI' ( 'EGA' DIR 'VERT' )                                    ;
+    FOR_H = 'PRES' 'MASS' MOD_SOL 1.0 BAS_ABS.'FRONTIERE'       ;
+   'FINSI'                                                      ;
+   'FINSI'                                                      ;
+'SINON'                                                         ;
+'SI' ( 'EGA' TYP_MODE 'PLANDEFO' )                              ;
+   'SI' ( 'EGA' DIR 'HORI' )                                    ;
+    FOR_P = 'PRES' 'MASS' MOD_SOL 1.0 BAS_ABS.'FRONTIERE'       ;
+    FOR_H = 'EXCO' 'FY' FOR_P 'FX'                              ;
+
+   'SINON'                                                      ;
+   'SI' ( 'EGA' DIR 'VERT' )                                    ;
+    FOR_H = 'PRES' 'MASS' MOD_SOL 1.0 BAS_ABS.'FRONTIERE'       ;
+   'FINSI'                                                      ;
+   'FINSI'                                                      ;
+'FINSI'                                                         ;
+'FINSI'                                                         ;
+ CHA_HFO = 'CHAR' FOR_H SIG_H                                   ;
+
+*    Amortissement * viteese A*VO
+
+'SI' ( 'EGA' TYP_MODE 'FOUR' )                              ;
+   'SI' ( 'EGA' DIR 'HORI' )                                ;
+    CH_V = 'MANU' 'CHPO' FOND_SOL 2 'UR' 1.0 'UT' -1.0      ;
+   'SINON'                                                  ;
+   'SI' ( 'EGA' DIR 'VERT' )                                ;
+    CH_V = 'MANU' 'CHPO' FOND_SOL 1 'UZ' 1.0                ;
+   'FINSI'                                                  ;
+   'FINSI'                                                  ;
+'SINON'                                                     ;
+'SI' ( 'EGA' TYP_MODE 'PLANDEFO' )                          ;
+   'SI' ( 'EGA' DIR 'HORI' )                                ;
+    CH_V = 'MANU' 'CHPO' FOND_SOL 1 'UX' 1.0                ;
+   'SINON'                                                  ;
+   'SI' ( 'EGA' DIR 'VERT' )                                ;
+    CH_V = 'MANU' 'CHPO' FOND_SOL 1 'UY' 1.0                ;
+   'FINSI'                                                  ;
+   'FINSI'                                                  ;
+'FINSI'                                                     ;
+'FINSI'                                                     ;
+
+ F_BAS   =  AM_H * CH_V                                     ;
+ CHA_HAX = 'CHAR' F_BAS ( V_FRON.NUM_BAS )                  ;
+'MENA'                                                      ;
+'TASS' FRON                                                 ;
+
+************************************************************************
+***         CHARGEMENT SISMIQUE SUR LA FRONTIERE VERTICALE           ***
+************************************************************************
+
+*     FO = - Réaction
+
+'MESS' 'CHARGEMENT SISMIQUE SUR LA FRONTIERE VERTICALE'             ;
+ J = 0                                                              ;
+'REPE' BOUCL9 NB_NOEU                                               ;
+ J = J + 1                                                          ;
+'SI' ( J 'EGA'  1 )                                                 ;
+ CHA_VFO =  'CHAR' ( 'FORC' FMOT -1.0 POI_FRO.J ) ( R_FRON.J )      ;
+'SINON'                                                             ;
+ CHA_VFO = ('CHAR' ( 'FORC' FMOT -1.0 POI_FRO.J ) ( R_FRON.J ))
+            'ET' CHA_VFO                                            ;
+'FINSI'                                                             ;
+'FIN' BOUCL9                                                        ;
+
+*     Amortissement  * viteese : A*VO
+
+V_ABSC = 'EXTR' ( V_FRON. 1 ) 'ABSC' ;
+N_PAS  = 'DIME' V_ABSC               ;
+
+*    Mode PLANDEFO, DIR = HORI ou VERT
+
+'SI' ( 'EGA' TYP_MODE 'PLANDEFO' )   ;
+   'SI' ( 'EGA' DIR 'HORI' )         ;
+    UDIR = 'MOT' 'UX'                ;
+    FDIR = 'MOT' 'FX'                ;
+   'SINON'                           ;
+   'SI' ( 'EGA' DIR 'VERT' )         ;
+    UDIR = 'MOT' 'UY'                ;
+    FDIR = 'MOT' 'FY'                ;
+   'FINSI'                           ;
+   'FINSI'                           ;
+ VISC = 'TABLE'                      ;
+ K = 0                               ;
+'REPE' BOUCL10 NB_NOEU               ;
+ K = K + 1                           ;
+ EV01 = V_FRON.K                     ;
+ V_FRON.K = 'EXTR' EV01 'ORDO'       ;
+ VISC.K   = 'PROG' N_PAS * 0.0       ;
+'FIN' BOUCL10                        ;
+
+ J = 0                                           ;
+'REPE' BOUCL11 NB_NOEU                           ;
+ J = J + 1                                       ;
+ VEC_U = 'MANU' 'CHPO' POI_FRO.J 1 UDIR 1.0      ;
+ VEC_F = AM_V * VEC_U                            ;
+
+ K = 0                                           ;
+'REPE' BOUC11B NB_NOEU                           ;
+ K = K + 1                                       ;
+ AM_JK = 'EXTR' VEC_F POI_FRO.K FDIR             ;
+ VISC.K = VISC.K + ( AM_JK * V_FRON.J )          ;
+'FIN' BOUC11B                                    ;
+'FIN' BOUCL11                                    ;
+
+*     Recombinaison
+
+ FOR_H = 'FORC' FDIR 1.0  POI_FRO.1              ;
+ CHA_VAX =  'CHAR' FOR_H ( 'EVOL' 'MANU'
+             V_ABSC ( VISC. 1 ) )                ;
+ K = 1                                           ;
+'REPE' BOUCL12 ( NB_NOEU - 1 )                   ;
+ K = K + 1                                       ;
+ FOR_H =  'FORC' FDIR 1.0 POI_FRO.K              ;
+ CHA_VAX =( 'CHAR' FOR_H ( 'EVOL' 'MANU'
+             V_ABSC ( VISC.K ) ) ) 'ET' CHA_VAX  ;
+'FIN' BOUCL12                                    ;
+'FINSI'                                          ;
+
+*     Mode FOUR 0 ( DIR = VERT )
+
+'SI' ( 'EGA' TYP_MODE 'FOUR' )       ;
+ 'SI' ( 'EGA' DIR 'VERT' )           ;
+    VISC_Z = 'TABLE'                 ;
+    K = 0                            ;
+   'REPE' BOUCL13 NB_NOEU            ;
+    K = K + 1                        ;
+    EV01 = V_FRON.K                  ;
+    V_FRON.K = 'EXTR' EV01 'ORDO'    ;
+    VISC_Z.K = 'PROG' N_PAS * 0.0    ;
+   'FIN' BOUCL13                     ;
+
+    J = 0                                           ;
+   'REPE' BOUCL14 NB_NOEU                           ;
+    J = J + 1                                       ;
+    VEC_VZ = 'MANU' 'CHPO' POI_FRO.J 1 'UZ' 1.0     ;
+    VEC_FZ =  AM_V * VEC_VZ                         ;
+    K = 0                                           ;
+   'REPE' BOUC14B NB_NOEU                           ;
+    K = K + 1                                       ;
+    AMZ_JK = 'EXTR' VEC_FZ POI_FRO.K 'FZ'           ;
+    VISC_Z.K = VISC_Z.K + ( AMZ_JK * V_FRON.J )     ;
+   'FIN' BOUC14B                                    ;
+   'FIN' BOUCL14                                    ;
+
+*      Recombinaison
+
+    FOR_Z   =  'FORC' 'FZ' 1.0 POI_FRO.1            ;
+    CHA_VAZ =  'CHAR' FOR_Z ( 'EVOL' 'MANU'
+                V_ABSC ( VISC_Z. 1 ))               ;
+    K = 1                                           ;
+   'REPE' BOUCL15 ( NB_NOEU - 1 )                   ;
+    K = K + 1                                       ;
+    FOR_Z   =  'FORC' 'FZ' 1.0 POI_FRO.K            ;
+    CHA_VAZ =( 'CHAR' FOR_Z ( 'EVOL' 'MANU'
+                V_ABSC ( VISC_Z.K ))) 'ET' CHA_VAZ  ;
+   'FIN' BOUCL15                                    ;
+    CHA_VAX = CHA_VAZ                               ;
+ 'FINSI'                                            ;
+
+*     Mode FOUR 1 ( DIR = HORI )
+
+ 'SI' ( 'EGA' DIR 'HORI' )           ;
+    VISC_R = 'TABLE'                 ;
+    VISC_T = 'TABLE'                 ;
+    K = 0                            ;
+   'REPE' BOUCL16 NB_NOEU            ;
+    K = K + 1                        ;
+    EV01 = V_FRON.K                  ;
+    V_FRON.K = 'EXTR' EV01 'ORDO'    ;
+    VISC_R.K = 'PROG' N_PAS * 0.0    ;
+    VISC_T.K = 'PROG' N_PAS * 0.0    ;
+   'FIN' BOUCL16                     ;
+    J = 0                                           ;
+   'REPE' BOUCL17 NB_NOEU                           ;
+    J = J + 1                                       ;
+    VEC_VR = 'MANU' 'CHPO' POI_FRO.J 1 'UR' 1.0     ;
+    VEC_VT = 'MANU' 'CHPO' POI_FRO.J 1 'UT' 1.0     ;
+    VEC_FR = AM_V * VEC_VR                          ;
+    VEC_FT = AM_V * VEC_VT                          ;
+    K = 0                                           ;
+   'REPE' BOUC17B NB_NOEU                           ;
+    K = K + 1                                       ;
+    AMR_JK = 'EXTR' VEC_FR POI_FRO.K 'FR'           ;
+    AMT_JK = 'EXTR' VEC_FT POI_FRO.K 'FT'           ;
+    VISC_R.K = VISC_R.K + ( AMR_JK * V_FRON.J )     ;
+    VISC_T.K = VISC_T.K - ( AMT_JK * V_FRON.J )     ;
+   'FIN' BOUC17B                                    ;
+   'FIN' BOUCL17                                    ;
+
+*      Recombinaison
+
+    FOR_R = 'FORC' 'FR' 1.0 POI_FRO.1               ;
+    FOR_T = 'FORC' 'FT' 1.0 POI_FRO.1               ;
+    CHA_VAR = 'CHAR' FOR_R ( 'EVOL' 'MANU'
+               V_ABSC ( VISC_R. 1 ) )               ;
+    CHA_VAT = 'CHAR' FOR_T ( 'EVOL' 'MANU'
+               V_ABSC ( VISC_T. 1 ) )               ;
+    K = 1                                           ;
+   'REPE' BOUCL18 ( NB_NOEU - 1 )                   ;
+    K = K + 1                                       ;
+    FOR_R =  'FORC' 'FR' 1.0 POI_FRO.K              ;
+    CHA_VAR = CHA_VAR 'ET' ( 'CHAR' FOR_R ( 'EVOL'
+             'MANU' V_ABSC ( VISC_R.K ) ) )         ;
+    FOR_T =  'FORC' 'FT' 1.0 POI_FRO.K              ;
+    CHA_VAT = CHA_VAT 'ET' ( 'CHAR' FOR_T ( 'EVOL'
+             'MANU' V_ABSC ( VISC_T.K ) ) )         ;
+   'FIN' BOUCL18                                    ;
+    CHA_VAX = CHA_VAR 'ET' CHA_VAT                  ;
+
+ 'FINSI'                                            ;
+'FINSI'                                             ;
+ CHA1 = CHA_HFO 'ET' CHA_HAX 'ET' CHA_VFO 'ET' CHA_VAX  ;
+
+* Changement de format du chargement
+
+ CHA1 = 'CHAN' 'TABL' CHA1 'MECA' ;
+
+************************************************************************
+***               Déformation de cisaillement maximale               ***
+************************************************************************
+'SAUT' 2 'LIGNE'                               ;
+'MESS' 'DEFORMATION MAXIMALE'                  ;
+ PROF = 'PROG' NB_NOEU * 0.0                   ;
+ GMAX = 'PROG' NB_NOEU * 0.0                   ;
+ J = 0                                         ;
+'REPE' BOUCL19 NB_NOEU                         ;
+ J = J + 1                                     ;
+ ZJ   = 'COOR' 2 ( POI_FRO.J )                 ;
+ CISA = 'EXTR' ( E_FRON.J ) 'ORDO'             ;
+ GX   = 'MAXI' CISA 'ABS'                      ;
+'REMP' PROF J ZJ                               ;
+'REMP' GMAX J GX                               ;
+'FIN' BOUCL19                                  ;
+ GMAXMAX = 'MAXI' GMAX                         ;
+
+*     Evolution de deformation en profondeur
+
+'SI' ( 'EGA' DIR 'HORI' )                                   ;
+'TITR' 'DEFORMATION DE CISAILLEMENT MAXIMALE'               ;
+ DEFZ  = 'EVOL' 'MANU' 'PROFONDEUR' PROF 'GAM_MAX' GMAX     ;
+ DEFZ  = 'ORDO' 'DECROISSANT' DEFZ                          ;
+ ZFROF = 'EXTR' DEFZ 'ABSC'                                 ;
+ ZGMAX = 'EXTR' DEFZ 'ORDO'                                 ;
+ DEFZ  = 'EVOL' 'MANU' 'GAM_MAX' ZGMAX 'PROFONDEUR' ZFROF   ;
+'DESS' DEFZ 'NCLK'                                          ;
+'FINSI'                                                     ;
+
+'SI' ( 'EGA' DIR 'VERT' )                                   ;
+'TITR' 'DEFORMATION VERTICALE MAXIMALE'                     ;
+ DEFZ  = 'EVOL' 'MANU' 'PROFONDEUR' PROF 'EPS_MAX' GMAX     ;
+ DEFZ  = 'ORDO' 'DECROISSANT' DEFZ                          ;
+ ZFROF = 'EXTR' DEFZ 'ABSC'                                 ;
+ ZGMAX = 'EXTR' DEFZ 'ORDO'                                 ;
+ DEFZ  = 'EVOL' 'MANU' 'EPS_MAX' ZGMAX 'PROFONDEUR' ZFROF   ;
+'DESS' DEFZ 'NCLK'                                          ;
+'FINSI'                                                     ;
+
+'SAUT' 5 'LIGNE'                                                   ;
+'MESS' '*********************************************************' ;
+'MESS' '*                                                       *' ;
+'MESS' '*        FIN DE LA PROCEDURE DE LA DECONVOLUTION        *' ;
+'MESS' '*                                                       *' ;
+'MESS' '*********************************************************' ;
+'SAUT' 5 'LIGNE'                                                   ;
+
+ TABRESU = 'TABLE'         ;
+
+ TABRESU.'CHAR'  = CHA1    ;
+ TABRESU.'AMOR'  = AMO1    ;
+ TABRESU.'DEFO'  = DEFZ    ;
+ TABRESU.'ACCE'  = GAMMA   ;
+ TABRESU.'PAS'   = PAS_TEM ;
+ TABRESU.'FCDYN' = FCDYN   ;
+
+'FINPROC' TABRESU ;
+************************************************************************
+
+
+$$$$
+

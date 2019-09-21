@@ -1,0 +1,77 @@
+C*** -INC TFFOR3D
+*
+* SEGMENTS UTILISES POUR LE CALCUL DES FACTEURS DE FORME EN 3D
+*
+C---------------------------------------------------------------------
+      SEGMENT SHC3D
+      INTEGER  KRO(NFC,NES),KSI(NFC,NES),KA(NFC),IM(NFC),IR(NR)
+      REAL*8   V(NES,NR,NR),G(NR,NR)
+      ENDSEGMENT
+C
+C     DESCRIPTION DU H.C DE PROJECTION
+C     --------------------------------
+C     KRO , KSI : POUR LE CHANGEMENT DE REPERE
+C     KA  , IM  : REFERENCE
+C     IR: CORRESPONDANCE
+C     V : DIRECTION UNITAIRE DES CELLULES
+C     G : FACTEUR DE FORME ASSOCIE
+C---------------------------------------------------------------------
+      SEGMENT SKBUFF
+      INTEGER  NUMF(NFC,NOC,NR,NR),NTYP(NFC,NR,NR)
+      REAL*8   ZB(NFC,NR,NR),PSC(NFC,NR,NR)
+      ENDSEGMENT
+C
+C     BUFFER ASSOCIE AU H.C
+C     ---------------------
+C     ZB  : PROFONDEUR
+C     NUMF : INDICE DE LE DERNIERE FACE RENCONTREE
+C     NTYP :  TYPE  ASSOCIES
+C     PSC  :  PRODUIT SCALAIRE (NORMALE.DIRECTION CELLULE)
+C---------------------------------------------------------------------
+      SEGMENT SKFACE
+      INTEGER  KCORR(MFACE),NUK(MS,MFACE),NAR(3,MFACE),KPATCH(MFACE)
+      INTEGER  NCELL(MFACE)
+      REAL*8   U(4,MFACE),S(MFACE)
+      REAL*8   FF1(MFACE)
+      ENDSEGMENT
+      SEGMENT IPATCH
+      REAL*8   GP(MSP,NPATCH),SP(NPATCH)
+      ENDSEGMENT
+C
+C     DESCRIPTION DES FACES
+C     ---------------------
+C
+C     MFACE : NOMBRE DE TRIANGLES
+C     KCORR : CORRESPONDANCE TRI3-QUA4  SI QUA4
+C     NUK   : CONNECTIVITES
+C     NAR   : INDICES DES ARETES
+C     U     : NORMALE UNITAIRE ET EQUATION DU PLAN DE L'ELEMENT
+C     S     : SURFACE
+C     FF1   : TABLEAU DES FF POUR UNE FACE 1 DONNEE
+C     NCELL : NOMBRE TOTAL DE CELLULES VUES PAR UN POINT
+C     KPATCH: POINTEUR SUR IPATCH
+C     NPATCH: NOMBRE DE POINTS SUR L'ELEMENT (REDECOUPAGE)
+C     GP    : COORDONNEES DES POINTS
+C     SP    : ET SURFACES
+C---------------------------------------------------------------------
+      SEGMENT SPROJA
+      INTEGER  NFA(NSE),IFA(4,NSE),IG(4,2,NSE),NCEL(4,NSE)
+      INTEGER  ICEL(4,2,NIMAX,NSE),ICELC(3,2,NSCEL),IC(2,NSCEL)
+      ENDSEGMENT
+C
+C     PROJECTION DES ARETES
+C     ---------------------
+C     NSE  : NOMBRE DE ARETES
+C     NFA  : NOMBRE DE FACES
+C     IFA  : NUMEROS DES FACES
+C     IG   : CENTRES DE GRAVITE DES PORTIONS D'ARETES PAR FACE
+C     ICEL : CELLULES ASSOCIEES  PAR FACE
+C     NCEL : NOMBRE DE CELLULES PAR FACE
+C     ICELC,IC : INTERNE
+C---------------------------------------------------------------------
+      COMMON/CKRESO/KFC,NRES,KES,KIMP
+C     KFC : NOMBRE DE FACES H.C
+C     NRES: RESOLUTION
+C     KES : DIM ESPACE
+C     KIMP: IMPRESSION
+C---------------------------------------------------------------------

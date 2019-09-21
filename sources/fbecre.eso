@@ -1,0 +1,970 @@
+C FBECRE    SOURCE    BECC      09/12/07    21:15:16     6579
+      subroutine fbecre(ndim, nesp, nLHS, nordpo,
+     &     reacoe, aprop, Runiv,
+     &     Tmaxcv,
+     &     cnna, ctna, ct1na,
+     &     wvec_l,
+     &     wvec_r,
+     &     wwork, y, acv_l, acv_r, acv_b, acv_w   ,
+     &     flu, f_lag, cellt,
+     &     logan)
+C
+c************************************************************************
+c
+c project           :
+c
+c name              :  fbecre
+C                      reaction shock in WDF, CJDF, CJDT, SDT
+c
+c description       :  Reactive Euler equations for a mixture of reactive
+C                      thermally perfect gases.
+c
+c                      Shock-shock fds + entropy fix, implemented in a
+C                      "Discrete Equation Method" fashion.
+c
+c                      Voir:
+c                      1) Beccantini, report ???
+C                      2) Metayer, Massoni, Saurel, "Modelling
+C                         evaporations fronts with reactive Riemann
+C                          solvers.", JCP 205, 2005
+c
+c language          :  fortran 77
+c
+c author            :  a. beccantini den/dm2s/sfme/ltmf
+c
+c************************************************************************
+c
+c called sub        :  prithe, racre2, flufun
+C
+C called by         :  comres
+c
+c************************************************************************
+c
+c**** input
+C
+C     ndim                =  dimension of the domain
+c
+c     nesp                =  species involved in the Euler equations
+C
+C     nLHS                =  species involved in the LHS of the global
+C                            reaction
+c
+c     nordp0              =  polynomial order of the cv
+c
+c     reacoe              =  coefficient involved in the global reaction
+c                            (positive in the LHS, negative in the RHS...
+c                            the first one should be positive)
+c
+c     aprop               =  gas properties (cv, molar mass, formation
+C                            energy)
+c
+C     Runiv               =  universal gas constant
+c
+C     Tmaxcv              =  Tmax for cv expansion
+C
+C     cnna, ctna, ct1na   = scalar products
+C                           (\vec{n},\vec{n}_{\rm alpha})
+C                           (\vec{t},\vec{n}_{\rm alpha})
+C                           (\vec{t1},\vec{n}_{\rm alpha})
+C                           HP. We suppose that \vec{n}_{\rm alpha} is
+C                               always from the burnt to the unburnt state
+C
+c     wvec_l             =  left primitive variables
+c
+c     wvec_r             =  right primitive variables
+C
+C                            NB Primitive variables =
+C
+C                            w(1)             = rho
+C                            w(2)             = ux
+C                            w(3)             = uy
+C                            w(4)             = uz
+C                            w(2+ndim)        = p
+C                            w(3+ndim)        = csi
+C                            w(3+ndim+1)      = yf(1)
+C                                ...
+C                            w(3+ndim+nLHS)   = yf(nLHS)
+C                            w(3+ndim+nLHS+1) = yi(nLHS+1)
+C                                ...
+C                            w(3+ndim+nesp-1) = yi(nesp-1)
+C                            w(3+ndim+nesp)   = dy1t = yi(1) - yf(1)
+C                            w(4+ndim+nesp)   = k0
+C
+C                            For ndim = 1, the total number of variables
+C                            is 4 + 1 + nesp = 5 + nesp.
+c
+c     wwork, y, acv_l,
+C     acv_r, acv_b,
+C     acv_w               =  temporary work vectors
+C                            wwork(4+ndim+nesp), y(1:nesp),
+C                            acv_l(0:nordpo),
+C                            acv_r(0:nordpo),
+C                            acv_b(0:nordpo),
+C                            acv_w   (0:nordpo)
+C
+c**** output
+c
+c     flu                 =  Eulerian interfacial flux in (n,t1,t2), i.e.
+c                            rho*un                 mass
+C                            rho*un*un + p          momentum along n
+C                            rho*un*ut1             momentum along t1
+*                            rho*un*ut2             momentum along t2
+C                            rho*un*ht              energy
+c                            0.0                    alpha
+C                            rho*un*y_{1,f}         mass * y_{1,f}
+C                            ...
+C                            rho*un*y_{nLHS+1,i}    mass * y_{nLHS+1,i}
+c                            ...
+C                            rho*un*dy_{1,t}        mass * dy_{1,t}
+C                            rho*un*k0              mass * k0
+C
+C                            NB. flu(1:(4+ndim+nesp))
+c
+C     f_lag             =  Lagrangian interfacial flux on the reactive
+C                            discontinuty in (n,t1,t2), i.e.
+c                            rho*(un - D_resh)                 mass
+C                            rho*un*un + p - (D_resh rho un)   momentum along n
+C                            rho*(un - D_resh)*ut1             momentum along t1
+C                            rho*(un - D_resh)*ut2             momentum along t2
+C                            rho*un*ht - (D_resh rho et)       energy
+c                            - D_resh                          alpha
+c                            rho*(un - D_resh)*y_{1,f}         mass * y_{1,f}
+C                            ...
+C
+C                            NB. f_lag(1:(4+ndim+nesp))
+C
+c
+c     cellt               =  stability condition, i.e.
+c
+c                            dt/dx < cellt (dimension 1/velocity)
+c
+c     logan               =  si true, anomaly detected
+c
+c************************************************************************
+c
+C     07/12/2009      created
+C
+c************************************************************************
+c
+c n.b.: all variables are declared
+c
+c      implicit none
+      integer ndim, nesp, nLHS, nordpo, iter
+      integer icomp
+      real*8 zero
+      parameter (zero=1.0d-10)
+      real*8 rind_l
+      real*8  reacoe(nesp), aprop(0:(nordpo+2),nesp), Runiv, Tmaxcv
+     &     , wvec_l(4+ndim+nesp), wvec_r(4+ndim+nesp)
+     &     , flu(4+ndim+nesp)
+     &     , f_lag(4+ndim+nesp),  cellt
+      real*8 wwork(4+ndim+nesp)
+     &     , acv_l(0:nordpo), acv_r(0:nordpo), acv_b(0:nordpo)
+     &     , acv_w(0:nordpo)
+     $     , y(1:nesp)
+      real*8 csi0, csi1, k0
+      real*8 scnna, cnna, ctna, ct1na
+      real*8 gam_b, Rgas_b, cv_b, hf_b, rho_b, u_b(1:3), un_b, p_b, T_b
+     &     , et_b, csi_b
+     &     , gam_l, Rgas_l, cv_l, hf_l, rho_l, u_l(1:3), p_l, T_l
+     &     , et_l, csi_l
+     &     , gam_r, Rgas_r, cv_r, hf_r, rho_r, u_r(1:3), p_r, T_r
+     &     , et_r, csi_r
+     &     , un_r, un_l, q
+      real*8 u_l1, u_r1
+      real*8 d_l, d_r
+      real*8 rho_d, p_d, un_d, T_d, d_d
+     &     , rho_c, p_c, un_c, T_c, d_c
+     &     , d_b
+     &     , rho_a, p_a, un_a, T_a, d_a
+      real*8 xst, flurho, fluru, fluret, coefy, omcoey
+     &     , trekin, D_resh, k0new
+      real*8 coefd, d_o
+     &     , k0m
+     &     , d_lm, d_rm
+     &     , rho_dm, p_dm, un_dm, T_dm, d_dm
+     &     , rho_cm, p_cm, un_cm, T_cm, d_cm
+     &     , rho_bm, p_bm, un_bm, T_bm, d_bm
+     &     , rho_am, p_am, un_am, T_am, d_am
+     &     , k0n
+     &     , d_ln, d_rn
+     &     , rho_dn, p_dn, un_dn, T_dn, d_dn
+     &     , rho_cn, p_cn, un_cn, T_cn, d_cn
+     &     , rho_bn, p_bn, un_bn, T_bn, d_bn
+     &     , rho_an, p_an, un_an, T_an, d_an
+     &     , k0o
+     &     , d_lo, d_ro
+     &     , rho_do, p_do, un_do, T_do, d_do
+     &     , rho_co, p_co, un_co, T_co, d_co
+     &     , rho_bo, p_bo, un_bo, T_bo, d_bo
+     &     , rho_ao, p_ao, un_ao, T_ao, d_ao
+C
+      logical logan
+      logical lognc
+      logical logdeb, logk0n
+C     logdeb = debugging ?
+C     logk0n = .true.  : instead of k0, we take k0 * abs(cnna)
+C              .false. : instead of k0, we take k0 * abs(cnna)
+      parameter (logdeb = .false., logk0n = .true.)
+C
+C     HP $\vec{n}_{\rm \alpha}$ is always from the burnt to the unburnt
+C     region
+C
+      scnna = sign(1.0D0, cnna)
+C
+C     In the reactive case, we have to distingish between 6 different
+C     states
+C
+C     l    = burnt state (csi = csimax)
+C                        | Left GNL wave
+C     ls   = connected to l by a GNL wave (csi = csimax)
+C          = d
+C                        | Contact discontinuty
+C     rsss = connected to rss by a rarefaction wave (true
+C            in CJDF and CJDT regime, = rss in WDF and SDT)
+C            (csi = csimax)
+C          = c
+C                        | Rarefaction wave
+C     rss  = connected to rs by a reactive wave (csi = csimax)
+C          = b
+C                        | Reactive shock (WDF, CJDF, CJDT, SDT)
+C     rs   = connected to r by a GNL wave (csi = csimin)
+C            in SDT, state behind the non-reactive shock travelling
+C            at the same speed than the reactive shock
+C          = a
+C                        | Right GNL wave
+C     r    = unburnt state (csi = csimin)
+C
+C
+C     In the non-reactive case, we have to distingish between 4 different
+C     states:
+C
+C     l    = burnt/unburnt state
+C                        | Left GNL wave
+C     ls   = connected to l by a GNL wave
+C          = b
+C                        | Contact discontinuty
+C     rs   = connected to r by a GNL wave
+C          = a
+C                        | Right GNL wave
+C     r    = burnt/unburnt state
+C
+      csi0 = wvec_l(ndim+3)
+      csi1 = wvec_r(ndim+3)
+C
+C     csi0 = 0 or 1
+C     csi1 = 0 or 1
+C
+      if (abs(csi0 - csi1) .lt. 1.0D-1)then
+C      if (.false.) then
+C
+C************************************************************************
+C******* NON REACTIVE CASE **********************************************
+C************************************************************************
+C
+         call prithe(ndim, nesp, nLHS, nordpo, aprop, reacoe, Runiv,
+     $        Tmaxcv,wvec_l,gam_l, Rgas_l, cv_l, acv_l, hf_l, rho_l,
+     $        u_l, p_l, T_l,y, et_l, csi_l, logan)
+         if (logan) then
+            write(*,'(/A8)') 'fbecre.f'
+            write(*,*) 'ANOMALY DETECTED 01'
+            goto 9999
+         endif
+C
+         call prithe(ndim, nesp, nLHS, nordpo, aprop, reacoe, Runiv,
+     $        Tmaxcv,wvec_r,gam_r, Rgas_r, cv_r, acv_r, hf_r, rho_r,
+     $        u_r, p_r, T_r,y, et_r, csi_r, logan)
+         if (logan) then
+            write(*,'(/A8)') 'fcolre.f'
+            write(*,*) 'ANOMALY DETECTED 02'
+            goto 9999
+         endif
+C
+         un_l = u_l(1)
+         un_r = u_r(1)
+C
+         call racnre(nordpo, Tmaxcv,
+     &        Rgas_l, acv_l, Rgas_r, acv_r,
+     &        rho_l, p_l, un_l, T_l, gam_l,
+     &        rho_r, p_r, un_r, T_r, gam_r,
+     &        d_l, d_r,
+     &        rho_b, p_b, un_b, T_b, d_b,
+     &        rho_a, p_a, un_a, T_a, d_a,
+     &        logan, lognc)
+C
+         cellt = max (abs(d_l), abs(d_r))
+C
+C******* States
+C
+C         l
+C        ***
+C          |*                              r
+C          | *   b                 *********
+C          |  *******             *|
+C          |  |     *   a        * |
+C          |  |     *************  |
+C          |  |     |           |  |
+C          |  |     |           |  |
+C        d_l d_b  un_b=un_a   d_a d_r
+C
+C
+         xst = 0.0D0
+         call flufu2(nordpo,
+     &        Tmaxcv, Rgas_r, acv_r,
+     &        Rgas_l, acv_l, acv_w,
+     &        xst,
+     &        d_l, d_b, d_a, d_r,
+     &        rho_l, T_l, un_l, hf_l,
+     &        rho_b, T_b, un_b,
+     &        rho_a, T_a, un_a,
+     &        rho_r, T_r, un_r, hf_r,
+     &        flurho, fluru, fluret)
+C
+         flu(1) = flurho
+         flu(2) = fluru
+         flu(2+ndim) = fluret
+         flu(3+ndim) = 0.0d0
+C        The Larrouturou theorem does hold
+C        Namely un_a (= un_b) has the same sign as flurho
+C        write (*,*) un_d, un_c, flurho
+C        un_ls > 0 => coefy = 1
+         coefy = 0.5d0 * (1.0d0 + sign(1.0d0, flurho))
+         omcoey = 1.0d0 - coefy
+C        Tangential speeds (ndim .ge. 2)
+         do icomp = 3, (ndim + 1), 1
+            flu(icomp) = flurho * ((coefy * wvec_l(icomp)) +
+     &           (omcoey * wvec_r(icomp)))
+         enddo
+         do icomp = (ndim + 4), (ndim + nesp + 4), 1
+            flu(icomp) = flurho * ((coefy * wvec_l(icomp)) +
+     &           (omcoey * wvec_r(icomp)))
+         enddo
+C        Kinetic energy flux
+         trekin = 0.0D0
+         do icomp = 2, ndim, 1
+            trekin = trekin + (((coefy * wvec_l(icomp + 1)) +
+     &           (omcoey * wvec_r(icomp + 1))) ** 2)
+         enddo
+         trekin = 0.5D0 * trekin
+         flu(2+ndim) = flu(2+ndim) + (flurho * trekin)
+C
+C******* f_lag is here not defined !!!
+C
+      else
+C
+C************************************************************************
+C******* REACTIVE CASE **************************************************
+C************************************************************************
+C
+C        We define the left state such that csi_l > csi_r
+C
+         if (csi0 .gt. csi1) then
+            k0 = wvec_r(4+ndim+nesp)
+            rind_l = 1.0D0
+C
+C           The rss (b) state is the burnt state relatively to the
+C           right and right star (a) state. It has the same value of csi as
+C           the left state.
+C           Note that this state has not necessary the same mass
+C           fractions as the left state.
+C           We compute the physical properties of the rss (b) state
+C           namely
+C           gam_b, Rgas_b, cv_b, acv_b, hf_b.
+C           The other physical values are of course meaningless!
+C
+            do icomp = 1, (nesp + 4 + ndim), 1
+               wwork(icomp) = wvec_r(icomp)
+            enddo
+            wwork(3+ndim) = wvec_l(3+ndim)
+C
+            call prithe(ndim, nesp, nLHS, nordpo, aprop, reacoe, Runiv,
+     $           Tmaxcv,wwork,gam_b, Rgas_b, cv_b, acv_b, hf_b,
+     $           rho_b, u_b, p_b, T_b ,y, et_b, csi_b, logan)
+            un_b = u_b(1)
+            if (logan) then
+               write(*,'(/A8)') 'fbecre.f'
+               write(*,*) 'ANOMALY DETECTED 1'
+               goto 9999
+            endif
+C
+C           The left state is considered as the burnt state.
+C           We compute the physical properties of the left state, namely
+C           gam_l, Rgas_l, cv_l, acv_l, hf_l.
+C           We also compute the physical variable on the left, namely
+C           rho_l, u_l, p_l, T_L, et_l and also csi_r
+C
+            call prithe(ndim, nesp, nLHS, nordpo, aprop, reacoe, Runiv,
+     $           Tmaxcv,wvec_l,gam_l, Rgas_l, cv_l, acv_l, hf_l, rho_l,
+     $           u_l, p_l, T_l,y, et_l, csi_l, logan)
+            if (logan) then
+               write(*,'(/A8)') 'fbecre.f'
+               write(*,*) 'ANOMALY DETECTED 2'
+               goto 9999
+            endif
+C
+C           We compute the normal speed in the frame
+C           (\vec{n}_{\rm alpha}, \vec{t}_{\rm alpha},
+C            \vec{t1}_{\rm alpha})
+C
+            u_l1 = u_l(1) * cnna * scnna
+            if (ndim .ge. 2) then
+               u_l1 = u_l1 + (u_l(2) * ctna * scnna)
+            endif
+            if (ndim .eq. 3) then
+               u_l1 = u_l1 + (u_l(3) * ct1na * scnna)
+            endif
+C
+C           The right state is considered as the unburnt state.
+C           We compute the physical properties of the right state, namely
+C           gam_r, Rgas_r, cv_r, acv_r, hf_r.
+C           We also compute the physical variable on the left, namely
+C           rho_r, u_r, p_r, T_r, et_r, csi_r
+C
+            call prithe(ndim, nesp, nLHS, nordpo, aprop, reacoe, Runiv,
+     $           Tmaxcv,wvec_r,gam_r, Rgas_r, cv_r, acv_r, hf_r, rho_r,
+     $           u_r, p_r, T_r,y, et_r, csi_r, logan)
+            if (logan) then
+               write(*,'(/A8)') 'fcolre.f'
+               write(*,*) 'ANOMALY DETECTED 3'
+               goto 9999
+            endif
+            u_r1 = u_r(1) * cnna * scnna
+            if (ndim .ge. 2) then
+               u_r1 = u_r1 + (u_r(2) * ctna * scnna)
+            endif
+            if (ndim .eq. 3) then
+               u_r1 = u_r1 + (u_r(3) * ct1na * scnna)
+            endif
+         else
+            rind_l = -1.0D0
+            k0 = wvec_l(4+ndim+nesp)
+C
+            do icomp = 1, (nesp + 4 + ndim), 1
+               wwork(icomp)=wvec_l(icomp)
+            enddo
+            wwork(3+ndim)=wvec_r(3+ndim)
+C
+            call prithe(ndim, nesp, nLHS, nordpo, aprop, reacoe, Runiv,
+     $           Tmaxcv,wwork,gam_b, Rgas_b, cv_b, acv_b, hf_b,
+     $           rho_b, u_b, p_b, T_b, y, et_b, csi_b, logan)
+            un_b = u_b(1)
+            if (logan) then
+               write(*,'(/A8)') 'fcolre.f'
+               write(*,*) 'ANOMALY DETECTED 4'
+               goto 9999
+            endif
+C
+            call prithe(ndim, nesp, nLHS, nordpo, aprop, reacoe, Runiv,
+     $           Tmaxcv,wvec_r,gam_l, Rgas_l, cv_l, acv_l, hf_l, rho_l,
+     $           u_l, p_l, T_l,y, et_l, csi_l, logan)
+            if (logan) then
+               write(*,'(/A8)') 'fcolre.f'
+               write(*,*) 'ANOMALY DETECTED 5'
+               goto 9999
+            endif
+            u_l1 = u_l(1) * cnna * scnna
+            if (ndim .ge. 2) then
+               u_l1 = u_l1 + (u_l(2) * ctna * scnna)
+            endif
+            if (ndim .eq. 3) then
+               u_l1 = u_l1 + (u_l(3) * ct1na * scnna)
+            endif
+C
+            call prithe(ndim, nesp, nLHS, nordpo, aprop, reacoe, Runiv,
+     $           Tmaxcv,wvec_l,gam_r, Rgas_r, cv_r, acv_r, hf_r, rho_r,
+     $           u_r, p_r, T_r,y, et_r, csi_r, logan)
+            if (logan) then
+               write(*,'(/A8)') 'fcolre.f'
+               write(*,*) 'ANOMALY DETECTED 6'
+               goto 9999
+            endif
+            u_r1 = u_r(1) * cnna * scnna
+            if (ndim .ge. 2) then
+               u_r1 = u_r1 + (u_r(2) * ctna * scnna)
+            endif
+            if (ndim .eq. 3) then
+               u_r1 = u_r1 + (u_r(3) * ct1na * scnna)
+            endif
+         endif
+         un_r = rind_l * u_r(1)
+         un_l = rind_l * u_l(1)
+         u_r1 = rind_l * u_r1
+         u_l1 = rind_l * u_l1
+C
+C**** Test
+C
+         if (logdeb) then
+            write(*,'(A23)') 'rho_r,  p_r,  t_r,  u_r, u_r1'
+            write(*,'(4E16.6)') rho_r, p_r, t_r, un_r, u_r1
+            write(*,'(A23)') 'rho_l,  p_l,  t_l,  u_l, u_l1'
+            write(*,'(4E16.6)') rho_l, p_l, t_l, un_l, u_l1
+C           stop
+         endif
+C
+C
+C        The reaction should be exothermic
+C
+         q = hf_r - hf_b
+         if (q .lt. (-1.0D0 * zero * max( abs(hf_b), abs(hf_r) )) ) then
+            write(*,'(/A8)') 'fcolre.f'
+            write(*,*) 'Endothermic reaction ???                '
+            write(*,*) 'q =', q
+            logan = .true.
+            goto 9999
+         endif
+         q = 0.5d0 * (q + abs(q))
+C
+C        Computation of the speed of the wave
+C        It can deal with vacuum
+C
+         call racre2(nordpo, Tmaxcv,
+     &        Rgas_l, acv_l, Rgas_b, acv_b, Rgas_r, acv_r,
+     &        q, k0,
+     &        rho_l, p_l, u_l1, T_l, gam_l,
+     &        rho_r, p_r, u_r1, T_r, gam_r,
+     &        d_l, d_r,
+     &        rho_d, p_d, un_d, T_d, d_d,
+     &        rho_c, p_c, un_c, T_c, d_c,
+     &        rho_b, p_b, un_b, T_b, d_b,
+     &        rho_a, p_a, un_a, T_a, d_a,
+     &        logan, lognc)
+C
+         if (ndim .eq. 1)then
+C
+C***************************
+C********** 1D *************
+C***************************
+C
+            cellt = max (abs(d_l), abs(d_r))
+            D_resh = d_b
+         elseif (logk0n) then
+C
+C******************************
+C********** K0 n \cdot n_a ****
+C******************************
+C
+C
+C           Intermediate state
+C           It can deal with vacuum
+C
+            k0new = max ((abs ((d_b - un_a) * cnna)), (k0*1.0D-3))
+C            k0new = k0
+            call racre2(nordpo, Tmaxcv,
+     &           Rgas_l, acv_l, Rgas_b, acv_b, Rgas_r, acv_r,
+     &           q, k0new,
+     &           rho_l, p_l, un_l, T_l, gam_l,
+     &           rho_r, p_r, un_r, T_r, gam_r,
+     &           d_l, d_r,
+     &           rho_d, p_d, un_d, T_d, d_d,
+     &           rho_c, p_c, un_c, T_c, d_c,
+     &           rho_b, p_b, un_b, T_b, d_b,
+     &           rho_a, p_a, un_a, T_a, d_a,
+     &           logan, lognc)
+C
+            D_resh = d_b
+C
+            if (logan) then
+               write(*,'(/A8)') 'fbecre.f'
+               write(*,*) 'ANOMALY DETECTED 7'
+               goto 9999
+            endif
+C
+            cellt = max (abs(d_l), abs(d_r))
+C
+         else
+C
+C******************************
+C********** D n \cdot n_a *****
+C******************************
+C
+C
+C            coefd = rind_l * cnna
+C            write(*,*) 'd_b, k0 = ', d_b, k0
+            coefd = max( abs (cnna), 1.0D-3)
+            d_o = d_b * coefd
+C
+C********** Linear interpolation
+C
+            k0m = 1.0D-3 * k0
+            call racre2(nordpo, Tmaxcv,
+     &           Rgas_l, acv_l, Rgas_b, acv_b, Rgas_r, acv_r,
+     &           q, k0m,
+     &           rho_l, p_l, un_l, T_l, gam_l,
+     &           rho_r, p_r, un_r, T_r, gam_r,
+     &           d_lm, d_rm,
+     &           rho_dm, p_dm, un_dm, T_dm, d_dm,
+     &           rho_cm, p_cm, un_cm, T_cm, d_cm,
+     &           rho_bm, p_bm, un_bm, T_bm, d_bm,
+     &           rho_am, p_am, un_am, T_am, d_am,
+     &           logan, lognc)
+C
+            if (logan) then
+               write(*,'(/A8)') 'fbecre.f'
+               write(*,*) 'ANOMALY DETECTED 8'
+               goto 9999
+            endif
+            k0m = abs (d_bm - un_am)
+C            write(*,*) 'd_bm, k0m = ', d_bm, k0m
+C
+            k0n = 1.0D3 * k0
+            call racre2(nordpo, Tmaxcv,
+     &           Rgas_l, acv_l, Rgas_b, acv_b, Rgas_r, acv_r,
+     &           q, k0n,
+     &           rho_l, p_l, un_l, T_l, gam_l,
+     &           rho_r, p_r, un_r, T_r, gam_r,
+     &           d_ln, d_rn,
+     &           rho_dn, p_dn, un_dn, T_dn, d_dn,
+     &           rho_cn, p_cn, un_cn, T_cn, d_cn,
+     &           rho_bn, p_bn, un_bn, T_bn, d_bn,
+     &           rho_an, p_an, un_an, T_an, d_an,
+     &           logan, lognc)
+C
+            if (logan) then
+               write(*,'(/A8)') 'fbecre.f'
+               write(*,*) 'ANOMALY DETECTED 9'
+               goto 9999
+            endif
+            k0n = abs (d_bn - un_an)
+C            write(*,*) 'd_bn, k0n = ', d_bn, k0n
+C
+            if (d_o .le. d_bm) then
+               d_l = d_lm
+               d_r = d_rm
+C
+               rho_d = rho_dm
+               p_d = p_dm
+               un_d = un_dm
+               T_d = T_dm
+               d_d = d_dm
+C
+               rho_c = rho_cm
+               p_c  = p_cm
+               un_c = un_cm
+               T_c = T_cm
+               d_c = d_cm
+C
+               rho_b = rho_bm
+               p_b = p_bm
+               un_b = un_bm
+               T_b = T_bm
+               d_b = d_bm
+C
+               rho_a = rho_am
+               p_a = p_am
+               un_a = un_am
+               T_a = T_am
+               d_a = d_am
+C
+C               write(*,*) 'Sono piccolino come il Masakino !'
+C               write(*,*) 'coefd , k0 =', coefd, k0m
+C               write(*,*) 'do =', d_o
+C               write(*,*) 'dn =', d_bn
+C               write(*,*) 'dm =', d_bm
+C               write(*,*) 'cnna =', cnna
+C
+C               k0o = 1.0D-3 * k0
+C               do iter = 1, 10
+C                  call racre2(nordpo, Tmaxcv,
+C     &                 Rgas_l, acv_l, Rgas_b, acv_b, Rgas_r, acv_r,
+C     &                 q, k0o,
+C     &                 rho_l, p_l, un_l, T_l, gam_l,
+C     &                 rho_r, p_r, un_r, T_r, gam_r,
+C     &                 d_lo, d_ro,
+C     &                 rho_do, p_do, un_do, T_do, d_do,
+C     &                 rho_co, p_co, un_co, T_co, d_co,
+C     &                 rho_bo, p_bo, un_bo, T_bo, d_bo,
+C     &                 rho_ao, p_ao, un_ao, T_ao, d_ao,
+C     &                 logan, lognc)
+C
+C                  if (logan) then
+C                     write(*,'(/A8)') 'fbecre.f'
+C                     write(*,*) 'ANOMALY DETECTED 10'
+C                     goto 9999
+C                  endif
+C
+C                  k0o = d_bo - un_ao
+C                  write(*,*) k0o
+C
+C                  write(*,*) 'd_b0, k0o = ', d_bo, k0o
+C                  k0o = k0o + 0.1D0 * (k0n - k0m)
+C               enddo
+C
+C               stop
+C
+            elseif (d_o .ge. d_bn) then
+               d_l = d_ln
+               d_r = d_rn
+C
+               rho_d = rho_dn
+               p_d = p_dn
+               un_d = un_dn
+               T_d = T_dn
+               d_d = d_dn
+C
+               rho_c = rho_cn
+               p_c  = p_cn
+               un_c = un_cn
+               T_c = T_cn
+               d_c = d_cn
+C
+               rho_b = rho_bn
+               p_b = p_bn
+               un_b = un_bn
+               T_b = T_bn
+               d_b = d_bn
+C
+               rho_a = rho_an
+               p_a = p_an
+               un_a = un_an
+               T_a = T_an
+               d_a = d_an
+C
+C               write(*,*) 'Sono piu grande del Masakino !'
+C               write(*,*) 'coefd , k0 =', coefd, k0n
+C               write(*,*) 'do =', d_o
+C               write(*,*) 'dn =', d_bn
+C               write(*,*) 'dm =', d_bm
+C               write(*,*) 'cnna =', cnna
+CC
+C               k0o = 1.0D-3 * k0
+C               do iter = 1, 11
+C                  call racre2(nordpo, Tmaxcv,
+C     &                 Rgas_l, acv_l, Rgas_b, acv_b, Rgas_r, acv_r,
+C     &                 q, k0o,
+C     &                 rho_l, p_l, un_l, T_l, gam_l,
+C     &                 rho_r, p_r, un_r, T_r, gam_r,
+C     &                 d_lo, d_ro,
+C     &                 rho_do, p_do, un_do, T_do, d_do,
+C     &                 rho_co, p_co, un_co, T_co, d_co,
+C     &                 rho_bo, p_bo, un_bo, T_bo, d_bo,
+C     &                 rho_ao, p_ao, un_ao, T_ao, d_ao,
+C     &                 logan, lognc)
+C
+C                  if (logan) then
+C                     write(*,'(/A8)') 'fbecre.f'
+C                     write(*,*) 'ANOMALY DETECTED 10'
+C                     goto 9999
+C                  endif
+C
+C                  k0o = d_bo - un_ao
+C                  write(*,*) k0o
+C
+C                  write(*,*) 'd_b0, k0o = ', d_bo, k0o
+C                  k0o = k0o + 0.1D0 * (k0n - k0m)
+C               enddo
+CC
+C               stop
+C
+            else
+               k0o = ((d_o - d_bm) * (k0n - k0m) / (d_bn - d_bm)) + k0m
+               call racre2(nordpo, Tmaxcv,
+     &              Rgas_l, acv_l, Rgas_b, acv_b, Rgas_r, acv_r,
+     &              q, k0o,
+     &              rho_l, p_l, un_l, T_l, gam_l,
+     &              rho_r, p_r, un_r, T_r, gam_r,
+     &              d_lo, d_ro,
+     &              rho_do, p_do, un_do, T_do, d_do,
+     &              rho_co, p_co, un_co, T_co, d_co,
+     &              rho_bo, p_bo, un_bo, T_bo, d_bo,
+     &              rho_ao, p_ao, un_ao, T_ao, d_ao,
+     &              logan, lognc)
+C
+               if (logan) then
+                  write(*,'(/A8)') 'fbecre.f'
+                  write(*,*) 'ANOMALY DETECTED 10'
+                  goto 9999
+               endif
+C
+               k0o = abs (d_bo - un_ao)
+C
+C               write(*,*) 'd_bo, k0o = ', d_bo, k0o
+C
+               do iter = 1, 10
+                  if (d_bo .le. d_o) then
+                     k0m = k0o
+                     d_bm = d_bm
+                  else
+                     k0n = k0o
+                     d_bn = d_bo
+                  endif
+C
+                  k0o = ((d_o - d_bm) * (k0n - k0m) / (d_bn - d_bm)) +
+     $                 k0m
+                  call racre2(nordpo, Tmaxcv,
+     &                 Rgas_l, acv_l, Rgas_b, acv_b, Rgas_r, acv_r,
+     &                 q, k0o,
+     &                 rho_l, p_l, un_l, T_l, gam_l,
+     &                 rho_r, p_r, un_r, T_r, gam_r,
+     &                 d_lo, d_ro,
+     &                 rho_do, p_do, un_do, T_do, d_do,
+     &                 rho_co, p_co, un_co, T_co, d_co,
+     &                 rho_bo, p_bo, un_bo, T_bo, d_bo,
+     &                 rho_ao, p_ao, un_ao, T_ao, d_ao,
+     &                 logan, lognc)
+C
+                  if (logan) then
+                     write(*,'(/A8)') 'fbecre.f'
+                     write(*,*) 'ANOMALY DETECTED 10'
+                     goto 9999
+                  endif
+C
+                  k0o = d_bo - un_ao
+C                  write(*,*) k0o
+C
+C                  write(*,*) 'd_b0, k0o = ', d_bo, k0o
+C
+                  d_l = d_lo
+                  d_r = d_ro
+C
+                  rho_d = rho_do
+                  p_d = p_do
+                  un_d = un_do
+                  T_d = T_do
+                  d_d = d_do
+C
+                  rho_c = rho_co
+                  p_c  = p_co
+                  un_c = un_co
+                  T_c = T_co
+                  d_c = d_co
+C
+                  rho_b = rho_bo
+                  p_b = p_bo
+                  un_b = un_bo
+                  T_b = T_bo
+                  d_b = d_bo
+C
+                  rho_a = rho_ao
+                  p_a = p_ao
+                  un_a = un_ao
+                  T_a = T_ao
+                  d_a = d_ao
+C
+               enddo
+C
+            endif
+            D_resh = d_b
+            cellt = max (abs(d_l), abs(d_r))
+C
+         endif
+C
+C******* States
+C
+C         l
+C        ***                       b
+C          |*                      *                 r
+C          | *   d                **         *********
+C          |  *******            * *        *|
+C          |  |     *   c       *  *       * |
+C          |  |     ************   *  a   *  |
+C          |  |     |          |   *******   |
+C          |  |     |          |   |     |   |
+C        d_l d_d  un_d=un_c   d_c d_b   d_a d_r
+C
+C
+C
+C******* Eulerian flux
+C
+         xst = 0.0D0
+         call flufu1(nordpo,
+     &        Tmaxcv, Rgas_r, acv_r, Rgas_b, acv_b,
+     &        Rgas_l, acv_l, acv_w,
+     &        xst,
+     &        d_l, d_d, d_c, d_b, d_a, d_r,
+     &        rho_l, T_l, un_l, hf_l,
+     &        rho_d, T_d, un_d,
+     &        rho_c, T_c, un_c,
+     &        rho_b, T_b, un_b, hf_b,
+     &        rho_a, T_a, un_a,
+     &        rho_r, T_r, un_r, hf_r,
+     &        flurho, fluru, fluret)
+C
+C        In order to obtain the flux in the true left-right frame, I have
+C        to  multiply the speed * rind_l
+         flurho = flurho * rind_l
+         fluret = fluret * rind_l
+         flu(1) = flurho
+         flu(2) = fluru
+         flu(2+ndim) = fluret
+         flu(3+ndim) = 0.0d0
+C        Note that the Larrouturou theorem does not hold
+C        Namely un_d (= un_c) has not the same sign as flurho
+C        write (*,*) un_d, un_c, flurho
+C        un_ls > 0 => coefy = 1
+         coefy = 0.5d0 * (1.0d0 + sign(1.0d0, (rind_l * un_d)))
+         omcoey = 1.0d0 - coefy
+C        Tangential speeds (ndim .ge. 2)
+         do icomp = 3, (ndim + 1), 1
+            flu(icomp) = flurho * ((coefy * wvec_l(icomp)) +
+     &           (omcoey * wvec_r(icomp)))
+         enddo
+         do icomp = (ndim + 4), (ndim + nesp + 4), 1
+            flu(icomp) = flurho * ((coefy * wvec_l(icomp)) +
+     &           (omcoey * wvec_r(icomp)))
+         enddo
+C        Kinetic energy flux
+         trekin = 0.0D0
+         do icomp = 2, ndim, 1
+            trekin = trekin + (((coefy * wvec_l(icomp + 1)) +
+     &           (omcoey * wvec_r(icomp + 1))) ** 2)
+         enddo
+         trekin = 0.5D0 * trekin
+         flu(2+ndim) = flu(2+ndim) + (flurho * trekin)
+C
+C******* Lagrangian flux over the reactive shock
+C
+         xst = D_resh
+         call flufu1(nordpo,
+     &        Tmaxcv, Rgas_r, acv_r, Rgas_b, acv_b,
+     &        Rgas_l, acv_l, acv_w,
+     &        xst,
+     &        d_l, d_d, d_c, d_b, d_a, d_r,
+     &        rho_l, T_l, un_l, hf_l,
+     &        rho_d, T_d, un_d,
+     &        rho_c, T_c, un_c,
+     &        rho_b, T_b, un_b, hf_b,
+     &        rho_a, T_a, un_a,
+     &        rho_r, T_r, un_r, hf_r,
+     &        flurho, fluru, fluret)
+C
+         flurho = flurho * rind_l
+         fluret = fluret * rind_l
+         f_lag(1) = flurho
+         f_lag(2) = fluru
+         f_lag(2+ndim) = fluret
+         f_lag(3+ndim) = -1.0D0 * rind_l * D_resh
+C
+C        Since we suppose that left state is the burnt one,
+C        D_resh > un_d, i.e. over (x/t) = D_resh we have the
+C        right passive scalar !
+C        rind_l = 1   =>  burnt state in wvec_l => passive scalar in r
+C        rind_l = -1  =>  burnt state in wvec_r => passive scalar in l
+C        Note that the result does not change as q -> 0
+C        (virtual combustion wave).
+C
+         coefy = 0.5d0 * (1.0d0 + sign(1.0d0, (1.0D0 * rind_l)))
+         omcoey = 1.0d0 - coefy
+C
+         do icomp = 3, (ndim + 1), 1
+            f_lag(icomp) = flurho * ((coefy * wvec_r(icomp)) +
+     &           (omcoey * wvec_l(icomp)))
+         enddo
+         do icomp = (ndim + 4), (ndim + nesp + 4), 1
+            f_lag(icomp) = flurho * ((coefy * wvec_r(icomp)) +
+     &           (omcoey * wvec_l(icomp)))
+         enddo
+C        Kinetic energy flux
+         trekin = 0.0D0
+         do icomp = 2, ndim, 1
+            trekin = trekin + (((coefy * wvec_r(icomp + 1)) +
+     &           (omcoey * wvec_l(icomp + 1))) ** 2)
+         enddo
+         trekin = 0.5D0 * trekin
+C        write(*,*) trekin
+         f_lag(2+ndim) = f_lag(2+ndim) + (flurho * trekin)
+      endif
+C
+ 9999 continue
+      return
+      end
+

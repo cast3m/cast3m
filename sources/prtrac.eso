@@ -1,0 +1,3086 @@
+C PRTRAC    SOURCE    CB215821  19/03/18    21:15:54     10161
+      SUBROUTINE PRTRAC
+C=======================================================================
+C
+C   CE SOUS PROGRAMME GERE LES TRACES.
+C
+C   IL COMMENCE PAR FABRIQUER L'ENSEMBLE DES SEGMENTS A TRACER EN
+C   EXTRAYANT LES POINTS UTILES DE L'ENSEMBLE DES POINTS
+C
+C   PUIS IL APPELE LA PROJECTION  ET EFFECTUE LE TRACE.
+C
+C   OPTIONS POSSIBLES
+C      QUALIFIE  =  TRACE AVEC LES NOMS D'OBJETS
+C      NOEUDS    =  TRACE AVEC LES NUMEROS REELS DE NOEU
+C      ELEMENTS  =  TRACE AVEC LES NUMEROS D'ELEMENT PAR
+C                   OBJET ELEMENTAIRE
+C      COULEUR   =  TRACE UNIQUEMENT LA COULEUR COURANTE
+C                   OU LA COULEUR CHOISIE
+C      CACHE     =  TRACE EN "PARTIES VUES-CACHEES"
+C      ECLATE    =  TRACE EN ECLATANT LES ELEMENTS
+C                   PEUT ETRE SUIVI PAR UN COEFFICIENT
+C      FACE      =  TRACE EN REPRESENTATION PAR FACETTE
+C                   EXCLUT POUR LE MOMENT LES AUTRES OPTIONS
+C      COUPE     =  TRACE EN EXCLUANT DE LA REPRESENTATION LA PARTIE
+C                   SITUE PLUS PRES DE L'OBSERVATEUR QU'UN PLAN DONNE
+C      SECTION   =  TRACE DE L'INTERSECTION AVEC UN PLAN DONNE
+C      CHAMP     =  AFFICHE LA VALEUR DU CHAMP AU POINT SUPPORT
+C
+C=======================================================================
+C
+C  Modifications :
+C
+C   NOEL 1984 Trace des DEFORMES
+C             En ce cas lecture non d'une geometrie mais d'un objet DEFORME
+C             La seule option permise est CACHE
+C
+C   AOUT 1985 Trace d'ISOVALEUR
+C             Trace les isovaleurs d'un objet de type CHAMPOINT uniquement
+C             Par defaut on trace 7 isovaleurs
+C             OPTION : Si prealablement on a cree un objet avec
+C               l'operateur 'PROG', on peut tracer le nombre d'isovaleurs
+C               que l'on desire (7 MAXI)
+C
+C   MARS 1986 Introduction de l'option COUPE limitee a la coupe par
+C             un plan en 3D uniquement
+C
+C   AOUT 1986 Introduction du trace de vecteurs
+C
+C   1995      Option 'DIRE' et compagnie P.PEGON JRC-ISPRA
+C
+C   FEV 1999  Augmentation des marges autour du dessin
+C
+C   09/2003   Modifications (temporaires ?) dans le cas IDIM=1.
+C
+C   OCT. 2007 PM :
+C            .Retournement axe des isovaleurs / amplitude deformee /
+C             legende vecteurs, contraintes et fissures
+C            .Couleur des segments marche avec nouvelles couleurs
+C            .Du fait du passage a 16 couleurs et de la precision des entiers,
+C             ajout d'une dimension a KON pour specifier le codage de la
+C             couleur : 0 = une seule, codage normal (anciennement < 300)
+C                       1 = Possiblement plusieurs, codage binaire par
+C                           puissance de 2 (anciennement > 300)
+C            .Des nombres en dur lies au nb de couleurs et a l'indice du noir
+C             passent en parametres
+C            .Passage du nb de legendes max des vecteurs a 40 (au lieu de 8)
+C            .Augmentation du nb de legendes de deformees a NDEFMX=40
+C             auparavant limite en dur a 7
+C            .Mauvaise identification des elements Navier-Stokes depuis l'ajout de
+C             nouveaux elements
+C
+C   DEC 2016 SG :
+C     Ajout d'une option BOITE pour centrer la vue sur un maillage
+C     donne
+C
+C   MAR 2017 CB215821 :
+C     Element de SEGMENT passe a la SUBROUTINE AMPINT
+C
+C=======================================================================
+C
+C  REMARQUES :
+C
+C     Limitation a NLEGMX du nombre de legendes de vecteurs
+C
+C=======================================================================
+C
+C  VARIABLES :
+C
+C     ICHL : tableau des numero de couleur a prendre pour les deformees
+C
+C=======================================================================
+      IMPLICIT INTEGER(I-N)
+C     IMPLICIT REAL*8 (A-H,O-Z)
+
+      EXTERNAL LONG
+-INC CCREEL
+-INC CCOPTIO
+-INC CCGEOME
+-INC SMELEME
+-INC CCNOYAU
+-INC CCASSIS
+-INC SMDEFOR
+-INC SMCHPOI
+-INC SMVECTE
+-INC SMMODEL
+-INC SMCOORD
+-INC CCTRACE
+
+C  Pointeur de sauvegarde du maillage en DIMEnsion 1
+      POINTEUR ICOORSAV.MCOORD
+      SEGMENT XCORD(IDIM,ITE)
+      SEGMENT ICPR(XCOOR(/1)/(IDIM+1))
+      SEGMENT JCPR(XCOOR(/1)/(IDIM+1))
+      SEGMENT VCPCHA(XCOOR(/1)/(IDIM+1))
+      SEGMENT IVU(ITE)
+      SEGMENT NTSEG(LTSEGS)
+      SEGMENT KON(3,NBCON,NMAX)
+      SEGMENT XPROJ(3,ITE)
+      SEGMENT XPRO2(3,ITE)
+      SEGMENT KXPRO2(NVEC)
+      SEGMENT KABEL(0)
+      SEGMENT KABCOR(0)
+      SEGMENT LABCO2(3,0)
+      SEGMENT KABEL2(0)
+      SEGMENT KABCO3(0)
+      SEGMENT LABCO3(3,0)
+      SEGMENT KABCO2(2,0)
+      SEGMENT ICOR2(0)
+      SEGMENT KABCPR(0)
+      SEGMENT KABCP2(0)
+      SEGMENT MCOUP(0)
+
+      LOGICAL   COUPE,ZDATE,ZCHAM,ZBOIT,ZNOLE
+C      LOGICAL   ZLEGI
+      REAL      DDEC,PDDEC,PYB
+
+      SEGMENT SDEF
+        REAL      AMPIMP(NDEF)
+      ENDSEGMENT
+
+      REAL      VCHC(70)
+      CHARACTER TXTIT*72,TXISO*12,VALISO*12
+      CHARACTER*72 TITRY,MONMES
+      CHARACTER*8 TXT
+      CHARACTER*7 FMTX
+      CHARACTER*64 ABCDEF
+      CHARACTER*12 ZONE
+      CHARACTER*13 LEGEND(10),COMPCH(10)
+      CHARACTER*10 TMPCAR
+CPM   NBCOUL-1 au lieu de 8, et IPUIS2
+CPV   NBCOUL pas connu a la compilation => valeur numerique
+      INTEGER   ICHC(0:30      ),ICHCS(0:30      ),ITEST(0:30      ),
+     &          IPUIS2(0:30      )
+      PARAMETER (NDEFMX=40)
+      INTEGER   ICHL(NDEFMX)
+C+PP  (DIRE et FACB et FSDB)
+      PARAMETER (ISOPT=22)
+      CHARACTER*4 MSOPT(ISOPT),MOVE(6)
+      DIMENSION diloc(3)
+C+PP
+      DIMENSION XTR(40),YTR(40),ZTR(40)
+      DIMENSION PX(4),PY(4)
+      LOGICAL   VALEUR,FENET,BLOCAG,INWDS,INWDS2,CROIX
+C probleme optimiseur sur rs6K
+      SAVE      NTSEG
+      REAL      VAMPF
+      REAL*8    XXX
+      dimension cgrav(3),axez(3)
+C     pour les traces de legendes de vecteurs
+      PARAMETER (NLEGMX=40)
+      DIMENSION NVCOL(NLEGMX),VAMPF(NLEGMX)
+      CHARACTER*4 NVLEG(3,NLEGMX)
+C+PP + option DIRE et divers FACE
+      LOGICAL   ldire, lndegr, lblanc
+C BERTIN: ajout de variable
+      REAL       XB,YB,ZB,XE,YE,ZE,OEBA,XM,YM,ZM,BARY(3),XU,YU,ZU
+      REAL       A,B,C,YHAUT,XHAUT
+      INTEGER    ZCOM,AB,BA,I,K,ISOVU
+      CHARACTER*72  BUFFER,TIME
+      CHARACTER*10  VALCH
+      CHARACTER*4 MODEC(3)
+C SG tableau contenant les pointeurs sur tous les maillages lus
+      PARAMETER(NMAXLU=3)
+C IMAILU : index dans le tableau LMAILU
+C NMAILU : nombre de maillage effectivent lus
+      INTEGER IMAILU,NMAILU
+      INTEGER LMAILU(NMAXLU)
+C     SG 20160420 dans le coloriage des segments
+C     icoul : couleur courante (non definie = -3)
+C     kcoul : couleur voulue
+C     le but est de n'appeler chcoul que si qqch va etre trace
+      integer icoul,kcoul
+C
+      REAL BLOK
+C+PP
+      DATA ABCDEF( 1:32)/'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef'/
+      DATA ABCDEF(33:64)/'ghijklmnopqrstuvwxyz0123456789&@'/
+C PP  + option DIRE et divers FACE
+      DATA MSOPT/'QUAL','NOEU','ELEM','CACH','ECLA','COUL','FACE',
+     *     'COUP','ANIM','OSCI','ARET','TITR','LEGE','NCLK','SECT',
+     *     'DIRE','FACB','FSDB','DATE','CHAM','BOIT','NOLE'/
+      DATA MOVE/'SI11','SI22','SI33','FIS1','FIS2','FIS3'/
+cbp   espacement des legendes des isovaleur (-> nombre maxi NDEC=25 par defaut)
+      DATA MODEC/'VING','DIX ','CINQ'/
+
+C-----------------------------------------------------------------------
+C     L'operateur TRACER ne marche pas en l'etat pour le cas IDIM=1.
+C     Astuce : au debut de l'appel a PRTRAC, on recopie le SEGMENT MCOORD
+C     a 1 DIMENSION dans un segment MCOORD a 2 DIMENSIONs. On effectue
+C     l'operation inverse lors de la sortie de PRTRAC (GOTO 8900).
+C     Utiliser IDIMSAV pour savoir si dimension = 1 (0 sinon).
+C-----------------------------------------------------------------------
+      IF (IDIM.EQ.1) THEN
+        ICOORSAV=MCOORD
+        IDIMSAV=IDIM
+        NBPTS=XCOOR(/1)/(IDIMSAV+1)
+        IDIM=IDIM+1
+        SEGINI MCOORD
+        j=IDIM+1
+        k=IDIMSAV+1
+        DO i=1,NBPTS
+          XCOOR((i-1)*j+1)=ICOORSAV.XCOOR((i-1)*k+1)
+          XCOOR(i*j)=ICOORSAV.XCOOR(i*k)
+        ENDDO
+      ELSE
+        IDIMSAV=0
+      ENDIF
+
+C-----------------------------------------------------------------------
+C     INITIALISATIONS
+C-----------------------------------------------------------------------
+      sdef  =0
+      ite   =0
+      mlreel=0
+      LCOMP =0
+      NCOMP =0
+      MCARA =0
+      MCAR1 =0
+      melemi=0
+      melei2=0
+
+C     POUR EVITER DES PROBLEMES UN DEFAUT SUR NCOUMA
+      NCOUMA=7
+      BLOCAG=.FALSE.
+      CROIX =.FALSE.
+      INWDS =.TRUE.
+      INWDS2=.TRUE.
+      ICHISO=0
+      vchmin= xsgran
+      vchmax=-xsgran
+      ipv   =0
+      IPVV  =0
+      melsau=0
+      mcham =0
+      VCPCHA=0
+      IANIM =0
+      KON   =0
+      ISORT =0
+      ICLE  =0
+      ITR   =1
+      IVU   =0
+      NTSEG =0
+      XPROJ =0
+      XPRO2 =0
+      KXPRO2=0
+      IVEC  =0
+      NVECL =0
+      NBCTS =0
+      IRETO2=0
+      KABCOR=0
+      KABCO2=0
+      KABCO3=0
+      LABCO2=0
+      LABCO3=0
+      KABEL =0
+      KABEL2=0
+      KABCPR=0
+      KABCP2=0
+      ICOR2 =0
+      DIOCA2=REAL(DIOCAD)
+      TITRY =TITREE
+      TXTIT =' '
+      TXISO =' '
+      VALISO='VAL - ISO'
+      KCLICK=1
+      SEGACT MCOORD*MOD
+      XPRO2 =0
+      MCOU2 =0
+      icoup1=0
+      coupol=-1.
+      MELEM2=0
+      MDEFOR=0
+      NDEF  =0
+      VALEUR=.FALSE.
+      FENET =.TRUE.
+      MCOUP =0
+      NISO  =0
+      IISO  =0
+      IMEL2 =0
+      IMEL3 =0
+      ZCOM  =0
+      ZDATE =.FALSE.
+      ISOVU =-1
+      ZCHAM =.FALSE.
+C      ZLEGI =.FALSE.
+      ZBOIT =.FALSE.
+      ZNOLE =.FALSE.
+      VALCH =' '
+      XHAUT =0.
+      YHAUT =0.
+
+C     INIT DU TABLEAU COMPTEUR DE COULEUR
+C     on ne compte pas le nb de fois que la couleur DEFA (i=0) apparait
+      DO i=1,NBCOUL-1
+        ICHC(i)=0
+      ENDDO
+      DO i=1,NDEFMX
+        ICHL(i)=0
+      ENDDO
+CPM   precalcul des puissances de 2 : IPUIS2(IC)=2**(IC-1)
+      IPUIS2(0)=0
+      K2=1
+      DO i=1,NBCOUL-1
+        IPUIS2(i)=K2
+        K2=K2*2
+      ENDDO
+      IICOL=IDCOUL
+      IDEF=1
+      IRESU=0
+      IECLAT=0
+      IQUALI=0
+      INUMNO=0
+      INUMEL=0
+      ICACHE=0
+      IFADES=0
+      IDEFCO=0
+      IDEFOR=0
+      IDEFS =0
+      KDEFOR=0
+      ICOUP =0
+      ISECT =0
+      IARET =0
+C+PP + option DIRE  et divers FACE
+      ldire =.FALSE.
+      lndegr=.FALSE.
+      lblanc=.FALSE.
+C+PP
+
+C-----------------------------------------------------------------------
+C     LECTURE DES PARAMETRES
+C-----------------------------------------------------------------------
+
+cBP   ajout possibilite d'espacer + les legendes avec VING DIX ou CINQ...
+      CALL LIRMOT(MODEC,3,NDEC2,0)
+C PP + option DIRE et divers FACE
+ 4099 CALL LIRMOT(MSOPT,ISOPT,IR,0)
+      IF (IR.EQ.0) GOTO 4000
+C PP  + option DIRE (4016) et divers FACE (4017,4018)
+      GOTO (4001,4002,4003,4004,4005,4006,4007,4008,4009,4010,4011,
+     >     4012,4013,4014,4015,4016,4017,4018,4019,4020,4021,4022)
+     $     ,IR
+ 4001 IQUALI=1
+      GOTO 4099
+ 4002 INUMNO=1
+      GOTO 4099
+ 4003 INUMEL=1
+      GOTO 4099
+ 4004 ICACHE=1
+      GOTO 4099
+ 4005 IECLAT=1
+      XXX=0.5D0
+      CALL LIRREE(XXX,0,IRETOU)
+      XECLAT=REAL(XXX)
+      GOTO 4099
+ 4006 IDEFCO=1
+      CALL LIRMOT(NCOUL,NBCOUL,IICOL,0)
+      IF (IICOL.EQ.0) IICOL=IDCOUL+1
+      IICOL=IICOL-1
+      GOTO 4099
+C+PP divers FACE
+ 4017 lndegr=.TRUE.
+ 4018 lblanc=.TRUE.
+C+PP
+ 4007 IFADES=1
+      ICACHE=1
+      GOTO 4099
+ 4008 ICOUP=1
+      GOTO 4099
+ 4009 IANIM=1
+      GOTO 4099
+ 4010 IANIM=2
+      GOTO 4099
+ 4011 IARET=1
+      GOTO 4099
+ 4012 CALL LIRCHA(TXTIT(1:72),0,IRETOU)
+      IF (IRETOU.EQ.0) TXTIT=' '
+      GOTO 4099
+ 4013 CALL LIRCHA(TXISO(1:12),0,IRETOU)
+      IF (IRETOU.EQ.0) TXISO=' '
+      GOTO 4099
+ 4014 KCLICK=0
+      GOTO 4099
+ 4015 ISECT=1
+      ICOUP=1
+      GOTO 4099
+C+PP + option DIRE (4016)
+ 4016 ldire=.TRUE.
+      IF (IDIM.NE.3) ldire=.FALSE.
+      GOTO 4099
+ 4019 ZDATE=.TRUE.
+      GOTO 4099
+ 4020 continue
+       ZCHAM=.TRUE.
+      GOTO 4099
+ 4021 continue
+       ZBOIT=.TRUE.
+      GOTO 4099
+ 4022 continue
+       ZNOLE=.TRUE.
+      GOTO 4099
+C+PP
+ 4000 CONTINUE
+C     MODIF POUR AUTORISER RIGIDITE A LA PLACE DE GEOMETRIE
+      CALL LIROBJ('RIGIDITE',III,0,IRETOU)
+      IF (IRETOU.EQ.1) THEN
+        CALL ECRCHA('MAILLAGE')
+        CALL ECROBJ('RIGIDITE',III)
+        CALL EXTRAI
+      ENDIF
+C
+C     SG 2016/11/29 On lit tous les maillages ici car on ne sait pas a
+C     priori combien on va en avoir. En effet, il peut y en avoir 3 avec
+C     le deuxième facultatif....
+C     Par contre, après, on est obligé de changer tous les
+C     LIROBJ(MAILLAGE) et de gérer les erreurs nous-mêmes
+C
+      IMAILU=1
+      NMAILU=0
+      DO JJJ=1,NMAXLU
+         LMAILU(JJJ)=0
+      ENDDO
+ 5555 CONTINUE
+      CALL LIROBJ('MAILLAGE',IGMAI,0,IGRET)
+      IF (IGRET.EQ.1) THEN
+         NMAILU=NMAILU+1
+         IF (NMAILU.GT.NMAXLU) THEN
+            CALL ERREUR(5)
+            RETURN
+         ENDIF
+         LMAILU(NMAILU)=IGMAI
+         GOTO 5555
+      ENDIF
+Cdbg      WRITE(IOIMP,*) 'NMAILU=',NMAILU
+Cdbg      WRITE(IOIMP,*) 'LMAILU=',(LMAILU(JJJ),JJJ=1,3)
+
+C  SG 2016/11/29 : Le maillage boite est le dernier lu
+      IF (ZBOIT) THEN
+C         CALL LIROBJ('MAILLAGE',IMBOIT,1,ireto)
+C         IF (IERR.NE.0) RETURN
+         IF (NMAILU.GT.0) THEN
+            IMBOIT=LMAILU(NMAILU)
+            LMAILU(NMAILU)=0
+            CALL CHANGE(IMBOIT,1)
+         ELSE
+            MOTERR(1:8)='MAILLAGE'
+C  37 2 On ne trouve pas d'objet de type %m1:8
+            CALL ERREUR(37)
+            RETURN
+         ENDIF
+      ENDIF
+C
+      IF (IDIM.EQ.2.OR.IECLAT.EQ.1) THEN
+        ICACHE=0
+        ICOUP=0
+      ENDIF
+
+C     Lecture du point d'observation et des points de coupe
+      IF (IDIM.EQ.3) CALL LIROBJ('POINT',IOEI,0,IRETOU)
+      IF (ICOUP.EQ.1) THEN
+        CALL LIROBJ('POINT',ICOUP1,1,IRETO)
+        CALL LIROBJ('POINT',ICOUP2,1,IRETO)
+        iob=0
+        if (iretou.eq.0) iob=1
+        CALL LIROBJ('POINT',ICOUP3,iob,IRETO)
+        if (ireto.eq.0) then
+          icoup3=ioei
+          ioei=0
+        endif
+        IF (IERR.NE.0) GOTO 8900
+      ENDIF
+
+C PP  + option DIRE
+      IF (ICOUP.EQ.1.AND.ldire.AND.IOEI.NE.0) THEN
+        xno1=0.
+        xno2=0.
+        psca=0.
+        do i=1,3
+          cgrav(i)=REAL(xcoor((ICOUP1-1)*4+i))
+          diloc(i)=REAL(xcoor((ICOUP2-1)*4+i)) - cgrav(i)
+          xno1=xno1+(cgrav(i)-REAL(xcoor((IOEI-1)*4+i)))**2
+          xno2=xno2+ diloc(i)**2
+          psca=psca+(cgrav(i)-REAL(xcoor((IOEI-1)*4+i)))*diloc(i)
+        enddo
+        xno1=SQRT(xno1*xno2)
+        IF (xno1.LT.1.D-5) then
+C         Tache impossible. Probablement donnees erronees
+          CALL ERREUR(26)
+        ELSE
+          if (ABS(psca/xno1).GT.0.5D0) THEN
+C            Tache impossible. Probablement donnees erronees
+            CALL ERREUR(26)
+            ENDIF
+         ENDIF
+         DO i=1,3
+            diloc(i)=diloc(i)/SQRT(xno2)
+         ENDDO
+      ELSE
+         do i=1,3
+            cgrav(i)=0.
+            diloc(i)=0.
+         enddo
+      ENDIF
+C PP
+C     en l'absence d'oeil specifie, on en met un par defaut
+      IF (IDIM.EQ.3) THEN
+         IF (IOEI.NE.0) IOEIL=IOEI
+         IF (IOEIL.EQ.0) THEN
+C           il n'y a meme pas d'oeil par defaut
+            NBPTS=XCOOR(/1)/4+1
+            SEGADJ MCOORD
+            IOEIL=NBPTS
+            XCOOR((IOEIL-1)*4+1)= 1.0D6
+            XCOOR((IOEIL-1)*4+2)=-1.2D6
+            XCOOR((IOEIL-1)*4+3)= 0.9D6
+            XCOOR((IOEIL-1)*4+4)= 1
+         ENDIF
+      ENDIF
+      IF (IERR.NE.0) GOTO 8900
+      IOEINI=IOEIL
+
+C-----------------------------------------------------------------------
+C     LECTURE de VECTEUR et/ou de DEFORME
+C-----------------------------------------------------------------------
+
+C    -VECTEUR ?
+      MVECTE=0
+      MVECTS=MVECTE
+      CALL LIROBJ('VECTEUR ',MVECTE,0,IRETO1)
+      MVECTS=MVECTE
+      IF (MVECTE.NE.0) THEN
+C SG 2016/11/29     CALL LIROBJ('MAILLAGE',MELEME,1,IRET)
+         IF (IMAILU.GT.NMAXLU) THEN
+            CALL ERREUR(5)
+            RETURN
+         ELSE
+            MELEME=LMAILU(IMAILU)
+            IMAILU=IMAILU+1
+            IF (MELEME.EQ.0) THEN
+               MOTERR(1:8)='MAILLAGE'
+C     37 2 On ne trouve pas d'objet de type %m1:8
+               CALL ERREUR(37)
+            ENDIF
+         ENDIF
+         IF (IERR.NE.0) GOTO 8900
+         SEGACT MVECTE
+      ENDIF
+
+C    -DEFORME ?
+      MDEFOR=0
+      IF (MVECTE.EQ.0) CALL LIROBJ('DEFORME ',MDEFOR,0,IRETO2)
+      IDEFOR=IRETO2
+      IF (IDEFOR.NE.0) THEN
+C        RECHERCHE UNE SECONDE DEFORMEE (CAS TRACE ARETE )
+         CALL LIROBJ('DEFORME',MDEFO1,0,IMEL3)
+C        STOP SI TRACE ARETE DE DEFORME (CAS OU IL EN MANQUE UNE)
+         IF (IDEFOR.NE.0 .AND. IARET.NE.0 .AND. IMEL3.EQ.0)  GOTO 8900
+         SEGACT MDEFOR
+      ENDIF
+
+C     PRENDRE LE BON TITRE SI IL Y A LIEU
+      MCHPOI=0
+      IF (MVECTE.NE.0)  THEN
+         MCHPOI=ICHPO(1)
+      ENDIF
+      IF (MDEFOR.NE.0) THEN
+         MCHPOI=ICHDEF(1)
+      ENDIF
+      IF (MCHPOI.NE.0) THEN
+         VALEUR=.TRUE.
+         SEGACT MCHPOI
+         IF(MOCHDE(1:12).NE.'            ') THEN
+            READ (MOCHDE,FMT='(A8)') IPVV
+            IF (IPVV.NE.0) THEN
+               TITRY=MOCHDE
+            ENDIF
+         ENDIF
+         SEGDES MCHPOI
+      ENDIF
+
+C-----------------------------------------------------------------------
+C     LECTURE D'UN CHPOINT ou d'un MCHAML
+C     POUR LE TRACE DES ISOVALEURS DE CELUI-CI
+C-----------------------------------------------------------------------
+
+C     MISE A 1 DU FLAG IRETOU POUR INDIQUER CETTE EXISTENCE
+      CALL LIROBJ('CHPOINT ',MCHPOI,0,IRETO3)
+c-----debut du cas ou on n'a pas lu de chpoint : lecture d'un mchaml
+      IF (IRETO3.EQ.0) THEN
+C         ICONV=0
+         CALL LIROBJ('MCHAML',IPIN,0,IRETO3)
+         IF (IRETO3.EQ.1) THEN
+            CALL LIROBJ('MMODEL',IPMO1,1,IRETT1)
+            IF (IRETT1.EQ.0) GOTO 8900
+            CALL ACTOBJ('MMODEL',IPMO1,1)
+            CALL ACTOBJ('MCHAML',IPIN ,1)
+            CALL REDUAF(IPIN,IPMO1,MCHA1,0,IR,KER)
+            IF(IR   .NE. 1) CALL ERREUR(KER)
+            IF(IERR .NE. 0) RETURN
+
+C  ENLEVER EVENTUELLEMENT LA PARTIE FROTTEMENT DU MODELE et les relations
+C  de conformite
+            MMODE1=IPMO1
+            SEGINI,MMODEL=MMODE1
+            N1=0
+            NS1=0
+            DO 4300 I=1,KMODEL(/1)
+              IMODEL=KMODEL(I)
+              SEGACT IMODEL
+C             FRO3
+              IF (NEFMOD.EQ.107) GOTO 4300
+C             FRO4
+              IF (NEFMOD.EQ.165) GOTO 4300
+C             MULT
+              IF (NEFMOD.EQ.22)  GOTO 4300
+              IF (NEFMOD.EQ.259)  GOTO 4300
+C             Navier_stokes
+CPM ceux apres 258 ne sont plus du NS
+              IF (NEFMOD.GE.195.AND.NEFMOD.LE.258) NS1=1
+              N1=N1+1
+              KMODEL(N1)=IMODEL
+ 4300      CONTINUE
+            SEGADJ MMODEL
+            IPMO1=MMODEL
+C          -TRAITEMENT SPECIAL POUR NAVIER_STOKES
+            IF(NS1.EQ.1) THEN
+              CALL CHASPG(IPMO1,MCHA1,MCHAM,IRET,1)
+              IF (IRET.NE.0) MCHAM=MCHA1
+            ELSE
+C          -SINON PASSER LES CHAMELEM AUX NOEUDS
+              CALL CHASUP(IPMO1,MCHA1,MCHAM,IRET,1)
+              IF (IRET.NE.0) MCHAM=MCHA1
+C             lecture eventuelle d'un champ de caracteristiques (poutres, etc ...)
+              CALL LIROBJ('MCHAML',IPIN,0,IRET)
+              mcara=IPIN
+              IF (IRET.EQ.1) THEN
+                CALL ACTOBJ('MMODEL',IPMO1,1)
+                CALL ACTOBJ('MCHAML',IPIN ,1)
+                CALL REDUAF(IPIN,IPMO1,MCAR1,0,IR,KER)
+                IF(IR   .NE. 1) CALL ERREUR(KER)
+                IF(IERR .NE. 0) RETURN
+                CALL CHASUP(IPMO1,MCAR1,MCARA,IRET,1)
+              ENDIF
+            ENDIF
+C          -FIN DE LA DISTINCTION NAVIER_STOKES / AUTRES CAS
+C  on ne les transforme plus en champoint. On travaille
+C  directement dessus
+C           CALL CHAMPO(MCHAM,1,MCHPOI,IY)
+C           IF(IRET.EQ.0) CALL DTCHAM(MCHAM)
+C           IF (ICONV.EQ.1) THEN
+C             CALL DTMODL(IPMO1)
+C             IF (IRET.EQ.0) CALL DTCHAM(MCHA1)
+C           ENDIF
+         ENDIF
+         IF (IERR.NE.0) GOTO 8900
+      ENDIF
+c-----fin du cas ou on n'a pas lu de chpoint : lecture d'un mchaml
+
+C     TRACE DES ISOVALEURS ? oui (ICHISO=1) si :
+C   - il y a effectivement un chpoint ou un mchaml
+      IF (IRETO3.EQ.1) THEN
+        ICHISO=IRETO3
+cbp        VALEUR=.TRUE.
+cbp     si NO LEgende, alors on ne decale pas
+        VALEUR=.NOT.ZNOLE
+      ENDIF
+C   - il y a au moins 1 deformee qui contient un chpoint
+      IF (IDEFOR.EQ.1) THEN
+        SEGACT MDEFOR
+        NDEF=AMPL(/1)
+        segini,sdef
+        DO I=1,NDEF
+          IF(MDCHP(I).NE.0.OR.MDCHEL(I).NE.0) ICHISO=1
+C (fdp)   Initialisation des coef d'amplification imposes pour le trace
+C         a partir de ceux contenus dans les objets deformees
+          AMPIMP(I)=AMPL(I)
+C (fdp)   S'il n'y a qu'une deformee a tracer et que l'on a modifie
+C         l'amplification via l'interface de trace, alors on reprend
+C         cette valeur saisie (stockee dans le COMMON AMPLIT)
+          IF ((NDEF.EQ.1).AND.(AMPLIT.LT.XSGRAN/2.)) AMPIMP(I)=AMPLIT
+        ENDDO
+      ENDIF
+
+
+C-----------------------------------------------------------------------
+C     INIT ENVIRONNEMENT GRAPHIQUE
+C-----------------------------------------------------------------------
+
+C     point de rebranchement apres nouveau point de vu
+ 4210 CONTINUE
+      NBPTS=XCOOR(/1)/(IDIM+1)
+      CALL TREFF
+      IF(TXTIT.NE.' ')    TITRY=TXTIT
+      CALL TRINIT(25,DIOCA2,DIOCA2,TITRY,0.15,VALEUR,NCOUMA)
+      CALL TRCLIK(KCLICK)
+      NVECL=0
+C
+      IF (MDEFOR.EQ.0.AND.MVECTE.EQ.0) GOTO 6000
+C---- C'EST UNE DEFORMEE OU UN VECTEUR QUE L'ON VEUT FAIRE -------------
+
+C     ON ANNULE LES OPTIONS INCOMPATIBLES
+      IQUALI=0
+      INUMNO=0
+      INUMEL=0
+      IDEFCO=0
+      IECLAT=0
+C     IFADES=0           CAS A DISCUTER  ????
+
+C-----------------------------------------------------------------------
+C   EXTRAIT DES DEFORMES LE MAILLAGE, LES COORD. POINTS ...
+C-----------------------------------------------------------------------
+ 1234 IF (MDEFOR.NE.0) THEN
+         CALL CREDEF(KABEL,KABCOR,KABCPR,MDEFOR,LABCO2,sdef  )
+         IF (IMEL3.NE.0) CALL CREDEF(KABEL2,KABCO3,KABCP2,MDEFO1,LABCO3,
+     >        sdef  )
+      ENDIF
+      IF (MVECTE.NE.0) CALL CREVEC(MELEME,ICPR,KABCOR,LABCO2,MVECTE,0)
+
+C-----------------------------------------------------------------------
+C  CALCUL DU CADRE AVANT DE CYCLER SUR LA SUITE (EN MODIFIANT PROJEC)
+C  SUR LA DEFORMEE PRINCIPALE
+C-----------------------------------------------------------------------
+
+C PP  + option DIRE
+      CALL CADRCL(KABCOR,LABCO2,IOEIL,XPROJ,
+     *     0,XMINT,YMINT,XMAXT,YMAXT,ZMINT,ZMAXT,cgrav,diloc,ldire,axez)
+Cgoo      WRITE(IOIMP,*) 'PRTRAC : XMINT,YMINT,XMAXT,YMAXT,ZMINT,ZMAXT=',
+Cgoo     $     XMINT,YMINT,XMAXT,YMAXT,ZMINT,ZMAXT
+C  TRACER CARRE  FAIT DANS TRINIT SI NECESSAIRE
+      XMIN=XMINT
+      XMAX=XMAXT
+C     XMAX=MAX(XMAXT,XMIN+YMAXT-YMINT,XMIN+ZMAXT-ZMINT)
+      YMIN=YMINT
+      YMAX=YMAXT
+C     YMAX=MAX(YMAXT,YMIN+XMAXT-XMINT,YMIN+ZMAXT-ZMINT)
+      ZMIN=ZMINT
+      ZMAX=ZMAXT
+C     ZMAX=MAX(ZMAXT,ZMIN+XMAXT-XMINT,ZMIN+XMAXT-XMINT)
+C Modif des marges
+C Ancien :
+C      XDEC=(XMAX-XMIN)*0.01
+C Nouveau :
+      XDEC=(XMAX-XMIN)*0.1
+      XMAX=XMAX+XDEC
+      YMAX=YMAX+XDEC
+      ZMAX=ZMAX+XDEC
+      XMIN=XMIN-XDEC
+      YMIN=YMIN-XDEC
+      ZMIN=ZMIN-XDEC
+      IF (IRESU.NE.1) THEN
+         IF (ZBOIT) THEN
+            CALL PROJC2(IMBOIT,IOEIL,CGRAV,XBMIN,XBMAX,YBMIN
+     $           ,YBMAX,ZBMIN,ZBMAX)
+            XMI=XBMIN
+            XMA=XBMAX
+            YMI=YBMIN
+            YMA=YBMAX
+            ZMI=ZBMIN
+            ZMA=ZBMAX
+         ELSE
+            XMI=XMIN
+            XMA=XMAX
+            YMI=YMIN
+            YMA=YMAX
+            ZMI=ZMIN
+            ZMA=ZMAX
+         ENDIF
+      ENDIF
+      CALL DFENET(XMI,XMA,YMI,YMA,ZMI,ZMA,X1,X2,Y1,Y2,FENET)
+
+
+C-----------------------------------------------------------------------
+C
+C     ON BOUCLE SUR LES DEFORMES (OU LES VECTEURS)
+C
+C-----------------------------------------------------------------------
+
+C     INITIALISATION de NDEF et NVEC
+      IF (MDEFOR.NE.0) THEN
+         SEGACT MDEFOR
+         NDEF=KABCPR(/1)
+C        dans le cas isovaleur sur chpoint (ou mchaml) = syntaxe 4,
+C        1 seule deformee est utilisee
+         IF (IRETO3.EQ.1)  NDEF=1
+         IF (IANIM.NE.0)   CALL TRANIM(IANIM,NDEF)
+      ENDIF
+      IDEFOR=NDEF
+      KDEFOR=NDEF
+      IF (MVECTE.NE.0) THEN
+         SEGACT MVECTE
+         NVEC=AMPF(/1)
+         NDEF=1
+         IDEFOR=NVEC
+         KDEFOR=0
+      ENDIF
+
+C     d'abord on calcule si necessaire le min et max general
+      vchmin=xsgran
+      vchmax=-xsgran
+      if (mdefor.ne.0.and.ichiso.ne.0.and.mlreel.eq.0)
+     >     CALL vchbor(mdefor,1,NDEF,vchmin,vchmax)
+      if(iimpi.ge.666) write(ioimp,*) 'vchmin,vchmax=',vchmin,vchmax
+
+      IDEF=0
+C>>>> DEBUT DE LA BOUCLE PRINCIPALE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+ 6099 CONTINUE
+      IDEF=IDEF+1
+      IF (IDEF.GT.NDEF) GOTO 6100
+      if(iimpi.ge.666) write(ioimp,*) '------IDEF=',IDEF,' /',NDEF
+      if(iimpi.ge.666) write(ioimp,*) 'ICHISO,NISO=',ICHISO,NISO
+
+c     cas animation
+      IF (IANIM.NE.0) CALL TRIMAG(IDEF)
+
+c     cas deformee
+      IF (MDEFOR.NE.0) THEN
+         VCHC(MIN(NDEFMX,IDEF))=REAL(AMPL(MIN(NDEFMX,IDEF)))
+C        POUR AFFICHER CORRECTEMENT DEFORME SUR ISOVALEUR
+         SIAMPL=REAL(AMPL(IDEF))
+         IF(AMPIMP(IDEF).LT.XSGRAN/2.)SIAMPL=AMPIMP(IDEF)
+         ICHL(MIN(NDEFMX,IDEF))=JCOUL(MIN(NDEFMX,IDEF))
+         KSCDEF=JCOUL(MIN(NDEFMX,IDEF))
+      ENDIF
+      IF (MDEFOR.NE.0) THEN
+         ICPR=KABCPR(IDEF)
+         MELEME=KABEL(IDEF)
+         XCORD=KABCOR(IDEF)
+         ITE=XCORD(/2)
+cbp         IF (MDCHP(IDEF).NE.0) MCHPOI=MDCHP(IDEF)
+cbp         IF (MDCHEL(IDEF).NE.0) MCHAM=MDCHEL(IDEF)
+cbp         IF (MDMODE(IDEF).NE.0) IPMO1=MDMODE(IDEF)
+c        on ne recupere le chpoint d isovaleur de la deformee
+c        que si pas de chpoint explicitement fourni
+         IF (IRETO3.EQ.0) THEN
+           SEGACT MDEFOR
+           MCHPOI=MDCHP(IDEF)
+           MCHAM=MDCHEL(IDEF)
+           IPMO1=MDMODE(IDEF)
+         ENDIF
+      ENDIF
+      if(iimpi.ge.666) write(ioimp,*) 'MCHPOI=',MCHPOI
+
+c     recup du MELEME et du KABEL si DEFORMES ou de CREVEC si VECTEURS
+      IPT1=MELEME
+      if (ite.eq.0) ITE=ICPR(/1)
+C     GOTO 6010
+
+C---- POINT D'ARRIVEE EN L'ABSENCE DE DEFORMES ET DE VECTEURS ----------
+ 6000 CONTINUE
+
+      IISO=0
+      IF (ICHISO.EQ.1) THEN
+cbp          NISO=1
+cbp      on introduit IISO
+cbp      =1 si il y a un champ d isovaleur pour cette ieme deformee
+         IF(MCHPOI.ne.0.or.mcham.ne.0) IISO=max(1,NISO)
+C        On ne sait indiquer les isovaleurs que sur une seule deformee
+C        IF (NDEF.GT.1) CALL ERREUR(283)
+         IF (IERR.NE.0) GOTO 8900
+         IF (ISOTYP.GT.0.AND.IDIM.EQ.3) ICACHE=1
+      ENDIF
+
+c     les operations suivantes ne doivent etre realisee qu'une seule
+c     fois, sinon on saute en 6011
+      IF (IDEF.NE.1) GOTO 6011
+      if (ipv.eq.0) then
+
+C-----------------------------------------------------------------------
+C    LECTURE MAILLAGE PRINCIPAL (sauf cas deformee et chamelem)
+C-----------------------------------------------------------------------
+         IF (IDEFOR.EQ.0.and.mcham.eq.0) THEN
+C SG 2016/11/29            CALL LIROBJ('MAILLAGE',MELEME,1,IRETOU)
+            IF (IMAILU.GT.NMAXLU) THEN
+               CALL ERREUR(5)
+               RETURN
+            ELSE
+               MELEME=LMAILU(IMAILU)
+               IMAILU=IMAILU+1
+               IF (MELEME.EQ.0) THEN
+                  MOTERR(1:8)='MAILLAGE'
+C     37 2 On ne trouve pas d'objet de type %m1:8
+                  CALL ERREUR(37)
+               ENDIF
+            ENDIF
+            IF (IERR.NE.0) GOTO 8900
+            melsau=meleme
+         ENDIF
+C-----------------------------------------------------------------------
+C    LECTURE EVENTUELLE D'UN 2ND MAILLAGE
+C-----------------------------------------------------------------------
+C SG 2016/11/29         CALL LIROBJ('MAILLAGE',MELEM2,0,IRETOU)
+         IF (IMAILU.GT.NMAXLU) THEN
+            CALL ERREUR(5)
+            RETURN
+         ELSE
+            MELEM2=LMAILU(IMAILU)
+            IMAILU=IMAILU+1
+            IRETOU=1
+            IF (MELEM2.EQ.0) IRETOU=0
+         ENDIF
+         IMEL2=IRETOU
+         IF (IMEL2.EQ.0.AND.IARET.EQ.1.AND.IDEFOR.EQ.0) GOTO 8900
+c          IF (MDEFOR.EQ.0) then
+C       mdefos=mdefor
+C      MDEFOR=MELEME
+c          endif
+         CALL REFUS
+
+      endif
+ 6011 CONTINUE
+
+C     POUR ETRE L'IDENTITE SUR L'OBJET
+
+C-----------------------------------------------------------------------
+C     INTERPOLATION CAS DES ISO
+C-----------------------------------------------------------------------
+
+cbp      IF (NISO.NE.0) THEN
+      IF (ICHISO.EQ.1) THEN
+C        ici on rajoute une structure recevant les chamelems
+        if(VCPCHA.ne.0) segsup,VCPCHA
+        VCPCHA = 0
+        if(MCHPOI.ne.0.or.mcham.ne.0) then
+          SEGINI VCPCHA
+cbp       cas chpoint fourni (a 1 ou plus composantes), on reinitialise
+          if (IRETO3.eq.1) then
+            vchmin=xsgran
+            vchmax=-vchmin
+          endif
+          CALL AVISO(MELEME,MCHPOI,mcham,ipmo1,VCPCHA,VCHC,NISO,NCOUMA,
+     >         VCHMIN,VCHMAX,MLREEL,MCARA,NCOMP,LCOMP,COMPCH,ISOVU)
+          if(iimpi.ge.666) write(ioimp,*) 'AVISO -> NISO=',NISO
+     &     ,'VCHMIN,VCHMAX=',VCHMIN,VCHMAX
+          IF (IERR.NE.0) GOTO 8900
+        endif
+      ENDIF
+      if(iimpi.ge.666) write(ioimp,*) 'VCPCHA=',VCPCHA
+
+C-----------------------------------------------------------------------
+C     CAS D'UNE COUPE
+C-----------------------------------------------------------------------
+
+      IF (ICOUP.EQ.1) THEN
+         if (melemi.eq.0) melemi=meleme
+         if (melei2.eq.0) melei2=melem2
+C        write(6 ,*) ' on doit faire une coupe '
+         IF (IDEFOR.EQ.0.AND.MVECTE.EQ.0) THEN
+            CALL CRCOUP(IOEIL,ICOUP1,ICOUP2,ICOUP3,MELEME,MCOUP,VCPCHA,
+     *           MELEM2,MCOU2,mcham,isect)
+         ELSE
+            KABC=KABCOR(IDEF)
+            XCORD=KABC
+            SEGACT XCORD
+            NBCTS=XCORD(/2)
+            ITE=NBCTS
+C           INITIALISATION DE IVU  (UN ELEMENT PAR POINT)
+C           IVU=1  POINT VU        (EN CAS DE COUPE )
+C           IVU<>1 POINT PAS VU
+            SEGINI IVU
+            DO 5000 I=1,ITE
+               IVU(I)=1
+ 5000       CONTINUE
+            CALL CRCOU2(IOEIL,ICOUP1,ICOUP2,ICOUP3,MELEME,MCOUP,VCPCHA,
+     *           KABC,ICPR,MELEM2,MCOU2,ITE,IVU,mcham,isect)
+         ENDIF
+      ENDIF
+
+C 3001 CONTINUE
+
+C    -ON SAUTE CETTE PARTIE SI DEFORMEE OU VECTEURS
+      IF (IDEFOR.NE.0.OR.MVECTE.NE.0) GOTO 6010
+C     SI MCOUP=0  DECRIT LA VISIBILITE DU DERNIER COMPOSANT DE MELEME
+      SEGINI ICPR
+      DO 3010 I=1,ICPR(/1)
+         ICPR(I)=0
+ 3010 CONTINUE
+      ITE=0
+      SEGACT MELEME
+      IPT1=MELEME
+      DO 3003 I=1,MAX(1,LISOUS(/1))
+         IF (LISOUS(/1).NE.0) THEN
+            IPT1=LISOUS(I)
+         ENDIF
+         SEGACT IPT1
+         DO 3005 J=1,IPT1.NUM(/1)
+            DO 30051 K=1,IPT1.NUM(/2)
+               IPOIT=IPT1.NUM(J,K)
+               IF (ICPR(IPOIT).NE.0) GOTO 30051
+               ITE=ITE+1
+               ICPR(IPOIT)=ITE
+30051       CONTINUE
+ 3005    CONTINUE
+ 3003 CONTINUE
+C  on complete ICPR avec le 2eme maillage pour que celui ci soit toujours trace
+      if (imel2.ne.0) then
+         ipt2=melem2
+         SEGACT ipt2
+         IPT1=ipt2
+         DO 3013 I=1,MAX(1,ipt2.LISOUS(/1))
+            IF (ipt2.LISOUS(/1).NE.0) THEN
+               IPT1=ipt2.LISOUS(I)
+            ENDIF
+            SEGACT IPT1
+            DO 3015 J=1,IPT1.NUM(/1)
+               DO 30151 K=1,IPT1.NUM(/2)
+                  IPOIT=IPT1.NUM(J,K)
+                  IF (ICPR(IPOIT).NE.0) GOTO 30151
+                  ITE=ITE+1
+                  ICPR(IPOIT)=ITE
+30151          CONTINUE
+ 3015       CONTINUE
+ 3013    CONTINUE
+      endif
+      NBCTS=ITE
+      DO 5011 I=NBPTS+1,XCOOR(/1)/(IDIM+1)
+         IF (ICPR(I).EQ.0) THEN
+            ITE=ITE+1
+            ICPR(I)=ITE
+         ENDIF
+ 5011 CONTINUE
+ 6010 CONTINUE
+C    -FIN DE LA PARTIE SAUTEE SI DEFORMEE OU VECTEURS
+C
+C     EN CAS DE TRACE ECLATE ON PROCEDE DIFFEREMMENT
+      IF (IECLAT.EQ.1) GOTO 4200
+
+C     ITE EST LE NOMBRE DE POINTS A TRACER  ICPR LE TABLEAU
+C     ON VA MAINTENANT INITIALISER ET REMPLIR LE TABLEAU DES CONNECTIONS
+      IMELIN=MELEME
+      MCOUIN=MCOUP
+
+C----------------------------------------------------------
+C    LE 2ND MAILLAGE DEVIENT MAILLAGE PRINCIPAL - LES POINTS VUS
+C    ONT ETE CALCULES SUR LE 1ER MAILLAGE -  (IDEM DEFO)
+C----------------------------------------------------------
+      IF (IMEL2.NE.0) THEN
+         MELEM3=MELEME
+         MELEME=MELEM2
+      ENDIF
+      IF (IMEL2.NE.0) MCOUP =MCOU2
+      IF (IMEL3.NE.0) THEN
+         MELEM3=KABEL(IDEF)
+         MELEME=KABEL2(IDEF)
+C         KABCOR=KABCOR(IDEF)
+         ICPR=KABCPR(IDEF)
+C          LABCO2=LABCO3
+      ENDIF
+      IPT1=MELEME
+      SEGACT MELEME
+
+C----------------------------------------------------------
+C     REALISATION DU TABLEAU DES CONNECTIONS
+C     KON(3,VOISIN,NOEUD) :
+C     KON(1,V,N)=Numero DU V-IEME NOEUD RELIE PAR UN SEGMENT AU NOEUD N
+C     KON(2,V,N)=COULEUR DU V-IEME NOEUD RELIE PAR UN SEGMENT A N
+C                Il peut y avoir plusieurs couleurs collationnees en binaire
+C                par ajout de puissances de 2
+C     KON(3,V,N)=0 si codage couleur direct, 1 si codage binaire
+C     RMQ: SI N=NBCONR, RENVOI SUR LISTE DE NOEUDS VOISINS
+C----------------------------------------------------------
+C     Pour permettre les isovaleurss sur les poutres, on exclue de ce tableau
+C     ce qui vient des SEG2 et SEG3 si on est en isovaleur
+C
+      NBCON =9
+      NBCONR=NBCON-1
+      NMAX  =(12*ITE)/NBCON+200
+      SEGINI KON
+C     MISE A ZERO DU TABLEAU KON
+      DO I=1,NMAX
+         DO J=1,NBCON
+            KON(1,J,I)=0
+            KON(2,J,I)=0
+            KON(3,J,I)=0
+         ENDDO
+      ENDDO
+
+C     FABRICATION DU TABLEAU DES CONNECTIONS
+      ICHAIN=ITE
+      COUPE=.FALSE.
+C     Boucle sur les Partitions
+      DO 222 IO=1,MAX(1,LISOUS(/1))
+         IF (LISOUS(/1).NE.0) THEN
+            COUPE=.FALSE.
+            IF (IO.EQ.LISOUS(/1).AND.MCOUP.NE.0) COUPE=.TRUE.
+            IPT1=LISOUS(IO)
+         ENDIF
+         SEGACT IPT1
+         K=IPT1.ITYPEL
+C        PRISE EN COMPTE DES BLOCAGES
+         IF (K.EQ.22) BLOCAG=.TRUE.
+         IF (K.EQ.259) BLOCAG=.TRUE.
+         IF (K.EQ.1)  CROIX =.TRUE.
+C        poutres+iso on saute
+         if(iimpi.ge.666) write(ioimp,*)
+     &    'avant goto 222 : ICHISO,NISO,MCHPOI=',ICHISO,NISO,MCHPOI
+cbp         if ((k.eq.2.or.k.eq.3).and.niso.ne.0.and.
+         if ((k.eq.2.or.k.eq.3).and.IISO.NE.0.and.
+     >        meleme.ne.melem2) goto 222
+C
+         if(iimpi.ge.666) write(ioimp,*)
+     &    'remplissage de KON depui IPT1=',IPT1
+         IDEP=LPT(K)
+         IFIN1=IDEP+2*LPL(K)-2
+         IFIN2=IFIN1
+         IF (LPL(K).EQ.0) THEN
+            IF (LPT(K).EQ.0)THEN
+               GOTO 2225
+            ELSE
+C              Polygone
+               IFIN1=IDEP+2*IPT1.NUM(/1)-2
+               IFIN2=IFIN1 - 2
+            ENDIF
+         ENDIF
+
+         IF (IDEFOR.NE.0.AND.MDEFOR.NE.0) SEGACT MDEFOR
+C        Boucle sur les elements de la partition
+         DO 223 I=1,IPT1.NUM(/2)
+            IF (IDEFOR.EQ.0.OR.MVECTE.NE.0.OR.IANIM.NE.0) THEN
+               KSCOLI=IPT1.ICOLOR(I)
+C               IF (KSCOLI.EQ.0) KSCOLI=IDCOUL
+            ELSE
+               KSCOLI=KSCDEF
+C+PP couleur par defaut pour les deformees = celle du maillage
+               IF (KSCOLI.EQ.0) KSCOLI=IPT1.ICOLOR(I)
+C+PP
+C               IF (KSCOLI.EQ.0) KSCOLI=IDCOUL
+            ENDIF
+            if(iimpi.ge.666) write(ioimp,*) 'KSCOLI=',KSCOLI
+            IS=1
+            DO 2 J=IDEP,IFIN1,2
+               IF (J.LE.IFIN2) THEN
+                  N1=ICPR(IPT1.NUM(KSEGM(J),I))
+                  N2=ICPR(IPT1.NUM(KSEGM(J+1),I))
+               ELSE
+C                 Polygone
+                  N1=ICPR(IPT1.NUM(KSEGM(IFIN2+1),I))
+                  N2=ICPR(IPT1.NUM(KSEGM(1),I))
+               ENDIF
+               IF (COUPE) THEN
+C                 NE FONCTIONNE QUE SUR DES TRI3
+                  IS=IS*2
+                  IF (MOD((2*MCOUP(I))/IS,2).EQ.0) GOTO 2
+               ENDIF
+               NI=N1
+               NJ=N2
+               IF (N1*N2.EQ.0) GOTO 8
+C              Attribution de la couleur au segment correspondant dans KON :
+               IPO=0
+ 9             CONTINUE
+               KSCOL1=KSCOLI
+               NII=NI
+ 7             DO 4 K=1,NBCONR
+                  IF (KON(1,K,NI).GT.NJ) GOTO 4
+                  IF (KON(1,K,NI).LT.NJ) THEN
+                     KSAUV1=NJ
+                     KSCOL1=KSCOLI
+                     KSCOD1=0
+                     GOTO 5
+                  ENDIF
+
+C                 recherche si KSCOL1 fait partie des couleurs du segment,
+C                 si oui (JJ=1), deje traite
+C                 sinon  (JJ=0), on l'ajoute a la liste de couleurs
+C                                et on met a jour celle des segments eventuellement confondus
+                  JJ=0
+C                 IF (KSCOL1.EQ.0) KSCOL1=IDCOUL
+CPM               IF (KON(2,K,NI).LT.300) KON(2,K,NI)=
+CPM  $                 300+(2**(KON(2,K,NI)-1))
+                  IF (KON(3,K,NI).EQ.0) THEN
+C                    Passage en binaire si pas deja fait
+                     KON(3,K,NI)=1
+                     IK=KON(2,K,NI)
+                     KON(2,K,NI)=IPUIS2(IK)
+C                    Il n'y a qu'une seule couleur de codee, facile a tester
+                     IF (IK.EQ.KSCOL1) JJ=1
+                  ELSE
+C                    potentiellement plusieurs couleurs codees, a tester
+CPM                  ICAL=KON(2,K,NI)-300
+                     ICAL=KON(2,K,NI)
+CPM (NBCOUL-1) au lieu de 7
+                     DO II=(NBCOUL-1),KSCOL1,-1
+                        IF (IPUIS2(II).LE.ICAL) THEN
+                           IF (II.EQ.KSCOL1) THEN
+                              JJ=1
+                           ELSE
+                              ICAL=ICAL-IPUIS2(II)
+                           ENDIF
+                        ENDIF
+                     ENDDO
+                  ENDIF
+
+C                 Si cette couleur existe, le segment a deja ete traite
+                  IF (JJ.EQ.1) GOTO 2
+
+C                 sinon on ajoute la couleur a la liste binaire de couleurs du segment
+                  KON(2,K,NI)=KON(2,K,NI)+IPUIS2(KSCOL1)
+
+C                 ainsi qu'aux segments confondus eventuels
+ 1111             CONTINUE
+                  DO II=1,NBCONR
+                     IF (KON(1,II,NJ).EQ.NII) THEN
+                        KON(2,II,NJ)=KON(2,K,NI)
+                        KON(3,II,NJ)=KON(3,K,NI)
+                        GOTO 1113
+                     ENDIF
+                  ENDDO
+                  IF (KON(1,NBCON,NJ).NE.0) THEN
+                     NJ=KON(1,NBCON,NJ)
+                     GOTO 1111
+                  ENDIF
+ 1113             CONTINUE
+                  GOTO 2
+ 4             CONTINUE
+
+C              on passe au noeud suivant dans la chaine,
+C              ou on l'incremente et on la met a jour si on est arrive au bout
+               IF (KON(1,NBCON,NI).NE.0) THEN
+                  NI=KON(1,NBCON,NI)
+                  GOTO 7
+               ENDIF
+               KSAUV1=NJ
+               KSCOL1=KSCOLI
+               KSCOD1=1
+ 301           ICHAIN=ICHAIN+1
+               IF (ICHAIN.EQ.NMAX) THEN
+                  NMAX=NMAX+1000
+                  SEGADJ KON
+C                 WRITE (IOIMP,*) 'PRTRAC: KON agrandi'
+               ENDIF
+               KON(1,NBCON,NI)=ICHAIN
+               K=1
+               NI=ICHAIN
+
+C              On insere la nouvelle connexion NJ a la place de la
+C              connexion actuelle, et on decale le reste d'un cran
+ 5             CONTINUE
+               KSAUV=KON(1,K,NI)
+               KSCOL=KON(2,K,NI)
+               KSCOD=KON(3,K,NI)
+C                IF (KSCOL1.EQ.0) KSCOL1=IDCOUL
+               KON(1,K,NI)=KSAUV1
+               KON(2,K,NI)=KSCOL1
+               KON(3,K,NI)=KSCOD1
+               KSAUV1=KSAUV
+               KSCOL1=KSCOL
+               KSCOD1=KSCOD
+               IF (KSAUV.EQ.0) GOTO 3
+               KDEP=K+1
+               IF (KDEP.EQ.NBCON) GOTO 302
+ 303           CONTINUE
+               DO KHE=KDEP,NBCONR
+                  KSAUV=KON(1,KHE,NI)
+                  KSCOL=KON(2,KHE,NI)
+                  KSCOD=KON(3,KHE,NI)
+C                    IF (KSCOL1.EQ.0) KSCOL1=IDCOUL
+                  KON(1,KHE,NI)=KSAUV1
+                  KON(2,KHE,NI)=KSCOL1
+                  KON(3,KHE,NI)=KSCOD1
+                  IF (KSAUV.EQ.0) GOTO 3
+                  KSAUV1=KSAUV
+                  KSCOL1=KSCOL
+                  KSCOD1=KSCOD
+               ENDDO
+ 302           CONTINUE
+               IF (KON(1,NBCON,NI).EQ.0) GOTO 301
+               NI=KON(1,NBCON,NI)
+               KDEP=1
+               GOTO 303
+ 3             IF (NJ.NE.N2.OR.IPO.EQ.1) GOTO 2
+               NI=N2
+               NJ=N1
+               IPO=1
+               GOTO 9
+ 2          CONTINUE
+ 223     CONTINUE
+ 2225    CONTINUE
+         IF (LISOUS(/1).NE.0) SEGDES IPT1
+ 222  CONTINUE
+      GOTO 10
+C     Operation malvenue. Resultat douteux
+ 8    CALL ERREUR(23)
+
+ 10   CONTINUE
+
+      SEGDES MELEME
+CTC      IF (MCOU2.NE.0) THEN
+C       NETTOYAGE APRES COUPE
+C         SEGSUP MCOUP
+C         SEGACT MELEME
+C         DO 8802 IO=1,LISOUS(/1)
+C            IPT1=LISOUS(IO)
+C            SEGSUP IPT1
+C 8802    CONTINUE
+C         SEGSUP MELEME
+C      ENDIF
+      MELEME=IMELIN
+      MCOUP =MCOUIN
+C     GESTION DU TABLEAU ICPR(COMPTEUR DE COULEUR)
+C     ITEST(II) = 1 si la couleur appartient a la liste du point, 0 sinon
+C              (= conversion de KON(2,I,J) en tableau)
+C     ICHC(I) : nb de segments sur lesquels apparait la couleur I
+C     On ramene, si code en binaire, KON(2,.,.) dans l'intervalle
+C     [0;NBCOUL-1] en melangeant eventuellement les couleurs des
+C     segments confondus
+      DO 310 I=1,NBCONR
+         DO 3101 J=1,KON(/3)
+CPM on ecrit IK au lieu de KON(2,I,J) pour economiser l'acces memoire
+            IK=KON(2,I,J)
+            IF (IK.NE.0) THEN
+CPM            IF (IK.LE.9) THEN
+               IF (KON(3,I,J).EQ.0) THEN
+C                 KON(2,.,.) est deja code dans l'intervalle [0;NBCOUL-1]
+C                 soit que ce segment est seul, soit qu'il a deja ete rencontre 1 fois
+                  ICHC(IK)=ICHC(IK)+1
+               ELSE
+C                 cas ou KON est code en puissances de 2 dans [1;2**(NBCOUL-1)]
+CPM NBCOUL-1 au lieu de 7
+C                 tablage des couleurs possibles. IK finit a 0
+                  DO II=1,(NBCOUL-1)
+                     ITEST(II)=0
+                  ENDDO
+CPM NBCOUL-1 au lieu de 7
+                  DO II=(NBCOUL-1),1,-1
+                     IF (IPUIS2(II).LE.IK) THEN
+                        IK=IK-IPUIS2(II)
+                        ITEST(II)=1
+                     ENDIF
+                  ENDDO
+
+C                 Couleur finale du segment a tracer
+                  IF (IDEFCO.EQ.1.AND.ITEST(IICOL).EQ.1) THEN
+C                    Le segment est eligible
+                     IK=IICOL
+                  ELSE
+CPM NBCOUL-1 au lieu de 7
+                     IK=0
+                     DO II=1,NBCOUL-1
+                        IF (ITEST(II).EQ.1) THEN
+C                          si plusieurs couleurs, on les melange
+                           IF (IK.EQ.0) THEN
+                              IK=II
+                           ELSE
+                              IK=ITABM(IK,II)
+                           ENDIF
+                        ENDIF
+                     ENDDO
+                  ENDIF
+                  KON(2,I,J)=IK
+                  KON(3,I,J)=0
+                  ICHC(IK)=ICHC(IK)+1
+               ENDIF
+            ENDIF
+ 3101    CONTINUE
+ 310  CONTINUE
+      SEGDES KON
+      IF (IRESU.EQ.6) GOTO 4999
+
+C     POINT D'ARRIVEE SI ECLATE
+ 4200 CONTINUE
+      segact icpr
+      IF(ITE.EQ.0)RETURN
+      SEGINI XPROJ
+      IF (IDEFOR.NE.0) GOTO 6030
+C     IF (IDEFOR.NE.0.OR.MVECTE.NE.0) GOTO 6030   A VOIR PV
+C  LA TROISIEME COORDONNEE PROJETEE EST LA DISTANCE A L'OEIL
+      CALL PROJEC(ICPR,XPROJ,IOEIL,CGRAV,axez)
+      SEGDES ICPR
+      IF (ZBOIT) THEN
+         CALL PROJC2(IMBOIT,IOEIL,CGRAV,XBMIN,XBMAX,YBMIN
+     $        ,YBMAX,ZBMIN,ZBMAX)
+      ENDIF
+C
+      XMIN=1E30
+      XMAX=-XMIN
+      YMIN=XMIN
+      YMAX=XMAX
+      ZMIN=XMIN
+      ZMAX=XMAX
+      DO I=1,ITE
+         XMIN=MIN(XMIN,XPROJ(1,I))
+         XMAX=MAX(XMAX,XPROJ(1,I))
+         YMIN=MIN(YMIN,XPROJ(2,I))
+         YMAX=MAX(YMAX,XPROJ(2,I))
+         ZMIN=MIN(ZMIN,XPROJ(3,I))
+         ZMAX=MAX(ZMAX,XPROJ(3,I))
+      ENDDO
+C
+      XDEC=XMAX-XMIN
+      YDEC=YMAX-YMIN
+      ZDEC=ZMAX-ZMIN
+C Modif des marges
+C Nouveau :
+      DDEC=MAX(XDEC,YDEC,ZDEC)*0.1
+C MODIF JCARDO 28/02/2012 : DDEC vaut maintenant XSZPRE au minimum
+C                           (evite des erreurs de cancellation)
+      DDEC=MAX(DDEC,REAL(xszpre))
+C      DDEC=MAX(DDEC,xspeti)
+      XMAX=XMAX+DDEC
+      XMIN=XMIN-DDEC
+      YMIN=YMIN-DDEC
+      YMAX=YMAX+DDEC
+      ZMIN=ZMIN-DDEC
+      ZMAX=ZMAX+DDEC
+C Zoom ou dezoome
+      IF (ZBOIT) THEN
+         XMI=XBMIN
+         XMA=XBMAX
+         YMI=YBMIN
+         YMA=YBMAX
+         ZMI=ZBMIN
+         ZMA=ZBMAX
+      ELSE
+         XMI=XMIN
+         YMI=YMIN
+         ZMI=ZMIN
+         XMA=XMAX
+         YMA=YMAX
+         ZMA=ZMAX
+      ENDIF
+Cgoo      CALL DFENET(XMIN,XMAX,YMIN,YMAX,ZMIN,ZMAX,X1,X2,Y1,Y2,FENET)
+      CALL DFENET(XMI,XMA,YMI,YMA,ZMI,ZMA,X1,X2,Y1,Y2,FENET)
+      GOTO 6040
+ 6030 CONTINUE
+C  FAIRE ICI LA PROJECTION DE LA DEFORMEE
+C PP  + option DIRE
+      CALL CADRCL(KABCOR,LABCO2,IOEIL,XPROJ,
+     *     IDEF,XMIN,YMIN,XMAX,YMAX,ZMIN,ZMAX,cgrav,diloc,ldire,axez)
+ 6040 CONTINUE
+C
+C
+C BERTIN: AFFICHAGE DE LA DATE
+      IF (ZDATE) THEN
+       CALL GIBDAT(JOUR,MOIS,IANNEE)
+       iannee=mod(iannee,100)
+C*TC       TIME=FDATE()
+       BUFFER(1:22)='     /  /20           '
+       WRITE (BUFFER(4:5),FMT='(I2)') JOUR
+       WRITE (BUFFER(7:8),FMT='(I2)') MOIS
+       WRITE (BUFFER(12:13),FMT='(I2)') IANNEE
+C*TC       WRITE (BUFFER(15:22),FMT='(A8)') TIME(12:20)
+C       CALL TRBOX(0.8,0.8)
+       READ(BUFFER(1:22),'(A26)') BUFFER
+C       CALL TRBOX(1./0.8,1./0.8)
+      ENDIF
+C BERTIN: FIN AFFICHAGE DE LA DATE
+
+C----------------------------------------------------------
+C   INITIALISATION DE IVU   SI NON FAIT
+C   IVU=1  PT VU
+C   IVU<>1 PT PAS VU
+C----------------------------------------------------------
+ 4999 CONTINUE
+      IF (IVU.EQ.0) THEN
+         SEGINI IVU
+         DO 4997 I=1,ITE
+            IVU(I)=1
+ 4997    CONTINUE
+      ENDIF
+C  METTRE NON CACHABLE LES POINTS DU PLAN DE COUPE
+      SEGADJ IVU
+C     IF (ICACHE.NE.0.AND.NBCTS.NE.0) THEN   CORRECTION PV
+      IF (NBCTS.NE.0) THEN
+         DO 5010 I=NBCTS+1,ITE
+            IVU(I)=2
+ 5010    CONTINUE
+      ENDIF
+C
+CPM NBCOUL-1 au lieu de 8
+      DO I=1,NBCOUL-1
+         ICHCS(I)=ICHC(I)
+      ENDDO
+C  cacher en soft si pas opengl
+      if (iogra.ne.6) then
+C  DEBUT MODIF
+      IF (ICACHE.NE.0) THEN
+         IF (IARET.EQ.0) THEN
+            CALL TIRET3(XPROJ,MELEME,ICPR,XMIN,XMAX,YMIN,YMAX,
+     .           IVU,NELEM,TMIN,TMAX,MCOUP)
+         ELSE
+
+            CALL TIRET3(XPROJ,MELEM3,ICPR,XMIN,XMAX,YMIN,YMAX,
+     .           IVU,NELEM,TMI,TMAX,MCOUP)
+         ENDIF
+      ENDIF
+C FIN MODIF
+      endif
+
+C------------------------------------------------------------
+C  CAS DU TRACE PAR FACE APPEL AU SOUS-PROGRAM FACED
+C  POUR REMPLIR LES FACES
+C------------------------------------------------------------
+      IF (IECLAT.NE.1) THEN
+        if(iimpi.ge.666) then
+        segact,KON
+          write(ioimp,*) 'KON(1,:,1)=',(KON(1,iou,1),iou=1,3)
+          write(ioimp,*) 'KON(2,:,1)=',(KON(2,iou,1),iou=1,3)
+          write(ioimp,*) 'KON(3,:,1)=',(KON(3,iou,1),iou=1,3)
+          write(ioimp,*) 'KON(1,:,2)=',(KON(1,iou,2),iou=1,3)
+          write(ioimp,*) 'KON(2,:,2)=',(KON(2,iou,2),iou=1,3)
+          write(ioimp,*) 'KON(3,:,2)=',(KON(3,iou,2),iou=1,3)
+          write(ioimp,*) 'KON(1,:,3)=',(KON(1,iou,3),iou=1,3)
+          write(ioimp,*) 'KON(2,:,3)=',(KON(2,iou,3),iou=1,3)
+          write(ioimp,*) 'KON(3,:,3)=',(KON(3,iou,3),iou=1,3)
+        endif
+        if(iimpi.ge.666) write(ioimp,*) 'appel a FACED',IFADES
+        IF (IFADES.EQ.1) THEN
+          CALL FACED(MELEME,XPROJ,ICPR,IVU,MCOUP,KON,LNDEGR,1)
+        ELSEIF (IFADES.EQ.0.AND.IOGRA.EQ.6.AND.ICACHE.EQ.1) THEN
+C         TRACe DES ELEMENTS EN EFFACEMENT
+          CALL FACED(MELEME,XPROJ,ICPR,IVU,MCOUP,KON,LNDEGR,0)
+        ENDIF
+      ENDIF
+      IF (IERR.NE.0) GOTO 8900
+
+C------------------------------------------------------------
+C
+C   CAS OU ON VEUT TRACER LES ISOVALEURS D UN OBJET DE TYPE CHAMPOINT
+C
+C------------------------------------------------------------
+cbp      IF (NISO.NE.0) THEN
+      IF (VCPCHA.NE.0) THEN
+C        signaler le nombre d'iso
+         CALL FVALIS(0,IRESU,NHAUT,NISO)
+         PTI=XMAX-XMIN
+         if(iimpi.ge.666) write(ioimp,*) 'apel a ATISO'
+         XDIB=XMAX-XMIN
+         YDIB=YMAX-YMIN
+         BLOK=MAX(XDIB,YDIB)*0.003
+         CALL ATISO(MELEME,ICPR,XPROJ,VCPCHA,VCHC,IVU,PTI,NISO,MCOUP,
+     >        mcham,BLOK)
+      ENDIF
+C
+C 6080 CONTINUE
+      IF (IERR.NE.0) RETURN
+      IF (ICACHE.EQ.1) THEN
+         LTSEGS=1000
+         SEGINI NTSEG
+         LTSEG=0
+      endif
+C 5001 CONTINUE
+C     IF (IECLAT.EQ.1.OR.IFADES.EQ.1) GOTO 4201    PV JUIN 86
+      IF (IECLAT.EQ.1) GOTO 4201
+C  TRACE DES SEGMENTS D'UNE COULEUR EN LES GROUPANT EN UNE LIGNE
+      if(iimpi.ge.666) write(ioimp,*) 'TRACE DES SEGMENTS DUNE COULEUR'
+      SEGACT KON*MOD
+C  PM NBCOUL-1 au lieu de 8
+      icoul=-3
+      DO 70 LI=0,NBCOUL-1
+         IF (IDEFCO.EQ.1 .AND. LI.NE.IICOL) GOTO 70
+C        SI ISOVALEUR ET REMPLISSAGE COULEUR EFFACEMENT
+C MODIF JCARDO 8/12/2011  : rajout condition LI=0
+C                           => on force NOIR seulement si COUL=DEFA
+C MODIF JCARDO 28/02/2012 : rajout condition IMEL2=0 (eventuellement)
+C                           => on force NOIR seulement s'il y a un
+C                              seul objet MAILLAGE
+C         IF (NISO.NE.0.AND.ISOTYP.GT.0) CALL CHCOUL(IDNOIR)
+C         IF (LI.EQ.0.AND.NISO.NE.0.AND.ISOTYP.GT.0)
+cbp         IF ((IMEL2.EQ.0.OR.LI.EQ.0).AND.NISO.NE.0.AND.ISOTYP.GT.0)
+         IF ((IMEL2.EQ.0.OR.LI.EQ.0).AND.IISO.NE.0.AND.ISOTYP.GT.0) then
+            kcoul=idnoir
+         ELSE
+C PP           kcoul=LI
+C+PP FACE avec trait blanc
+            IF (LBLANC) THEN
+               kcoul=0
+            ELSE
+               kcoul=LI
+            ENDIF
+C+PP
+         ENDIF
+         KAUX=1
+ 23      K=KAUX
+         IF (IVU(KAUX).LE.0) GOTO 40
+         KAUXR=KAUX
+ 41      CONTINUE
+         DO 19 KL=1,NBCONR
+            ITRA=KON(1,KL,K)
+            IF (ITRA.LT.0) GOTO 19
+            IF (ITRA.EQ.0) GOTO 40
+            IF (KON(2,KL,K).NE.LI) GOTO 19
+            IF (IVU(ITRA).GE.1) GOTO 21
+ 19      CONTINUE
+         K=KON(1,NBCON,K)
+         IF (K.NE.0) GOTO 41
+ 40      KAUX=KAUX+1
+         IF (KAUX.GE.ITE+1) GOTO 27
+         GOTO 23
+ 21      CONTINUE
+         IF (ITR.GT.1) THEN
+            if (kcoul.ne.icoul) then
+               call chcoul(kcoul)
+               icoul=kcoul
+            endif
+            CALL POLRL(ITR,XTR,YTR,ZTR)
+         ENDIF
+         ITR=1
+         XTR(ITR)=XPROJ(1,KAUXR)
+         YTR(ITR)=XPROJ(2,KAUXR)
+         ZTR(ITR)=XPROJ(3,KAUXR)
+         KPRESS=KAUXR
+         GOTO 25
+ 24      KL=1
+ 25      DO 22 L=KL,NBCONR
+            M=KON(1,L,K)
+            IF (M.EQ.0) GOTO 23
+            IF (M.LT.0) GOTO 22
+            IF (KON(2,L,K).NE.LI) GOTO 22
+            IF (IVU(M).LE.0) GOTO 22
+            GOTO 28
+ 22      CONTINUE
+         K=KON(1,NBCON,K)
+         IF (K.EQ.0) GOTO 23
+         GOTO 24
+ 28      CONTINUE
+         ITR=ITR+1
+         XTR(ITR)=XPROJ(1,M)
+         YTR(ITR)=XPROJ(2,M)
+         ZTR(ITR)=XPROJ(3,M)
+         IF (ITR.EQ.40) THEN
+            if (kcoul.ne.icoul) then
+               call chcoul(kcoul)
+               icoul=kcoul
+            endif
+            CALL POLRL(ITR,XTR,YTR,ZTR)
+            XTR(1)=XTR(ITR)
+            YTR(1)=YTR(ITR)
+            ZTR(1)=ZTR(ITR)
+            ITR=1
+         ENDIF
+         KON(1,L,K)=-KON(1,L,K)
+         M1=M
+ 42      DO 43 L=1,NBCONR
+            IF (KON(1,L,M1).EQ.0) GOTO 45
+            IF (KON(1,L,M1).EQ.KPRESS) GOTO 44
+ 43      CONTINUE
+         M1=KON(1,NBCON,M1)
+         IF (M1.EQ.0) GOTO 45
+         GOTO 42
+ 44      KON(1,L,M1)=-KON(1,L,M1)
+ 45      KPRESS=M
+         K=KPRESS
+         GOTO 24
+ 27      CONTINUE
+         IF (ITR.NE.1) THEN
+            if (kcoul.ne.icoul) then
+               call chcoul(kcoul)
+               icoul=kcoul
+            endif
+            CALL POLRL(ITR,XTR,YTR,ZTR)
+         ENDIF
+         ITR=0
+ 70   CONTINUE
+      IF (ICACHE.EQ.0) GOTO 5002
+
+C----------------------------------------------------------
+C  ON REMPLIT NTSEG AVEC LES SEGMENTS EN PARTIE VUS
+C                        (OPTION CACHE)
+C----------------------------------------------------------
+      DO 5003 K=1,ITE
+         IF (IVU(K).LE.0) GOTO 5003
+         KK=K
+ 5005    CONTINUE
+         DO 5004 KL=1,NBCONR
+            ITRA=KON(1,KL,KK)
+            IF (ITRA.LT.0) GOTO 5004
+            IF (ITRA.EQ.0) GOTO 5003
+            IF (LTSEGS-LTSEG.LT.10) THEN
+               LTSEGS=LTSEGS+1000
+               SEGADJ NTSEG
+            ENDIF
+            NTSEG(LTSEG+1)=K
+            NTSEG(LTSEG+2)=ITRA
+C MODIF JCARDO 28/02/2012 : rajout conditions LICLR=0 (+ eventuellement IMEL2=0)
+C                           cf. commentaires 100 lignes plus haut...
+C            IF (NISO.NE.0.AND.ISOTYP.GT.0) THEN
+            LICLR=KON(2,KL,KK)
+C            IF (LICLR.EQ.0.AND.NISO.NE.0.AND.ISOTYP.GT.0) THEN
+            IF ((IMEL2.EQ.0.OR.LICLR.EQ.0)
+cbp     &                .AND.NISO.NE.0.AND.ISOTYP.GT.0) THEN
+     &                .AND.IISO.NE.0.AND.ISOTYP.GT.0) THEN
+CPM IDNOIR au lieu de 8
+               NTSEG(LTSEG+3)=IDNOIR
+            ELSE
+               NTSEG(LTSEG+3)=LICLR
+            ENDIF
+            LTSEG=LTSEG+3
+ 5004    CONTINUE
+         KK=KON(1,NBCON,KK)
+         IF (KK.NE.0) GOTO 5005
+ 5003 CONTINUE
+ 5002 CONTINUE
+      SEGDES KON
+C     Trace des petites croix, cas de type POI1
+      IF (CROIX) then
+C        CALCUL TAILLE POUR LES CROIX
+         XDIB=XMAX-XMIN
+         YDIB=YMAX-YMIN
+         BLOK=MAX(XDIB,YDIB)*0.003
+         IPT1=MELEME
+         IF (IMEL2.NE.0) IPT1=MELEM2
+         SEGACT IPT1
+         SEGACT MELEME
+         DO 8002 ISOUS=1,MAX(1,LISOUS(/1))
+            IF (LISOUS(/1).NE.0) THEN
+               IPT1=LISOUS(ISOUS)
+               SEGACT IPT1
+            ENDIF
+            IF (IPT1.ITYPEL.NE.1.OR.VCPCHA.NE.0) GOTO 8004
+C----------------------------------------------------------
+C  TRACE DES croix
+C----------------------------------------------------------
+            SEGACT IVU,ICPR
+            icc = -3
+            NBNN=IPT1.NUM(/1)
+            DO 8005 IEL=1,IPT1.NUM(/2)
+               IF (IVU(ICPR(IPT1.NUM(1,IEL))).GE.1) THEN
+                  ICOOL=IPT1.ICOLOR(IEL)
+C              IF (ICOOL.LE.0) ICOOL=IDCOUL
+CPM IDNOIR au lieu de 8
+cbp                  IF (NISO.NE.0.AND.ISOTYP.GT.0) ICOOL=IDNOIR
+                  IF (IISO.NE.0.AND.ISOTYP.GT.0) ICOOL=IDNOIR
+                  IF (ICOOL.NE.ICC) THEN
+                     ICC=ICOOL
+                     CALL CHCOUL(ICC)
+                  ENDIF
+                  XPOS=XPROJ(1,ICPR(IPT1.NUM(1,IEL)))
+                  YPOS=XPROJ(2,ICPR(IPT1.NUM(1,IEL)))
+                  ZPOS=XPROJ(3,ICPR(IPT1.NUM(1,IEL)))
+                  XTR(1)=XPOS+BLOK
+                  YTR(1)=YPOS
+                  ZTR(1)=ZPOS
+                  XTR(2)=XPOS-BLOK
+                  YTR(2)=YPOS
+                  ZTR(2)=ZPOS
+                  CALL POLRL(2,XTR,YTR,ZTR)
+                  XTR(1)=XPOS
+                  YTR(1)=YPOS+BLOK
+                  ZTR(1)=ZPOS
+                  XTR(2)=XPOS
+                  YTR(2)=YPOS-BLOK
+                  ZTR(2)=ZPOS
+                  CALL POLRL(2,XTR,YTR,ZTR)
+               ENDIF
+ 8005       CONTINUE
+ 8004       CONTINUE
+            IF (LISOUS(/1).NE.0) SEGDES IPT1
+ 8002    CONTINUE
+         SEGDES MELEME
+      endif
+C  Y A T IL DES BLOCAGES ???
+      IF (.NOT.BLOCAG) GOTO 7000
+C  CALCUL TAILLE POUR LES BLOCAGES
+      XDIB=XMAX-XMIN
+      YDIB=YMAX-YMIN
+      BLOK=MAX(XDIB,YDIB)*0.01
+      ICC=-3
+      SEGACT MELEME
+      IPT1=MELEME
+      DO 7002 ISOUS=1,MAX(1,LISOUS(/1))
+         IF (LISOUS(/1).NE.0) THEN
+            IPT1=LISOUS(ISOUS)
+            SEGACT IPT1
+         ENDIF
+         IF (IPT1.ITYPEL.NE.22) GOTO 7004
+         IF (IPT1.ITYPEL.NE.259) GOTO 7004
+C----------------------------------------------------------
+C  TRACE DES BLOCAGES
+C----------------------------------------------------------
+         SEGACT IVU,ICPR
+         NBNN=IPT1.NUM(/1)
+         DO 7005 IEL=1,IPT1.NUM(/2)
+            ICOOL=IPT1.ICOLOR(IEL)
+C           IF (ICOOL.LE.0) ICOOL=IDCOUL
+            IF (NBNN.GT.2) THEN
+C      IF (NISO.NE.0.AND.ISOTYP.GT.0) ICOOL=IDNOIR
+               IF (ICOOL.NE.ICC) THEN
+                  ICC=ICOOL
+                  CALL CHCOUL(ICC)
+               ENDIF
+               JDTRAC=0
+               DO 7006 INO=2,NBNN
+                  INOS=INO+1
+                  IF (INOS.GT.NBNN) INOS = 2
+                  IP1=ICPR(IPT1.NUM(INO,IEL))
+                  IP2=ICPR(IPT1.NUM(INOS,IEL))
+                  IF (IVU(IP1).GE.1.AND.IVU(IP2).GE.1) THEN
+                     IF (JDTRAC.EQ.0) THEN
+                        XTR(1)=XPROJ(1,IP1)
+                        YTR(1)=XPROJ(2,IP1)
+                        ZTR(1)=XPROJ(3,IP1)
+                        XTR(2)=XPROJ(1,IP2)
+                        YTR(2)=XPROJ(2,IP2)
+                        ZTR(2)=XPROJ(3,IP2)
+                        CALL POLRL(2,XTR,YTR,ZTR)
+                     ENDIF
+                     JDTRAC=1
+                  ELSEIF (IVU(IP1).GE.1) THEN
+                     IF (LTSEGS-LTSEG.LT.10) THEN
+                        LTSEGS=LTSEGS+1000
+                        SEGADJ NTSEG
+                     ENDIF
+                     NTSEG(LTSEG+1)=IP1
+                     NTSEG(LTSEG+2)=IP2
+                     NTSEG(LTSEG+3)=ICC
+                     LTSEG=LTSEG+3
+                     JDTRAC=0
+                  ELSEIF (IVU(IP2).GE.1) THEN
+                     IF (LTSEGS-LTSEG.LT.10) THEN
+                        LTSEGS=LTSEGS+1000
+                        SEGADJ NTSEG
+                     ENDIF
+                     NTSEG(LTSEG+1)=IP2
+                     NTSEG(LTSEG+2)=IP1
+                     NTSEG(LTSEG+3)=ICC
+                     LTSEG=LTSEG+3
+                     JDTRAC=0
+                  ENDIF
+ 7006          CONTINUE
+            ELSEIF (NBNN.EQ.2.AND.IVU(ICPR(IPT1.NUM(2,IEL))).GE.1) THEN
+cbp               IF (NISO.NE.0.AND.ISOTYP.GT.0) ICOOL=IDNOIR
+               IF (IISO.NE.0.AND.ISOTYP.GT.0) ICOOL=IDNOIR
+               IF (ICOOL.NE.ICC) THEN
+                  ICC=ICOOL
+                  CALL CHCOUL(ICC)
+               ENDIF
+               XPOS=XPROJ(1,ICPR(IPT1.NUM(2,IEL)))
+               YPOS=XPROJ(2,ICPR(IPT1.NUM(2,IEL)))
+               ZPOS=XPROJ(3,ICPR(IPT1.NUM(2,IEL)))
+               XTR(1)=XPOS+BLOK
+               YTR(1)=YPOS
+               ZTR(1)=ZPOS
+               XTR(2)=XPOS
+               YTR(2)=YPOS+BLOK
+               ZTR(2)=ZPOS
+               XTR(3)=XPOS-BLOK
+               YTR(3)=YPOS
+               ZTR(3)=ZPOS
+               XTR(4)=XPOS
+               YTR(4)=YPOS-BLOK
+               ZTR(4)=ZPOS
+               XTR(5)=XTR(1)
+               YTR(5)=YTR(1)
+               ZTR(5)=ZTR(1)
+               CALL POLRL(5,XTR,YTR,ZTR)
+            ENDIF
+ 7005    CONTINUE
+ 7004    CONTINUE
+         IF (LISOUS(/1).NE.0) SEGDES IPT1
+ 7002 CONTINUE
+      SEGDES MELEME
+ 7000 CONTINUE
+      if (iogra.eq.6) goto 4202
+      IF (ICACHE.NE.0) THEN
+C PP FACE avec trait blanc
+         CALL DICHO3(XPROJ,MELEME,ICPR,XMIN,XMAX,
+     *        YMIN,YMAX,IVU,NTSEG,NELEM,IICOL,IDEFCO,lblanc,LTSEG)
+C PP *   YMIN,YMAX,IVU,NTSEG,NELEM,IICOL,IDEFCO)
+      ENDIF
+      GOTO 4202
+ 4201 CONTINUE
+C----------------------------------------------------------
+C
+C  TRACE ECLATE DES ELEMENTS
+C
+C----------------------------------------------------------
+      SEGACT ICPR
+C     IF (IFADES.EQ.1) GOTO 4400     PV JUIN 86
+      SEGACT MELEME
+      ICOLE=0
+      IPT1=MELEME
+      DO 4111 IO=1,MAX(1,LISOUS(/1))
+         IF (LISOUS(/1).NE.0) THEN
+            IPT1=LISOUS(IO)
+            SEGACT IPT1
+         ENDIF
+         K=IPT1.ITYPEL
+         IDEP=LPT(K)
+         IFIN=IDEP+2*LPL(K)-2
+         IFIN2=IFIN
+         IF (LPL(K).EQ.0) THEN
+            IF (LPT(K).EQ.0)THEN
+               GOTO 4112
+            ELSE
+C            Polygone
+               IFIN=IDEP+2*IPT1.NUM(/1)-2
+               IFIN2=IFIN -2
+            ENDIF
+         ENDIF
+ 4112    CONTINUE
+C         IFIN=IDEP+2*LPL(K)-2
+         DO 4115 I=1,IPT1.NUM(/2)
+            IF (IDEFCO.EQ.1.AND.IPT1.ICOLOR(I).NE.IICOL) GOTO 4115
+            XG=0.
+            YG=0.
+            ZG=0.
+            ZN=0.
+            N=IPT1.NUM(/1)
+            DO 4116 J=1,N
+               XG=XG+XPROJ(1,ICPR(IPT1.NUM(J,I)))
+               YG=YG+XPROJ(2,ICPR(IPT1.NUM(J,I)))
+               ZG=ZG+XPROJ(3,ICPR(IPT1.NUM(J,I)))
+ 4116       CONTINUE
+            XG=XG/N
+            YG=YG/N
+            ZG=ZG/N
+            I3=0
+            IF (ICOLE.NE.IPT1.ICOLOR(I)) THEN
+               ICOLE=IPT1.ICOLOR(I)
+               CALL CHCOUL(ICOLE)
+            ENDIF
+            ITR=1
+            ILTEL=LTEL(1,K)
+           IF (ILTEL.NE.0) THEN
+            DO 4117 IF=1,ILTEL
+            ITR=0
+            ILTAD=LTEL(2,K)
+            ITYP=LDEL(1,ILTAD+IF-1)
+            IAD=LDEL(2,ILTAD+IF-1)
+            DO 4118 J=1,KDFAC(1,ITYP)
+               I1=ICPR(IPT1.NUM(LFAC(IAD+J-1),I))
+               XR=XG+(XPROJ(1,I1)-XG)*XECLAT
+               YR=YG+(XPROJ(2,I1)-YG)*XECLAT
+               ZR=ZG+(XPROJ(3,I1)-ZG)*XECLAT
+               ITR=ITR+1
+               XTR(ITR)=XR
+               YTR(ITR)=YR
+               ZTR(ITR)=ZR
+ 4118       CONTINUE
+            ITR=ITR+1
+            XTR(ITR)=XTR(1)
+            YTR(ITR)=YTR(1)
+            ZTR(ITR)=ZTR(1)
+            IF (IFADES.EQ.0) THEN
+              CALL POLRL(ITR,XTR,YTR,ZTR)
+            ELSE
+              CALL TRFACE(ITR,XTR,YTR,ZTR,ZN,ICOLE,IEFF)
+              CALL CHCOUL(IDNOIR)
+              CALL POLRL(ITR,XTR,YTR,ZTR)
+              CALL CHCOUL(ICOLE)
+            ENDIF
+            ITR=0
+ 4117       CONTINUE
+           ELSE
+            DO 4114 J=IDEP,IFIN,2
+               IF (J.LE.IFIN2) THEN
+                  I1=ICPR(IPT1.NUM(KSEGM(J),I))
+                  I2=ICPR(IPT1.NUM(KSEGM(J+1),I))
+               ELSE
+                  I1=ICPR(IPT1.NUM(KSEGM(IFIN2+1),I))
+                  I2=ICPR(IPT1.NUM(KSEGM(1),I))
+               ENDIF
+               XR=XG+(XPROJ(1,I1)-XG)*XECLAT
+               YR=YG+(XPROJ(2,I1)-YG)*XECLAT
+               ZR=ZG+(XPROJ(3,I1)-ZG)*XECLAT
+               IF (I1.NE.I3) THEN
+            if (ifades.eq.0) then
+            IF (ITR.NE.1) call POLRL(ITR,XTR,YTR,ZTR)
+            else
+            IF (ITR.NE.1)  CALL trface(ITR,XTR,YTR,ZTR,zn,icole,ieff)
+            endif
+                  ITR=1
+                  XTR(1)=XR
+                  YTR(1)=YR
+                  ZTR(1)=ZR
+               ENDIF
+               XR=XG+(XPROJ(1,I2)-XG)*XECLAT
+               YR=YG+(XPROJ(2,I2)-YG)*XECLAT
+               ZR=ZG+(XPROJ(3,I2)-ZG)*XECLAT
+               ITR=ITR+1
+               XTR(ITR)=XR
+               YTR(ITR)=YR
+               ZTR(ITR)=ZR
+               I3=I2
+ 4114       CONTINUE
+            if (ifades.eq.0) then
+            IF (ITR.NE.1)  CALL POLRL(ITR,XTR,YTR,ZTR)
+            else
+            IF (ITR.NE.1)  CALL trface(ITR,XTR,YTR,ZTR,zn,icole,ieff)
+            endif
+            ITR=1
+           ENDIF
+ 4115    CONTINUE
+         IF (LISOUS(/1).NE.0) SEGDES IPT1
+ 4111 CONTINUE
+      SEGDES MELEME
+ 4202 CONTINUE
+
+C----------------------------------------------------------
+C     TRAITEMENT DES PARAMETRES TELS QUE NOEUD,QUALI,...
+C                           (AVANT AFFICHAGE)
+C----------------------------------------------------------
+      IF (IQUALI.EQ.0) GOTO 500
+      SEGACT XPROJ,IVU,ICPR
+      PAS=(X2-X1)/(XMA-XMI)
+      CALL INSEGT(3,IRESS)
+C  ON MET LES NOMS LA OU ON PEUT
+      if(nbesc.ne.0) segact ipiloc
+      DO 501 IOB=1,LMNNOM
+C  IGNORER LES OBJETS TEMPORAIRES OU INVALIDES
+         ICOLE=0
+         IF (INOOB2(IOB).NE.'MAILLAGE') GOTO 511
+         IPVH=INOOB1(IOB)
+         IDEBCH=IPCHAR(IPVH)
+         IFINCH=IPCHAR(IPVH+1)-1
+         TXT= ICHARA(IDEBCH:IFINCH)
+         IF (TXT(1:1).EQ.'#') GOTO 501
+         IF (TXT(1:1).EQ.' ') GOTO 501
+         IPT4=IOUEP2(IOB)
+         IF (IPT4.EQ.0) GOTO 501
+         SEGACT IPT4
+         XP=0
+         YP=0
+         ZP=0
+         NP=0
+         IPT5=IPT4
+         DO 503 ISB=1,MAX(1,IPT4.LISOUS(/1))
+            IF (IPT4.LISOUS(/1).NE.0) THEN
+               IPT5=IPT4.LISOUS(ISB)
+               SEGACT IPT5
+            ENDIF
+CPM NBCOUL-1 au lieu de 7
+            DO 507 I=1,NBCOUL-1
+               ITEST(I)=0
+ 507        CONTINUE
+            DO 504 J=1,IPT5.NUM(/2)
+               IF (IPT5.ICOLOR(J).NE.0) THEN
+                  ITEST(IPT5.ICOLOR(J))=1
+               ELSE
+C                 ITEST(7)=1
+               ENDIF
+               DO 5041 I=1,IPT5.NUM(/1)
+                  K=ICPR(IPT5.NUM(I,J))
+                  IF (K.EQ.0) GOTO 505
+                  IF (IVU(K).LE.0) GOTO 5041
+                  NP=NP+1
+                  XP=XP+XPROJ(1,K)
+                  YP=YP+XPROJ(2,K)
+                  ZP=ZP+XPROJ(3,K)
+ 5041          CONTINUE
+ 504        CONTINUE
+            IF (IPT4.LISOUS(/1).NE.0) SEGDES IPT5
+ 503     CONTINUE
+         SEGDES IPT4
+         IF (NP.EQ.0) GOTO 501
+         XP=XP/NP
+         YP=YP/NP
+         ZP=ZP/NP
+C     IF (XP.LT.XMI.OR.XP.GT.XMA.OR.YP.LT.YMI.OR.YP.GT.YMA) GOTO 501
+         ICOLE=0
+CPM NBCOUL-1 au lieu de 7
+C        couleur avec melange eventuel si plusieurs
+         DO 508 I=1,NBCOUL-1
+            IF (ITEST(I).EQ.1) THEN
+               IF (ICOLE.EQ.0) THEN
+                  ICOLE=I
+               ELSE
+                  ICOLE=ITABM(ICOLE,I)
+               ENDIF
+            ENDIF
+ 508     CONTINUE
+         IF (IDEFCO.EQ.1.AND.ICOLE.NE.IICOL) GOTO 501
+         CALL CHCOUL(ICOLE)
+         XP=PAS*(XP-XMI)+X1
+         YP=PAS*(YP-YMI)+Y1
+         ZP=PAS*(ZP-ZMI)+ZMI
+C         TXT= INOOB1(IOB)
+         CALL TRLABL(XP,YP,ZP,TXT,8,0.15)
+         GOTO 501
+ 505     CONTINUE
+         SEGDES IPT4,IPT5
+ 511     CONTINUE
+C   AU TOUR DES POINTS NOMMES
+         IF (INOOB2(IOB).NE.'POINT   ') GOTO 501
+         IF (IOUEP2(IOB).EQ.0) GOTO 501
+         K=ICPR(IOUEP2(IOB))
+         IF (K.EQ.0) GOTO 501
+         IF (IVU(K).LE.0) GOTO 501
+C     IF (XPROJ(1,K).LT.XMI.OR.XPROJ(1,K).GT.XMA) GOTO 501
+C     IF (XPROJ(2,K).LT.YMI.OR.XPROJ(2,K).GT.YMA) GOTO 501
+         ITRUC=0
+         IF (IDEFCO.EQ.1) THEN
+ 512        DO 509 I=1,NBCONR
+CPM   ?????????? pb si codage KON en binaire ???????????
+               IF (KON(2,I,K).EQ.IICOL) THEN
+                  ITRUC=1
+                  GOTO 510
+               ENDIF
+ 509        CONTINUE
+            IF (KON(1,NBCON,K).NE.0) THEN
+               K=KON(1,NBCON,K)
+               GOTO 512
+            ENDIF
+         ELSE
+            ITRUC=1
+         ENDIF
+ 510     IF (ITRUC.EQ.1) THEN
+            CALL CHCOUL(0)
+            XP=XPROJ(1,K)
+            YP=XPROJ(2,K)
+            ZP=XPROJ(3,K)
+            XP=PAS*(XP-XMI)+X1
+            YP=PAS*(YP-YMI)+Y1
+            ZP=PAS*(ZP-ZMI)+ZMI
+            IPVH=INOOB1(IOB)
+            IDEBCH=IPCHAR(IPVH)
+            IFINCH=IPCHAR(IPVH+1)-1
+            TXT= ICHARA(IDEBCH:IFINCH)
+            CALL TRLABL(XP,YP,ZP,TXT,8,0.15)
+         ENDIF
+ 501  CONTINUE
+      if(nbesc.ne.0) SEGDES,IPILOC
+      IF (IRESU.EQ.3) GOTO 6101
+ 500  IF (INUMNO.EQ.0) GOTO 531
+      SEGACT XPROJ,IVU,ICPR
+      PAS=(X2-X1)/(XMA-XMI)
+      CALL INSEGT(4,IRESS)
+C   INDICATION DES NUMEROS DE NOEUDS
+      CALL CHCOUL(0)
+      DO 530 I=1,NBPTS
+         K=ICPR(I)
+         IF (K.EQ.0) GOTO 530
+         IF (IVU(K).LE.0) GOTO 530
+C     IF (XPROJ(1,K).LT.XMI.OR.XPROJ(1,K).GT.XMA) GOTO 530
+C     IF (XPROJ(2,K).LT.YMI.OR.XPROJ(2,K).GT.YMA) GOTO 530
+         ITRUC=0
+         IF (IDEFCO.EQ.1) THEN
+ 521        DO 519 J=1,NBCONR
+CPM   ?????????? pb si codage KON en binaire ???????????
+               IF (KON(2,J,K).EQ.IICOL) THEN
+                  ITRUC=1
+                  GOTO 520
+               ENDIF
+ 519        CONTINUE
+            IF (KON(1,NBCON,K).NE.0) THEN
+               K=KON(1,NBCON,K)
+               GOTO 521
+            ENDIF
+         ELSE
+            ITRUC=1
+         ENDIF
+ 520     IF (ITRUC.EQ.1) THEN
+            IF (I.LT.10) THEN
+               FMTX='(I1,7X)'
+            ELSEIF (I.LT.100) THEN
+               FMTX='(I2,6X)'
+            ELSEIF (I.LT.1000) THEN
+               FMTX='(I3,5X)'
+            ELSEIF (I.LT.10000) THEN
+               FMTX='(I4,4X)'
+            ELSEIF (I.LT.100000) THEN
+               FMTX='(I5,3X)'
+            ELSEIF (I.LT.1000000) THEN
+               FMTX='(I6,2X)'
+            ELSEIF (I.LT.10000000) THEN
+               FMTX='(I7,1X)'
+            ENDIF
+            WRITE (TXT,FMT=FMTX) I
+            XP=XPROJ(1,K)
+            YP=XPROJ(2,K)
+            ZP=XPROJ(3,K)
+            XP=PAS*(XP-XMI)+X1
+            YP=PAS*(YP-YMI)+Y1
+            ZP=PAS*(ZP-ZMI)+ZMI
+            CALL TRLABL(XP,YP,ZP,TXT,8,0.15)
+         ENDIF
+ 530  CONTINUE
+      IF (IRESU.EQ.4) GOTO 6101
+ 531  CONTINUE
+C+++*
+      IF (LABCO2.EQ.0) GOTO 538
+      MVECTS=MVECTE
+      MVECTE=LABCO2(3,IDEF)
+      IF (MVECTE.EQ.0) GOTO 538
+      SEGACT XPROJ,IVU,ICPR
+
+C     TRACE DES VECTEURS SI IL Y A LIEU
+      SEGACT MVECTE
+      NVEC=NOCOUL(/1)
+      KABCO2=LABCO2(1,IDEF)
+      KXPRO2=LABCO2(2,IDEF)
+      DO 541 IVEC=1,NVEC
+C        Mots reserves : contraintes principales / fissures
+         CALL PLACE(MOVE,6,IPLA,NOCOVE(IVEC,1))
+         IF (IPLA.EQ.0) THEN
+C           Cas classique des vecteurs
+CPM NLEGMX au lieu de 8
+            IF (NVECL.LT.NLEGMX) THEN
+               IFLE = 0
+               NVECL=NVECL+1
+               VAMPF(NVECL)=REAL(AMPF(IVEC))
+               IF (VAMPF(NVECL).LT.0) IFLE = -1
+               NVCOL(NVECL)=NOCOUL(IVEC)
+               NVLEG(1,NVECL)=NOCOVE(IVEC,1)
+cbp            petit ajout pour eviter pb si vecteurs crees depuis mchaml
+               NVLEG(2,NVECL)='    '
+               NVLEG(3,NVECL)='    '
+               IDVECT=NOCOVE(/3)
+               IF(IDVECT.GT.1) THEN
+                 NVLEG(2,NVECL)=NOCOVE(IVEC,2)
+                 IF (IDIM.EQ.3) NVLEG(3,NVECL)=NOCOVE(IVEC,3)
+               ENDIF
+cbp            fin petit ajout
+            ENDIF
+         ELSE
+C           Cas des contraintes principales
+            IF (IPLA.LE.3) IFLE = 1
+C           Cas des fissures
+            IF (IPLA.GT.3) IFLE = 2
+            IF (IFLE.EQ.1.AND.NOCOVE(2,1).EQ.NOCOVE(1,1)) THEN
+               NVECL = 1
+               VAMPF(1)=REAL(AMPF(1))
+               NVCOL(1)=NOCOUL(1)
+               NVLEG(1,1)=NOCOVE(1,1)
+            ELSE
+               NVECL = 2
+               VAMPF(1)=REAL(AMPF(1))
+               NVCOL(1)=NOCOUL(1)
+               NVLEG(1,1)=NOCOVE(1,1)
+               VAMPF(2)=REAL(AMPF(2))
+               NVCOL(2)=NOCOUL(2)
+               NVLEG(1,2)=NOCOVE(2,1)
+               IF (IDIM.EQ.3) THEN
+                  NVECL = 3
+                  VAMPF(3)=REAL(AMPF(3))
+                  NVCOL(3)=NOCOUL(3)
+                  NVLEG(1,3)=NOCOVE(3,1)
+               ENDIF
+            ENDIF
+         ENDIF
+         XPRO2=KXPRO2(IVEC)
+         ICOR2=KABCO2(2,IVEC)
+         SEGACT XPRO2,ICOR2,XPROJ,IVU,ICPR
+         INVCOU=NOCOUL(IVEC)
+         CALL CHCOUL(INVCOU)
+         DO 540 I=1,NBPTS
+            K=ICPR(I)
+            IF (K.EQ.0) GOTO 540
+            IF (ICOR2(K).EQ.0) GOTO 540
+            IF (IVU(K).LE.0) GOTO 540
+            IF (IFLE.EQ.-1) THEN
+C              Fleches pointant vers les points
+               UX=XPROJ(1,K)-XPRO2(1,K)
+               UY=XPROJ(2,K)-XPRO2(2,K)
+               UZ=XPROJ(3,K)-XPRO2(3,K)
+               XTR(1)=XPRO2(1,K)
+               YTR(1)=XPRO2(2,K)
+               ZTR(1)=XPRO2(3,K)
+               XTR(2)=XPROJ(1,K)-UX/10.
+               YTR(2)=XPROJ(2,K)-UY/10.
+               ZTR(2)=XPROJ(3,K)-UZ/10.
+               U1=XPROJ(1,K)-UX/3-UY/5
+               V1=XPROJ(2,K)-UY/3+UX/5
+               W1=XPROJ(3,K)
+               XTR(3)=U1
+               YTR(3)=V1
+               ZTR(3)=W1
+               XTR(4)=XPROJ(1,K)
+               YTR(4)=XPROJ(2,K)
+               ZTR(4)=XPROJ(3,K)
+               U1=XPROJ(1,K)-UX/3+UY/5
+               V1=XPROJ(2,K)-UY/3-UX/5
+               W1=XPROJ(3,K)
+               XTR(5)=U1
+               YTR(5)=V1
+               ZTR(5)=W1
+               XTR(6)=XPROJ(1,K)-UX/10.
+               YTR(6)=XPROJ(2,K)-UY/10.
+               ZTR(6)=XPROJ(3,K)
+               CALL POLRL(6,XTR,YTR,ZTR)
+            ELSE IF (IFLE.EQ.0) THEN
+C              Fleches partant des points
+
+               XTR(1)=XPROJ(1,K)
+               YTR(1)=XPROJ(2,K)
+               ZTR(1)=XPROJ(3,K)
+               UX=XPRO2(1,K)-XPROJ(1,K)
+               UY=XPRO2(2,K)-XPROJ(2,K)
+               UZ=XPRO2(3,K)-XPROJ(3,K)
+               XTR(2)=XPRO2(1,K)-UX/10.
+               YTR(2)=XPRO2(2,K)-UY/10.
+               ZTR(2)=XPRO2(3,K)
+               U1=XPRO2(1,K)-UX/3-UY/5
+               V1=XPRO2(2,K)-UY/3+UX/5
+               W1=XPRO2(3,K)
+               XTR(3)=U1
+               YTR(3)=V1
+               ZTR(3)=W1
+               XTR(4)=XPRO2(1,K)
+               YTR(4)=XPRO2(2,K)
+               ZTR(4)=XPRO2(3,K)
+               U1=XPRO2(1,K)-UX/3+UY/5
+               V1=XPRO2(2,K)-UY/3-UX/5
+               W1=XPRO2(3,K)
+               XTR(5)=U1
+               YTR(5)=V1
+               ZTR(5)=W1
+               XTR(6)=XPRO2(1,K)-UX/10.
+               YTR(6)=XPRO2(2,K)-UY/10.
+               ZTR(6)=XPRO2(3,K)
+               CALL POLRL(6,XTR,YTR,ZTR)
+            ELSE IF (IFLE.EQ.1) THEN
+C              contraintes principales
+               IF (ICOR2(K).EQ.1) THEN
+                  NTR = 6
+                  XTR(1) = XPROJ(1,K)
+                  YTR(1) = XPROJ(2,K)
+                  ZTR(1) = XPROJ(3,K)
+                  UX = XPRO2(1,K) - XPROJ(1,K)
+                  UY = XPRO2(2,K) - XPROJ(2,K)
+                  UZ = XPRO2(3,K) - XPROJ(3,K)
+                  XTR(2) = XPRO2(1,K) - UX/10
+                  YTR(2) = XPRO2(2,K) - UY/10
+                  ZTR(2) = XPRO2(3,K)
+                  XTR(3) = XPRO2(1,K) - UX/3 - UY/5
+                  YTR(3) = XPRO2(2,K) - UY/3 + UX/5
+                  ZTR(3) = XPRO2(3,K)
+                  XTR(4) = XPRO2(1,K)
+                  YTR(4) = XPRO2(2,K)
+                  ZTR(4) = XPRO2(3,K)
+                  XTR(5) = XPRO2(1,K) - UX/3 + UY/5
+                  YTR(5) = XPRO2(2,K) - UY/3 - UX/5
+                  ZTR(5) = XPRO2(3,K)
+                  XTR(6) = XPRO2(1,K) - UX/10.
+                  YTR(6) = XPRO2(2,K) - UY/10.
+                  ZTR(6) = XPRO2(3,K)
+                  CALL POLRL(NTR,XTR,YTR,ZTR)
+               ELSE
+                  NTR = 6
+                  XTR(1) = XPROJ(1,K)
+                  YTR(1) = XPROJ(2,K)
+                  ZTR(1) = XPROJ(3,K)
+                  XTR(2) = XPRO2(1,K)
+                  YTR(2) = XPRO2(2,K)
+                  ZTR(2) = XPRO2(3,K)
+                  UX = XPRO2(1,K) - XPROJ(1,K)
+                  UY = XPRO2(2,K) - XPROJ(2,K)
+                  UZ = XPRO2(3,K) - XPROJ(3,K)
+                  XTR(3) = XPRO2(1,K) + UX/3 + UY/5
+                  YTR(3) = XPRO2(2,K) + UY/3 - UX/5
+                  ZTR(3) = XPRO2(3,K)
+                  XTR(4) = XPRO2(1,K) + UX/10
+                  YTR(4) = XPRO2(2,K) + UY/10
+                  ZTR(4) = XPRO2(3,K)
+                  XTR(5) = XPRO2(1,K) + UX/3 - UY/5
+                  YTR(5) = XPRO2(2,K) + UY/3 + UX/5
+                  ZTR(5) = XPRO2(3,K)
+                  XTR(6) = XPRO2(1,K)
+                  YTR(6) = XPRO2(2,K)
+                  ZTR(6) = XPRO2(3,K)
+                  CALL POLRL(NTR,XTR,YTR,ZTR)
+               ENDIF
+            ELSE IF (IFLE.EQ.2) THEN
+C              fissures
+               IF (ICOR2(K).EQ.-1) GOTO 540
+               NTR = 2
+               XTR(1) = XPROJ(1,K)
+               YTR(1) = XPROJ(2,K)
+               ZTR(1) = XPROJ(3,K)
+               XTR(2) = XPRO2(1,K)
+               YTR(2) = XPRO2(2,K)
+               ZTR(2) = XPRO2(3,K)
+               CALL POLRL(NTR,XTR,YTR,ZTR)
+            ENDIF
+ 540     CONTINUE
+         SEGSUP XPRO2,ICOR2
+ 541  CONTINUE
+      SEGSUP KXPRO2,KABCO2
+      MVECTE = MVECTS
+ 538  CONTINUE
+      IF (INUMEL.EQ.0) GOTO 532
+      SEGACT XPROJ,IVU,ICPR
+      PAS=(X2-X1)/(XMA-XMI)
+      CALL INSEGT(5,IRESS)
+      SEGACT MELEME
+      IPT1=MELEME
+      IF (MCOUP.NE.0) GOTO 537
+      DO 534 II=1,MAX(1,LISOUS(/1))
+         IF (LISOUS(/1).NE.0) IPT1=LISOUS(II)
+         SEGACT IPT1
+         NBNN=IPT1.NUM(/1)
+         NBELEM=IPT1.NUM(/2)
+         DO 535 L=1,NBELEM
+            XG=0.
+            YG=0.
+            ZG=0.
+            NG=0
+            DO 536 N=1,NBNN
+               I=ICPR(IPT1.NUM(N,L))
+               IF (IVU(I).LE.0) GOTO 536
+               XG=XG+XPROJ(1,I)
+               YG=YG+XPROJ(2,I)
+               ZG=ZG+XPROJ(3,I)
+               NG=NG+1
+ 536        CONTINUE
+            IF (NG.EQ.0) GOTO 535
+            XG=XG/NG
+            YG=YG/NG
+            ZG=ZG/NG
+C     IF (XG.LT.XMI.OR.XG.GT.XMA.OR.YG.LT.YMI.OR.YG.GT.YMA) GOTO 535
+            INVCOU=IPT1.ICOLOR(L)
+C           IF (INVCOU.EQ.0) INVCOU=IDCOUL
+            IF (IDEFCO.EQ.1.AND.INVCOU.NE.IICOL) GOTO 535
+            CALL CHCOUL(INVCOU)
+            IF (L.LT.10) THEN
+               FMTX='(I1,7X)'
+            ELSEIF (L.LT.100) THEN
+               FMTX='(I2,6X)'
+            ELSEIF (L.LT.1000) THEN
+               FMTX='(I3,5X)'
+            ELSEIF (L.LT.10000) THEN
+               FMTX='(I4,4X)'
+            ELSEIF (L.LT.100000) THEN
+               FMTX='(I5,3X)'
+            ELSEIF (L.LT.1000000) THEN
+               FMTX='(I6,2X)'
+            ELSEIF (L.LT.10000000) THEN
+               FMTX='(I7,1X)'
+            ENDIF
+            WRITE (TXT,FMT=FMTX) L
+            XG=PAS*(XG-XMI)+X1
+            YG=PAS*(YG-YMI)+Y1
+            ZG=PAS*(ZG-ZMI)+ZMI
+            CALL TRLABL(XG,YG,ZG,TXT,8,0.15)
+ 535     CONTINUE
+         IF (LISOUS(/1).NE.0) SEGDES IPT1
+ 534  CONTINUE
+ 537  SEGDES MELEME
+      IF (IRESU.EQ.5.OR.IRESU.EQ.7) GOTO 6101
+ 532  CONTINUE
+      IF (IDEFOR.EQ.0) GOTO 6101
+      SEGSUP KON,XPROJ,ICPR,IVU
+      IF (XPRO2.NE.0) SEGSUP XPRO2
+      IF (MCOUP.NE.0) THEN
+C        NETTOYAGE APRES COUPE
+C         SEGSUP MCOUP
+         SEGACT MCOORD*MOD
+C         SEGADJ MCOORD
+C         SEGACT MELEME
+C         DO 8801 IO=1,LISOUS(/1)
+C*            IPT1=LISOUS(IO)
+C            SEGSUP IPT1
+C 8801    CONTINUE
+C         SEGSUP MELEME
+      ENDIF
+      GOTO 6099
+C<<<< FIN DE BOUCLE SUR LES DEFORMEES OU VECTEURS <<<<<<<<<<<<<<<<<<<<<<
+
+
+C---- POINT D'ARRIVEE EN FIN DE BOUCLE SUR LES DEFORMEES OU VECTEURS ---
+ 6100 CONTINUE
+      IDEFS=IDEFOR
+      IDEFOR=0
+      IF (IANIM.NE.0)  CALL TRIMAG(NDEF+1)
+      IF (KABEL.NE.0)  SEGSUP KABEL
+      IF (KABEL2.NE.0) SEGSUP KABEL2
+      IF (KABCPR.NE.0) SEGSUP KABCPR
+      IF (KABCP2.NE.0) SEGSUP KABCP2
+      SEGSUP KABCOR
+      IF (KABCO3.NE.0) SEGSUP KABCO3
+      IF (LABCO2.NE.0) SEGSUP LABCO2
+      IF (LABCO3.NE.0) SEGSUP LABCO3
+ 6101 CONTINUE
+      CALL MAJSEG(1,IRESU,IQUALI,INUMNO,INUMEL)
+      IF (ZCHAM) THEN
+C           ZCHAM=.TRUE.
+         SEGACT MCHPOI,icpr,vcpcha
+         do ibc=1,ipchp(/1)
+           msoupo=ipchp(ibc)
+           segact msoupo
+           do ibcn=1,nocomp(/2)
+           if(compch(lcomp).eq.nocomp(ibcn)) go to 6108
+           enddo
+           go to 6107
+ 6108      continue
+           IPT6=IGEOC
+           SEGACT IPT6
+           MPOVAL=IPOVAL
+           SEGACT MPOVAL
+           do I=1, IPT6.NUM(/2)
+              IJ=IPT6.NUM(1,I)
+              ijj=icpr(ij)
+            WRITE(VALCH,FMT='(E10.3)') vcpcha(ij)
+            CALL TRLABL(XPROJ(1,IJj),XPROJ(2,IJj),0.,
+     $                  VALCH,LEN(VALCH),0.15)
+           enddo
+           segdes ipt6,mpoval
+ 6107      continue
+           segdes msoupo
+         enddo
+         segdes mchpoi,icpr,vcpcha
+      ENDIF
+
+*     option NOLEN : pas d'informations
+      IF(ZNOLE)  GOTO 6105
+C BERTIN : fin affichage CHAMPOIN
+      IF (INWDS.AND.VALEUR) THEN
+C        AFFICHAGE DES LABELS DES ISOVALEURS
+         CALL FVALIS(1,IRESU,NHAUT,NISO)
+         iresu=3
+         CALL INSEGT(7,iresu)
+         CALL CHCOUL(0)
+         NHAUT=NHAUT+INT(YHAUT)
+
+         NDEC=0
+         IF (NISO.NE.0) THEN
+C           Legende des isovaleurs
+            IF(TXISO.NE.' ')    VALISO=TXISO
+            IF (NCOMP.NE.0) VALISO=COMPCH(LCOMP)(1:12)
+            LVS=LONG(VALISO)
+        CALL TRLABL(XHAUT+0.1,FLOAT(NHAUT+2),0.,VALISO(1:LVS),LVS,0.17)
+C           min et max
+            WRITE (ZONE,FMT='(1PE9.2)') VCHMIN
+            CALL TRLABL(XHAUT+0.,FLOAT(NHAUT),0.,'>'//ZONE,10,0.17)
+
+            IF (ZDATE) CALL TRLABL(-1.4,FLOAT(NHAUT-50),0.,BUFFER,26,
+     $                            0.17)
+            WRITE (ZONE,FMT='(1PE9.2)') VCHMAX
+            CALL TRLABL(XHAUT+0.,FLOAT(NHAUT+1),0.,'<'//ZONE,10,0.17)
+C           NISO=MIN(15,NISO)
+C           NDEC : amplitude verticale de la gamme d'isovaleurs
+            NDEC = 25
+            PDEC = REAL(NDEC)
+            PDDEC= PDEC/NISO
+cBP         pour espacer les legendes avec VING DIX ou CINQ labels maxi
+            XDEC=0.98
+            if(NDEC2.eq.1) XDEC=XDEC*25./21.
+            if(NDEC2.eq.2) XDEC=XDEC*25./11.
+            if(NDEC2.eq.3) XDEC=XDEC*25./6.
+            FAIT = -1
+CPM            NHAUT= NHAUT
+            NBAS = NHAUT - 1 - NDEC
+            DO 6102 I=1,NISO
+               PYB = NBAS + ((I-1)*PDDEC)
+               IF (ISOTYP.NE.0) THEN
+C                 petit carre colore
+                  PX(1)=XHAUT+0.
+                  PX(2)=XHAUT+0.09
+                  PX(3)=XHAUT+0.09
+                  PX(4)=XHAUT+0.
+                  PY(1)=PYB
+                  PY(2)=PYB
+                  PY(3)=PYB + PDDEC
+                  PY(4)=PYB + PDDEC
+C                 si moins de 16 isov., on prend une couleur
+C                 correspondante sur deux (NISO<8) ou sur une (NISO>=8)
+                  IF (NISO.LT.16) THEN
+c                      CALL TRAISO(4,PX,PY,ICOTAB(I*(2-NISO/8)))
+                     CALL TRAISO(4,PX,PY,ICOTAB(ISOTAB(I,NISO)))
+                  ELSE
+                     CALL TRAISO(4,PX,PY,I)
+                  ENDIF
+                  IF (I*PDDEC-FAIT.LT. XDEC ) GOTO 6102
+C                 valeur seuil pour l'affichage de la legende isovaleur
+                  IF (I.GT.1) THEN
+                     WRITE (ZONE,FMT='(1PG9.2)') VCHC(I-1)
+                     CALL CHCOUL(0)
+                     CALL TRLABL(XHAUT+0.1,PYB,0.,ZONE,10,0.17)
+                  ENDIF
+                  FAIT=I*PDDEC
+               ELSE
+C                 lettre coloree
+                  IF (NISO.LT.13) THEN
+C                     CALL CHCOUL(ICOTAB(I*(2-NISO/8)))
+                     CALL CHCOUL(ICOTAB(ISOTA0(I,NISO)))
+                  ELSE
+Csg                     CALL CHCOUL(I)
+                     CALL CHCOUL(ICOTAB(MOD(I,12)+1))
+                  ENDIF
+                  IF (I*PDDEC-FAIT.LT. 0.98 ) GOTO 6102
+                  CALL TRLABL(XHAUT+0.002,PYB,0.,ABCDEF(I:I),1,0.17)
+C                 valeur seuil
+                  WRITE (ZONE,FMT='(1PG9.2)') VCHC(I)
+                  CALL TRLABL(XHAUT+0.1,PYB,0.,ZONE,10,0.17)
+                  FAIT=I*PDDEC
+               ENDIF
+ 6102       CONTINUE
+         ELSE IF (KDEFOR.NE.0) THEN
+            CALL TRLABL(XHAUT+0.,FLOAT(NHAUT),0.,'AMPLITUDE',9,0.17)
+CPM NDEFMX au lieu de 7
+            NDEF=MIN(NDEF,NDEFMX)
+            NBAS = NHAUT - 1 - NDEF
+            DO 6103 I=1,NDEF
+               CALL CHCOUL(ICHL(I))
+               XXXX = AMPIMP(I)
+               IF(AMPIMP(I).GE.XSGRAN/2.) XXXX = VCHC(I)
+               WRITE (ZONE,FMT='(1PG9.2)') XXXX
+               CALL TRLABL(XHAUT+0.,FLOAT(NBAS+I),0.,ZONE,9,0.17)
+ 6103       CONTINUE
+         ENDIF
+         IF (NISO.NE.0.AND.KDEFOR.NE.0) THEN
+            CALL CHCOUL(0)
+            CALL TRLABL(0.1,FLOAT(NHAUT-NDEC-3),0.,'AMPLITUDE',9,0.17)
+            CALL TRLABL(0.1,FLOAT(NHAUT-NDEC-4),0.,'DEFORMEE ',9,0.17)
+            WRITE (ZONE,FMT='(1PG9.2)') SIAMPL
+            CALL TRLABL(0.,FLOAT(NHAUT - 6 - NDEC),0.,ZONE,9,0.17)
+         ENDIF
+         IF (NVECL.NE.0) THEN
+            CALL TRBOX(0.75,0.75)
+            CALL CHCOUL(0)
+C+++*
+            CALL TRLABL(-0.1,FLOAT(NHAUT-NDEC-8),0.,
+     &                                         'COMPOSANTES',11,0.17)
+            IF (IFLE.NE.0) THEN
+               IF (IFLE.EQ.1) THEN
+                 CALL TRLABL(-0.1,NHAUT-NDEC-8.75,0.,
+     &                                         'CONTRAINTES',11,0.17)
+               ELSE
+                 CALL TRLABL(0.1,NHAUT-NDEC-8.75,0.,'FISSURES',8,0.17)
+               ENDIF
+               NBAS = NHAUT - 10 - NDEC - NVECL
+               DO I=1,NVECL
+                  CALL CHCOUL(NVCOL(I))
+                  ZONE=NVLEG(1,I)
+                  CALL TRLABL(0.,FLOAT(NBAS+I),0.,ZONE,4,0.17)
+               ENDDO
+            ELSE
+               CALL TRLABL(0.1,NHAUT-NDEC-8.75,0.,'VECTEURS',8,0.17)
+               NBAS = NHAUT - 10 - NDEC - NVECL
+               DO 6104 I=1,NVECL
+                  CALL CHCOUL(NVCOL(I))
+                  IF (IDIM.EQ.2) ZONE=NVLEG(1,I)//NVLEG(2,I)
+                  IF (IDIM.EQ.3) ZONE=NVLEG(1,I)//NVLEG(2,I)//NVLEG(3,I)
+                  CALL TRLABL(0.,FLOAT(NBAS+I),0.,ZONE,12,0.17)
+ 6104          CONTINUE
+            ENDIF
+         ENDIF
+         INWDS2=INWDS
+         INWDS=.FALSE.
+         CALL FVALIS(0,IRESU,NHAUT,NISO)
+      ENDIF
+
+
+C----------------------------------------------------------
+C
+C      POST TRAITEMENT DE L'AFFICHAGE : ZOOM,NOM,IMPRESSION ...
+C
+C----------------------------------------------------------
+
+C
+ 6105 CONTINUE
+C         AFFICHAGE DES CLES GRAPHIQUES
+C         AFFICHAGE DES CLES GRAPHIQUES
+      NCASE=10
+      LLONG=13
+      LEGEND(1)=' Fin trace '
+      LEGEND(2)='  Zoom/Pan'
+      LEGEND(3)='  Rotation'
+      LEGEND(4)='  Coupe '
+      LEGEND(5)='  Valeur'
+      LEGEND(6)='Qualification'
+      LEGEND(7)='   Noeuds'
+      LEGEND(8)='  Elements'
+      LEGEND(9)='  Animation'
+C attention dans xtrini on teste la chaine "  Animation"
+      LEGEND(10)='  Options'
+
+      if (idim.ne.3) then
+          legend(3)=' '
+          legend(4)=' '
+      endif
+      IF (NISO.NE.0.OR.NDEF.NE.0.OR.NVECL.NE.0) THEN
+         LEGEND(6)=' '
+         LEGEND(7)=' '
+         LEGEND(8)=' '
+         IF (KDEFOR.NE.0.OR.IVEC.NE.0) LEGEND(5)=' '
+         IF (IANIM.EQ.0) LEGEND(9)=' '
+      ELSE
+         LEGEND(5)=' '
+         LEGEND(9)=' '
+      ENDIF
+      IF (KDEFOR.NE.0) LEGEND(5)='Amplification'
+      IF (NCOMP.NE.0) LEGEND(6)='Composantes'
+      CALL MENU(LEGEND,NCASE,LLONG)
+C
+      IRESU=0
+C         RECUPERATION DE LA CLE FRAPPEE
+      icle=-1
+      isort=0
+      CALL TRAFF(ICLE)
+C         TRAITEMENT
+      IF (ICLE.NE.0) THEN
+         IF (ICLE.EQ.1) THEN
+           CALL PRZOOM(IRESU,ISORT,IQUALI,INUMNO,INUMEL,
+     $           XMI,XMA,YMI,YMA)
+
+
+         ENDIF
+         IF (ICLE.EQ.2) THEN
+            CALL rotvu(ioeini,ioeil,cgrav,xmi,xma,ymi,yma,zmi,zma,axez)
+            GOTO 7001
+         ENDIF
+         IF (ICLE.EQ.4) THEN
+            IF (KDEFOR.EQ.0) THEN
+C         AFFICHAGE DE VALEUR D'ISO
+               PAS=(X2-X1)/(XMA-XMI)
+               CALL ISOINT(VCPCHA,MELEME,ICPR,XPROJ,IVU,PAS,
+     $              XMI,YMI,X1,Y1,mcham)
+               IRESU=2
+               GOTO 6101
+            ELSE
+C (fdp)     Modification de l'amplitude de maniere interactive
+               CALL AMPINT(NDEF,VCHC,SDEF,IIMP)
+C (fdp)     Dans le cas d'une deformee seule, on garde l'amplification
+C           saisie dans le COMMON AMPLIT (voir include CCTRACE)
+C           Cette valeur sera re-utilisee au prochain trace d'une
+C           deformee seule
+               IF (NDEF.EQ.1) THEN
+                 AMPLIT=REAL(AMPIMP(IIMP))
+                 SIAMPL=REAL(AMPIMP(IIMP))
+               ENDIF
+               GOTO 7001
+            ENDIF
+         ENDIF
+         IF (ICLE.EQ.5.AND.NCOMP.NE.0) THEN
+            CALL COMPINT(NCOMP,LCOMP,COMPCH)
+            GOTO 7001
+         ENDIF
+         IF (ICLE.EQ.5) CALL CHANG(IRESU,ISORT,IQUALI,3)
+         IF (ICLE.EQ.6) CALL CHANG(IRESU,ISORT,INUMNO,4)
+         IF (ICLE.EQ.7) CALL CHANG(IRESU,ISORT,INUMEL,5)
+         IF (ICLE.EQ.11) THEN
+            CALL FLGI
+            ISORT=0
+         ENDIF
+         IF (ICLE.EQ.12) THEN
+            CALL IMPR
+            ISORT=0
+         ENDIF
+C BERTIN: Traitement de la coupe
+         IF (ICLE.EQ.3) THEN
+C Ecriture de maniere permanente du barycentre e ICOUP1.
+          IF (ZCOM.EQ.0) THEN
+           CALL ECROBJ('MAILLAGE',MELEME)
+           CALL BARYCE
+           CALL LIROBJ('POINT',IBARY,1,IRETOU)
+           IREF=(IBARY-1)*(IDIM+1)
+           BARY(1)=REAL(XCOOR(IREF+1))
+           BARY(2)=REAL(XCOOR(IREF+2))
+           BARY(3)=REAL(XCOOR(IREF+3))
+           XB= BARY(1)
+           YB= BARY(2)
+           ZB= BARY(3)
+           ZCOM=1
+           nbpts=xcoor(/1)/(idim+1)
+           nbpts=nbpts+3
+           segadj mcoord
+           icoup1=nbpts-2
+           icoup2=nbpts-1
+           icoup3=nbpts
+          ENDIF
+
+          XE=REAL( XCOOR((IOEIL-1)*(idim+1)+1) )
+          YE=REAL( XCOOR((IOEIL-1)*(idim+1)+2) )
+          ZE=REAL( XCOOR((IOEIL-1)*(idim+1)+3) )
+          LEGEND(1)=' Retour '
+          LEGEND(2)=' Annulation '
+          LEGEND(3)=' Position '
+
+          CALL MENU(LEGEND,3,30)
+          call trmess('Pour une coupe choisir Position puis la definir')
+          CALL TRAFF(ICLE2)
+
+          IF (ICLE2.EQ.0) GOTO 6105
+
+          IF (ICLE2.EQ.1) THEN
+           ICOUP=0
+           mcou2=0
+           mcoup=0
+           coupol=-1.
+           GOTO 7001
+          ENDIF
+          call coupno(xmi,xma,ymi,yma,zmi,zma,coupra,coupol)
+          if(melemi.ne.0)then
+            mcoup=0
+            mcou2=0
+            meleme=melemi
+          endif
+          if(melei2.ne.0) melem2=melei2
+          icoup=1
+C recherche du min et du max le long de oeil bary
+          xb=bary(1)
+          yb=bary(2)
+          zb=bary(3)
+          xm=xb-XE
+          ym= yb-YE
+          zm= zb-ZE
+          oeba=sqrt(xm*xm + ym*ym + zm*zm)
+          xm = xm / oeba
+          ym=ym/oeba
+          zm=zm/oeba
+          ipt7=meleme
+          ipt3=ipt7
+          segact ipt7
+          coupma= -1000.*oeba
+          coupmi= +1000.*oeba
+          do ipa=1,max(1,ipt7.lisous(/1))
+            if( ipt7.lisous(/1).ne.0) then
+              ipt3=ipt7.lisous(ipa)
+              segact ipt3
+            endif
+            do ipb=1,ipt3.num(/2)
+              do ipc=1,ipt3.num(/1)
+                iu=ipt3.num(ipc,ipb)*(idim+1)
+                xu= real(xcoor(iu-3))
+                yu= real(xcoor(iu-2))
+                zu= real(xcoor(iu-1))
+                dd= xm*(xb-xu) + ym*(yb-yu) +zm*(zb-zu)
+                if(coupma.lt.dd ) coupma=dd
+                if(coupmi.gt.dd ) coupmi=dd
+              enddo
+            enddo
+            if(ipt7.lisous(/1).ne.0) segdes ipt3
+          enddo
+          xbn = xb - xm*coupma + xm*coupra*(coupma-coupmi)
+          ybn = yb - ym*coupma + ym*coupra*(coupma-coupmi)
+          zbn = zb - zm*coupma + zm*coupra*(coupma-coupmi)
+          segact,mcoord*MOD
+          XCOOR((ICOUP1-1)*(idim+1)+1)=XBn
+          XCOOR((ICOUP1-1)*(idim+1)+2)=YBn
+          XCOOR((ICOUP1-1)*(idim+1)+3)=ZBn
+
+
+          if( (abs (XM) + abs(YM)) .ne. 0.) then
+            xcoor((icoup2-1)*(idim+1)+1 )= xbn - ym
+            xcoor((icoup2-1)*(idim+1)+2 )= ybn + xm
+            xcoor((icoup2-1)*(idim+1)+3 )= zbn
+            xcoor((icoup3-1)*(idim+1)+1 )= xbn - xm*zm
+            xcoor((icoup3-1)*(idim+1)+2 )= ybn - ym*zm
+            xcoor((icoup3-1)*(idim+1)+3 )= zbn + xm*xm + ym*ym
+          else
+            xcoor((icoup2-1)*(idim+1)+1 )= xbn + 1.
+            xcoor((icoup2-1)*(idim+1)+2 )= ybn
+            xcoor((icoup2-1)*(idim+1)+3 )= zbn
+            xcoor((icoup3-1)*(idim+1)+1 )= xbn
+            xcoor((icoup3-1)*(idim+1)+2 )= ybn + 1.
+            xcoor((icoup3-1)*(idim+1)+3 )= zbn
+          endif
+C         write(IOIMP,*) ' points definissant la coupe'
+          icoy1=(ICOUP1-1)*(idim+1)
+          icoy2=(ICOUP2-1)*(idim+1)
+          icoy3=(ICOUP3-1)*(idim+1)
+        write(IOIMP,fmt='(3(e12.5,2X))')xcoor(icoy1+1),xcoor(icoy1+2)
+     $  ,xcoor(icoy1+3)
+        write(ioimp,fmt='(3(e12.5,2X))')xcoor(icoy2+1),xcoor(icoy2+2)
+     $  ,xcoor(icoy2+3)
+        write(ioimp,fmt='(3(e12.5,2X))')xcoor(icoy3+1),xcoor(icoy3+2)
+     $ ,xcoor(icoy3+3)
+          GOTO 7001
+         ENDIF
+
+          IF (ICLE.EQ.9) THEN
+           LEGEND(1)= ' Retour '
+           LEGEND(2)=' Isovaleurs'
+           IF (ZCHAM) THEN
+            LEGEND(3)=' (X) Champ'
+           ELSE
+            LEGEND(3)=' ( ) Champ'
+           ENDIF
+           IF (ZDATE) THEN
+            LEGEND(4)=' (X) Date '
+           ELSE
+            LEGEND(4)=' ( ) Date '
+           ENDIF
+           LEGEND(5)=' Fonts >> '
+           IF (ICOSC.EQ.1) THEN
+            LEGEND(6)='Ecran>> Blanc'
+           ELSE IF (ICOSC.EQ.2) THEN
+            LEGEND(6)='Ecran>> Noir'
+           ENDIF
+           LEGEND(7)=' Pos Legende '
+           CALL MENU(LEGEND,7,13)
+           CALL TRAFF(ICLE2)
+C  si on a change la fonte on sort
+           if (icle2.eq.7) icle2=0
+
+           IF (ICLE2.EQ.0) GOTO 6105
+
+           IF (ICLE2.EQ.1) THEN
+            CALL TRGET ('Entrer le nombre d''''isovaleurs : ', TMPCAR)
+            READ(TMPCAR,'(I2)') BA
+            ISOVU=BA
+
+            GOTO 7001
+           ENDIF
+
+           IF (ICLE2.EQ.2.and.(mchpoi.ne.0)) THEN
+            IF (ZCHAM) then
+             ZCHAM=.FALSE.
+            ELSE
+             ZCHAM=.TRUE.
+            ENDIF
+            GOTO 7001
+           ENDIF
+
+           IF (ICLE2.EQ.3) THEN
+            IF (ZDATE) THEN
+             ZDATE=.FALSE.
+            ELSE
+             ZDATE=.TRUE.
+            ENDIF
+           GOTO 7001
+           ENDIF
+           IF (ICLE2.EQ.4) THEN
+            LEGEND(1)='  Retour  '
+            LEGEND(2)=' 8_BY_13  '
+            LEGEND(3)=' 9_BY_15  '
+            LEGEND(4)=' TIMES_10 '
+            LEGEND(5)=' TIMES_24 '
+            LEGEND(6)=' HELV_10  '
+            LEGEND(7)=' HELV_12  '
+            LEGEND(8)=' HELV_18  '
+            CALL MENU(LEGEND,8,13)
+            CALL TRAFF(ICLE3)
+            IF (ICLE3.EQ.0) GOTO 7001
+            IOPOLI=ICLE3
+            GOTO 7001
+           ENDIF
+           IF (ICLE2.EQ.5) THEN
+            IF (ICOSC.EQ.1) THEN
+             ICOSC=2
+            ELSE IF (ICOSC.EQ.2) THEN
+             ICOSC=1
+            ENDIF
+            GOTO 7001
+           ENDIF
+           IF (ICLE2.EQ.6) THEN
+C            ZLEGI=.TRUE.
+            CALL TRGET ('Translation en X de :', TMPCAR)
+            READ(TMPCAR,'(F4.2)') XHAUT
+            CALL TRGET ('Translation en Y de :', TMPCAR)
+            READ(TMPCAR,'(F4.2)') YHAUT
+            GOTO 7001
+           ENDIF
+
+          ENDIF
+
+C BERTIN: Fin traitement
+
+         IF (ISORT.EQ.0) GOTO 6105
+C
+      ELSE
+         CALL MAJSEG(2,IRESU,IQUALI,INUMNO,INUMEL)
+      ENDIF
+      IF (IRESU.EQ.8) THEN
+         XMI=XMIN
+         XMA=XMAX
+         YMI=YMIN
+         YMA=YMAX
+         IRESU=1
+      ENDIF
+      IF (IRESU.EQ.2) THEN
+         GOTO 4202
+      ELSE IF (IRESU.EQ.1) THEN
+         X1=XMI
+         X2=XMA
+         Y1=YMI
+         Y2=YMA
+C         Z1=ZMI
+C         Z2=ZMA
+         IF (IDEFOR.NE.0) GOTO 1234
+C     IF (IECLAT.NE.1.AND.IFADES.NE.1) THEN   PV JUIN 86
+         IF (IECLAT.NE.1) THEN
+            SEGACT KON,XPROJ,ICPR,IVU
+            DO 6004 I=1,NBCONR
+              DO J=1,KON(/3)
+                IF (KON(1,I,J).LT.0) KON(1,I,J)=-KON(1,I,J)
+              ENDDO
+ 6004       CONTINUE
+
+            SEGDES KON
+CPM NBCOUL-1 au lieu de 7
+            DO I=1,NBCOUL-1
+               ICHC(I)=ICHCS(I)
+            ENDDO
+            CALL DFENET(XMI,XMA,YMI,YMA,ZMI,ZMA,X1,X2,Y1,Y2,FENET)
+            GOTO 4999
+         ENDIF
+         SEGACT XPROJ
+         CALL DFENET(XMI,XMA,YMI,YMA,ZMI,ZMA,X1,X2,Y1,Y2,FENET)
+         GOTO 4201
+      ELSE IF (IRESU.EQ.3) THEN
+         GOTO 4202
+      ELSE IF (IRESU.EQ.4) THEN
+         GOTO 500
+      ELSE IF (IRESU.EQ.5) THEN
+         GOTO 531
+      ELSE IF (IRESU.EQ.6) THEN
+         CALL DFENET(XMI,XMA,YMI,YMA,ZMI,ZMA,X1,X2,Y1,Y2,FENET)
+C             IF (IECLAT.NE.1.AND.IFADES.NE.1) THEN   PV JUIN 86
+         IF (IECLAT.NE.1) THEN
+            SEGSUP KON
+            GOTO 6010
+         ELSE
+            SEGACT XPROJ
+            GOTO 4201
+         ENDIF
+      ENDIF
+      SEGSUP XPROJ,ICPR,IVU
+      IF (IECLAT.NE.1) SEGSUP KON
+      IF (IDEFOR.NE.0) THEN
+        SEGSUP KABEL,KABCOR,KABCPR
+        SEGDES MDEFOR
+      ENDIF
+      IF ((MCOUP.NE.0).AND.(IDEFOR.EQ.0)) THEN
+C  NETTOYAGE APRES COUPE
+        SEGSUP MCOUP
+        SEGACT MCOORD*MOD
+C        SEGADJ MCOORD
+        SEGACT MELEME
+        DO IO=1,LISOUS(/1)
+          IPT1=LISOUS(IO)
+          SEGSUP IPT1
+        ENDDO
+        SEGSUP MELEME
+      ENDIF
+      IF (MVECTE.NE.0) SEGDES MVECTE
+      IF (VCPCHA.NE.0) SEGSUP VCPCHA
+
+C  FIN de l'appel a PRTRAC - Cas particulier IDIM=1
+C  Recopie du segment MCOORD en DIMENSION 1 (retour a l'etat initial)
+ 8900 IF (IDIMSAV.NE.0) THEN
+        IDIM=IDIMSAV
+        SEGSUP MCOORD
+        MCOORD=ICOORSAV
+        SEGACT MCOORD
+      ENDIF
+      RETURN
+
+ 7001 continue
+      if (icpr  .ne.0) segsup icpr
+      if (ivu   .ne.0) segsup ivu
+      if (ntseg .ne.0) segsup ntseg
+      if (kon   .ne.0) segsup kon
+      if (xproj .ne.0) segsup xproj
+      if (xpro2 .ne.0) segsup xpro2
+      if (kxpro2.ne.0) segsup kxpro2
+      if (kabel .ne.0) segsup kabel
+      if (kabcor.ne.0) segsup kabcor
+      if (labco2.ne.0) segsup labco2
+      if (kabel2.ne.0) segsup kabel2
+      if (kabco3.ne.0) segsup kabco3
+      if (labco3.ne.0) segsup labco3
+      if (kabco2.ne.0) segsup kabco2
+      if (icor2 .ne.0) segsup icor2
+      if (kabcpr.ne.0) segsup kabcpr
+      if (kabcp2.ne.0) segsup kabcp2
+      if (mvecte.ne.0) segact mvecte
+      if (mcoup .ne.0) segsup mcoup
+      if (vcpcha.ne.0) segsup vcpcha
+      idefor=idefs
+      ipv=1
+C           if (mdefos.ne.-1) mdefor=mdefos
+      if (melsau.ne.0) meleme=melsau
+      INWDS=INWDS2
+      goto 4210
+
+      END
+
+
+
+
+
+
+
+
+
+

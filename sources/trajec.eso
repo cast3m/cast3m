@@ -1,0 +1,320 @@
+C TRAJEC    SOURCE    CHAT      11/03/16    21:32:36     6902
+      SUBROUTINE TRAJEC
+C     CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C   CE SOUS PROGRAMME  GERE L'OPERATEUR TRAJ DE CALCUL DE TRAJECTOIRES
+C                   ( cf Rapport DMT/94/707)
+C
+C         Appelé par PILOT
+C         lit les données CHPOIN des vitesses ou des flux
+C                             ou tables transitoires
+C                          MODELE ou TABLE  domaine
+C                          TABLE de lacher
+C         appelle : TRJCN1 et TRJCN3  qui controlent les données
+C                 : TRJFLU et TRJVIT qui preparent les données relatives
+C                      au flux ou à la vitesse.
+C                 : TRJPAR  qui décode la table de lacher et
+C                    pilote le calcul
+C
+C       Auteur : F Auriol
+C
+C     CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+-INC SMTABLE
+-INC SMELEME
+-INC SMCHPOI
+-INC SMLREEL
+-INC CCOPTIO
+-INC SMCHAML
+-INC SMMODEL
+      CHARACTER*8 MTYPI,CHARI,MTYPR,CHARR
+      POINTEUR IZLAC.MELEME,IELTFA.MELEME,IZCENT.MELEME,IFACEL.MELEME
+      POINTEUR IZFACE.MELEME
+      POINTEUR MTABTR.MTABLE
+      CHARACTER*20 MOCAL(3)
+      SEGMENT IZVIT
+           REAL*8 TEMTRA(NVIPT)
+           INTEGER IPUN(NBS),IDUN(NBS),IPVPT(NVIPT),IFORML
+      ENDSEGMENT
+C             IDUN(I) nombre d elements avant le sous maillage I
+C             IPVPT  pointeurs de izvpt pour chaque pas de temps
+      SEGMENT IZVPT
+           INTEGER IPUN1(NBS),IPUMAX
+      ENDSEGMENT
+      SEGMENT IZUN
+           REAL*8 UN(I1,I2,I3)
+      ENDSEGMENT
+      POINTEUR IZUN1.IZUN ,IZUN2.IZUN
+      SEGMENT IZUMAX
+           REAL*8 UMAX(NBREL)
+      ENDSEGMENT
+      DATA MOCAL/'CONVECTION_EXPLICITE','CONVECTION_ANALYTIQU',
+     * 'CONVECTION_DIFFUSION'/
+C
+      IRETOU=0
+
+C     LECTURE DU TYPE DE CALCUL
+      IRAN=0
+      CALL LIRMOT(MOCAL,3,IRAN,0)
+      IICAL=IRAN
+      IF(IRAN.EQ.0)IICAL=1
+
+C     LA VITESSE
+      CALL LIROBJ('CHPOINT',MCHPOI,0,IRETOU)
+            IF(IRETOU.NE.0)THEN
+            IPTVIT=MCHPOI
+            ITR=1
+            SEGACT MCHPOI
+            NSOUPO=IPCHP(/1)
+            IF(NSOUPO.NE.1)THEN
+                  CALL ERREUR(21)
+                  RETURN
+            ENDIF
+            MSOUPO=IPCHP(1)
+            SEGACT MSOUPO
+C           ON VA TESTER LE NOM DES COMPOSANTES POUR DETERMINER
+C           LA FORMULATION : ELEM FINIS OU MIXTE HYBRIDES
+            IF(IIMPI.GT.0) WRITE(IOIMP,*)NOCOMP(1)
+            IF(NOCOMP(1).EQ.'FLUX')THEN
+                 IFORMU=2
+                 IF(IIMPI.GT.0)WRITE(IOIMP,*)' FORMULATION HYBRIDE '
+            ELSEIF(NOCOMP(1).EQ.'VX  ' )THEN
+                 IFORMU=1
+                 IF(IIMPI.GT.0)
+     *        WRITE(IOIMP,*)' FORMULATION ELEMENTS FINIS ',NOCOMP(2)
+                 IF(NOCOMP(2).NE.'VY  ')THEN
+                       MOTERR(1:4)=NOCOMP(2)
+                       CALL ERREUR(197)
+                       RETURN
+                 ENDIF
+            ELSE
+                 MOTERR(1:4)=NOCOMP(1)
+                 CALL ERREUR(197)
+                 RETURN
+            ENDIF
+      ELSE
+              CALL LIRTAB('DARCY_TRANSITOIRE',MTABTR,0,IRETOU)
+              IF (IRETOU.NE.0)THEN
+                  ITR=3
+                  IFORMU=2
+                  IPTVIT=MTABTR
+              ELSE
+                  CALL LIRTAB('TRANSITOIRE',MTABTR,1,IRETOU)
+                  IF (IRETOU.EQ.0)RETURN
+                  ITR=3
+                  IFORMU=1
+                  IPTVIT=MTABTR
+              ENDIF
+      ENDIF
+
+C     MODELE OU TABLE DOMAINE
+C     LE TYPE DU MODELE EST TESTE DANS LEKMOD
+      IRETOU=0
+      MTAB1=0
+      MCHELM=0
+      CALL LIROBJ('MMODEL',IPMODE,0,IRET)
+      IF(IRET.NE.0)THEN
+           CALL LEKMOD(IPMODE,MTAB1,INEFMD)
+      ELSE
+           CALL LIRTAB('DOMAINE',MTAB1,1,IRETOU)
+           IF(IRETOU.EQ.0)THEN
+           MOTERR(1:40)='                                        '
+                 MOTERR(1:8)='MODELE  '
+                 MOTERR(9:16) ='   TABLE'
+                 MOTERR(17:24)='_DOMAINE'
+                 CALL ERREUR(471)
+                 RETURN
+           ENDIF
+      ENDIF
+
+C     LECTURE DES MCHAML
+      IZPOR=0
+      IZDIFF=0
+      IZDISP=0
+   20 CONTINUE
+      CALL LIRCHA(CHARI(1:4),0,IRET)
+      IF(IRET.NE.0)THEN
+         IF(CHARI(1:4).EQ.'PORO')THEN
+            CALL LIROBJ('MCHAML  ',IRET1,1,IRET2)
+            IF(IRET2.EQ.0)THEN
+               MOTERR(1:8)='PORO    '
+               MOTERR(9:16)='MCHAML  '
+               CALL ERREUR(929)
+               RETURN
+            ENDIF
+            IZPOR=IRET1
+            GO TO 20
+         ELSEIF(CHARI(1:4).EQ.'DISP')THEN
+            CALL LIROBJ('MCHAML  ',IRET1,1,IRET2)
+            IF(IRET2.EQ.0)THEN
+               MOTERR(1:8)='DISP    '
+               MOTERR(9:16)='MCHAML  '
+               CALL ERREUR(929)
+               RETURN
+            ENDIF
+            IZDISP=IRET1
+            IICAL=3
+            GO TO 20
+         ELSEIF(CHARI(1:4).EQ.'DIFF')THEN
+            CALL LIROBJ('MCHAML  ',IRET1,1,IRET2)
+            IF(IRET2.EQ.0)THEN
+               MOTERR(1:8)='DIFF    '
+               MOTERR(9:16)='MCHAML  '
+               CALL ERREUR(929)
+               RETURN
+            ENDIF
+            IZDIFF=IRET1
+            IICAL=3
+            GO TO 20
+         ENDIF
+      ENDIF
+
+C     LE MAILLAGE
+      SEGACT MTAB1
+      IRETR=0
+      CHARI='MAILLAGE'
+      CALL LEKTAB(MTAB1,CHARI,IRETR)
+       MELEME=IRETR
+
+      CALL TRJCN1(MELEME)
+      IF(IERR.NE.0)RETURN
+      SEGACT MELEME
+C     ON RECUPERE LE MAILLAGE DES POINTS CENTRES
+      IRETR=0
+      CALL LEKTAB(MTAB1,'CENTRE',IRETR)
+      IZCENT=IRETR
+C     ON RECUPERE LE MAILLAGE DES FACES PAR ELEMENTS
+      IRETR=0
+      CALL LEKTAB(MTAB1,'ELTFA',IRETR)
+      IELTFA=IRETR
+C     ON RECUPERE LE LAISONS FACES CENTRES
+      IRETR=0
+      CALL LEKTAB(MTAB1,'FACEL',IRETR)
+      IFACEL=IRETR
+C     controle de la coherence vitesse maillage
+      MCHPO1=MCHPOI
+      IF(IFORMU.EQ.1)THEN
+           NCC=IDIM
+           IF(ITR.NE.3)THEN
+           CALL TRJCN3(MCHPO1,MELEME,NCC)
+           ELSE
+           IVALI=1
+           XVALI=0.D0
+           IRETI=0
+           IVALR=0
+           XVALR=0.D0
+           MTYPI='MOT'
+           CHARR='        '
+           MTYPR='TABLE'
+           CALL ACCTAB(IPTVIT,MTYPI,IVALI,XVALI,'VITESSE',.TRUE.,
+     *      IRETI,MTYPR,IVALR,XVALR,CHARR,.TRUE.,IRETR)
+           MTABFT=IRETR
+           CALL TRJCN6(MTABFT,MELEME,NCC)
+           ENDIF
+           IF(IERR.NE.0)RETURN
+           CALL TRJVIT(IPTVIT,ITR,MELEME,IZVIT)
+           IF(IERR.NE.0)RETURN
+      ELSEIF(IFORMU.EQ.2)THEN
+C          ON RECUPERE LE MAILLAGE FACES
+           IVALI=0
+           XVALI=0.D0
+           IRETI=0
+           IVALR=0
+           XVALR=0.D0
+           IRETR=0
+           MTYPI='MOT     '
+           MTYPR='MAILLAGE'
+           CHARR='MAILLAGE'
+           CALL LEKTAB(MTAB1,'FACE',IRETR)
+           IZFACE=IRETR
+           NCC=1
+           SEGACT IZFACE
+           IF(ITR.NE.3)THEN
+           CALL TRJCN3(MCHPO1,IZFACE,NCC)
+           ELSE
+           IVALI=1
+           XVALI=0.D0
+           IRETI=0
+           IVALR=0
+           XVALR=0.D0
+           MTYPI='MOT'
+           CHARR='        '
+           MTYPR='TABLE'
+           CALL ACCTAB(IPTVIT,MTYPI,IVALI,XVALI,'FLUX',.TRUE.,
+     *                 IRETI,MTYPR,IVALR,XVALR,CHARR,.TRUE.,IRETR)
+           MTABFT=IRETR
+           CALL TRJCN6(MTABFT,IZFACE,NCC)
+           ENDIF
+           SEGDES IZFACE
+           IF(IERR.NE.0)RETURN
+           CALL LEKTAB(MTAB1,'XXNORMAE',MCHELM)
+           IF(IERR.NE.0)RETURN
+           CALL TRJFLU(IPTVIT,ITR,MCHELM,IELTFA,MELEME,IZVIT)
+           IF(IERR.NE.0)RETURN
+      ENDIF
+
+C     LA TABLE DE LACHER
+      CALL LIROBJ('TABLE',MTAB2,1,IRETOU)
+      IF(IRETOU.EQ.0)RETURN
+
+C     ON CREE LA PILE RESULTAT
+      CALL CRTABL(MTAB3)
+C
+      IERR=0
+      CALL TRJPAR(MELEME,IZVIT,IZCENT,IELTFA,IFACEL,MTAB2,IICAL,IZPOR,
+     *            IZDIFF,IZDISP,MCHEL1,MMODE1 )
+      IF(IERR.NE.0)RETURN
+
+      SEGDES IZCENT,IFACEL
+      NBS=IELTFA.LISOUS(/1)
+      IF(NBS.NE.0)THEN
+           DO 81 I=1,NBS
+           IPT1=IELTFA.LISOUS(I)
+           SEGDES IPT1
+   81      CONTINUE
+      ENDIF
+      SEGDES IELTFA
+      NBS=LISOUS(/1)
+      IF(NBS.NE.0)THEN
+           DO 83 I=1,NBS
+           IPT1=LISOUS(I)
+           SEGDES IPT1
+   83      CONTINUE
+      ENDIF
+      SEGDES MELEME
+      SEGDES MTAB2
+      SEGDES MTAB1
+      IF(IERR.NE.0)RETURN
+      SEGACT IZVIT
+      NBS=IPUN(/1)
+      DO 80 I=1,NBS
+         IZUN=IPUN(I)
+         SEGSUP IZUN
+   80 CONTINUE
+      NVIPT= IPVPT(/1)
+      DO 85 J=1,NVIPT
+         IZVPT=IPVPT(J)
+         SEGACT IZVPT
+         DO 82 I=1,NBS
+         IZUN1=IPUN1(I)
+         IF(IZUN1.NE.0)SEGSUP IZUN1
+   82    CONTINUE
+      IZUMAX=IPUMAX
+      SEGSUP IZUMAX
+      SEGSUP IZVPT
+   85 CONTINUE
+      SEGSUP IZVIT
+
+C     ON SAUVEGARDE LES RESULTATS
+      CALL ECROBJ('MCHAML  ',MCHEL1)
+      CALL ECROBJ('MMODEL  ',MMODE1)
+      SEGDES MCHEL1,MMODE1
+
+      RETURN
+      END
+
+
+
+
+

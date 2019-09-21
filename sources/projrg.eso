@@ -1,0 +1,629 @@
+C PROJRG    SOURCE    PV        17/09/29    21:15:45     9578
+      SUBROUTINE PROJRG(MRIGID,MTAB1,ITAB2,POS,RI1,RI2)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+*
+***********************************************************
+*     PROJECTION D'UNE MATRICE SUR UNE BASE DE MODES      *
+* _______________________________________________________ *
+*                                                         *
+*    CREATION : Nicolas BENECH (11 Avril 1995)            *
+*    MODIFICATIONS :                                      *
+*    -18/11/2010 Benoit PRABEL : AMELIORATION PERFORMANCE *
+*    -30/07/2014 Benoit PRABEL : ajout modes statiques    *
+*                                + matrices de relations  *
+*    -18/11/2015 BP : calcul nbre de modes (pas a priori) *
+* _______________________________________________________ *
+*                                                         *
+*     MODULE(S) APPELANT(S) : PJBA                        *
+*                                                         *
+*     MODULE(S) APPELE(S) : ACCTAB, YTMX                  *
+*                           mucpri, corrsp, xty           *
+* _______________________________________________________ *
+*                                                         *
+*    EN ENTREE :                                          *
+*        MRIGID : Matrice a projeter                      *
+*        MTAB1  : Base de modes, reels ou complexes       *
+*        'REEL' : indique que l'on utilise le produit     *
+*                 scalaire reel (pas de conjugaison)      *
+*        ITAB2  : Base de modes liaisons statiques        *
+*                                                         *
+*    EN SORTIE :                                          *
+*        RI1 : Matrice projetee (partie reelle)           *
+*        RI2 : Matrice projetee (partie imaginaire)       *
+* _______________________________________________________ *
+*                                                         *
+*    REMARQUE :                                           *
+*         L'operation realisee est :                      *
+*                (MTAB1)t . MRIGID. MTAB1                 *
+*  Dans le cas complexe, la transposition est accompagnee *
+*   de la conjugaison (si REEL n'est pas mentionne).      *
+*         L'operation realisee est :                      *
+***********************************************************
+*
+-INC CCOPTIO
+-INC SMCHPOI
+-INC SMELEME
+-INC SMLCHPO
+-INC SMRIGID
+-INC SMTABLE
+-INC SMLMOTS
+      pointeur IPLMOX.mlmots, IPLMOY.mlmots
+      pointeur DES5.DESCR
+*
+* Declarations
+*
+      REAL*8 XVAL, RMAX
+      CHARACTER*8 LETYPE
+      CHARACTER*8  TYPMOD,TYPRET,CHARRE
+      LOGICAL MODCOM
+      INTEGER I, J, NBMOD, POS, IREEL, IVALRE, IOBRE, isym
+      REAL*8 XVALRE
+      LOGICAL LOGRE
+      CHARACTER*4  MO5
+
+
+***********************************************************
+*     INITIALISATIONS
+***********************************************************
+*
+      MODCOM = .FALSE.
+      RI2 = 0
+*     par defaut, on considere le vrai produit scalaire avec le conjugué
+*     transposé y^H.M.x ,  mais avec POS=1, on prend seulement y^T.M.x
+      IREEL = -1
+      IF(POS.EQ.1) IREEL = 1
+*
+*     recup de MTYMAT + symetrie / antisymetrie de la matrice a projeter
+      segact,MRIGID
+      LETYPE = MRIGID.MTYMAT
+      NRIGEL=IRIGEL(/2)
+      isym=IRIGEL(7,1)
+      if(NRIGEL.le.1) goto 09
+      do iel=2,NRIGEL
+        if (isym.ne.IRIGEL(7,iel)) then
+          isym=2
+          goto 09
+        endif
+      enddo
+ 09   CONTINUE
+
+
+***********************************************************
+*     ON SEPARE LA RIGIDITE EN 2 :
+*           - RI4: partie rigidite "pure"
+*           - RI5: partie relation cinematique
+*     On ne traite que l'1 des 2 (RI4 par défaut)
+***********************************************************
+      IPRIG0 = MRIGID
+      jmax  = IRIGEL(/1)
+      NRIG0 = NRIGEL
+      segini,RI4,RI5
+      nel4 = 0
+      nel5 = 0
+      iel4 = 0
+      iel5 = 0
+      do 1 iel=1,NRIGEL
+         MELEME=IRIGEL(1,iel)
+         segact,MELEME
+c  rem : on teste ITYPEL,
+c        mais on pourrait aussi tester LX comme dans SEPA.eso
+         IF(ITYPEL.EQ.22) THEN
+           nel5 = 1
+           iel5 = iel5 + 1
+           RI5.COERIG(iel5)=COERIG(iel)
+           do j=1,jmax
+             RI5.IRIGEL(j,iel5)=IRIGEL(j,iel)
+           enddo
+         ELSE
+           nel4=1
+           iel4 = iel4 + 1
+           RI4.COERIG(iel4)=COERIG(iel)
+           do j=1,jmax
+             RI4.IRIGEL(j,iel4)=IRIGEL(j,iel)
+           enddo
+         ENDIF
+         segdes,MELEME
+ 1    continue
+      segdes,MRIGID
+      NRIGEL=iel5
+      segadj,RI5
+      NRIGEL=iel4
+      segadj,RI4
+
+
+***********************************************************
+*     CREATION DE LA RIGIDITE CALCULEE
+***********************************************************
+c       IF(ITAB2.EQ.0) THEN
+c         NRIGEL=nel4+nel5
+      IF(ITAB2.EQ.0.and.nel4.eq.0) THEN
+        NRIGEL=nel5
+      ELSE
+c      +en presence de Table de liaison statiques,
+c       on ne traite pas les relations cinematiques
+*      +si RI4 et Ri5, On ne traite que l'1 des 2 (RI4 par défaut)
+        NRIGEL=nel4
+      ENDIF
+      SEGINI,RI1
+      RI1.MTYMAT = LETYPE
+      RI1.IFORIG = IFOMOD
+      RI1.IMGEO1 = 0
+      RI1.IMGEO2 = 0
+      IRI1=0
+
+
+************************************************************
+*     TRAITEMENT DES MODES
+*     + on prepare les MELEME + DESCR de sortie
+***********************************************************
+
+***** BASE MODALE *****
+
+      LETYPE = ' '
+      CALL ACCTAB(MTAB1,'MOT',0,0.0D0,'MODES',.TRUE.,0,
+     &           'TABLE',IVALRE,XVALRE,CHARRE,LOGRE,MTAB2)
+      IF (IERR.NE.0) RETURN
+
+c c     longueur a priori
+c       SEGACT, MTAB2
+c       NBMOD = MTAB2.MLOTAB-2
+c       SEGDES, MTAB2
+c     remplace par le calcul du vrai nombre de modes
+      NBMOD = 0
+ 11   CONTINUE
+      NBMOD = NBMOD + 1
+      TYPRET = ' '
+      ITMOD=0
+      CALL ACCTAB(MTAB2,'ENTIER',NBMOD,0.0D0,' ',.TRUE.,0,
+     &            TYPRET,IVALRE,XVALRE,CHARRE,LOGRE,ITMOD)
+      IF(IERR.NE.0) RETURN
+      IF(TYPRET.EQ.'TABLE   ' .AND. ITMOD.NE.0) GOTO 11
+      NBMOD = NBMOD - 1
+      if(iimpi.ge.333) write(ioimp,*) 'nombre de modes=',NBMOD
+
+*
+      N1 = NBMOD
+      SEGINI, MLCHP1
+      SEGINI, MLCHP2
+*
+* Constitution du maillage support et du segment descriptif
+*
+      NBNN = NBMOD
+      NBELEM = 1
+      NBSOUS = 0
+      NBREF = 0
+      SEGINI, MELEME
+* rem : ce itypel est faux, mais on arrive a vivre avec !
+      ITYPEL = 1
+*
+      NLIGRD=NBMOD
+      NLIGRP=NBMOD
+      nelrig=1
+      SEGINI,DESCR
+*
+      DO 10, I=1, NBMOD
+         IPT1 = 0
+*
+         CALL ACCTAB(MTAB2,'ENTIER',I,0.0D0,' ',.TRUE.,0,
+     &              'TABLE',IVALRE,XVALRE,CHARRE,LOGRE,MTAB3)
+         IF (IERR.NE.0) RETURN
+         CALL ACCTAB(MTAB3,'MOT',0,0.0D0,'SOUSTYPE',.TRUE.,0,
+     &               'MOT',IVALRE,XVALRE,TYPMOD,LOGRE,IOBRE)
+*
+*  Le calcul est impossible :
+*
+         IF (TYPMOD.EQ.'MODE_ANN') THEN
+           IF (LETYPE.NE.'ANNULE') THEN
+             WRITE (*,*) 'Calcul impossible : modes annules !!!'
+             LETYPE = 'ANNULE'
+           ENDIF
+           GOTO 5
+         ENDIF
+*
+*  Cas reel ou cas complexe ?
+*
+         IF (TYPMOD .EQ. 'MODE_COM') THEN
+           MODCOM=.TRUE.
+           CALL ACCTAB(MTAB3,'MOT',0,0.0D0,'DEFORMEE_MODALE_REELLE',
+     &         .TRUE.,0,'CHPOINT',IVALRE,XVALRE,CHARRE,LOGRE,MCHPOI)
+           MLCHP1.ICHPOI(I) = MCHPOI
+           CALL ACCTAB(MTAB3,'MOT',0,0.0D0,'DEFORMEE_MODALE_IMAGINAIRE',
+     &            .TRUE.,0,'CHPOINT',IVALRE,XVALRE,CHARRE,LOGRE,MCHPOI)
+           MLCHP2.ICHPOI(I) = MCHPOI
+         ELSE
+           MODCOM = .FALSE.
+           CALL ACCTAB(MTAB3,'MOT',0,0.0D0,'DEFORMEE_MODALE',.TRUE.,0,
+     &                  'CHPOINT',IVALRE,XVALRE,CHARRE,LOGRE,MCHPOI)
+           IF (IERR.NE.0) RETURN
+           MLCHP1.ICHPOI(I) = MCHPOI
+         ENDIF
+*
+         CALL ACCTAB(MTAB3,'MOT',0,0.0D0,'POINT_REPERE',.TRUE.,0,
+     &              'POINT',IVALRE,XVALRE,CHARRE,LOGRE,IPT1)
+         IF (IERR.NE.0) RETURN
+*
+ 5       MELEME.NUM(I,1)=IPT1
+*
+         DESCR.LISINC(I) = 'ALFA'
+         DESCR.LISDUA(I) = 'FALF'
+         DESCR.NOELEP(I) = I
+         DESCR.NOELED(I) = I
+*
+ 10   CONTINUE
+
+
+***** BASE LIAISONS STATIQUES *****
+
+      IF(ITAB2.EQ.0) GOTO 19
+
+      NBMOD1=NBMOD
+      MTAB2=ITAB2
+      SEGACT, MTAB2
+c c     longueur a priori
+c       NBMOD2 = MTAB2.MLOTAB-1
+c     remplace par le calcul du vrai nombre de solutions statiques
+      NBMOD2 = 0
+ 13   NBMOD2 = NBMOD2 + 1
+      TYPRET = ' '
+      ITMOD=0
+      CALL ACCTAB(MTAB2,'ENTIER',NBMOD2,0.0D0,' ',.TRUE.,0,
+     &            TYPRET,IVALRE,XVALRE,CHARRE,LOGRE,ITMOD)
+      IF(IERR.NE.0) RETURN
+      IF(TYPRET.EQ.'TABLE   ' .AND. ITMOD.NE.0) GOTO 13
+      NBMOD2 = NBMOD2 - 1
+      if(iimpi.ge.333) write(ioimp,*) 'nombre de sol statiques=',NBMOD2
+
+      NBMOD = NBMOD1 + NBMOD2
+      N1    =NBMOD
+      NBNN  =NBMOD
+      NLIGRD=NBMOD
+      NLIGRP=NBMOD
+      SEGADJ,MLCHP1,MLCHP2,MELEME,DESCR
+
+      ITOT=NBMOD1
+
+      DO 12, I=1,NBMOD2
+
+
+         CALL ACCTAB(MTAB2,'ENTIER',I,0.0D0,' ',.TRUE.,0,
+     &              'TABLE',IVALRE,XVALRE,CHARRE,LOGRE,MTAB3)
+         IF (IERR.NE.0) RETURN
+
+c        ici, on a une solution statique
+         ITOT=ITOT+1
+
+c        DEFORMEE
+c        modes statiques reels seulement !
+         CALL ACCTAB(MTAB3,'MOT',0,0.0D0,'DEFORMEE',.TRUE.,0,
+     &                  'CHPOINT',IVALRE,XVALRE,CHARRE,LOGRE,MCHPOI)
+         IF (IERR.NE.0) RETURN
+         MLCHP1.ICHPOI(ITOT) = MCHPOI
+
+c        POINT_REPERE
+         CALL ACCTAB(MTAB3,'MOT',0,0.0D0,'POINT_REPERE',.TRUE.,0,
+     &              'POINT',IVALRE,XVALRE,CHARRE,LOGRE,IPT1)
+         IF (IERR.NE.0) RETURN
+         MELEME.NUM(ITOT,1)=IPT1
+
+c        DESCR
+         DESCR.LISINC(ITOT) = 'BETA'
+         DESCR.LISDUA(ITOT) = 'FBET'
+         DESCR.NOELEP(ITOT) = ITOT
+         DESCR.NOELED(ITOT) = ITOT
+
+ 12   CONTINUE
+
+      SEGDES, MTAB2
+
+***** FIN DE TRAITEMENT DES BASES (MODALES ET STATIQUES) *****
+
+ 19   CONTINUE
+      SEGDES, DESCR
+      SEGDES, MELEME
+*
+* Constitution des segments XMATRI
+*
+      NLIGRD=NBMOD
+      NLIGRP=NBMOD
+*
+      IF (LETYPE .EQ. 'ANNULE') THEN
+        SEGINI, XMATR1
+        IF (MODCOM) THEN
+          SEGINI, XMATR2
+          SEGDES, XMATR2
+        ENDIF
+        SEGDES, XMATR1
+        GOTO 55
+      ENDIF
+
+
+***********************************************************
+*     ON PROJETTE LA RIGIDITE "PURE" RI4
+***********************************************************
+
+      IF(iel4.eq.0) GOTO 100
+      MRIGID=RI4
+*
+* Cas reel
+*
+      SEGINI, XMATR1
+      if (isym.eq.0) then
+          DO 20 J=1, NBMOD
+            MCHPO2 = MLCHP1.ICHPOI(J)
+            CALL MUCPRI(MCHPO2,MRIGID,MCHPO3)
+            DO I=J, NBMOD
+              MCHPO1 = MLCHP1.ICHPOI(I)
+              CALL CORRSP(MRIGID,MCHPO1,MCHPO3,IPLMOX,IPLMOY)
+              CALL XTY1(MCHPO1,MCHPO3,IPLMOX,IPLMOY,XVAL)
+              XMATR1.RE(I,J,1)=XVAL
+              XMATR1.RE(J,I,1)=XVAL
+             ENDDO
+            segsup,IPLMOX,IPLMOY
+            segsup,MCHPO3
+            MCHPO3=0
+ 20       CONTINUE
+      elseif (isym.eq.1) then
+          DO 21 J=1, NBMOD
+            XMATR1.RE(J,J,1)=0.D0
+            if(J.ge.NBMOD) goto 21
+            MCHPO2 = MLCHP1.ICHPOI(J)
+            CALL MUCPRI(MCHPO2,MRIGID,MCHPO3)
+            JP1=J+1
+            DO I=JP1, NBMOD
+              MCHPO1 = MLCHP1.ICHPOI(I)
+              CALL CORRSP(MRIGID,MCHPO1,MCHPO3,IPLMOX,IPLMOY)
+              CALL XTY1(MCHPO1,MCHPO3,IPLMOX,IPLMOY,XVAL)
+              XMATR1.RE(I,J,1)=XVAL
+              XMATR1.RE(J,I,1)=-1.D0*XVAL
+            ENDDO
+            segsup,IPLMOX,IPLMOY
+            segsup,MCHPO3
+ 21       CONTINUE
+      else
+          DO 22, J=1, NBMOD
+            MCHPO2 = MLCHP1.ICHPOI(J)
+            CALL MUCPRI(MCHPO2,MRIGID,MCHPO3)
+            DO I=1, NBMOD
+              MCHPO1 = MLCHP1.ICHPOI(I)
+              CALL CORRSP(MRIGID,MCHPO1,MCHPO3,IPLMOX,IPLMOY)
+              CALL XTY1(MCHPO1,MCHPO3,IPLMOX,IPLMOY,XVAL)
+              XMATR1.RE(I,J,1)=XVAL
+            ENDDO
+            segsup,IPLMOX,IPLMOY
+            segsup,MCHPO3
+ 22       CONTINUE
+      endif
+*
+* Cas complexe : calcul de termes complementaires
+*
+      IF (MODCOM) THEN
+c         partie reelle = phiR_i^T.M.phiR_j +/-  phiI_i^T.M. phiI_j
+          DO 30, J=1, NBMOD
+            MCHPO2 = MLCHP2.ICHPOI(J)
+            CALL MUCPRI(MCHPO2,MRIGID,MCHPO3)
+            DO I=1, NBMOD
+              MCHPO1 = MLCHP2.ICHPOI(I)
+              CALL CORRSP(MRIGID,MCHPO1,MCHPO3,IPLMOX,IPLMOY)
+              CALL XTY1(MCHPO1,MCHPO3,IPLMOX,IPLMOY,XVAL)
+              XMATR1.RE(I,J,1)=XMATR1.RE(I,J,1)-IREEL*XVAL
+            ENDDO
+            segsup,IPLMOX,IPLMOY
+            segsup,MCHPO3
+ 30       CONTINUE
+*         2eme matrice (=partie imaginaire)
+c         partie imaginaire = phiR_i^T.M.phiI_j -/+  phiI_i^T.M. phiR_j
+          SEGINI,XMATR2
+          DO 40, J=1, NBMOD
+            MCHPO2 = MLCHP2.ICHPOI(J)
+            CALL MUCPRI(MCHPO2,MRIGID,MCHPO3)
+            DO I=1, NBMOD
+              MCHPO1 = MLCHP1.ICHPOI(I)
+              CALL CORRSP(MRIGID,MCHPO1,MCHPO3,IPLMOX,IPLMOY)
+              CALL XTY1(MCHPO1,MCHPO3,IPLMOX,IPLMOY,XVAL)
+              XMATR2.RE(I,J,1)=XVAL
+            ENDDO
+            segsup,IPLMOX,IPLMOY
+            segsup,MCHPO3
+ 40       CONTINUE
+          DO 50, J=1, NBMOD
+            MCHPO2 = MLCHP1.ICHPOI(J)
+            CALL MUCPRI(MCHPO2,MRIGID,MCHPO3)
+            DO I=1, NBMOD
+              MCHPO1 = MLCHP2.ICHPOI(I)
+              CALL CORRSP(MRIGID,MCHPO1,MCHPO3,IPLMOX,IPLMOY)
+              CALL XTY1(MCHPO1,MCHPO3,IPLMOX,IPLMOY,XVAL)
+              XMATR2.RE(I,J,1)=XMATR2.RE(I,J,1)+IREEL*XVAL
+            ENDDO
+            segsup,IPLMOX,IPLMOY
+            segsup,MCHPO3
+ 50       CONTINUE
+          SEGDES,XMATR2
+      ENDIF
+*
+ 55   NELRIG = 1
+
+*     Stockage dans la rigidite calculee
+      IRI1=IRI1+1
+        RI1.COERIG(IRI1) = 1.D0
+        RI1.IRIGEL(1,IRI1) = MELEME
+        RI1.IRIGEL(2,IRI1) = 0
+        RI1.IRIGEL(3,IRI1) = DESCR
+        RI1.IRIGEL(4,IRI1) = xMATR1
+        RI1.IRIGEL(5,IRI1) = NIFOUR
+        RI1.IRIGEL(6,IRI1) = 0
+        RI1.IRIGEL(7,IRI1) = isym
+        xmatr1.symre=isym
+      SEGDES,XMATR1
+        RI1.IRIGEL(8,IRI1) = 0
+      IF (MODCOM) THEN
+        RI1.IRIGEL(7,1) = 2
+        SEGINI, RI2 = RI1
+          RI2.IRIGEL(4,IRI1) = xMATR2
+        SEGDES, RI2
+      ELSE
+        RI2 = 0
+      ENDIF
+
+*     Travail termine pour RI4.
+
+*     si RI4 et RI5 : On ne traite que l'1 des 2 (RI4 par défaut)
+      IF(iel5.ne.0) THEN
+        IF(IIMPI.ne.0) THEN
+          WRITE(IOIMP,*) 'Présence de rigidites pures ',
+     &                   'et de relations cinematiques :'
+          WRITE(IOIMP,*) 'On ne traite pas les relations cinematiques !'
+        ENDIF
+        GOTO 900
+      ENDIF
+
+ 100  CONTINUE
+      SEGSUP,RI4
+
+
+***********************************************************
+*     ON PROJETTE LES RELATIONS CINEMATIQUES RI5
+*     rem : cela conduit a construire n rigidites-"relation"
+*           de taille m*m -> pas forcement interessant...
+***********************************************************
+
+      IF(iel5.eq.0) GOTO 900
+      IF(ITAB2.NE.0) THEN
+        WRITE(IOIMP,*) 'La syntaxe utilisee ne traite pas',
+     &                ' les relations cinematiques !'
+        GOTO 900
+      ENDIF
+
+c     Calcul de la projection d'une relation cinematique sur base modale
+
+*     recup de la matrice d entree
+      NRIGEL=RI5.IRIGEL(/2)
+*     DES2 = DESCR de sortie
+      NLIGRD=NBMOD+1
+      NLIGRP=NBMOD+1
+      SEGINI,DES2
+      DES2.LISINC(1)='LX'
+      DES2.LISDUA(1)='FLX'
+      DES2.NOELEP(1)=1
+      DES2.NOELED(1)=1
+      do i=2,NLIGRD
+       DES2.LISINC(i)='ALFA'
+       DES2.LISDUA(i)='FALF'
+       DES2.NOELEP(i)=i
+       DES2.NOELED(i)=i
+      enddo
+      SEGDES,DES2
+*     maillage de sortie
+      NBNN   = NBMOD+1
+      NBELEM = NRIGEL
+      NBSOUS = 0
+      NBREF  = 0
+      SEGINI,IPT2
+      IPT2.ITYPEL = 22
+*     XMATR3 de sortie
+      NELRIG =NRIGEL
+      SEGINI,XMATR3
+
+*     on branche et on remplit RI1
+      IRI1 = IRI1 + 1
+      RI1.COERIG(IRI1) = 1.D0
+      RI1.IRIGEL(1,IRI1) = IPT2
+      RI1.IRIGEL(3,IRI1) = DES2
+      RI1.IRIGEL(4,IRI1) = XMATR3
+      RI1.IRIGEL(5,IRI1) = RI5.IRIGEL(5,IRI1)
+      RI1.IRIGEL(7,IRI1) = 0
+      xmatr3.symre=0
+
+      SEGACT, MELEME
+
+* --- Boucle sur les sous rigidites ---
+      iel2=0
+      DO 101 irig5=1,NRIGEL
+
+*       recup de la sous matrice d entree
+c         xcoe5 = RI5.COERIG(irig5) =1 normalement !
+        IPT5  = RI5.IRIGEL(1,irig5)
+        DES5  = RI5.IRIGEL(3,irig5)
+        XMATR5= RI5.IRIGEL(4,irig5)
+        segact,IPT5,DES5,XMATR5
+        NBEL5 = IPT5.NUM(/2)
+        nddl5 = XMATR5.RE(/2)
+
+c    -- boucle sur les matrices elementaires --
+        DO 102 iel5=1,NBEL5
+
+*         traitement de la sous matrice de sortie
+          iel2 = iel2 + 1
+          if(iel2.gt.NBELEM) then
+            NBELEM=NBELEM+1
+            segadj,IPT2
+            NELRIG=NELRIG+1
+            segadj,XMATR3
+          endif
+c         recopie du LX
+          IPT2.NUM(1,iel2) = IPT5.NUM(1,iel5)
+
+c         boucle sur les modes
+          DO 110 j=1,NBMOD
+
+c           point repere des modes et chpoint de deformee modale
+            IPT2.NUM(j+1,iel2) = NUM(j,1)
+            IPHI = MLCHP1.ICHPOI(j)
+            XVALj = 0.d0
+
+c           boucle sur les ddls (non LX) de la relation en entree
+            DO 120 k=2,nddl5
+
+              X5k = XMATR5.RE(1,k,iel5)
+c             XPHIk = valeur de la jeme deformee modale au ddl u_k
+              IP5 = DES5.NOELEP(k)
+              IP5 = IPT5.NUM(IP5,iel5)
+              MO5 = DES5.LISINC(k)
+              CALL EXTRA9(IPHI,IP5,MO5,KERRE,XPHIk)
+              XVALj = XVALj + X5k*XPHIk
+
+ 120       CONTINUE
+
+           XMATR3.RE(1,J+1,iel2) = XVALj
+           XMATR3.RE(J+1,1,iel2) = XVALj
+
+ 110    CONTINUE
+
+ 102    CONTINUE
+        SEGDES,IPT5,DES5,XMATR5
+
+ 101  CONTINUE
+
+      SEGDES,MELEME
+      SEGDES,IPT2,XMATR3
+
+
+
+***********************************************************
+*     MENAGE AVANT DE QUITTER
+***********************************************************
+ 900  CONTINUE
+      SEGSUP,MLCHP1,MLCHP2
+      SEGSUP,RI5
+      SEGDES,RI1
+      IF(RI2.NE.0) SEGDES,RI2
+
+      if(iimpi.ge.333) write(ioimp,*) 'RI1,RI2=',RI1,RI2
+
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

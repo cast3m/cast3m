@@ -1,0 +1,286 @@
+C KRES8     SOURCE    PV        16/11/17    22:00:25     9180
+      SUBROUTINE KRES8(MRIGID,KSMBR,
+     $           KTYPI,ITER,RESID,ICALRS,IRSTRT,LBCG,BRTOL,IDDOT,IMVEC,
+     $           KPREC,RXMILU,RXILUP,XLFIL,XDTOL,XSPIV,
+     $           KTIME,LTIME,
+     $           MCHSOL,LRES,LNMV,ICVG,IMPR)
+      IMPLICIT REAL*8 (A-H,O-Z)
+      IMPLICIT INTEGER (I-N)
+C***********************************************************************
+C NOM         : KRES8
+C DESCRIPTION : - Assemblage par RESOU
+C               - Conversion au format Morse de la matrice
+C               - Conversion du second membre en MVECTD
+C               - Construction du préconditionneur
+C               - Appel des solveurs itératifs
+C               - Conversion du résultat en CHPOINT
+C
+C
+C LANGAGE     : ESOPE
+C AUTEUR      : Stéphane GOUNAND (CEA/DEN/DM2S/SFME/LTMF)
+C               mél : gounand@semt2.smts.cea.fr
+C***********************************************************************
+C VERSION    : v1, 04/08/2011, version initiale
+C HISTORIQUE : v1, 04/08/2011, création
+C HISTORIQUE :
+C HISTORIQUE :
+C***********************************************************************
+-INC CCOPTIO
+-INC SMCHPOI
+      POINTEUR MCHSOL.MCHPOI
+-INC SMRIGID
+-INC SMVECTD
+      POINTEUR ISMBR.MVECTD
+      POINTEUR INCX.MVECTD
+      POINTEUR IR.MVECTD
+-INC SMMATRI
+      SEGMENT PMORS
+      INTEGER IA (NTT+1)
+      INTEGER JA (NJA)
+      ENDSEGMENT
+      POINTEUR PMS1.PMORS,PMS2.PMORS
+      POINTEUR KMORS.PMORS
+C Segment de stokage
+      SEGMENT IZA
+      REAL*8  A(NBVA)
+      ENDSEGMENT
+      POINTEUR IZA1.IZA,IZA2.IZA,IZAU.IZA,IZAL.IZA,ISA.IZA
+      POINTEUR KIZA.IZA
+
+-INC SMLENTI
+      POINTEUR KTYP.MLENTI
+-INC SMTABLE
+      POINTEUR KTIME.MTABLE
+      DIMENSION ITTIME(4)
+      CHARACTER*8 CHARI
+      CHARACTER*1 CCOMP
+      LOGICAL LTIME,LOGII
+      REAL*8 GNRM2
+C     ..
+C     .. External subroutines and functions..
+      EXTERNAL GAXPY,GCOPY,GDOT,GNRM2
+
+      IVALI=0
+      XVALI=0.D0
+      LOGII=.FALSE.
+      IRETI=0
+      XVALR=0.D0
+      IOBRE=0
+      IRETR=0
+C
+C Executable statements
+C
+      IF (LTIME) THEN
+         CALL CRTABL(KTIME)
+         CALL TIMESPV(ITTIME)
+         ITI1=(ITTIME(1)+ITTIME(2))/10
+      ELSE
+         KTIME=0
+      ENDIF
+C
+C  CAS PARTICULIER : Si la matrice est vide (toutes les inconnues
+C      éliminées, par exemple)
+C
+      SEGACT MRIGID
+      IF (IRIGEL(/2).EQ.0) THEN
+         NSOUPO=0
+         NAT=0
+         SEGINI MCHSOL
+         SEGDES MCHSOL
+         ICVG=0
+         LNMV=0
+         LRES=0
+         IF (LTIME) THEN
+            CALL TIMESPV(ITTIME)
+            ITI2=(ITTIME(1)+ITTIME(2))/10
+            CHARI='MATVIDE'
+            CALL ECCTAB(KTIME,'MOT     ',IVALI,XVALI,CHARI,LOGII,IRETI,
+     $           'ENTIER  ',ITI2-ITI1,XVALR,CHARR,LOGIR,IRETR)
+            SEGDES KTIME
+         ENDIF
+         SEGDES MRIGID
+         RETURN
+      ENDIF
+C
+C               - Assemblage par RESOU
+C
+      CALL KRES9(MRIGID,1)
+      IF (IERR.NE.0) RETURN
+      IF (LTIME) THEN
+         CALL TIMESPV(ITTIME)
+         ITI2=(ITTIME(1)+ITTIME(2))/10
+      ENDIF
+C
+C               - Conversion au format Morse de la matrice
+C
+      CALL KRES10(MRIGID,KMORS,KIZA)
+      IF (IERR.NE.0) RETURN
+      IF (LTIME) THEN
+         CALL TIMESPV(ITTIME)
+         ITI3=(ITTIME(1)+ITTIME(2))/10
+      ENDIF
+C
+C On donne des infos sur la matrice
+C
+C      WRITE(IOIMP,*) 'IMPR=',IMPR
+      CALL INFMAT(KMORS,KIZA,IMPR,IRET)
+C      IF (IRET.NE.0) GOTO 9999
+C      WRITE(IOIMP,*) 'Apres KRES10'
+C      WRITE(IOIMP,*) 'KMORS=',KMORS
+C      WRITE(IOIMP,*) 'KIZA=',KIZA
+
+C
+C               - Conversion du second membre en MVECTD
+C                 et initialisation du résultat
+C
+      SEGACT MRIGID
+      ICHOLX=ICHOLE
+      ISECO=KSMBR
+C On ne vérifie pas que le second membre doit être dans le dual
+      NOID=1
+      CALL CHVNS(ICHOLX,ISECO,ISMBR,NOID)
+      IF (IERR.NE.0) RETURN
+      IF (LTIME) THEN
+         CALL TIMESPV(ITTIME)
+         ITI4=(ITTIME(1)+ITTIME(2))/10
+      ENDIF
+C      SEGACT ISMBR
+C      WRITE(IOIMP,*) 'Second membre sous forme vecteur'
+C      INC=ISMBR.VECTBB(/1)
+C      WRITE(IOIMP,*) '     ISMBR, INC=',INC
+C      WRITE(IOIMP,2022) (ISMBR.VECTBB(II),II=1,ISMBR.VECTBB(/1))
+C
+C               - Construction du préconditionneur (repris sur kres5)
+C               - Appel des solveurs itératifs
+C
+C Si solveur multigrille, il faut un segment permettant de distinguer
+C les inconnues
+      IF (KTYPI.EQ.7.OR.KTYPI.EQ.8) THEN
+         MMATRI=ICHOLE
+         SEGACT MMATRI
+         MINCPO=IINCPO
+         SEGACT MINCPO
+         NCOMP=INCPO(/1)
+         NNOE=INCPO(/2)
+         SEGACT ISMBR
+         INC=ISMBR.VECTBB(/1)
+         SEGDES ISMBR
+         JG=INC
+         SEGINI KTYP
+         DO ICOMP=1,NCOMP
+            DO INOE=1,NNOE
+               IG=INCPO(ICOMP,INOE)
+               IF (IG.GT.0) KTYP.LECT(IG)=ICOMP
+            ENDDO
+         ENDDO
+         SEGDES KTYP
+         SEGDES MINCPO
+         SEGDES MMATRI
+      ELSE
+         KTYP=0
+      ENDIF
+C
+C Warning KMORS, KIZA et KTYP sont détruits dans KRES11 et KRES12
+C si inodet=0
+      INODET=1
+C         CALL ECMORS(KMORS,KIZA,3)
+C      SEGACT ISMBR
+C      WRITE(IOIMP,*) 'Second membre sous forme vecteur'
+C      INC=ISMBR.VECTBB(/1)
+C      WRITE(IOIMP,*) '     ISMBR, INC=',INC
+C      WRITE(IOIMP,2022) (ISMBR.VECTBB(II),II=1,ISMBR.VECTBB(/1))
+C Solveur Direct
+      IF (KTYPI.EQ.1) THEN
+         SEGINI,INCX=ISMBR
+         CALL KRES12(KMORS,KIZA,INCX,
+C         CALL KRES12(KMORS,KIZA,ISMBR,
+     $        KTIME,LTIME,
+     $        INCX,LRES,LNMV,ICVG,IMPR,INODET)
+      ELSE
+C Solveur Itératif
+         CALL KRES11(KMORS,KIZA,KTYP,ISMBR,
+     $        KTYPI,ITER,RESID,ICALRS,IRSTRT,LBCG,BRTOL,IDDOT,IMVEC,
+     $        KPREC,RXMILU,RXILUP,XLFIL,XDTOL,XSPIV,
+     $        KTIME,LTIME,
+     $        INCX,LRES,LNMV,ICVG,IMPR,INODET)
+C      WRITE(IOIMP,*) 'Apres KRES11'
+      ENDIF
+      IF(IERR.NE.0) RETURN
+C      SEGACT INCX
+C      WRITE(IOIMP,*) 'Inconnue sous forme vecteur'
+C      INC=INCX.VECTBB(/1)
+C      WRITE(IOIMP,*) '     INCX, INC=',INC
+C      WRITE(IOIMP,2022) (INCX.VECTBB(II),II=1,INCX.VECTBB(/1))
+C      IF(IERR.NE.0) RETURN
+C                    r(0)=b
+C      SEGINI,IR=ISMBR
+C      SEGACT INCX
+C      SEGACT KMORS
+C      SEGACT KIZA
+CC                    r(0)=b-Ax
+C      CALL GMOMV('N',-1.D0,KMORS,KIZA,INCX,1.D0,IR)
+C      RNRM2 = GNRM2(IR)
+C      WRITE(IOIMP,*) '||R||=',RNRM2
+
+      IF (LTIME) THEN
+         CALL TIMESPV(ITTIME)
+         ITI5=(ITTIME(1)+ITTIME(2))/10
+      ENDIF
+C
+C               - Conversion du résultat en CHPOINT
+C
+      CALL VCH1(ICHOLX,INCX,MCHSOL,MRIGID)
+C      WRITE(IOIMP,*) 'Apres VCH1'
+      IF(IERR.NE.0) RETURN
+      IF (LTIME) THEN
+         CALL TIMESPV(ITTIME)
+         ITI6=(ITTIME(1)+ITTIME(2))/10
+         CHARI='ASS+RENU'
+         CALL ECCTAB(KTIME,'MOT     ',IVALI,XVALI,CHARI,LOGII,IRETI,
+     $                     'ENTIER  ',ITI2-ITI1,XVALR,CHARR,LOGIR,IRETR)
+         CHARI='CONVMORS'
+         CALL ECCTAB(KTIME,'MOT     ',IVALI,XVALI,CHARI,LOGII,IRETI,
+     $                     'ENTIER  ',ITI3-ITI2,XVALR,CHARR,LOGIR,IRETR)
+C         CHARI='CONVSMB '
+C         CALL ECCTAB(KTIME,'MOT     ',IVALI,XVALI,CHARI,LOGII,IRETI,
+C     $                     'ENTIER  ',ITI4-ITI3,XVALR,CHARR,LOGIR,IRETR)
+         IF (KTYPI.EQ.1) THEN
+            CHARI='FAC+RESO'
+         ELSE
+            CHARI='PRE+RESO'
+         ENDIF
+         CALL ECCTAB(KTIME,'MOT     ',IVALI,XVALI,CHARI,LOGII,IRETI,
+     $                     'ENTIER  ',ITI5-ITI4,XVALR,CHARR,LOGIR,IRETR)
+C         CHARI='CONVINC'
+C         CALL ECCTAB(KTIME,'MOT     ',IVALI,XVALI,CHARI,LOGII,IRETI,
+C     $                     'ENTIER  ',ITI6-ITI5,XVALR,CHARR,LOGIR,IRETR)
+         CHARI='TOTAL   '
+         CALL ECCTAB(KTIME,'MOT     ',IVALI,XVALI,CHARI,LOGII,IRETI,
+     $                     'ENTIER  ',ITI6-ITI1,XVALR,CHARR,LOGIR,IRETR)
+         SEGDES KTIME
+      ENDIF
+C     Le solveur direct surcharge le second membre
+      IF (ISMBR.NE.INCX) SEGSUP ISMBR
+      SEGSUP INCX
+      SEGDES MRIGID
+C
+C Normal termination
+C
+      RETURN
+C
+C Format handling
+C
+C 2022 FORMAT(10(1X,1PG12.5))
+C
+C End of subroutine KRES8
+C
+      END
+
+
+
+
+
+
+
+
+

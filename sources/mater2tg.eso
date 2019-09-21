@@ -1,0 +1,372 @@
+C MATER2TG  SOURCE    CB215821  16/04/21    21:17:44     8920
+      SUBROUTINE mater2tg(cmat,ntot,lerror,idimpara3,
+     *                  parahot3,npttot3,H66t,sigma6v,deps6v,lcp,
+     *                  NOEL,NPT,Kinc)
+
+c cmat is the name (characters) of the material
+c ntot is the integration point (global number for the whole structure): counter
+c idimpara3 is the number of parameters for parahot3
+c parahot3 is the array that contains the material parameters and state variables
+c npttot3 is the number of integration points (number for the considered material 3D)
+c         and is thus the number of columns in parahot3
+c H66t is the tangent matrix
+c sigma6v is the nominal stress vector
+c deps6v is the incremental strains vector
+
+c===========================================================================
+
+c input
+c     CMAT     : name of the material
+c     NTOT     : # of the integration point ( global # for the entire structure )
+c                 can be NTOT1 or NTOT2 or NTOT3
+
+c output
+c     H66t     : tangent stiffness matrix for 3D materials (THG add)
+
+c input and output
+c     PARAHOT3 : the first columns contain the material properties at elevated temperature,
+c                the last columns contain strains, stresses, ....
+
+c     SIGMA6v  : stress vector for 3D materials (THG add)
+c     DEPS6V   : incremental strain vector for 3D materials (THG add)
+
+c=======================================================================
+
+
+c     This routine is run for every iteration,
+c                         for every point of integration.
+c
+C     At the integration point  NTOT  is the material described by CMAT.
+c     This material has, at the point NTOT, the caracteristics PARAHOT
+c           at elevated temperature.
+
+c     In multiaxial situation
+c       We are going to calculate the stress vector sigm6v and the stiffness
+c       matrix H66t as a function of the strain incr. vector deps6v,
+c       calculated from the strain vector at the beginning of the time step.
+
+c i o
+c     a       : df/dsigma
+c               df/dsigmax, df/dsigmay, df/dtauxy, df/dsigmaz
+c   * Ai      : Hardening parameter
+
+c THG add concrete model 3D
+
+      IMPLICIT REAL*8 (A-B,D-H,O-Z)
+      implicit integer (I-K,M,N)
+      implicit logical (L)
+      implicit character*10 (C)
+
+      dimension parahot3(idimpara3,npttot3)
+      dimension epstr6v(6), esigmac(6)
+      dimension esigma6v(6),H66t(6,6),deps6v(6),sigma6v(6)
+      dimension rt1(1,6),rc1(1,6),H66tsave(6,6),H66(6,6)
+
+      i1 = 1
+      i2 = 2
+      i3 = 3
+      i4 = 4
+      i5 = 5
+      i6 = 6
+      i7 = 7
+      i8 = 8
+      i9 = 9
+      i10=10
+      i11=11
+      i12=12
+      i13=13
+      i14=14
+      i15=15
+      i16=16
+      i17=17
+      i18=18
+      i19=19
+      i20=20
+      i21=21
+      i22=22
+      i23=23
+      i24=24
+      i25=25
+      i26=26
+      i27=27
+      i28=28
+      i29=29
+      i30=30
+      i31=31
+      i32=32
+      i33=33
+      i34=34
+      i35=35
+      i36=36
+      i37=37
+      i38=38
+      i39=39
+
+      r2 = 2.
+      r3 = 3.
+
+c     TEMPERATURE
+      T = parahot3(idimpara3-39,ntot)
+      TMAX = parahot3(idimpara3-38,ntot)
+
+
+c     Compressive strength
+      fc20 = parahot3(i3,ntot)
+      rloc = rKfcsi(t,tmax)
+      parahot3(i3,ntot) = rloc * fc20
+      fc = parahot3(i3,ntot)
+
+c     Tensile strength
+      ft20 = parahot3(i4,ntot)
+      rloc = rkftco(t,tmax)
+      parahot3(i4,ntot) = rloc * ft20
+      if (parahot3(i4,ntot).lt.(1.d5)) then
+c       minimal value for ft = 0.10 MPa implemented for numerical stability
+c       so if ft entered by the user < 0.10 MPa, the concrete is considered as
+c       previously cracked with dt>0.96 and ft = 1.00 MPa
+        parahot3(i4,ntot) = (1.d6)
+        parahot3(idimpara3-41,ntot) =
+     .             max(0.96d0,parahot3(idimpara3-41,ntot))
+      endif
+      ft = parahot3(i4,ntot)
+
+c     Strain at peak stress
+c     Strain at peak stress according to EC2: epsc1,ec2
+      rloc = 1.0d0
+      epsc1ec2 = EPSc1co(tmax,rloc)
+c     Strain at peak stress according to ENV (minimal value): epsc1,env
+      epsc1env = EPSc1co(tmax,-rloc)
+c     Strain at peak stress for the instantaneous stress-strain relationship
+c     epsc1,ETC = (2 * epsc1,min + epsc1,EC2)/3
+      epsc1etc = (2.*epsc1env+epsc1ec2)/3.
+      parahot3(i5,ntot) = epsc1etc
+
+      epsc1ec220 = EPSc1co(20.d0,rloc)
+      epsc1env20 = EPSc1co(20.d0,-rloc)
+      epsc1etc20 = (2.*epsc1env20+epsc1ec220)/3.
+
+c     Modulus at the origin
+      parahot3(i1,ntot) = 2.0d0*parahot3(i3,ntot)/parahot3(i5,ntot)
+
+c     Compressive limit of elasticity
+      parahot3(i6,ntot) = (0.3d0)*parahot3(i3,ntot)
+      fc0 = parahot3(i6,ntot)
+
+c     Biaxial compression strength: considered as 1.20 x compressive strength
+      parahot3(7,ntot) = (1.2d0)*parahot3(3,ntot)
+
+c     thermal strain
+c     first, save thermal strain at the precedent step
+      parahot3(idimpara3-31,ntot) = parahot3(idimpara3,ntot)
+c     then, calculate new thermal strain
+      parahot3(idimpara3,ntot) = epsthsi(t,tmax)
+
+c     Modulus used in tension
+      parahot3(i12,ntot) = parahot3(i1,ntot)
+
+c     Material parameter dc: damage in compression at peak stress
+      dco = parahot3(i9,ntot)
+
+c     Material parameter x,c: adimensional densitive crack energy in compression
+c     This parameter is assumed to be constant with temperature
+      rxc = parahot3(i10,ntot)
+
+c     Model parameter kappa,c1: accumulated compressive plastic strain at peak stress
+      denom = (2.-2.*dco)*((parahot3(i8,ntot))-1.)
+      parahot3(i13,ntot) = -parahot3(i5,ntot)*(1.-2.*dco)/(denom)
+      rkappa1 = parahot3(i13,ntot)
+
+c     Model Parameter ac
+      parahot3(i14,ntot) = ( -LOG(1-dco)/(rkappa1) )
+
+c     Model Parameter bc
+      parahot3(i15,ntot) = 2*fc*rxc/((1-rxc)*((fc0*rkappa1)+
+     .                     ((fc-fc0)*rkappa1*LOG(r2))))
+
+c     Parameter at
+      if (ft20.ge.1.d6) then
+        parahot3(i16,ntot) = (7.0d0*ft20)/(12.0d0*
+     .                    parahot3(i11,ntot))
+      else
+c     for numerical reason at cannot be equal to 0 even if ft0 = 0
+        parahot3(i16,ntot) = (7.0d0*1.0d6)/(12.0d0*
+     .                    parahot3(i11,ntot))
+      endif
+
+c     TRANSIENT CREEP STRAIN
+      do iloc=1,6
+        epstr6v(iloc) = 0.d0
+      enddo
+c     Phi function
+c     First, phi(ti) is saved as phiprev
+      phiprev = parahot3(17,ntot)
+c     Then, phi(ti+1) is calculated and saved as phi
+c     phi = 2*(epsc1,EC2 - epsc1,min) / (3*(fc/fck))
+      phi = 2.*(epsc1ec2-epsc1env)/(3.*(fc/fc20))
+      parahot3(17,ntot) = phi
+c     Calculation of transient creep strain
+c     If the temperature is bellow Tmax (T is decreasing or it is
+c     not a first heating) the transient creep strain is unchanged
+      if (T.lt.(tmax-1.0d-3)) then
+        continue
+c     Else, it is a first-time heating
+c     so there is an increment of transient creep strain under compressive stress
+      else
+c       unless the concrete is in the descending branch of the material law
+c       if (kappa,c < kappa,c1) (i.e. material in the ascending branch of the
+c                                  compressive part of the material law)
+        rkappac = parahot3(idimpara3-36,ntot)
+        if (rkappac.le.rkappa1) then
+c         epstr,i+1 = epstr,i + [phi(Ti+1) - phi(Ti)] * (1 - dc,i) * (sigma,eff-,i / fck)
+          dc = parahot3(idimpara3-40,ntot)
+          do iloc=i1,i6
+            esigmac(iloc) = parahot3(29+iloc,ntot)
+            epstr6v(iloc) = parahot3(17+iloc,ntot) + ((phi-phiprev)/
+     .                      fc20)*(1.0d0 - dc) * esigmac(iloc)
+          end do
+c         epstr cannot decrease in absolute value
+          do iloc=i1,i6
+            if (epstr6v(iloc).lt.parahot3(17+iloc,ntot)) then
+              parahot3(17+iloc,ntot) = epstr6v(iloc)
+            endif
+          end do
+        endif
+      endif
+
+c     CALCULATE THE INCREMENT IN MECHANICAL STRAIN DEPS
+c     (the increment in thermal strain is subtracted)
+c     Deps = Deps - (Epsth(n)-Epsth(n-1))
+      deps6v(1) = deps6v(1) - parahot3(idimpara3,ntot)
+     .                      + parahot3(idimpara3-31,ntot)
+      deps6v(2) = deps6v(2) - parahot3(idimpara3,ntot)
+     .                      + parahot3(idimpara3-31,ntot)
+      if (.not.lcp) deps6v(3) = deps6v(3) - parahot3(idimpara3,ntot)
+     .                      + parahot3(idimpara3-31,ntot)
+
+      lg = .false.
+      lbroyden = .false.
+      lfulldamage = .false.
+
+      n = 1
+   23 continue
+      do istep = 1,n
+c     To improve convergence, the step can be subdivided
+
+
+c       ***********************************************************
+c           *********************
+c           ! 3D concrete model !
+c           !    PLASTIC BOX    !
+c           *********************
+
+        call DPRAN3D(parahot3(i1,ntot),idimpara3,H66t,rt1,rc1,
+c            *******
+     .             esigma6v,deps6v,lg,ntot,lerror,i1,i2,i3,i4,i5,
+     .             i6,n,lnoconv,istep,lcp,lbroyden,H66,lfulldamage)
+c       Plastic Box of the 3D plastic-damage concrete model by T. Gernay
+c       Yield functions of Drucker Prager in compression and Rankine in tension
+c       Calculate the effective stresses and the effective elastoplastic tangent
+c       modulus Dt (implicit process)
+c       ***********************************************************
+
+        if (lnoconv) then
+          n = n*2
+c         the step is subdivided by factor 2
+c         we come back to the state at the previous (converged) step: rkappac = rkappaic
+          parahot3(idimpara3-35,ntot) = parahot3(idimpara3-37,ntot)
+          parahot3(idimpara3-34,ntot) = parahot3(idimpara3-36,ntot)
+          if (n.lt.32) go to 23
+c         the step can be divided in maximum 16 "sub-steps"
+          if (.not.lbroyden) then
+c           if still no convergence when dividing the size of the step => try another algorithm
+            lbroyden = .true.
+            n = 1
+            go to 23
+          endif
+          if (.not.lfulldamage) then
+c           still no convergence => if completely damaged, "remove" the point (sigma = 0)
+            dc = parahot3(idimpara3-40,ntot)
+            dt = parahot3(idimpara3-41,ntot)
+            if ((dt.gt.0.97).or.(dc.gt.0.97)) then
+              lfulldamage = .true.
+              n = 1
+              go to 23
+            endif
+          endif
+c         if we arrive here, all the strategies to improve convergence have been tested with
+c         no success => lerror is true (send back an error from the MATERIAL subroutines)
+          lerror = .true.
+          return
+        endif
+      enddo
+
+c     if ((NOEL.eq.18).and.(NPT.eq.23)) then
+*       print *,'SORTIE DPRAN3D contraintes = ',esigma6v
+c     endif
+
+c     *************************************************************
+c         *********************
+c         ! 3D concrete model !
+c         !     DAMAGE BOX    !
+c         *********************
+      call DAMTG3D(parahot3(i1,ntot),idimpara3,H66t,rt1,rc1,
+c          *******
+     .    esigma6v,lg,ntot,lerror,i1,i2,i3,i4,i5,i6,H66,
+     .    lfulldamage,lcp)
+c     Damage Box of the 3D plastic-damage concrete model by T. Gernay
+c     Calculate the nominal stresses and the nominal consistent algorithmic
+c     tangent modulus Ct (explicit process)
+c     *************************************************************
+
+c     if ((NOEL.eq.18).and.(NPT.eq.23)) then
+*       print *,'SORTIE DAMTG3D contraintes = ', sigma6v
+c     endif
+
+
+c     The tangent matrix is symmetrized
+c     because SAFIR uses a symmetric matrix for the resolution of the equilibrium
+c                T
+c     B = ( A + A ) / 2
+      do iloc=2,6
+        rloc = H66t(1,iloc) + H66t(iloc,1)
+        H66t(1,iloc) = rloc/(2.d0)
+        H66t(iloc,1) = H66t(1,iloc)
+      enddo
+      do iloc=3,6
+        rloc = H66t(2,iloc) + H66t(iloc,2)
+        H66t(2,iloc) = rloc/(2.d0)
+        H66t(iloc,2) = H66t(2,iloc)
+      enddo
+      do iloc=4,6
+        rloc = H66t(3,iloc) + H66t(iloc,3)
+        H66t(3,iloc) = rloc/(2.d0)
+        H66t(iloc,3) = H66t(3,iloc)
+      enddo
+      do iloc=5,6
+        rloc = H66t(4,iloc) + H66t(iloc,4)
+        H66t(4,iloc) = rloc/(2.d0)
+        H66t(iloc,4) = H66t(4,iloc)
+      enddo
+      rloc = H66t(5,6) + H66t(6,5)
+      H66t(5,6) = rloc/(2.d0)
+      H66t(6,5) = H66t(5,6)
+
+c     Save the nominal stresses
+      do iloc=i1,i6
+        sigma6v(iloc) = PARAHOT3(idimpara3-13+iloc,ntot)
+      end do
+
+c      if (lcp) then
+cc     Plane stress model
+c        parahot2(idimpara2-i3,ntot) = sigma6v(1)
+c        parahot2(idimpara2-i2,ntot) = sigma6v(2)
+c        parahot2(idimpara2-i1,ntot) = sigma6v(4)
+c        PARAHOT2(idimpara2-i7,ntot)=parahot3(idimpara3-18,ntot)
+c        PARAHOT2(idimpara2-i6,ntot)=parahot3(idimpara3-17,ntot)
+c        PARAHOT2(idimpara2-i5,ntot)=parahot3(idimpara3-15,ntot)
+c      endif
+      END
+
+
+
+

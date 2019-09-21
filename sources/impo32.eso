@@ -1,0 +1,1335 @@
+C IMPO32    SOURCE    CB215821  19/03/18    21:15:19     10160
+
+*  impo bloc en 3D
+
+      SUBROUTINE IMPO32(ipt6)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCREEL
+-INC CCGEOME
+
+-INC SMCOORD
+-INC SMELEME
+-INC SMRIGID
+-INC SMCHPOI
+-INC SMCHAML
+
+* Contact en formulation forte :
+* Segments utiles dans les cas dits pathologiques
+      segment mfopa1
+        integer lpoin(nfopa1,3)
+        real*8  xpoin(nfopa1,3)
+        real*8  zje1(nfopa1)
+      endsegment
+      segment mfopa2
+        integer lsegm(nfopa2,4)
+        real*8  xsegm(nfopa2,3)
+        real*8  zje2(nfopa2)
+      endsegment
+* directions moyennes aux sommets
+      segment mfopa3
+        real*8 xms(nbpts),yms(nbpts),zms(nbpts)
+      endsegment
+
+* Contact en formulation faible :
+* Segment utile pour le calcul de l'intersection des 2 triangles
+* projetes dans le plan de contact intermediaire
+      segment mfaible
+        real*8 cPT1C(3,3),cPT2C(3,3), cPT1A(4,2),cPT2A(4,2)
+        real*8 cPIn0(6,2), cPIn(6,2), test(6)
+        real*8 vT1A(3,2), vT2A(3,2)
+        real*8 SuT1A, SuT2A, SuPIn
+*DBG-F        real*8 xGIn,yGIn, b1T1,b2T1,b3T1, b1T2,b2T2,b3T2
+      endsegment
+
+      PARAMETER ( X1s3=0.333333333333333333333333333333333333333333D0 )
+
+      character*4 modepl(3),moforc(3)
+
+      data modepl /'UX  ','UY  ','UZ  '/
+      data moforc /'FX  ','FY  ','FZ  '/
+*
+      idimp1 = IDIM + 1
+*
+*  Lecture du maillage support des conditions de contact
+*
+      call lirobj('MAILLAGE',ipt1,1,iretou)
+      isous=0
+      call lirent(isous,0,iretou)
+      mchel1=0
+      call lirent(mchel1,0,iretou)
+      if (ierr.ne.0) return
+*
+*  Activation du maillage et petites verifications
+*
+      segact ipt1
+      nbno1 = ipt1.num(/1)
+      nbel1 = ipt1.num(/2)
+      if (ipt1.lisous(/1).ne.0) call erreur(25)
+      if (ipt1.itypel.ne.22) call erreur(16)
+      if (nbno1.ne.5 .and. nbno1.ne.7) call erreur(16)
+      if (ierr.ne.0) goto 900
+*
+*   Increment sur le nombre d'elements de contact retenus et utilises
+*   dans le chpoint (mpoval et igeoc) et rigidite pour agrandir les
+*   longueurs des segments adequats
+      incnel = 2000
+*
+*  Creation de la raideur des conditions de contact
+*  Remplissage de l'entete commun
+*
+      nrigel = 1
+      segini,mrigid
+      ichole = 0
+      imgeo1 = 0
+      imgeo2 = 0
+      isupeq = 0
+      iforig = ifomod
+      coerig(1) = 1.
+      mtymat='RIGIDITE'
+*
+*     MCHAML materiau associe au MMODEL
+      MELVA1 = 0
+      MELVA2 = 0
+      IF (MCHEL1.NE.0) THEN
+        SEGACT, MCHEL1
+        MCHAM1 = MCHEL1.ICHAML(isous)
+        SEGACT, MCHAM1
+        NBCO = MCHAM1.NOMCHE(/2)
+        DO JCMP = 1,NBCO
+          IF (MCHAM1.NOMCHE(JCMP).EQ.'JEU') THEN
+            MELVA1 = MCHAM1.IELVAL(JCMP)
+            SEGACT, MELVA1
+            NELJ = MELVA1.VELCHE(/2)
+            NPTELJ = min(MELVA1.VELCHE(/1),4)
+          ENDIF
+          IF (MCHAM1.NOMCHE(JCMP).EQ.'ADHE') THEN
+            MELVA2 = MCHAM1.IELVAL(JCMP)
+            SEGACT, MELVA2
+            NELA = MELVA2.VELCHE(/2)
+            NPTELA = min(MELVA2.VELCHE(/1),4)
+          ENDIF
+        ENDDO
+      ENDIF
+*
+*  Creation du chpoint de depi
+*
+      nat=1
+      nsoupo=1
+      segini mchpoi
+      mtypoi='DEPIMP'
+      mochde='engendré par impose'
+      ifopoi=ifomod
+      jattri(1)=2
+*
+      nc=1
+      IF (MELVA2.NE.0) nc=2
+      segini msoupo
+      ipchp(1)=msoupo
+      nocomp(1)='FLX '
+      nocons(1)='                '
+      IF (MELVA2.NE.0) THEN
+        nocomp(2)='FADH'
+        nocons(2)='                '
+      ENDIF
+*
+      nbnn  =1
+      nbelem=incnel
+      nbref =0
+      nbsous=0
+      segini ipt7
+      ipt7.itypel=1
+      igeoc=ipt7
+*
+      n=incnel
+      segini mpoval
+      ipoval=mpoval
+*
+*  Nombre de noeuds dans le chpoint (en totalite) : ipt7 et mpoval
+      nelch = 0
+
+*=======================================================================
+* Formulation "forte" (standard) du contact :
+*=======================================================================
+* Element de contact 3D a 5 noeuds
+      if (nbno1.eq.7) goto 500
+
+*  Calcul des directions moyennes
+      nbpts = xcoor(/1)/(idim+1)
+      segini mfopa3
+      ip1o=0
+      ip2o=0
+      ip3o=0
+      do 820 iel=1,nbel1
+*
+        ip1=ipt1.num(2,iel)
+        ip2=ipt1.num(3,iel)
+        ip3=ipt1.num(4,iel)
+* on suppose que les elements de frottements appuyes sur la même facette se suivent
+* et on ne les comptabilise qu'une fois
+        if (ip1.eq.ip1o.and.ip2.eq.ip2o.and.ip3.eq.ip3o) goto 820
+        ip1o=ip1
+        ip2o=ip2
+        ip3o=ip3
+        ipv1 = (ip1-1)*idimp1
+        xp1 = xcoor(ipv1+1)
+        yp1 = xcoor(ipv1+2)
+        zp1 = xcoor(ipv1+3)
+        ipv2 = (ip2-1)*idimp1
+        xp2 = xcoor(ipv2+1)
+        yp2 = xcoor(ipv2+2)
+        zp2 = xcoor(ipv2+3)
+        ipv3 = (ip3-1)*idimp1
+        xp3 = xcoor(ipv3+1)
+        yp3 = xcoor(ipv3+2)
+        zp3 = xcoor(ipv3+3)
+*
+*    normale au plan (123)
+*
+        x12 = xp2 - xp1
+        y12 = yp2 - yp1
+        z12 = zp2 - zp1
+        x23 = xp3 - xp2
+        y23 = yp3 - yp2
+        z23 = zp3 - zp2
+        xn = y12*z23 - z12*y23
+        yn = z12*x23 - x12*z23
+        zn = x12*y23 - y12*x23
+        sn = xn*xn + yn*yn + zn*zn
+        sn = max(sqrt(abs(sn)),xpetit*1d10)
+        xn = xn/sn
+        yn = yn/sn
+        zn = zn/sn
+        xms(ip1)=xms(ip1)+xn
+        yms(ip1)=yms(ip1)+yn
+        zms(ip1)=zms(ip1)+zn
+        xms(ip2)=xms(ip2)+xn
+        yms(ip2)=yms(ip2)+yn
+        zms(ip2)=zms(ip2)+zn
+        xms(ip3)=xms(ip3)+xn
+        yms(ip3)=yms(ip3)+yn
+        zms(ip3)=zms(ip3)+zn
+ 820  continue
+        do 821 ip = 1,nbpts
+         sn = xms(ip)*xms(ip)+yms(ip)*yms(ip)+zms(ip)*zms(ip)
+         sn = max(sqrt(abs(sn)),xpetit*1d10)
+         xms(ip)=xms(ip)/sn
+         yms(ip)=yms(ip)/sn
+         zms(ip)=zms(ip)/sn
+ 821  continue
+*
+*  Nombre d'iterations pour la detection de la direction du contact
+      nbiter=16
+*
+* Relation du type 3 : noeud-triangle
+*-------------------------------------
+*
+*  creation du meleme associe a la relation
+*
+      nbsous=0
+      nbref =0
+      nbnn  =5
+      nbelem=incnel
+      segini meleme
+      itypel=22
+      irigel(1,nrigel)=meleme
+*
+*  creation du descriptif commun a toutes les raideurs
+*
+      nligrp = 13
+      nligrd = nligrp
+      segini,descr
+      lisinc(1)='LX  '
+      lisdua(1)='FLX '
+      noelep(1)=1
+      noeled(1)=1
+      do 10 i=2, nligrp, 3
+        lisinc(i)  =modepl(1)
+        lisinc(i+1)=modepl(2)
+        lisinc(i+2)=modepl(3)
+        lisdua(i)  =moforc(1)
+        lisdua(i+1)=moforc(2)
+        lisdua(i+2)=moforc(3)
+        noelep(i)  =(i+4)/3
+        noelep(i+1)=noelep(i)
+        noelep(i+2)=noelep(i)
+        noeled(i)  =noelep(i)
+        noeled(i+1)=noelep(i)
+        noeled(i+2)=noelep(i)
+ 10   continue
+      segdes,descr
+      irigel(3,nrigel) = descr
+*
+*  creation du segment xmatri
+*
+      nelrig = incnel
+      segini,xmatri
+      irigel(4,nrigel) = xmatri
+*
+*  ce qu'on cree est unilateral
+*
+      irigel(6,nrigel)=1
+*
+*  ce qu'on cree est symetrique
+*
+      irigel(7,nrigel)=0
+*
+*  Nombre d'elements dans la rigidite du type 3
+      nelri3 = 0
+
+*  Boucle sur le maillage support du contact(frottement)
+*
+      DO 20 iel=1,nbel1
+*
+        xjr = 0d0
+        ip1=ipt1.num(2,iel)
+        ip2=ipt1.num(3,iel)
+        ip3=ipt1.num(4,iel)
+*  Recuperation des coordonees des noeuds du triangle
+        ipv = (ip1-1)*idimp1
+        xp1 = xcoor(ipv+1)
+        yp1 = xcoor(ipv+2)
+        zp1 = xcoor(ipv+3)
+        ipv = (ip2-1)*idimp1
+        xp2 = xcoor(ipv+1)
+        yp2 = xcoor(ipv+2)
+        zp2 = xcoor(ipv+3)
+        ipv = (ip3-1)*idimp1
+        xp3 = xcoor(ipv+1)
+        yp3 = xcoor(ipv+2)
+        zp3 = xcoor(ipv+3)
+*  Centre de gravite du triangle
+        xg = (xp1+xp2+xp3) /3.d0
+        yg = (yp1+yp2+yp3) /3.d0
+        zg = (zp1+zp2+zp3) /3.d0
+*  Triangle un peu plus grand pour les tests
+        scale=1.00 + xszpre
+        xp1e=xg+(xp1-xg)*scale
+        yp1e=yg+(yp1-yg)*scale
+        zp1e=zg+(zp1-zg)*scale
+        xp2e=xg+(xp2-xg)*scale
+        yp2e=yg+(yp2-yg)*scale
+        zp2e=zg+(zp2-zg)*scale
+        xp3e=xg+(xp3-xg)*scale
+        yp3e=yg+(yp3-yg)*scale
+        zp3e=zg+(zp3-zg)*scale
+        jp =ipt1.num(5,iel)
+        ipv = (jp-1)*idimp1
+        xp  = xcoor(ipv+1)
+        yp  = xcoor(ipv+2)
+        zp  = xcoor(ipv+3)
+        if (MELVA1.ne.0) then
+           nel1 = min (iel,nelj)
+           xjr = melva1.velche(nptelj,nel1)
+      endif
+*  Verification que pas relation du point sur lui meme
+        if (jp.eq.ip1) goto 20
+        if (jp.eq.ip2) goto 20
+        if (jp.eq.ip3) goto 20
+*
+*  Verification si autre point dans la zone de selection
+*  verif distance au centre de gravite
+        d1 = (xg-xp1)**2 + (yg-yp1)**2 + (zg-zp1)**2
+        d2 = (xg-xp2)**2 + (yg-yp2)**2 + (zg-zp2)**2
+        d3 = (xg-xp3)**2 + (yg-yp3)**2 + (zg-zp3)**2
+        dist = max(d1,d2,d3)
+        dp = ((xg-xp)**2 + (yg-yp)**2 + (zg-zp)**2)
+        if (dp.gt.dist*9) goto 20
+C*DBG        write(ioimp,*) 'contact test distance ok',dp,d1,d2,d3
+        dist = SQRT(dist)
+
+*  verif position par rapport aux cotes
+
+*  cote 1 2
+        x12 = xp2 - xp1
+        y12 = yp2 - yp1
+        z12 = zp2 - zp1
+        sv = sqrt(x12**2+y12**2+z12**2)
+        xv=x12/sv
+        yv=y12/sv
+        zv=z12/sv
+*  normale locale (1 et 2)
+        xnl=xms(ip1)+xms(ip2)
+        ynl=yms(ip1)+yms(ip2)
+        znl=zms(ip1)+zms(ip2)
+
+*  vecteur reference
+        xn=y12*znl-z12*ynl
+        yn=z12*xnl-x12*znl
+        zn=x12*ynl-y12*xnl
+        dn  = sqrt(xn*xn+yn*yn+zn*zn)
+        scal = (xp-xp1e)*xv + (yp-yp1e)*yv + (zp-zp1e)*zv
+        xm = xp1e + scal*xv
+        ym = yp1e + scal*yv
+        zm = zp1e + scal*zv
+        dpm = sqrt(abs((xp-xm)**2+(yp-ym)**2+(zp-zm)**2))
+        scal = (xp-xm)*xn + (yp-ym)*yn + (zp-zm)*zn
+        if (dpm.lt.dist*xszpre) write(6,*) ' pt sur 1 2',dpm
+        if (dpm.gt.dist*xszpre.and.scal.gt.0.707d0*dn*dpm) goto 20
+        dpm=max(xpetit,dpm)
+*       write(ioimp,*) 'contact test position 1 ok',
+*    &                 scal/(dn*dpm),scal,dn,dpm
+*
+*  cote 2 3
+        x23 = xp3 - xp2
+        y23 = yp3 - yp2
+        z23 = zp3 - zp2
+        sv = sqrt(x23**2+y23**2+z23**2)
+        xv=x23/sv
+        yv=y23/sv
+        zv=z23/sv
+*  normale locale (2 et 3)
+        xnl=xms(ip2)+xms(ip3)
+        ynl=yms(ip2)+yms(ip3)
+        znl=zms(ip2)+zms(ip3)
+
+*  vecteur reference
+        xn=y23*znl-z23*ynl
+        yn=z23*xnl-x23*znl
+        zn=x23*ynl-y23*xnl
+        dn  = sqrt(xn*xn+yn*yn+zn*zn)
+        scal = (xp-xp2e)*xv + (yp-yp2e)*yv + (zp-zp2e)*zv
+        xm = xp2e + scal*xv
+        ym = yp2e + scal*yv
+        zm = zp2e + scal*zv
+        dpm = sqrt(abs((xp-xm)**2+(yp-ym)**2+(zp-zm)**2))
+        scal = (xp-xm)*xn + (yp-ym)*yn + (zp-zm)*zn
+        if (dpm.lt.dist*xszpre) write(6,*) ' pt sur 2 3',dpm
+        if (dpm.gt.dist*xszpre.and.scal.gt.0.707d0*dn*dpm) goto 20
+        dpm=max(xpetit,dpm)
+*       write(ioimp,*) 'contact test position 2 ok',
+*    &                 scal/(dn*dpm),scal,dn,dpm
+*
+*  cote 3 1
+        x31 = xp1 - xp3
+        y31 = yp1 - yp3
+        z31 = zp1 - zp3
+        sv = sqrt(x31**2+y31**2+z31**2)
+        xv=x31/sv
+        yv=y31/sv
+        zv=z31/sv
+*  normale locale (3 et 1)
+        xnl=xms(ip3)+xms(ip1)
+        ynl=yms(ip3)+yms(ip1)
+        znl=zms(ip3)+zms(ip1)
+*  vecteur reference
+        xn=y31*znl-z31*ynl
+        yn=z31*xnl-x31*znl
+        zn=x31*ynl-y31*xnl
+        dn  = sqrt(xn*xn+yn*yn+zn*zn)
+        scal = (xp-xp3e)*xv + (yp-yp3e)*yv + (zp-zp3e)*zv
+        xm = xp3e + scal*xv
+        ym = yp3e + scal*yv
+        zm = zp3e + scal*zv
+        dpm = sqrt(abs((xp-xm)**2+(yp-ym)**2+(zp-zm)**2))
+        scal = (xp-xm)*xn + (yp-ym)*yn + (zp-zm)*zn
+        if (dpm.lt.dist*xszpre) write(6,*) ' pt sur 3 1',dpm
+        if (dpm.gt.dist*xszpre.and.scal.gt.0.707d0*dn*dpm) goto 20
+        dpm=max(xpetit,dpm)
+*       write(ioimp,*) 'contact test position 2 ok',
+*    &                 scal/(dn*dpm),scal,dn,dpm
+*
+* on a un point ou imposer la relation
+C*DBG       write(ioimp,*) 'contact potentiel '
+* Quelle est la relation ???
+*
+*   direction de la relation = normale au plan (123)
+*
+*  normale reelle
+        xnr = y12*z23 - z12*y23
+        ynr = z12*x23 - x12*z23
+        znr = x12*y23 - y12*x23
+        dnr = sqrt(xnr*xnr+ynr*ynr+znr*znr)
+        if (dnr.lt.dist*xszpre) write(6,*) ' pb dnr'
+        xnr = xnr / dnr
+        ynr = ynr / dnr
+        znr = znr / dnr
+* normale ponderee
+        xn=xms(ip1)+xms(ip2)+xms(ip3)
+        yn=yms(ip1)+yms(ip2)+yms(ip3)
+        zn=zms(ip1)+zms(ip2)+zms(ip3)
+        dn = sqrt(xn*xn+yn*yn+zn*zn)
+        if (.not.(dn.lt.1d-10).and. .not.(dn.gt.1d-10))
+     &    write(ioimp,*) 'Prob 4.1 - impo32'
+        if (abs(dn).le.xpetit) write(ioimp,*) 'Prob 4.2 - impo32'
+        xn = xn / dn
+        yn = yn / dn
+        zn = zn / dn
+*
+*   Distance (jeu) du point jp au plan de contact
+*   Puis calcul de la projection sur le plan de contact
+*
+**      write(6,*) 'ip1 xms ',ip1,xms(ip1),yms(ip1),zms(ip1)
+**      write(6,*) 'ip2 xms ',ip2,xms(ip2),yms(ip2),zms(ip2)
+**      write(6,*) 'ip3 xms ',ip3,xms(ip3),yms(ip3),zms(ip3)
+**      write(6,*) 'xn      ',xn,yn,zn
+        iter = 0
+  21    continue
+        xjeuv = (xp-xg)*xnr + (yp-yg)*ynr + (zp-zg)*znr
+        angn = xn * xnr + yn*ynr + zn*znr
+        if (angn.lt.0.d0) write(6,*) 'angn negatif ',angn
+        xjeuv = xjeuv / angn
+*
+*   Recherche de ses coordonnées barycentriques
+*   qui sont les surfaces des sous triangles
+*
+        xq = xp - xjeuv*xn
+        yq = yp - xjeuv*yn
+        zq = zp - xjeuv*zn
+        xb1 = (yq-yp2)*(zq-zp3)-(zq-zp2)*(yq-yp3)
+        yb1 = (zq-zp2)*(xq-xp3)-(xq-xp2)*(zq-zp3)
+        zb1 = (xq-xp2)*(yq-yp3)-(yq-yp2)*(xq-xp3)
+        xb2 = (yq-yp3)*(zq-zp1)-(zq-zp3)*(yq-yp1)
+        yb2 = (zq-zp3)*(xq-xp1)-(xq-xp3)*(zq-zp1)
+        zb2 = (xq-xp3)*(yq-yp1)-(yq-yp3)*(xq-xp1)
+        xb3 = (yq-yp1)*(zq-zp2)-(zq-zp1)*(yq-yp2)
+        yb3 = (zq-zp1)*(xq-xp2)-(xq-xp1)*(zq-zp2)
+        zb3 = (xq-xp1)*(yq-yp2)-(yq-yp1)*(xq-xp2)
+        b1  = xb1*xn  + yb1*yn  + zb1*zn
+        b2  = xb2*xn  + yb2*yn  + zb2*zn
+        b3  = xb3*xn  + yb3*yn  + zb3*zn
+        bt  = b1 + b2 + b3
+*  normalement pas utile
+        if (bt.lt.0.d0) then
+        write (6,*) ' bt negatif dans impo32 '
+         print *,'xp1 yp1 zp1',xp1,yp1,zp1
+         print *,'xp2 yp2 zp2',xp2,yp2,zp2
+         print *,'xp3 yp3 zp3',xp3,yp3,zp3
+         print *,'xp yp zp',xp,yp,zp
+         print *,'xn yn zn',xn,yn,zn
+         print *,'b1 b2 b3 bt',b1,b2,b3,bt
+*        goto 20
+        endif
+        bsurf = bt / 2
+        if (.not.(bt.lt.1d-10) .and. .not.(bt.gt.1d-10))
+     &    write(ioimp,*) 'Prob 5.1 - impo32'
+        if (abs(bt).le.xpetit) write(ioimp,*) 'Prob 5.2 - impo32'
+        b1 = b1 / bt
+        b2 = b2 / bt
+        b3 = b3 / bt
+*  recalcul de la direction et du jeu en fonction des normales aux sommets
+*  on arete l'interpolation de la normale au bord de l'element
+        bb1=max(b1,0.d0)
+        bb2=max(b2,0.d0)
+        bb3=max(b3,0.d0)
+        bm = bb1 + bb2 + bb3
+        bb1 = bb1 / bm
+        bb2 = bb2 / bm
+        bb3 = bb3 / bm
+        xn =   bb1*xms(ip1)+ bb2*xms(ip2)+ bb3*xms(ip3)
+        yn =   bb1*yms(ip1)+ bb2*yms(ip2)+ bb3*yms(ip3)
+        zn =   bb1*zms(ip1)+ bb2*zms(ip2)+ bb3*zms(ip3)
+        sn = sqrt (xn*xn + yn*yn + zn*zn)
+        xn=xn/sn
+        yn=yn/sn
+        zn=zn/sn
+*       write (6,*) ' iter b* *n ',iter,b1,b2,b3,xn,yn,zn
+* recalcul en fonction de la nouvelle normale
+        iter=iter+1
+        if (iter.le.nbiter) goto 21
+**        write (6,*) ' iter b* *n ',iter,b1,b2,b3,xn,yn,zn
+
+
+* si on a deja traverse, les trois coordonnees barycentriques doivent etre positives
+**      if (xjeuv-xjr.lt.-xszpre*dist) then
+**        if (b1.lt.-xszpre) goto 20
+**        if (b2.lt.-xszpre) goto 20
+**        if (b3.lt.-xszpre) goto 20
+**      endif
+*  Si on est en dehors, on projette sur l'arete (ou pas)
+**      if (b1.lt.0.d0.or.b2.lt.0.d0.or.b3.lt.0.d0) then
+**        xq=xp1*bb1+xp2*bb2+xp3*bb3
+**        yq=yp1*bb1+yp2*bb2+yp3*bb3
+**        zq=zp1*bb1+zp2*bb2+zp3*bb3
+**        xnn=xp-xq
+**        ynn=yp-yq
+**        znn=zp-zq
+**        snn=sqrt(abs(xnn*xnn+ynn*ynn+znn*znn))
+**        if (snn.lt.xszpre*dist) write (6,*) ' snn petit ',snn
+*  sinon on prend la direction reelle
+**        if (snn.gt.xszpre*dist) then
+**           xn=xnn/sn
+**           yn=ynn/sn
+**           zn=znn/sn
+**        endif
+**      endif
+        xjeu1 = (xp-xp1)*xn + (yp-yp1)*yn + (zp-zp1)*zn
+        xjeu2 = (xp-xp2)*xn + (yp-yp2)*yn + (zp-zp2)*zn
+        xjeu3 = (xp-xp3)*xn + (yp-yp3)*yn + (zp-zp3)*zn
+        xjeuv = xjeu1 * bb1 + xjeu2 * bb2 + xjeu3 * bb3
+**      write (6,*) 'b1 b2 b3',b1,b2,b3
+**      write (6,*) 'xjeu xjeuv ',xjeu,xjeuv,xjeu1,xjeu2,xjeu3
+        xjeu = xjeuv - xjr
+**      write (6,*) ' normale ',xn,yn,zn,' jeu ',xjeu1,xjeu2,xjeu3
+*  verif bon cote (a la tolerance pres)
+**      write (6,*) ' xjeu ',xjeu,dist,iel
+        if (xjeu.lt.-3*dist) goto 20
+        if (xjeu.gt.3*dist) goto 20
+*  verif compatibilite avec la normale au poin impactant
+        if (xms(jp)*xn+yms(jp)*yn+zms(jp)*zn.gt. -0.0d0) then
+**        write (6,*) ' impo32 normales incompatibes 1 ',
+**   >  jp,xjeu,dpm,dist
+          goto 20
+        endif
+
+
+
+C*DBG        write(ioimp,*) ' b1 b2 b3 ',b1,b2,b3
+*  creation du support du multiplicateur de lagrange si necessaire
+        nbpts = xcoor(/1)/(idim+1)
+        if (ipt1.num(1,iel).eq.ilgni) then
+          nbpts = nbpts + 1
+          segadj mcoord
+          segact ipt1*mod
+          ipt1.num(1,iel)=nbpts
+          if (ipt6.ne.0) ipt6.num(1,iel)=nbpts
+        endif
+        segact mcoord*mod
+        xcoor(nbpts*(idim+1)) = dist
+ 1954   continue
+* points a l'exterieur?
+* on met une ponderation et un rayon d'acceptation
+        pond =  (1D4+1) - 1D4 * bm
+        if (pond.le.0.d0) goto 20
+        pond=max(pond,0.d0)
+        pond=min(pond,1.d0)
+
+**       if (xjeu.lt.0.d0)
+**   >    write (6,*) 'pt traverse',jp,b1,b2,b3,xjeuv-xjr,dist
+
+*
+*  Ajout d'une relation noeud-triangle
+*
+        nelri3 = nelri3 + 1
+        nelch = nelch + 1
+*
+*   on ajuste les differents segments si necesaire
+*
+        if (nelri3.gt.nelrig) then
+          nelrig = nelrig + incnel
+          segadj,xmatri
+          nbelem = nbelem + incnel
+          nbnn = 5
+          segadj,meleme
+          nbnn = 1
+          segadj,ipt7
+          n = n + incnel
+          segadj,mpoval
+        endif
+*
+*  Mise a jour du meleme
+        num(1,nelri3) = ipt1.num(1,iel)
+        num(2,nelri3) = ip1
+        num(3,nelri3) = ip2
+        num(4,nelri3) = ip3
+        num(5,nelri3) = jp
+*
+*  Mise a jour de xmatri
+*  lambda
+        re( 1,1,nelri3) = 0d0
+*  ip1
+        re( 2,1,nelri3) = xn * bb1 * bsurf * pond
+        re( 3,1,nelri3) = yn * bb1 * bsurf * pond
+        re( 4,1,nelri3) = zn * bb1 * bsurf * pond
+*  ip2
+        re( 5,1,nelri3) = xn * bb2 * bsurf * pond
+        re( 6,1,nelri3) = yn * bb2 * bsurf * pond
+        re( 7,1,nelri3) = zn * bb2 * bsurf * pond
+*  ip3
+        re( 8,1,nelri3) = xn * bb3 * bsurf * pond
+        re( 9,1,nelri3) = yn * bb3 * bsurf * pond
+        re(10,1,nelri3) = zn * bb3 * bsurf * pond
+*  jp
+        re(11,1,nelri3) = -xn * bsurf * pond
+        re(12,1,nelri3) = -yn * bsurf * pond
+        re(13,1,nelri3) = -zn * bsurf * pond
+*  on transpose
+        do 30 ic = 2, nligrp
+          re(1,ic,nelri3) = re(ic,1,nelri3)
+ 30     continue
+*  le reste est nul
+*
+*  remplissage du champoint de depi (jeu)
+*
+        ipt7.num(1,nelch) = ipt1.num(1,iel)
+        vpocha(nelch,1)   = xjeu  * bsurf * pond
+        IF (MELVA2.NE.0) THEN
+          NEL2 = min (iel,NELA)
+          VPOCHA(nelch,2) = max(MELVA2.VELCHE(NPTELA,NEL2),0.D0)*
+     >      bsurf * pond
+        ENDIF
+*         write(ioimp,*) ' jeu ',xjeu,ip1,ip2,ip3,jp,b1,b2,b3,xn,yn,zn
+*
+ 20   CONTINUE
+*
+* Ajustement au plus juste puis desactivation des segments lies
+* a la rigidite du type 3
+      if (nelri3.ne.nelrig) then
+        nelrig = nelri3
+        segadj,xmatri
+        nbelem = nelri3
+        nbnn = 5
+        segadj,meleme
+      endif
+      segdes,meleme,xmatri
+*
+*pv        write(ioimp,*) ' nb relation type 3 ',nelri3
+**         write(6,fmt='(10i8)') (num(5,nelr),nelr=1,nelri3)
+
+
+
+
+
+C*DBG      if (nelri3.eq.0) irigel(6,nrigel)=0
+*
+*  Fin du traitement de la formulation standard/forte
+* ----------------------------------------------------
+ 300  CONTINUE
+* Destruction des segments locaux devenus inutiles
+      segsup mfopa3
+
+      GOTO 1000
+
+*=======================================================================
+*= Formulation "faible" 3D : relation triangle-triangle
+*=======================================================================
+* Element de contact 3D a 7 noeuds (1+6)
+ 500  CONTINUE
+*
+*  Petit segment de travail
+      segini,mfaible
+*
+* Relation du type 0 : triangle-triangle (faible)
+*---------------------------------------
+*
+*  Creation du meleme associe a la relation
+*
+      nbnn   = 7
+      nbelem = incnel
+      nbsous = 0
+      nbref  = 0
+      segini,meleme
+      itypel = 22
+      irigel(1,nrigel) = meleme
+*
+*  Creation du descriptif commun a toutes les raideurs
+*
+      nligrp = 19
+      nligrd = nligrp
+      segini,descr
+      lisinc(1) = 'LX  '
+      lisdua(1) = 'FLX '
+      noelep(1) = 1
+      noeled(1) = 1
+      do 510 i = 2, nligrp, 3
+        lisinc(i  ) = modepl(1)
+        lisinc(i+1) = modepl(2)
+        lisinc(i+2) = modepl(3)
+        lisdua(i  ) = moforc(1)
+        lisdua(i+1) = moforc(2)
+        lisdua(i+2) = moforc(3)
+        noelep(i  ) = (i+5)/3
+        noelep(i+1) = noelep(i)
+        noelep(i+2) = noelep(i)
+        noeled(i  ) = noelep(i)
+        noeled(i+1) = noelep(i)
+        noeled(i+2) = noelep(i)
+ 510  continue
+      segdes,descr
+      irigel(3,nrigel) = descr
+*
+*     creation du segment xmatri
+*
+      nelrig = incnel
+      segini,xmatri
+      irigel(4,nrigel) = xmatri
+*
+*     ce qu'on cree est unilateral
+*
+      irigel(6,nrigel) = 1
+*
+*     ce qu'on cree est symetrique
+*
+      irigel(7,nrigel) = 0
+*
+*  Nombre d'elements crees dans meleme=irigel(1,nrigel), ipt7 et mpoval
+      nelri0 = 0
+*
+*  Boucle sur les elements du maillage de contact/frottement "faible"
+*
+      DO 520 iel = 1, nbel1
+*
+        xjr = 0d0
+        ip1 = ipt1.num(2,iel)
+        ip2 = ipt1.num(3,iel)
+        ip3 = ipt1.num(4,iel)
+        jp1 = ipt1.num(5,iel)
+        jp2 = ipt1.num(6,iel)
+        jp3 = ipt1.num(7,iel)
+        if (MELVA1.ne.0) then
+           nel1 = min (iel,nelj)
+           xjr = melva1.velche(nptelj,nel1)
+        endif
+C*DBG        write(ioimp,*) iel,ip1,ip2,ip3,jp1,jp2,jp3,ipt1.num(1,iel)
+*
+* Verification (provisoire) qu'il n'y a pas de noeud double
+        if (ip1.eq.jp1) goto 520
+        if (ip1.eq.jp2) goto 520
+        if (ip1.eq.jp3) goto 520
+        if (ip2.eq.jp1) goto 520
+        if (ip2.eq.jp2) goto 520
+        if (ip2.eq.jp3) goto 520
+        if (ip3.eq.jp1) goto 520
+        if (ip3.eq.jp2) goto 520
+        if (ip3.eq.jp3) goto 520
+*
+* Definition du triangle T1(ip1,ip2,ip3)
+* - Coordonnees des noeuds de T1
+        ipv = (ip1-1)*idimp1
+        xp1 = xcoor(ipv+1)
+        yp1 = xcoor(ipv+2)
+        zp1 = xcoor(ipv+3)
+        ipv = (ip2-1)*idimp1
+        xp2 = xcoor(ipv+1)
+        yp2 = xcoor(ipv+2)
+        zp2 = xcoor(ipv+3)
+        ipv = (ip3-1)*idimp1
+        xp3 = xcoor(ipv+1)
+        yp3 = xcoor(ipv+2)
+        zp3 = xcoor(ipv+3)
+* - Barycentre de T1
+        xgT1 = (xp1 + xp2 + xp3) * X1s3
+        ygT1 = (yp1 + yp2 + yp3) * X1s3
+        zgT1 = (zp1 + zp2 + zp3) * X1s3
+* - Normale au triangle T1
+        xnT1 = (yp1-yp2)*(zp2-zp3) - (zp1-zp2)*(yp2-yp3)
+        ynT1 = (zp1-zp2)*(xp2-xp3) - (xp1-xp2)*(zp2-zp3)
+        znT1 = (xp1-xp2)*(yp2-yp3) - (yp1-yp2)*(xp2-xp3)
+        dnT1 = SQRT(xnT1*xnT1+ynT1*ynT1+znT1*znT1)
+        IF (.not.(dnT1.lt.1d-10) .and. .not.(dnT1.gt.1d-10))
+     &    write(ioimp,*) 'FAIBle - 1.1 - impo32'
+        IF (abs(dnT1).le.xpetit) write(ioimp,*) 'FAIBle - 1.2 - impo32'
+        xnT1 = xnT1 / dnT1
+        ynT1 = ynT1 / dnT1
+        znT1 = znT1 / dnT1
+C*DBG        write(ioimp,*) 'Normale au plan T1',xnT1,ynT1,znT1,dnT1
+* - Rayon de la sphere "englobante" de l'element (centre=barycentre)
+        d1 = (xgT1-xp1)**2 + (ygT1-yp1)**2 + (zgT1-zp1)**2
+        d2 = (xgT1-xp2)**2 + (ygT1-yp2)**2 + (zgT1-zp2)**2
+        d3 = (xgT1-xp3)**2 + (ygT1-yp3)**2 + (zgT1-zp3)**2
+        RayT1 = SQRT(max(d1,d2,d3))
+*
+* Definition du triangle T2(jp1,jp2,jp3)
+* - Coordonnees des noeuds de T2
+        ipv = (jp1-1)*idimp1
+        xq1 = xcoor(ipv+1)
+        yq1 = xcoor(ipv+2)
+        zq1 = xcoor(ipv+3)
+        ipv = (jp2-1)*idimp1
+        xq2 = xcoor(ipv+1)
+        yq2 = xcoor(ipv+2)
+        zq2 = xcoor(ipv+3)
+        ipv = (jp3-1)*idimp1
+        xq3 = xcoor(ipv+1)
+        yq3 = xcoor(ipv+2)
+        zq3 = xcoor(ipv+3)
+* - Barycentre de T2
+        xgT2 = (xq1 + xq2 + xq3) * X1s3
+        ygT2 = (yq1 + yq2 + yq3) * X1s3
+        zgT2 = (zq1 + zq2 + zq3) * X1s3
+* - Normale au triangle T2
+        xnT2 = (yq1-yq2)*(zq2-zq3) - (zq1-zq2)*(yq2-yq3)
+        ynT2 = (zq1-zq2)*(xq2-xq3) - (xq1-xq2)*(zq2-zq3)
+        znT2 = (xq1-xq2)*(yq2-yq3) - (yq1-yq2)*(xq2-xq3)
+        dnT2 = SQRT(xnT2*xnT2+ynT2*ynT2+znT2*znT2)
+        IF (.not.(dnT2.lt.1d-10) .and. .not.(dnT2.gt.1d-10))
+     &    write(ioimp,*) 'FAIBle - 2.1 - impo32'
+        IF (abs(dnT2).le.xpetit) write(ioimp,*) 'FAIBle - 2.2 - impo32'
+        xnT2 = xnT2 / dnT2
+        ynT2 = ynT2 / dnT2
+        znT2 = znT2 / dnT2
+C*DBG        write(ioimp,*) 'Normale au plan T2',xnT2,ynT2,znT2,dnT2
+* - Rayon de la sphere "englobante" de l'element (centre=barycentre)
+        d1 = (xgT2-xq1)**2 + (ygT2-yq1)**2 + (zgT2-zq1)**2
+        d2 = (xgT2-xq2)**2 + (ygT2-yq2)**2 + (zgT2-zq2)**2
+        d3 = (xgT2-xq3)**2 + (ygT2-yq3)**2 + (zgT2-zq3)**2
+        RayT2 = SQRT(max(d1,d2,d3))
+
+* Orientation respective correcte des 2 normales
+*  Les triangles T1 et T2 etant decrits dans le meme sens ("prisme"),
+*  le produit scalaire de leur normale doit etre positif ou nul !
+        scal = xnT1 * xnT2 + ynT1 * ynT2 + znT1 * znT2
+C*DBG        write(ioimp,*) 'Prod.scal des normales',scal
+        if (scal.lt.0.) goto 520
+*
+* Distance entre les centres de gravite
+* Les spheres "englobantes" doivent s'intersecter pour contact potentiel
+        dist = SQRT((xgT2-xgT1)**2 + (ygT2-ygT1)**2 + (zgT2-zgT1)**2)
+        IF (dist*4.GT.RayT1+RayT2) goto 520
+*
+* Critere d'acceptation de l'element de contact
+*
+* Definition du plan de contact (surface intermediaire)
+* - Normale (unitaire) du plan de contact
+        xnC = xnT1 + xnT2
+        ynC = ynT1 + ynT2
+        znC = znT1 + znT2
+        dnC = SQRT(xnC*xnC + ynC*ynC + znC*znC)
+        IF (.not.(dnC.lt.1d-10) .and. .not.(dnC.GT.1D-10))
+     &    write(ioimp,*) 'FAIBle - 3.1 - impo32'
+        IF (abs(dnC).le.xpetit) write(ioimp,*) 'FAIBle - 3.2 - impo32'
+        xnC = xnC / dnC
+        ynC = ynC / dnC
+        znC = znC / dnC
+C*DBG        write(ioimp,*) 'Normale au plan Contact',xnC,ynC,znC,dnC
+
+* - Point definissant le plan de contact
+*   = milieu des barycentres des triangles T1 et T2
+        xgC = (xgT1 + xgT2) * 0.5
+        ygC = (ygT1 + ygT2) * 0.5
+        zgC = (zgT1 + zgT2) * 0.5
+* - "Distance" de reference au plan de contact
+        dgC = xgC*xnC + ygC*ynC + zgC*znC
+*
+* Distance "signee" des triangles T1 et T2 au plan de contact
+        dp1C = (xp1*xnC + yp1*ynC + zp1*znC) - dgC
+        dp2C = (xp2*xnC + yp2*ynC + zp2*znC) - dgC
+        dp3C = (xp3*xnC + yp3*ynC + zp3*znC) - dgC
+        dq1C = (xq1*xnC + yq1*ynC + zq1*znC) - dgC
+        dq2C = (xq2*xnC + yq2*ynC + zq2*znC) - dgC
+        dq3C = (xq3*xnC + yq3*ynC + zq3*znC) - dgC
+* Projection des triangles T1 et T2 sur le plan de contact
+* T1C = triangle T1 projete sur plan de Contact
+        cPT1C(1,1) = xp1 - dp1C * xnC
+        cPT1C(1,2) = yp1 - dp1C * ynC
+        cPT1C(1,3) = zp1 - dp1C * znC
+        cPT1C(2,1) = xp2 - dp2C * xnC
+        cPT1C(2,2) = yp2 - dp2C * ynC
+        cPT1C(2,3) = zp2 - dp2C * znC
+        cPT1C(3,1) = xp3 - dp3C * xnC
+        cPT1C(3,2) = yp3 - dp3C * ynC
+        cPT1C(3,3) = zp3 - dp3C * znC
+* T2C = triangle T2 projete sur plan de Contact
+        cPT2C(1,1) = xq1 - dq1C * xnC
+        cPT2C(1,2) = yq1 - dq1C * ynC
+        cPT2C(1,3) = zq1 - dq1C * znC
+        cPT2C(2,1) = xq2 - dq2C * xnC
+        cPT2C(2,2) = yq2 - dq2C * ynC
+        cPT2C(2,3) = zq2 - dq2C * znC
+        cPT2C(3,1) = xq3 - dq3C * xnC
+        cPT2C(3,2) = yq3 - dq3C * ynC
+        cPT2C(3,3) = zq3 - dq3C * znC
+*
+* On determine quelle est la composante maximale de la normale pour
+* projeter les triangles T1C et T2C sur un plan parallele aux axes
+* ("le plus orthogonal" a cette normale), ce qui maximise leur aire.
+        r_x = abs(xnC)
+        r_y = abs(ynC)
+        r_z = abs(znC)
+        if (r_x.gt.r_y) then
+          inC = 1
+          if (r_x.lt.r_z) inC = 3
+        else
+          inC = 2
+          if (r_y.lt.r_z) inC = 3
+        endif
+* Projection des triangles T1C et T2C sur ce plan // aux axes (A)
+* T1A = triangle T1C projete sur ce plan (A)
+* T2A = triangle T2C projete sur ce plan (A)
+* On prend soin d'orienter les triangles T1A et T2A dans le sens
+* direct (en tenant compte du signe de la composante normale !)
+        GOTO (531,532,533), inC
+        call erreur(5)
+        return
+* Normale NC selon "x" : A =(y,z)
+ 531    if (xnC.lt.0.) inC = -inC
+        inX = 2
+        inY = 3
+        goto 534
+* Normale NC selon "y" : A =(x,z)
+ 532    if (ynC.lt.0.) inC = -inC
+        inX = 1
+        inY = 3
+        goto 534
+* Normale NC selon "z" : A =(x,y)
+ 533    if (znC.lt.0.) inC = -inC
+        inX = 1
+        inY = 2
+        goto 534
+ 534    continue
+        cPT1A(1,1) = cPT1C(1,inX)
+        cPT1A(1,2) = cPT1C(1,inY)
+        cPT2A(1,1) = cPT2C(1,inX)
+        cPT2A(1,2) = cPT2C(1,inY)
+        if (inC.gt.0) then
+          cPT1A(2,1) = cPT1C(2,inX)
+          cPT1A(2,2) = cPT1C(2,inY)
+          cPT2A(2,1) = cPT2C(2,inX)
+          cPT2A(2,2) = cPT2C(2,inY)
+          cPT1A(3,1) = cPT1C(3,inX)
+          cPT1A(3,2) = cPT1C(3,inY)
+          cPT2A(3,1) = cPT2C(3,inX)
+          cPT2A(3,2) = cPT2C(3,inY)
+        else
+          cPT1A(2,1) = cPT1C(3,inX)
+          cPT1A(2,2) = cPT1C(3,inY)
+          cPT2A(2,1) = cPT2C(3,inX)
+          cPT2A(2,2) = cPT2C(3,inY)
+          cPT1A(3,1) = cPT1C(2,inX)
+          cPT1A(3,2) = cPT1C(2,inY)
+          cPT2A(3,1) = cPT2C(2,inX)
+          cPT2A(3,2) = cPT2C(2,inY)
+        endif
+        cPT1A(4,1) = cPT1A(1,1)
+        cPT1A(4,2) = cPT1A(1,2)
+* Calcul des cotes des triangles T1A et T2A (12,23,31)
+* Utile pour connaitre ensuite la normale aux cotes des triangles
+        vT1A(1,1) = cPT1A(2,1) - cPT1A(1,1)
+        vT1A(1,2) = cPT1A(2,2) - cPT1A(1,2)
+        vT1A(2,1) = cPT1A(3,1) - cPT1A(2,1)
+        vT1A(2,2) = cPT1A(3,2) - cPT1A(2,2)
+        vT1A(3,1) = cPT1A(1,1) - cPT1A(3,1)
+        vT1A(3,2) = cPT1A(1,2) - cPT1A(3,2)
+C*nu        vT2A(1,1) = cPT2A(2,1) - cPT2A(1,1)
+        vT2A(1,2) = cPT2A(2,2) - cPT2A(1,2)
+C*nu        vT2A(2,1) = cPT2A(3,1) - cPT2A(2,1)
+        vT2A(2,2) = cPT2A(3,2) - cPT2A(2,2)
+C*nu        vT2A(3,1) = cPT2A(1,1) - cPT2A(3,1)
+        vT2A(3,2) = cPT2A(1,2) - cPT2A(3,2)
+* Calcul de la surface de chacun des triangles T1A et T2A
+* (en fait, on calcule le double, mais par la suite on ne considere que
+*  des rapports de surfaces de triangle)
+        SuT1A =  (cPT1A(2,1)+cPT1A(1,1)) * vT1A(1,2)
+     &         + (cPT1A(3,1)+cPT1A(2,1)) * vT1A(2,2)
+     &         + (cPT1A(1,1)+cPT1A(3,1)) * vT1A(3,2)
+        SuT2A =  (cPT2A(2,1)+cPT2A(1,1)) * vT2A(1,2)
+     &         + (cPT2A(3,1)+cPT2A(2,1)) * vT2A(2,2)
+     &         + (cPT2A(1,1)+cPT2A(3,1)) * vT2A(3,2)
+C*DBG        write(ioimp,*) 'Surfaces T1A - T2A :', 0.5*SuT1A,0.5*SuT2A
+C*DBG        if (SuT1A.gt.100.*SuT2A .or. SuT2A.gt.100.*SuT1A)
+C*DBG     &    write(ioimp,*) 'Rapport des surfaces tres important !'
+
+* On initialise l'intersection des triangles avec T2A
+        nPIn0 = 3
+        do 540 i = 1, nPIn0
+          cPIn0(i,1) = cPT2A(i,1)
+          cPIn0(i,2) = cPT2A(i,2)
+ 540    continue
+* Determination de l'intersection des triangles T1A et T2A
+* en regardant progressivement l'intersection avec les cotes de T1A
+* Note : On utilise le fait que les polygones traites sont convexes !
+        DO 550 i = 1, 3
+          vN1x = -vT1A(i,2)
+          vN1y =  vT1A(i,1)
+          scal = vN1x * cPT1A(i,1) + vN1y * cPT1A(i,2)
+*
+          ipos = 0
+          ineg = 0
+          jpos = 0
+          jneg = 0
+          do 551 j = 1, nPIn0
+            test(j) = (vN1x * cPIn0(j,1) + vN1y * cPIn0(j,2)) - scal
+            if (test(j).gt.1.d-10) then
+*            if (test(j).gt.0.) then
+              ipos = ipos + 1
+              if (jneg.ne.0 .and. jpos.eq.0) jpos = j
+            else if (test(j).lt.-1.d-10) then
+*            else if (test(j).lt.0.) then
+              ineg = ineg + 1
+              if (jneg.eq.0) jneg = j
+            else
+              test(j) = 0.
+            endif
+ 551      continue
+*
+* 1) Cas ou ipos = 0 :
+* 1.1) il n'y pas d'intersection (ineg=nPIn0)
+* 1.2) l'intersection se limite a 1 point (ineg=nPIn0-1)
+* 1.3) l'intersection a 1 segment sur une frontiere (ineg=nPIn0-2)
+* La surface correspondante est nulle et il n'y a donc pas de contact !
+          if (ipos.eq.0) then
+C*DBG       write(ioimp,*) 'Intersection a ',nPIn0-ineg,' points'
+            goto 520
+          endif
+* 2) Cas ou ipos > 0 : Il y a une intersection a calculer
+* 2.1) ineg = 0 : Tous les points sont "du bon cote" et l'intersection
+*      correspond au polygone de depart !
+          if (ineg.eq.0) then
+C*DBG            write(ioimp,*) 'Intersection du bon cote - rien a faire'
+            goto 550
+          endif
+* 2.2) ineg > 0 : Il y a deux intersections a determiner car il y a
+*      au moins un point du "mauvais cote"
+          jpos = max(1,jpos)
+          jpr = jpos - 1
+          if (jpos.eq.1) jpr = nPIn0
+          nPIn = 1
+          if (test(jpr).lt.0.) then
+            r_z = test(jpos) / (test(jpos) - test(jpr))
+            cPIn(nPIn,1) =  cPIn0(jpos,1)
+     &                    + r_z*(cPIn0(jpr,1) - cPIn0(jpos,1))
+            cPIn(nPIn,2) =  cPIn0(jpos,2)
+     &                    + r_z*(cPIn0(jpr,2) - cPIn0(jpos,2))
+          else
+            cPIn(nPIn,1) = cPIn0(jpr,1)
+            cPIn(nPIn,2) = cPIn0(jpr,2)
+          endif
+          do 552 j = 1, ipos
+            nPIn = nPIn + 1
+            cPIn(nPIn,1) = cPIn0(jpos,1)
+            cPIn(nPIn,2) = cPIn0(jpos,2)
+            jpr  = jpos
+            jpos = jpos + 1
+            if (jpos.gt.nPIn0) jpos = 1
+ 552      continue
+          nPIn = nPIn + 1
+          if (test(jpos).lt.0.) then
+            r_z = test(jpr) / (test(jpr) - test(jpos))
+            cPIn(nPIn,1) =  cPIn0(jpr,1)
+     &                    + r_z*(cPIn0(jpos,1) - cPIn0(jpr,1))
+            cPIn(nPIn,2) =  cPIn0(jpr,2)
+     &                    + r_z*(cPIn0(jpos,2) - cPIn0(jpr,2))
+          else
+            cPIn(nPIn,1) = cPIn0(jpos,1)
+            cPIn(nPIn,2) = cPIn0(jpos,2)
+          endif
+* Mise a jour cPIn0 pour la suite du traitement des intersections...
+          nPIn0 = nPIn
+          do 554 j = 1, nPIn0
+            cPIn0(j,1) = cPIn(j,1)
+            cPIn0(j,2) = cPIn(j,2)
+ 554      continue
+C*DBG-F          write(ioimp,*) 'Intersection ',i,' a ',nPIn0,' points'
+C*DBG-F          do j = 1, nPIn0
+C*DBG-F            write(ioimp,*) '  ',j,nbpts0+6+j,cPIn0(j,1),cPIn0(j,2)
+C*DBG-F          enddo
+*
+ 550    CONTINUE
+*
+* Calcul de la surface de l'intersection  et de son centre de gravite
+        r_z  =  cPIn0(nPIn0,1)*cPIn0(1,2) - cPIn0(1,1)*cPIn0(nPIn0,2)
+        SuPIn = r_z
+        xGIn = (cPIn0(nPIn0,1)+cPIn0(1,1)) * r_z
+        yGIn = (cPIn0(nPIn0,2)+cPIn0(1,2)) * r_z
+        do 560 i = 1, nPIn0-1
+          j = i + 1
+          r_z  =  cPIn0(i,1)*cPIn0(j,2) - cPIn0(j,1)*cPIn0(i,2)
+          SuPIn = SuPIn + r_z
+          xGIn  = xGIn + (cPIn0(i,1)+cPIn0(j,1)) * r_z
+          yGIn  = yGIn + (cPIn0(i,2)+cPIn0(j,2)) * r_z
+ 560    continue
+        if (SuPIn .lt. 1.E-7*max(SuT1A,SuT2A) ) then
+C*DBG          write(ioimp,*) 'Intersection a une surface negligeable !'
+          goto 520
+        endif
+        r_z = X1s3 / SupIn
+        SuPIn = 0.5 * SupIn
+        xGIn = xGIn * r_z
+        yGIn = yGIn * r_z
+C*DBG        write(ioimp,*) 'Surface Intersection :',SuPIn
+*
+* Calcul des coordonnees barycentriques du centre de gravite
+* pour le triangle T1A
+        xpip1 = xGIn - cPT1A(1,1)
+        ypip1 = yGIn - cPT1A(1,2)
+        xpip2 = xGIn - cPT1A(2,1)
+        ypip2 = yGIn - cPT1A(2,2)
+        xpip3 = xGIn - cPT1A(3,1)
+        ypip3 = yGIn - cPT1A(3,2)
+        b1T1 = xpip2 * ypip3 - ypip2 * xpip3
+        b2T1 = xpip3 * ypip1 - ypip3 * xpip1
+        b3T1 = xpip1 * ypip2 - ypip1 * xpip2
+        bt = b1T1 + b2T1 + b3T1
+        if (abs(bt-SuT1A) .gt. 1.E-3)
+     &    write(ioimp,*) 'Prob bt-SuT1A',bt,SuT1A
+        b1T1 = b1T1 / SuT1A
+        b2T1 = b2T1 / SuT1A
+        b3T1 = b3T1 / SuT1A
+*
+* pour le triangle T2A
+        xpip1 = xGIn - cPT2A(1,1)
+        ypip1 = yGIn - cPT2A(1,2)
+        xpip2 = xGIn - cPT2A(2,1)
+        ypip2 = yGIn - cPT2A(2,2)
+        xpip3 = xGIn - cPT2A(3,1)
+        ypip3 = yGIn - cPT2A(3,2)
+        b1T2 = xpip2 * ypip3 - ypip2 * xpip3
+        b2T2 = xpip3 * ypip1 - ypip3 * xpip1
+        b3T2 = xpip1 * ypip2 - ypip1 * xpip2
+        bt = b1T2 + b2T2 + b3T2
+        if (abs(bt-SuT2A) .gt. 1.E-3)
+     &    write(ioimp,*) 'Prob bt-SuT2A',bt,SuT2A
+        b1T2 = b1T2 / SuT2A
+        b2T2 = b2T2 / SuT2A
+        b3T2 = b3T2 / SuT2A
+*
+* Calcul du jeu
+        xjeu =   (b1T2*dq1C + b2T2*dq2C + b3T2*dq3C)
+     &         - (b1T1*dp1C + b2T1*dp2C + b3T1*dp3C)
+C*DBG        write(ioimp,*) 'Jeu =',xjeu
+*
+*  Ajout d'une relation triangle-triangle
+*
+        nelri0 = nelri0 + 1
+        nelch = nelch + 1
+*
+*   on ajuste les differents segments si necesaire
+*
+        if (nelri0.gt.nelrig) then
+          nelrig = nelrig + incnel
+          segadj,xmatri
+          nbelem = nbelem + incnel
+          nbnn = 7
+          segadj,meleme
+          nbnn = 1
+          segadj,ipt7
+          n = n + incnel
+          segadj,mpoval
+        endif
+*
+*  Mise a jour du meleme
+*
+        if (ipt1.num(1,iel).eq.ILGNI) then
+         segact ipt1*mod
+         nbpts=xcoor(/1)/(idim+1)+1
+         segadj mcoord
+         ipt1.num(1,iel)=nbpts
+          if (ipt6.ne.0) ipt6.num(1,iel)=nbpts
+        endif
+        num(1,nelri0) = ipt1.num(1,iel)
+        num(2,nelri0) = ip1
+        num(3,nelri0) = ip2
+        num(4,nelri0) = ip3
+        num(5,nelri0) = jp1
+        num(6,nelri0) = jp2
+        num(7,nelri0) = jp3
+        icolor(nelri0) = 1
+*$
+*  Mise a jour de xmatri
+*
+*  lambda
+        re( 1,1,nelri0) = 0.d0
+*  ip1
+        re( 2,1,nelri0) =  xnC * b1T1 * SuPIn
+        re( 3,1,nelri0) =  ynC * b1T1 * SuPIn
+        re( 4,1,nelri0) =  znC * b1T1 * SuPIn
+*  ip2
+        re( 5,1,nelri0) =  xnC * b2T1 * SuPIn
+        re( 6,1,nelri0) =  ynC * b2T1 * SuPin
+        re( 7,1,nelri0) =  znC * b2T1 * SuPIn
+*  ip3
+        re( 8,1,nelri0) =  xnC * b3T1 * SuPIn
+        re( 9,1,nelri0) =  ynC * b3T1 * SuPIn
+        re(10,1,nelri0) =  znC * b3T1 * SuPIn
+*  jp1
+        re(11,1,nelri0) = -xnC * b1T2 * SuPIn
+        re(12,1,nelri0) = -ynC * b1T2 * SuPIn
+        re(13,1,nelri0) = -znC * b1T2 * SuPIn
+*  jp2
+        re(14,1,nelri0) = -xnC * b2T2 * SuPIn
+        re(15,1,nelri0) = -ynC * b2T2 * SuPIn
+        re(16,1,nelri0) = -znC * b2T2 * SuPIn
+*  jp3
+        re(17,1,nelri0) = -xnC * b3T2 * SuPIn
+        re(18,1,nelri0) = -ynC * b3T2 * SuPIn
+        re(19,1,nelri0) = -znC * b3T2 * SuPIn
+*  on transpose
+        do 580 ic = 2, nligrp
+          re(1,ic,nelri0) = re(ic,1,nelri0)
+ 580    continue
+*  le reste est nul
+*
+*  remplissage du champoint de depi (jeu)
+*
+        ipt7.num(1,nelch) = ipt1.num(1,iel)
+        vpocha(nelch,1)   = (xjeu - xjr) * SuPIn
+        IF (MELVA2.NE.0) THEN
+          NEL2 = min (iel,NELA)
+          VPOCHA(nelch,2) = max(MELVA2.VELCHE(NPTELA,NEL2),0.D0)*SuPIn
+        ENDIF
+C*DBG-F        call prfaible(ipt1,iel,nPIn0,mfaible)
+*
+ 520  CONTINUE
+*
+* Ajustement au plus juste puis desactivation des segments lies
+* a la rigidite du type 0
+      if (nelri0.ne.nelrig) then
+        nelrig = nelri0
+        segadj,xmatri
+        nbelem = nelri0
+        nbnn = 7
+        segadj,meleme
+      endif
+      segdes,meleme,xmatri
+*
+c      write(ioimp,*) ' nb relation type 0 ',nelri0
+*      if (nelri0.eq.0) irigel(6,nrigel)=0
+*
+* Destruction des segments locaux devenus inutiles
+      segsup,mfaible
+*
+C*    GOTO 1000
+
+*=======================================================================
+*= Fin du sous-programme :
+*=======================================================================
+ 1000 CONTINUE
+*
+* Ajustement au plus juste du chpoint de depi (jeu) : mpoval et ipt7
+* puis desactivation du chpoint
+      if (vpocha(/1).ne.nelch) then
+        n = nelch
+        nc=vpocha(/2)
+        segadj,mpoval
+        nbnn   = 1
+        nbelem = nelch
+        nbsous = 0
+        nbref  = 0
+        segadj,ipt7
+      endif
+      segdes,mpoval,ipt7
+      segdes,msoupo,mchpoi
+* Desctivation de la matrice de raideur de contact
+      segdes,mrigid
+*
+* Reunion des relations portant sur le meme multiplicateur de lagrange
+*
+      call impofu(MRIGID,MCHPOI)
+*
+* Nettoyage eventuel des termes petits dans les relations
+*
+* A voir plus tard. Frig3c suppose que la relation est complete.
+*
+**    call relasi(mrigid)
+*
+*  Ecriture des resultats de l'operateur :
+      call ecrobj('RIGIDITE',mrigid)
+      call ecrobj('CHPOINT ',mchpoi)
+*
+ 900  CONTINUE
+      segdes,ipt1
+
+      return
+      end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

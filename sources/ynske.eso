@@ -1,0 +1,1028 @@
+C YNSKE     SOURCE    PV        16/11/17    22:02:31     9180
+      SUBROUTINE YNSKE
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+C***********************************************************************
+C
+C  CET OPERATEUR DISCRETISE LES EQUATIONS DE NAVIER STOKES COUPLEES
+C  AUX DEUX EQUATIONS DU MODELE K - EPSILON
+C    EN 2D SUR LES ELEMENTS QUA4 ET TRI3      PLAN OU AXI
+C    EN 3D SUR LES ELEMENTS CUB8 ET PRI6
+C  LES OPERATEURS SONT "SOUS-INTEGRES"
+C
+C  SYNTAXE :
+C  ---------
+C    1/ Cas incompréssible
+C
+C du/dt + u Grad u = (nu+nut) Lapl u - 1/ro Grad p  < + S >
+C                                             < + g beta (T-Tref) >
+C
+C   'OPER' 'NSKE' nu nut            'INCO' UN :
+C   'OPER' 'NSKE' nu nut s          'INCO' UN :
+C   'OPER' 'NSKE' nu nut gb tn tref 'INCO' UN :
+C
+C
+C    2/ Cas compréssible
+C
+C dG/dt + u Grad G + G Div u = (mu+mut)(Lapl u + 1/3 Grad Div u)
+C                              - Grad p   < + S >
+C
+C   'OPER' 'NSKE' ro mu mut un    'INCO' GN :
+C   'OPER' 'NSKE' ro mu mut un S  'INCO' GN :
+C
+C    ro   densité
+C         FLOTTANT ou CHPOINT SCAL CENTRE
+C    nu,mu viscosité cinématique (resp. dynamique) moléculaire
+C         FLOTTANT ou CHPOINT SCAL CENTRE
+C    nut,mut viscosité cinématique (resp. dynamique) turbulente
+C         CHPOINT SCAL CENTRE
+C    s    source volumique de qdm
+C         POINT ou CHPOINT VECT CENTRE
+C    gb   coéfficient de flottabilité (g*beta où g est l'accéllération
+C         de la pesanteur et beta le coéfficient de dilatabilité)
+C         POINT ou CHPOINT VECT CENTRE
+C    tn   Champ de température CHPOINT SCAL SOMMET
+C    tref température de référence
+C         FLOTTANT ou CHPOINT SCAL SOMMET
+C
+C         Champ de vitesse                       -> VITESS
+C    un   Champ de vitesse transportant          -> UTRANS
+C         CHPOINT VECT SOMMET
+C    gn   Champ de vitesse massique (transporté) -> IZTU1  (Inconnue)
+C         CHPOINT VECT SOMMET
+C    kn   Energie cinétique turbulente
+C         CHPOINT SCAL SOMMET
+C    en   Taux de disparition de k
+C         CHPOINT SCAL SOMMET
+C    Constantes du modèle K - Epsilon
+C         cnu = 0.09 c1 = 1.41 c2 = 1.92
+C
+C************************************************************************
+
+-INC CCOPTIO
+-INC CCGEOME
+-INC SIZFFB
+      POINTEUR IZF1.IZFFM
+      SEGMENT PETROV
+      REAL*8 WT(LRV,NP,NPG,KDIM),WS(LRV,NP,NPG,KDIM),HK(LRV,IDIM,NP,NPG)
+      REAL*8 UIL(LRV,IDIM,NPG),DUIL(LRV,IDIM,NPG)
+      REAL*8 PGSK(LRV,NPG),RPGK(LRV,NPG),AIRE(LRV),ANUK(LRV),COEFK(LRV)
+      REAL*8 AJK(LRV,IDIM,IDIM,NPG)
+      ENDSEGMENT
+
+-INC SMCHAML
+-INC SMCOORD
+-INC SMLENTI
+      POINTEUR IPADI.MLENTI,IPADU.MLENTI,IPADF.MLENTI,IPADS.MLENTI
+      POINTEUR IPADQ.MLENTI
+-INC SMELEME
+      POINTEUR MELEMC.MELEME,MELEMS.MELEME,MELEMI.MELEME
+      POINTEUR MELEMK.MELEME,MELEP1.MELEME,IGEOM0.MELEME
+-INC SMCHPOI
+      POINTEUR IZG1.MCHPOI,IZGG1.MPOVAL
+      POINTEUR IZTU1.MPOVAL,IZTU2.MPOVAL,IZTU3.MPOVAL
+      POINTEUR VITESS.MPOVAL,UTRANS.MPOVAL
+      POINTEUR MZNU.MPOVAL,MZGB.MPOVAL,MZTN.MPOVAL,MZTR.MPOVAL
+      POINTEUR MZRO.MPOVAL
+      POINTEUR MZNT.MPOVAL
+      POINTEUR IZVOL.MPOVAL,IZTCO.MPOVAL
+      POINTEUR MCHVOL.MCHPOI
+-INC SMMATRIK
+      POINTEUR KMATRI.IMATRI,IPM.IZAFM
+
+      SEGMENT IMATRS
+      INTEGER LIZAFS(NBSOUS,NBME)
+      ENDSEGMENT
+      POINTEUR IPMS.IZAFM,IPS1.IZAFM,IPS2.IZAFM,IPS3.IZAFM
+
+-INC SMLMOTS
+      POINTEUR LINCO.MLMOTS
+      CHARACTER*8 NOMZ,NOMI,NOMA,TYPE,TYPC,NOM,NOM0
+      CHARACTER*4 NOM4(5)
+      PARAMETER (NTB=1)
+      CHARACTER*8 LTAB(NTB)
+      DIMENSION KTAB(NTB),IXV(3),RO(1)
+      SAVE IPAS
+      DATA LTAB/'KIZX    '/,IPAS/0/
+C*****************************************************************************
+CNSKE
+C     write(6,*)' DEBUT NSKE '
+      RO(1)=1.d0
+      CALL LITABS(LTAB,KTAB,NTB,1,IRET)
+      IF (IERR.NE.0) RETURN
+      MTABX=KTAB(1)
+C
+C- Récupération de la table EQEX (pointeur MTAB1)
+C
+      CALL LEKTAB(MTABX,'EQEX',MTAB1)
+      IF(MTAB1.EQ.0)THEN
+C Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  EQEX  '
+         MOTERR( 9:16) = '  EQEX  '
+         MOTERR(17:24) = '  KIZX  '
+         CALL ERREUR(786)
+         RETURN
+      ENDIF
+      CALL ACME(MTAB1,'NAVISTOK',NASTOK)
+      IF(NASTOK.EQ.0)THEN
+      CALL ZNSKE(MTABX,MTAB1)
+      RETURN
+      ENDIF
+C
+C- Récupération de la table INCO (pointeur KINC)
+C
+      CALL LEKTAB(MTAB1,'INCO',KINC)
+      IF(KINC.EQ.0)THEN
+C Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  INCO  '
+         MOTERR( 9:16) = '  INCO  '
+         MOTERR(17:24) = '  EQEX  '
+         CALL ERREUR(786)
+         RETURN
+      ENDIF
+
+C*****************************************************************************
+C OPTIONS
+C KIMPL = 0 -> EXPL     1 -> IMPL     2 -> SEMI
+C KFORM = 0 -> SI       1 -> EF       2 -> VF    3 -> EFMC
+C IDCEN = 0-> rien  1-> CENTREE  2-> SUPGDC  3-> SUPG  4-> TVISQUEU  5-> CNG
+
+      IAXI=0
+      IF(IFOMOD.EQ.0)IAXI=2
+C
+C- Récupération de la table des options KOPT (pointeur KOPTI)
+C
+      CALL LEKTAB(MTABX,'KOPT',KOPTI)
+      IF (KOPTI.EQ.0) THEN
+C Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  KOPT  '
+         MOTERR( 9:16) = '  KOPT  '
+         MOTERR(17:24) = '  KIZX  '
+         CALL ERREUR(786)
+         RETURN
+      ENDIF
+
+      CALL ACME(KOPTI,'MTRMASS ',MMPG)
+      IPG=0
+      IF(MMPG.EQ.3)IPG=1
+      CALL ACME(KOPTI,'IDCEN',IDCEN)
+      KDIM=1
+      IF(IDCEN.EQ.2)KDIM=IDIM
+      CALL ACME(KOPTI,'RNG   ',IMODEL)
+      CALL ACME(KOPTI,'IKOMP',IKOMP)
+      CALL ACME(KOPTI,'KIMPL',KIMPL)
+      CALL ACME(KOPTI,'KPOIN',KPRE)
+      CALL ACME(KOPTI,'KFORM',KFORM)
+      CALL ACME(KOPTI,'KMACO',KMACO)
+      CALL ACME(KOPTI,'IDIV',IDIV)
+      CALL ACMF(KOPTI,'CMD',CMD)
+      CALL ACMF(KOPTI,'AIMPL',AIMPL)
+      AG=AIMPL
+      AD=AIMPL-1.D0
+
+      IF (IERR.NE.0) RETURN
+
+      IF(KFORM.NE.0.AND.KFORM.NE.1)THEN
+C        Option %m1:8 incompatible avec les données
+            MOTERR( 1: 8) = 'EF/EFM1 '
+            CALL ERREUR(803)
+            RETURN
+        ENDIF
+
+      IF(KFORM.NE.0.AND.KPRE.NE.2)THEN
+C        Option %m1:8 incompatible avec les données
+            MOTERR( 1: 8) = 'EFM1 '
+            CALL ERREUR(803)
+            RETURN
+        ENDIF
+
+C     write(6,*)' Apres les options '
+C*****************************************************************************
+C
+C- Récupération de la table DOMAINE associée au domaine local
+C
+      CALL ACMM(MTABX,'NOMZONE',NOMZ)
+      CALL LEKTAB(MTABX,'DOMZ',MTABZ)
+      IF(MTABZ.EQ.0)THEN
+C Indice %m1:8 : Indice %m9:16 non trouvé dans la table %m17:24
+         MOTERR( 1: 8) = '  DOMZ  '
+         MOTERR( 9:16) = '  DOMZ  '
+         MOTERR(17:24) = '  KIZX  '
+         CALL ERREUR(786)
+         RETURN
+      ENDIF
+
+      CALL LEKTAB(MTABZ,'MAILLAGE',MELEME)
+      CALL LEKTAB(MTABZ,'CENTRE',MELEMC)
+      CALL LEKTAB(MTABZ,'SOMMET',MELEMS)
+      IF (IERR.NE.0) RETURN
+
+      MELEMQ=MELEMC
+      MELEP1=MELEMC
+
+      IF(KPRE.NE.2)THEN
+      CALL LEKTAB(MTABZ,'MACRO',MACRO)
+      CALL LEKTAB(MTABZ,'MACRO1',MELEMK)
+      CALL LEKTAB(MTABZ,'QUADRATI',MQUAD)
+      IF(KPRE.EQ.3)THEN
+      CALL LEKTAB(MTABZ,'CENTREP0',MELEMQ)
+      MELEP1=MELEMQ
+      ELSEIF(KPRE.EQ.4)THEN
+      CALL LEKTAB(MTABZ,'CENTREP1',MELEMQ)
+      CALL LEKTAB(MTABZ,'ELTP1NC ',MELEP1)
+      ENDIF
+      ENDIF
+
+C*************************************************************************
+C VERIFICATIONS SUR LES INCONNUES
+C
+C- Récupération du nombre d'inconnues et du nom de l'inconnue NOMI
+C
+      TYPE='LISTMOTS'
+      CALL ACMO(MTABX,'LISTINCO',TYPE,LINCO)
+      IF (IERR.NE.0) RETURN
+      SEGACT LINCO
+      NBINC=LINCO.MOTS(/2)
+      IF(NBINC.NE.3)THEN
+C        Indice %m1:8 : contient plus de %i1 %m9:16
+         MOTERR( 1:8) = 'LISTINCO'
+         INTERR(1) = 3
+         MOTERR(9:16) = ' MOTS   '
+         CALL ERREUR(799)
+         RETURN
+      ENDIF
+
+C
+C- Récupération des inconnues
+C
+C
+C 1ère inconnue UN vitesse
+C
+      NOMI=LINCO.MOTS(1)
+      NOMA=NOMI
+      DO 15 I=1,IDIM
+      WRITE(NOM4(I),FMT='(I1,A3)')I,NOMI(1:3)
+ 15   CONTINUE
+
+      TYPE=' '
+      CALL ACMO(KINC,NOMI,TYPE,MCHPOI)
+      IF(TYPE.NE.'CHPOINT ')THEN
+C        Indice %m1:8 : ne contient pas un objet de type %m9:16
+         MOTERR( 1: 8) = 'INC '//NOMI
+         MOTERR( 9:16) = 'CHPOINT '
+         CALL ERREUR(800)
+         RETURN
+      ELSE
+      CALL LICHT(MCHPOI,IZTU1,TYPC,MELEMI)
+         NINKO = IZTU1.VPOCHA(/2)
+         NPTI  = IZTU1.VPOCHA(/1)
+         IF (NINKO.NE.IDIM) THEN
+C        Indice %m1:8 : Le %m9:16 n'a pas le bon nombre de composantes
+            MOTERR( 1: 8) = 'INC '//NOMI
+            MOTERR( 9:16) = 'CHPOINT '
+            CALL ERREUR(784)
+            RETURN
+         ENDIF
+C     write(6,*)' MCHPOI,MELEMI=',MCHPOI,MELEMI
+C On fait pointer ces deux tableaux sur le champ U inconu (tjs présent) pour
+C eviter de les enlever lors de l'appel FORTRAN si les options sont absentes
+      UTRANS=IZTU1
+      IKW=0
+      VITESS=IZTU1
+      ENDIF
+C
+C 2ème inconnue KN énergie turbulente
+C
+      NOMI=LINCO.MOTS(2)
+      NKN=IDIM+1
+      NOM4(NKN)=NOMI(1:4)
+
+      TYPE=' '
+      CALL ACMO(KINC,NOMI,TYPE,MCHPOI)
+      IF(TYPE.NE.'CHPOINT ')THEN
+      WRITE(6,*)' L objet CHPOINT ',NOMI,' n existe pas dans la table'
+C        Indice %m1:8 : ne contient pas un objet de type %m9:16
+         MOTERR( 1: 8) = 'INC '//NOMI
+         MOTERR( 9:16) = 'CHPOINT '
+         CALL ERREUR(800)
+         RETURN
+      ELSE
+      CALL LICHT(MCHPOI,IZTU2,TYPC,IGEOM0)
+      IF(IGEOM0.NE.MELEMI)THEN
+       segact igeom0,melemi
+       call crech1(igeom0,0)
+       call crech1(melemi,0)
+      endif
+      IF(IGEOM0.NE.MELEMI)THEN
+      WRITE(6,*)' Opérateur NSKE '
+      WRITE(6,*)' Le SPG de l''inconnue 2 n''est pas convenable'
+C     Indice %m1:8 : L'objet %m9:16 n'a pas le bon support géométrique
+         MOTERR(1: 8) = 'INC '//NOMI
+         MOTERR(9:16) = 'CHPOINT '
+         CALL ERREUR(788)
+      RETURN
+      ENDIF
+      ENDIF
+C
+C 3ème inconnue EN dissipation de KN
+C
+      NOMI=LINCO.MOTS(3)
+      NEN=IDIM+2
+      NOM4(NEN)=NOMI(1:4)
+
+      TYPE=' '
+      CALL ACMO(KINC,NOMI,TYPE,MCHPOI)
+      IF(TYPE.NE.'CHPOINT ')THEN
+      WRITE(6,*)' L objet CHPOINT ',NOMI,' n existe pas dans la table'
+C        Indice %m1:8 : ne contient pas un objet de type %m9:16
+         MOTERR( 1: 8) = 'INC '//NOMI
+         MOTERR( 9:16) = 'CHPOINT '
+         CALL ERREUR(800)
+      RETURN
+      ELSE
+      CALL LICHT(MCHPOI,IZTU3,TYPC,IGEOM0)
+      IF(IGEOM0.NE.MELEMI)THEN
+       segact igeom0,melemi
+       call crech1(igeom0,0)
+       call crech1(melemi,0)
+      endif
+      IF(IGEOM0.NE.MELEMI)THEN
+      WRITE(6,*)' Opérateur NSKE '
+      WRITE(6,*)' Le SPG de l''inconnue 3 n''est pas convenable'
+C     Indice %m1:8 : L'objet %m9:16 n'a pas le bon support géométrique
+         MOTERR(1: 8) = 'INC '//NOMI
+         MOTERR(9:16) = 'CHPOINT '
+         CALL ERREUR(788)
+      RETURN
+      ENDIF
+      ENDIF
+
+C*****************************************************************************
+C Le domaine de definition est donne par le SPG  de la premiere inconnue
+C Les inconnues suivantes devront posseder ce meme pointeur
+C On verifie que les points de la zone sont tous inclus dans ce SPG
+
+      CALL KRIPAD(MELEMI,IPADI)
+      IPADS=IPADI
+      NPTS = NPTI
+      IF(MELEMI.NE.MELEMS)THEN
+      CALL KRIPAD(MELEMS,IPADS)
+      NPTS=MELEMS.NUM(/2)
+      ENDIF
+      IPADU=IPADI
+      NPTU=NPTI
+
+      IF(IPAS.EQ.0)THEN
+      IPAS=1
+      CALL VERPAD(IPADI,MELEME,IRET)
+      IF(IRET.NE.0)THEN
+C     Indice %m1:8 : L'objet %m9:16 n'a pas le bon support géométrique
+         MOTERR(1: 8) = 'INC '//NOMI
+         MOTERR(9:16) = 'CHPOINT '
+         CALL ERREUR(788)
+      RETURN
+      ENDIF
+      ENDIF
+
+C*************************************************************************
+C Lecture du coefficient
+C Type du coefficient :
+C IK1=0 CHPOINT IK1=1 scalaire  IK1=2 vecteur
+
+C     write(6,*)' Opérateur NSKE lecture des coefficients'
+      CALL ACME(MTABX,'IARG',IARG)
+      IF(IKOMP.EQ.0)THEN
+      IF(IARG.NE.2.AND.IARG.NE.3.AND.IARG.NE.5)THEN
+      WRITE(6,*)' Opérateur NSKE : option incompréssible '
+      WRITE(6,*)' Nombre d''arguments incorrect : ',IARG
+      WRITE(6,*)' On attend 2 , 3 ou 5 '
+C           Indice %m1:8 : nombre d'arguments incorrect
+            MOTERR(1:8) = 'IARG    '
+            CALL ERREUR(804)
+      RETURN
+      ENDIF
+      ELSEIF(IKOMP.EQ.1)THEN
+      IF(IARG.NE.4.AND.IARG.NE.5)THEN
+      WRITE(6,*)' Opérateur NSKE : option compréssible '
+      WRITE(6,*)' Nombre d''arguments incorrect : ',IARG
+      WRITE(6,*)' On attend 4 ou 5 '
+C           Indice %m1:8 : nombre d'arguments incorrect
+            MOTERR(1:8) = 'IARG    '
+            CALL ERREUR(804)
+      RETURN
+      ENDIF
+      ENDIF
+
+C--Cas incompréssible
+      IF(IKOMP.EQ.0)THEN
+
+      MZRO=IZTU1
+
+C 1er coefficient : nu
+      IXV(1)=MELEMC
+      IXV(2)=1
+      IXV(3)=0
+      CALL LEKCOF('Opérateur NSKE :',
+     & MTABX,KINC,1,IXV,MNU,MZNU,NPT1,NC1,IKN,IRET)
+      IF(IRET.EQ.0)RETURN
+
+      MZGB=MZNU
+      MZTN=MZNU
+      MZTR=MZNU
+
+C 2ème coefficient : nut
+      IXV(1)=MELEMC
+      IXV(2)=0
+      IXV(3)=0
+      CALL LEKCOF('Opérateur NSKE :',
+     & MTABX,KINC,2,IXV,MNT,MZNT,NPT2,NC2,IKNT,IRET)
+      IF(IRET.EQ.0)RETURN
+
+      IF(IARG.GE.3)THEN
+C 3ème coefficient : gbeta
+      IXV(1)=-MELEMC
+      IXV(2)=0
+      IXV(3)=1
+      CALL LEKCOF('Opérateur NSKE :',
+     & MTABX,KINC,3,IXV,MGB,MZGB,NELG,NC3,IKG,IRET)
+      IF(IRET.EQ.0)RETURN
+
+      IF(IKG.EQ.2)IKG=1
+
+      IF(IARG.EQ.5)THEN
+
+C 4ème coefficient : tn
+      IXV(1)=MELEMS
+      IXV(2)=1
+      IXV(3)=0
+      CALL LEKCOF('Opérateur NSKE :',
+     & MTABX,KINC,4,IXV,MTN,MZTN,NPT4,NC4,IKTN,IRET)
+      IF(IRET.EQ.0)RETURN
+
+C 5ème coefficient : tref
+      IXV(1)=MELEMS
+      IXV(2)=1
+      IXV(3)=0
+      CALL LEKCOF('Opérateur NSKE :',
+     & MTABX,KINC,5,IXV,MTR,MZTR,NPT5,NC5,IKTR,IRET)
+      IF(IRET.EQ.0)RETURN
+
+      ENDIF
+      ENDIF
+
+C--Cas compréssible
+      ELSEIF(IKOMP.EQ.1)THEN
+C 1er coefficient : ro
+      IXV(1)=MELEMC
+      IXV(2)=1
+      IXV(3)=0
+      CALL LEKCOF('Opérateur NSKE :',
+     & MTABX,KINC,1,IXV,MRO,MZRO,NPT1,NCR,IKR,IRET)
+      IF(IRET.EQ.0)RETURN
+
+      MZGB=MZRO
+      MZTN=MZRO
+      MZTR=MZRO
+
+C 2ème coefficient : mu
+      IXV(1)=MELEMC
+      IXV(2)=1
+      IXV(3)=0
+      CALL LEKCOF('Opérateur NSKE :',
+     & MTABX,KINC,2,IXV,MNU,MZNU,NPT2,NC2,IKN,IRET)
+      IF(IRET.EQ.0)RETURN
+
+C 3ème coefficient : mut
+      IXV(1)=MELEMC
+      IXV(2)=0
+      IXV(3)=0
+      CALL LEKCOF('Opérateur NSKE :',
+     & MTABX,KINC,3,IXV,MNT,MZNT,NPT3,NC3,IKNT,IRET)
+      IF(IRET.EQ.0)RETURN
+
+C 4ème coefficient : un (en compréssible)
+      IXV(1)=-MELEMS
+      IXV(2)=0
+      IXV(3)=0
+      CALL LEKCOF('Opérateur NSKE :',
+     & MTABX,KINC,4,IXV,MUN,UTRANS,NPT4,NC4,IK4,IRET)
+      IF(IRET.EQ.0)RETURN
+      IPADU=IPADS
+      NPTU=NPTS
+
+      IF(IARG.EQ.5)THEN
+C 5ème coefficient : s (en compréssible)
+      IXV(1)=-MELEMC
+      IXV(2)=0
+      IXV(3)=1
+      CALL LEKCOF('Opérateur NSKE :',
+     & MTABX,KINC,5,IXV,MGB,MZGB,NELG,NC5,IKG,IRET)
+      IF(IRET.EQ.0)RETURN
+
+      IF(IKG.EQ.2)IKG=1
+      ENDIF
+
+      ENDIF
+
+C     write(6,*)' Opérateur NSKE : Fin lecture Arguments '
+C Fin lecture Arguments ************************************************
+
+
+      CALL LEKTAB(MTABZ,'XXDXDY',MCHPDX)
+      IF(IRET.EQ.0)RETURN
+      CALL LICHT(MCHPDX,IZTCO,TYPC,IGEOM)
+      NELZ=IZTCO.VPOCHA(/1)
+
+
+C     write(6,*)' FORMULATION ',kform
+C*********** FORMULATIONS **********
+
+      IF(KFORM.EQ.0)THEN
+C Formulation EFM1
+      IF(KIMPL.NE.0)THEN
+      WRITE(6,*)' Operateur NSKE'
+C        Option %m1:8 incompatible avec les données
+            MOTERR( 1: 8) = '  EFM1  '
+      CALL ERREUR(803)
+      RETURN
+      ENDIF
+
+      CALL LEKTAB(MTABZ,'MATESI',MATRIK)
+      IF(MATRIK.EQ.0)GO TO 90
+      SEGACT MATRIK
+      KMATRI=IRIGEL(4,1)
+      SEGACT KMATRI
+      SEGDES MATRIK
+
+      CALL LEKTAB(MTABZ,'XXPSOML',MCHELM)
+      CALL LEKTAB(MTABZ,'XXVOLUM',MCHVOL)
+      IF(IRET.EQ.0)RETURN
+
+      SEGACT MCHELM
+      CALL LICHT(MCHVOL,IZVOL,TYPC,IGEOM)
+
+C*****************************************************************************
+C
+C Création du Chpoint second membre recevant l'incrément en explicite
+
+      NC=IDIM+2
+      TYPE='SOMMET'
+      CALL KRCHPT(TYPE,MELEMS,NC,IZG1,NOM4)
+
+      CALL LICHT(IZG1,IZGG1,TYPC,IGEOM)
+
+      SEGDES LINCO
+
+
+C######################################################################
+
+      NRIGE=7
+      NKID =9
+      NKMT =7
+      NMATRI=1
+      SEGINI MATRIK
+      IRIGEL(1,1)=MELEMS
+      IRIGEL(2,1)=MELEMS
+      IRIGEL(7,1)=5
+      NBME=1
+      NBSOUS=1
+      SEGINI IMATRI
+      IRIGEL(4,1)=IMATRI
+      SEGACT MELEMS
+      KSPGP=MELEMS
+      KSPGD=MELEMS
+      LISPRI(1)=NOM4(NEN)//'    '
+      LISDUA(1)=NOM4(NEN)//'    '
+      NP=1
+      MP=1
+      NBEL=MELEMS.NUM(/2)
+      SEGINI IZAFM
+      LIZAFM(1,1)=IZAFM
+      SEGDES MATRIK,IMATRI
+
+      SEGACT MELEME
+      NBSOUS=LISOUS(/1)
+      IF(NBSOUS.EQ.0)NBSOUS=1
+      NUTOEL=0
+      DT=1.D30
+      IES=IDIM
+
+      DO 1 L=1,NBSOUS
+      IPT1=MELEME
+      IF(NBSOUS.NE.1)IPT1=LISOUS(L)
+      SEGACT IPT1
+      IPM=KMATRI.LIZAFM(L,1)
+      SEGACT IPM
+      IPM1=IPM
+      IF(IAXI.NE.0)THEN
+      IPM1=KMATRI.LIZAFM(L,2)
+      SEGACT IPM1
+      ENDIF
+
+      MCHAML=ICHAML(L)
+      SEGACT MCHAML
+      MELVAL=IELVAL(1)
+      SEGACT MELVAL
+
+      IF(IMACHE(L).NE.IPT1)THEN
+       write(*,*)'IPT1,IMACHE ',IPT1,IMACHE(L)
+       goto 90
+      ENDIF
+
+      NP  =IPT1.NUM(/1)
+      NBEL=IPT1.NUM(/2)
+
+      CALL YCVIT(IPM.AM,IPM1.AM,VELCHE,
+     & IPT1.NUM,NBEL,NUTOEL,NPTI,NPTS,NPTU,IES,NP,IAXI,
+     & IPADI.LECT,IPADS.LECT,IPADU.LECT,IKOMP,IARG,
+     & MZRO.VPOCHA,IKR,
+     & MZNU.VPOCHA,IKN,MZGB.VPOCHA,IKG,NELG,MZTN.VPOCHA,IKTN,
+     & MZTR.VPOCHA,IKTR,MZNT.VPOCHA,
+     & IZTU1.VPOCHA,UTRANS.VPOCHA,IZTU2.VPOCHA,IZTU3.VPOCHA,
+     & IZGG1.VPOCHA,IZGG1.VPOCHA(1,NKN),IZGG1.VPOCHA(1,NEN),AM,
+     & IZVOL.VPOCHA,IZTCO.VPOCHA,NELZ,IDCEN,IMODEL,
+     & DT,DTT1,DTT2,NUEL,DIAEL,ECHLM)
+
+      SEGDES IPM,IPT1,MCHAML,MELVAL
+      NUTOEL=NUTOEL+NBEL
+
+ 1    CONTINUE
+      SEGDES MELEME
+      SEGDES KMATRI,MCHELM,IZAFM
+
+      SEGDES MZTN
+      SEGDES IZTU1,IZTU2,IZTU3
+      SEGDES IZGG1
+      SEGDES IZVOL,IZTCO
+
+      CALL ECROBJ('MATRIK',MATRIK)
+
+      CALL ECROBJ('CHPOINT',IZG1)
+
+      CALL LEKTAB(MTAB1,'PASDETPS',MTABT)
+      IF(MTABT.EQ.0)THEN
+      CALL CRTABL(MTABT)
+      CALL ECMM(MTABT,'SOUSTYPE','PASDETPS')
+      CALL ECMO(MTAB1,'PASDETPS','TABLE   ',MTABT)
+      DTP=1.D30+DT
+      IPAT=1
+      CALL ECME(MTABT,'NUPASDT',IPAT)
+      ELSE
+      CALL ACMF(MTABT,'DELTAT',DTP)
+      ENDIF
+
+      IF(DT.LT.DTP)THEN
+      CALL ECMF(MTABT,'DELTAT',DT)
+      CALL ECMM(MTABT,'OPER','NSKE')
+      CALL ACMM(MTABX,'NOMZONE',NOMZ)
+      CALL ECMM(MTABT,'ZONE',NOMZ)
+      CALL ECMF(MTABT,'DTCONV',DTT1)
+      CALL ECMF(MTABT,'DTDIFU',DTT2)
+      CALL ECMF(MTABT,'DIAEL',DIAEL)
+      CALL ECME(MTABT,'NUEL',NUEL)
+      ENDIF
+C*************************************************************************
+      ELSE IF(KFORM.EQ.1)THEN
+C CAS FORMULATION EF
+
+      IF(KIMPL.EQ.0)THEN
+C        Option %m1:8 incompatible avec les données
+            MOTERR( 1: 8) = '  EF    '
+            CALL ERREUR(803)
+            RETURN
+        ENDIF
+
+      DT=0.D0
+      IF(IDCEN.EQ.4)THEN
+      TYPE=' '
+      CALL ACMO(MTABT,'DELTAT',TYPE,IENT)
+      IF(TYPE.NE.'ENTIER')THEN
+      WRITE(6,*)' Opérateur NS '
+      WRITE(6,*)' On reclame un pas de temps'
+C        Option %m1:8 incompatible avec les données
+            MOTERR( 1: 8) = '  EF    '
+            CALL ERREUR(803)
+      RETURN
+      ELSE
+      CALL ACMF(MTABT,'DELTAT',DT)
+      ENDIF
+      ENDIF
+
+      IHV=1
+      NUTOEL=0
+      NINKO=VITESS.VPOCHA(/2)
+      SEGACT MELEME
+      NBSOUS=LISOUS(/1)
+      IF(NBSOUS.EQ.0)NBSOUS=1
+
+      TYPE=' '
+      CALL ACMO(MTABX,'MATELM',TYPE,MATRIK)
+      IF(TYPE.EQ.'MATRIK'.AND.KMACO.NE.0)THEN
+      SEGACT MATRIK
+      NMATRI=IRIGEL(/2)
+      MELEME=IRIGEL(1,1)
+      SEGACT MELEME
+      IMATRI=IRIGEL(4,1)
+      SEGACT IMATRI
+      NBME=LIZAFM(/2)
+      NINKO=NBME
+      MELEMS=KSPGP
+
+
+      ELSE
+
+      NRIGE=7
+      NKID =9
+      NKMT =7
+      NMATRI=1
+      SEGINI MATRIK
+      IRIGEL(1,1)=MELEME
+      IRIGEL(2,1)=MELEME
+
+      IRIGEL(7,1)=2
+      NBOP=0
+      NBME=NINKO
+      NBELC=0
+      SEGINI IMATRI,IMATRS
+      IRIGEL(4,1)=IMATRI
+      KSPGP=MELEMS
+      KSPGD=MELEMS
+
+      IF(NBME.EQ.1)THEN
+      LISPRI(1)=NOMI(1:4)//'    '
+      LISDUA(1)=NOMA(1:4)//'    '
+      ELSE
+      DO 102 I=1,NBME
+      WRITE(NOM,FMT='(I1,A7)')I,NOMI(1:7)
+      LISPRI(I)=NOM(1:4)//'    '
+      WRITE(NOM,FMT='(I1,A7)')I,NOMA(1:7)
+      LISDUA(I)=NOM(1:4)//'    '
+ 102  CONTINUE
+      ENDIF
+
+      NUTOEL=0
+      DO 101 L=1,NBSOUS
+      IPT1=MELEME
+      IF(NBSOUS.NE.1)IPT1=LISOUS(L)
+      SEGACT IPT1
+      WRITE(NOM0,FMT='(A8)')NOMS(IPT1.ITYPEL)//'    '
+      CALL KALPBG(NOM0,'FONFORM ',IZFFM)
+      SEGACT IZFFM*MOD
+      IZHR=KZHR(1)
+      SEGACT IZHR*MOD
+      NES=GR(/1)
+      NPG=GR(/3)
+
+      NP = IPT1.NUM(/1)
+      MP = NP
+      NBEL=IPT1.NUM(/2)
+      SEGINI IPM1,IPS1
+      LIZAFM(L,1)=IPM1
+      LIZAFS(L,1)=IPS1
+      IPM2=IPM1
+      IPM3=IPM1
+      IPS2=IPS1
+      IPS3=IPS1
+      IF(NBME.GE.2)THEN
+      SEGINI IPM2,IPS2
+      LIZAFM(L,2)=IPM2
+      LIZAFS(L,2)=IPS2
+      ENDIF
+      IF(NBME.GE.3)THEN
+      SEGINI IPM3,IPS3
+      LIZAFM(L,3)=IPM3
+      LIZAFS(L,3)=IPS3
+      ENDIF
+
+
+      KITT=2
+      KJTT=IKN
+      NPT=UTRANS.VPOCHA(/1)
+
+      SEGINI PETROV
+      CALL XCONV(FN,GR,PG,XYZ,HR,PGSQ,RPG,AJ,
+     & NES,IDIM,NP,NPG,IAXI,AG,AD,IDIV,CMD,IKOMP,LRV,
+     & WT,WS,HK,PGSK,RPGK,AIRE,AJK,UIL,DUIL,COEFK,ANUK,
+     & RO,1,UTRANS.VPOCHA,NPTU,IPADU.LECT,MZNU.VPOCHA,IK1,
+     & IPT1.NUM,NBEL,NUTOEL,XCOOR,
+     & IPM1.AM,IPM2.AM,IPM3.AM,
+     & IPS1.AM,IPS2.AM,IPS3.AM,
+     & NINKO,IDCEN,DT,
+     & IZTU1.VPOCHA,NPTI,IPADI.LECT)
+      SEGSUP PETROV
+
+      CALL XLAPL(FN,GR,PG,XYZ,HR,PGSQ,RPG,NES,IDIM,NP,NPG,IAXI,
+     & MZNU.VPOCHA,MZNU.VPOCHA,MZNU.VPOCHA,KITT,KJTT,IKN,
+     & IPT1.NUM,NBEL,NUTOEL,XCOOR,AIMPL,IKOMP,
+     & IPM1.AM,IPM2.AM,IPM3.AM,
+     & IPS1.AM,IPS2.AM,IPS3.AM,
+     & NINKO,IHV,IARG,MZNU.VPOCHA)
+
+      NUTOEL=NUTOEL+NBEL
+ 101  CONTINUE
+
+      ENDIF
+
+
+      IF(KIMPL.EQ.2.OR.KIMPL.EQ.0.OR.IARG.GT.1)THEN
+      NAT=2
+      NSOUPO=1
+      SEGACT MELEMS
+      N=MELEMS.NUM(/2)
+      NC=NINKO
+      SEGINI MCHPO1,MSOUP1,MPOVA1
+      MCHPO1.IFOPOI=IFOMOD
+      MCHPO1.MOCHDE=TITREE
+      MCHPO1.MTYPOI='SMBR'
+      MCHPO1.JATTRI(1)=2
+      MCHPO1.IPCHP(1)=MSOUP1
+      DO 177 N=1,NINKO
+      MSOUP1.NOCOMP(N)=LISDUA(N)(1:4)
+ 177  CONTINUE
+      MSOUP1.IGEOC=MELEMS
+      MSOUP1.IPOVAL=MPOVA1
+      ENDIF
+
+      IF(IARG.EQ.3.OR.IARG.EQ.5)THEN
+       CALL KRIPAD(MELEMQ,IPADQ)
+      IF(IARG.EQ.3)THEN
+       IKAS=2
+      ELSEIF(IARG.EQ.5)THEN
+       IKAS=3
+      ENDIF
+
+
+
+      IF(MACRO.NE.0.AND.KPRE.EQ.2)MELEMK=MELEME
+      SEGACT MELEMK
+      NBSOUS=MELEMK.LISOUS(/1)
+      IF(NBSOUS.EQ.0)NBSOUS=1
+
+      NUTOEL=0
+      DO 1102 L=1,NBSOUS
+      IPT1=MELEMK
+      IF(NBSOUS.NE.1)IPT1=MELEMK.LISOUS(L)
+      SEGACT IPT1
+
+       IF(MQUAD.NE.0)THEN
+       IF(KPRE.EQ.2)WRITE(NOM0,FMT='(A8)')NOMS(IPT1.ITYPEL)//'PRP0'
+       IF(KPRE.EQ.3)WRITE(NOM0,FMT='(A8)')NOMS(IPT1.ITYPEL)//'PRP0'
+       IF(KPRE.EQ.4)WRITE(NOM0,FMT='(A8)')NOMS(IPT1.ITYPEL)//'PRP1'
+       ELSEIF(MACRO.NE.0)THEN
+       IF(KPRE.EQ.2)WRITE(NOM0,FMT='(A8)')NOMS(IPT1.ITYPEL)//'    '
+       IF(KPRE.EQ.3)WRITE(NOM0,FMT='(A8)')NOMS(IPT1.ITYPEL)//'MCP0'
+       IF(KPRE.EQ.4)WRITE(NOM0,FMT='(A8)')NOMS(IPT1.ITYPEL)//'MCP1'
+       ELSE
+       IF(KPRE.EQ.2)WRITE(NOM0,FMT='(A8)')NOMS(IPT1.ITYPEL)//'    '
+       ENDIF
+       CALL KALPBG(NOM0,'FONFORM ',IZFFM)
+
+
+      SEGACT IZFFM*MOD
+      IZHR=KZHR(1)
+      SEGACT IZHR*MOD
+      NES=GR(/1)
+      NPG=GR(/3)
+      IZF1=KTP(1)
+      SEGACT IZF1*MOD
+      MP1=IZF1.FN(/1)
+      NP = IPT1.NUM(/1)
+      MP = NP
+      NBEL=IPT1.NUM(/2)
+      NELG=MZGB.VPOCHA(/1)
+      NPT =MPOVA1.VPOCHA(/1)
+
+      SEGACT MELEP1
+
+
+      CALL XSOUR(FN,IZF1.FN,GR,PG,XYZ,HR,PGSQ,RPG,
+     & NES,IDIM,NP,MP1,NPG,IAXI,IPT1.NUM,IKAS,KPRE,
+     & MZGB.VPOCHA,IKG,NELG,IPADQ.LECT,MELEP1.NUM,
+     & MZTN.VPOCHA,IKTN,MZTR.VPOCHA,IKTR,IPADS.LECT,
+     & NBEL,NUTOEL,XCOOR,MPOVA1.VPOCHA,NPT)
+
+      NUTOEL=NUTOEL+NBEL
+ 1102 CONTINUE
+
+      ENDIF
+
+      IF(KIMPL.EQ.2.OR.KIMPL.EQ.0)THEN
+
+      NBSOUS=LISOUS(/1)
+      IF(NBSOUS.EQ.0)NBSOUS=1
+
+      DO 1533 L=1,NBSOUS
+      IPT1=MELEME
+      IF(NBSOUS.NE.1)IPT1=LISOUS(L)
+      SEGACT IPT1
+      NP=IPT1.NUM(/1)
+      NBEL=IPT1.NUM(/2)
+      DO 2 N=1,NINKO
+      IPMS=LIZAFS(L,N)
+      SEGACT IPMS
+      DO 12 K=1,NBEL
+      DO 13 J=1,NP
+      UU=0.D0
+      IU=IPADS.LECT(IPT1.NUM(J,K))
+      DO 14 I=1,NP
+      IK=IPADI.LECT(IPT1.NUM(I,K))
+      UU=UU+IPMS.AM(K,I,J)*IZTU1.VPOCHA(IK,N)
+ 14   CONTINUE
+      MPOVA1.VPOCHA(IU,N)=MPOVA1.VPOCHA(IU,N)+UU
+ 13   CONTINUE
+ 12   CONTINUE
+
+ 2    CONTINUE
+
+ 1533 CONTINUE
+      ENDIF
+
+      SEGDES IPM1,IPM2,IPM3
+      IPS=IPS1
+      SEGSUP IPS1
+      IF(IPS2.NE.IPS)SEGSUP IPS2
+      IF(IPS3.NE.IPS)SEGSUP IPS3
+      SEGDES IZTCO
+
+      CALL ECROBJ('MATRIK',MATRIK)
+
+      IF(KIMPL.EQ.2.OR.KIMPL.EQ.0.OR.IARG.GT.1)THEN
+
+C?    TYPE=' '
+C?    CALL ACMO(MTAB1,'SMBR',TYPE,MCHPO2)
+C?    IF(TYPE.NE.'CHPOINT')THEN
+C?    CALL ECMO(MTAB1,'SMBR','CHPOINT',MCHPO1)
+C?    ELSE
+C?    CALL ECROBJ('CHPOINT',MCHPO2)
+C?    CALL ECROBJ('CHPOINT',MCHPO1)
+C??   CALL OPERAD
+C?    CALL PRFUSE
+C?    CALL LIROBJ('CHPOINT',MCHPOI,1,IRET)
+C?    CALL ECMO(MTAB1,'SMBR','CHPOINT',MCHPOI)
+C?    ENDIF
+
+      CALL ECROBJ('CHPOINT',MCHPO1)
+      ELSE
+            NAT=2
+            NSOUPO=0
+            SEGINI MCHPOI
+            JATTRI(1)=2
+            CALL ECROBJ('CHPOINT',MCHPOI)
+      ENDIF
+
+      SEGDES IMATRI
+      SEGDES MELEME,MATRIK
+      IF(IKN.EQ.0)THEN
+      SEGDES MZNU
+      ENDIF
+C?    CALL ECMO(MTABX,'MATELM','MATRIK',MATRIK)
+
+C*************************************************************************
+      ELSE IF(KFORM.EQ.2)THEN
+C CAS FORMULATION VF
+      WRITE(6,*)' FORMULATION VF NON DISPONIBLE '
+C        Option %m1:8 incompatible avec les données
+            MOTERR( 1: 8) = '  EF    '
+            CALL ERREUR(803)
+            RETURN
+      ENDIF
+C*************************************************************************
+
+
+
+      SEGSUP IPADI
+      IPAS=1
+C     write(6,*)' FIN NSKE '
+      RETURN
+
+ 90   CONTINUE
+      WRITE(6,*)' Interuption anormale de NSKE'
+C        Option %m1:8 incompatible avec les données
+            MOTERR( 1: 8) = '  EF    '
+      CALL ERREUR(803)
+      RETURN
+ 1002 FORMAT(10(1X,1PE11.4))
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

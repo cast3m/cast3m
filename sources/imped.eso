@@ -1,0 +1,1033 @@
+C IMPED     SOURCE    PV        17/09/29    21:15:14     9578
+      SUBROUTINE IMPED
+*---------------------------------------------------------------------*
+*        __________________________                                   *
+*        |                        |                                   *
+*        |   OPERATEUR IMPEDANCE  |                                   *
+*        |________________________|                                   *
+*                                                                     *
+*---------------------------------------------------------------------*
+*                                                                     *
+* SYNTAXE :                                                           *
+*                                                                     *
+*                                                                     *
+*     RIG1 = IMPE RIG2 (RIG3) (REEL1)(| 'MASSE'         | )  (FLAM);  *
+*                                     | 'RAIDEUR'       |             *
+*                                     | 'AMORTISSEMENT' |             *
+*                                     | 'QUELCONQUE' LISREEL1   |     *
+*
+* CREATION :  DC 2004
+* MODIFS : #6131 BP 2008 : correction dans le cas 'AMOR' en Fourier
+*          #6644 et #6653 BP 2010 : reecriture pour etre conforme au
+*                                   partionnement des matrices
+*          #6838 BP 2011 : reecriture car erreur lors de l assemblage si
+*                          non correspondance primale - duale
+*          #7774 BP 05/2013 : extension au cas Fourier sur les ddls
+*                             symetriques seuls ( IMPE 'AMOR' C^n )
+*                             + large choix d'inconnues
+*                             + prise en compte des MULTiplicateurs LX
+*
+*---------------------------------------------------------------------*
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*
+-INC SMRIGID
+-INC CCOPTIO
+-INC SMLREEL
+-INC SMLENTI
+-INC SMELEME
+-INC SMCOORD
+*
+      EXTERNAL    LONG
+      PARAMETER(NBMO=24)
+      CHARACTER*4 MOPRIM(NBMO),MODUAL(NBMO)
+      CHARACTER*4 MOPRII(NBMO),MODUAI(NBMO)
+      CHARACTER*4 LISMOT(4),LISMO2(1)
+      CHARACTER*4 MOTEMP
+      CHARACTER*8 LISMO3(3)
+      REAL*8      XOME,COEFA,COEFB,COEFC,COEFD,XCOEF2
+      LOGICAL     FLAGFO,FLUT,FLRI23
+      CHARACTER*4 MOP1,MOD1,MOP2,MOD2,MOP3,MOD3
+*
+*     on utilise les noms reels NOMDD et NOMDU de CCHAMP (cf bdata)
+      DATA MOPRIM / 'UX  ','UY  ','UZ  ','UR  ','UZ  ','UT  ',
+     .              'RX  ','RY  ','RZ  ','RT  ','RS  ','ALFA',
+     .              'P   ','PI  ','BETA','FBET','T   ','RR  ',
+     .              'TINF','TSUP','TH  ','FC  ','PQ  ','TP  '/
+      DATA MODUAL / 'FX  ','FY  ','FZ  ','FR  ','FZ  ','FT  ',
+     .              'MX  ','MY  ','MZ  ','MT  ','MS  ','FALF',
+     .              'FP  ','FPI ','FBET','BETA','Q   ','MR  ',
+     .              'QINF','QSUP','FLUX','ED  ','FPQ ','FTP '/
+*     on definit les noms imaginaires correspondants
+      DATA MOPRII / 'IUX ','IUY ','IUZ ','IUR ','IUZ ','IUT ',
+     .              'IRX ','IRY ','IRZ ','IRT ','IRS ','IALF',
+     .              'IP  ','IPI ','IBET','IFBE','IT  ','IRR ',
+     .              'ITIN','ITSU','ITH ','IFC ','IPQ ','ITP '/
+      DATA MODUAI / 'IFX ','IFY ','IFZ ','IFR ','IFZ ','IFT ',
+     .              'IMX ','IMY ','IMZ ','IMT ','IMS ','IFAL',
+     .              'IFP ','IFPI','IFBE','IBET','IQ  ','IMR ',
+     .              'IQIN','IQSU','IFLU','IED ','IFPQ','IFTP'/
+      DATA LISMOT/  'MASS','RAID','AMOR','QUEL'/
+      DATA LISMO2/  'FLAM'/
+      DATA LISMO3/  'MASSE   ','RIGIDITE','AMOR    '/
+*
+*
+*---- Initialisations et lectures des objets -------------------------*
+*
+      IRET = 1
+      idimp1=IDIM+1
+*
+*     Matrices
+*
+      CALL LIROBJ('RIGIDITE',IPOIR2,1,IRETOU)
+      IF(IRETOU.EQ.0) RETURN
+*
+      CALL LIROBJ('RIGIDITE',IPOIR3,0,IRETOU)
+      IF (IRETOU.NE.0) THEN
+        FLAGFO = .true.
+      ELSE
+        FLAGFO = .false.
+      ENDIF
+*
+*     Coef multiplicatif (Vitesse de Rotation par ex.)
+      XOME=1.D0
+      CALL LIRREE(XOME,0,IRETOX)
+*
+*     Quel Cas ? 'MASS','RAID','AMOR','QUEL'?
+      NUMLIS = 0
+      CALL LIRMOT(LISMOT,4,NUMLIS,0)
+*
+*     Quel type de matrice en sortie ?
+      NUMLI2 = 0
+      CALL LIRMOT(LISMO2,1,NUMLI2,0)
+      IFLAM=0
+      IF(NUMLI2.EQ.1)    IFLAM = 1
+*
+*     Dans le cas quelconque, on a besoin d une listreel
+      IF (NUMLIS.EQ.4) THEN
+           if (FLAGFO) then
+             write(6,*) 'Le cas QUELconque ne fonctionne qu avec'
+     &       ,' 1 matrice en entrée actuellement (et pas 2) !!!'
+             call erreur (19)
+             return
+           endif
+           CALL LIROBJ('LISTREEL',ICOEF,1,IRETOU)
+           MLREEL =ICOEF
+           SEGACT MLREEL
+             NCOEF = PROG(/1)
+             if (NCOEF.lt.4) then
+               write(6,*) 'Le cas QUELconque ne fonctionne qu avec'
+     &         ,' 1 listreel d au moins 4 valeurs !!!'
+              call erreur (21)
+              return
+             endif
+             COEFA = PROG(1)
+             COEFB = PROG(2)
+             COEFC = PROG(3)
+             COEFD = PROG(4)
+           SEGDES MLREEL
+      ENDIF
+*
+*
+*---- Activation de(s) matrice(s) d'entree -------------------------*
+*
+      RI2 = IPOIR2
+      SEGACT RI2
+      NRIGE2 = RI2.IRIGEL(/1)
+      NRIGEL2= RI2.IRIGEL(/2)
+
+      IF (FLAGFO) THEN
+          RI3 = IPOIR3
+          SEGACT RI3
+          NRIGE3 = RI3.IRIGEL(/1)
+          NRIGEL3= RI3.IRIGEL(/2)
+*         Tests de Compatibilité avec RI2
+*         BP: on decide de n'en garder que tres peu
+          IF ( ((RI2.MTYMAT).NE.(RI3.MTYMAT)) .or.
+     &         ((RI2.IFORIG).NE.(RI3.IFORIG)) ) THEN
+            WRITE(6,*) 'Plantage: RIGIDITES non compatibles !!!'
+            WRITE(6,*) 'MTYMAT,IFORIG'
+            WRITE(6,*) (RI2.MTYMAT),(RI2.IFORIG)
+            WRITE(6,*) (RI3.MTYMAT),(RI3.IFORIG)
+            call erreur (21)
+            RETURN
+          ENDIF
+*         FLRI23 = meme support entre RI2 et RI3 ?
+          FLRI23=.false.
+          if(NRIGEL2.ne.NRIGEL3) goto 23
+          do k=1,NRIGEL2
+             if((RI2.irigel(1,k)).ne.(RI3.irigel(1,k))) goto 23
+             if((RI2.irigel(2,k)).ne.(RI3.irigel(2,k))) goto 23
+             if((RI2.coerig(k)).ne.(RI3.coerig(k))) goto 23
+          enddo
+          FLRI23=.true.
+  23      continue
+      ELSE
+*         on n a pas lu de 2eme matrice RI3 : on utilise RI2
+          RI3=RI2
+          FLRI23=.true.
+          NRIGE3 = NRIGE2
+          NRIGEL3= NRIGEL2
+      ENDIF
+*
+*
+*---- Quel Cas ? 1='MASS',2='RAID',3='AMOR',4='QUEL'? --------------*
+*
+*     si on lu un mot clé, on lutilise
+      IF (NUMLIS.NE.0) THEN
+         ICAS = NUMLIS
+      ELSE
+*     sinon par defaut on va faire une IMPEDANCE 'RAIDEUR' [K 0 ; 0 K]
+         ICAS = 2
+*        sauf si on a reconnu le type de la matrice d entree,
+*        auquel cas on choisit le cas le + vraisemblable
+         IF ((RI2.MTYMAT).EQ.LISMO3(3)) THEN
+            ICAS = 3
+         ELSEIF ((RI2.MTYMAT).EQ.LISMO3(1)) THEN
+            ICAS = 1
+         ELSEIF ((RI2.MTYMAT).EQ.LISMO3(2)) THEN
+            ICAS = 2
+         ENDIF
+      ENDIF
+*
+      if(IRETOX.ne.0.and.ICAS.eq.2)  write(6,*) 'Cas Raideur:'
+     &  ,' Le coefficient multiplicatif n est pas pris en compte !!!'
+*
+*
+*---- on verifie que l'on n'a pas de multiplicateur
+*     dans les cas autres que RAIDEUR ------------------------------*
+*
+      IF (ICAS.NE.2) THEN
+      DO 24 k=1,NRIGEL2
+         ipt2 = RI2.IRIGEL(1,k)
+         segact,ipt2
+c        detection des elements de type MULTiplicateur de Lagrange
+         if (ipt2.itypel.eq.22) then
+           write(ioimp,*) 'Les liaisons avec MULTiplicateur ne sont'
+     &     ,' compatibles qu avec l option RAIDEUR de IMPE'
+           call ERREUR(19)
+           RETURN
+         endif
+         segdes,ipt2
+  24  CONTINUE
+      ENDIF
+
+*
+*
+*---- Creation de la matrice de sortie  ----------------------------*
+*
+      NRIGE = NRIGE2
+      if (ICAS.eq.1.or.ICAS.eq.2) then
+           NRIGEL = NRIGEL2 + NRIGEL3
+      elseif (ICAS.eq.4) then
+           NRIGEL = NRIGEL2
+      else
+        if (FLRI23) then
+           NRIGEL = NRIGEL2
+        else
+           if(iimpi.ge.1) write(ioimp,*) 'supports incompatibles !'
+           NRIGEL = NRIGEL2 + NRIGEL3
+        endif
+      endif
+*
+      SEGINI,RI1
+*     Pour les besoins d une analyse de 'FLAM'bage on ecrit matrice de type masse
+      IF (IFLAM.EQ.1) THEN
+        RI1.MTYMAT = LISMO3(1)
+      ELSE
+        RI1.MTYMAT = RI2.MTYMAT
+      ENDIF
+      RI1.IFORIG = RI2.IFORIG
+*
+*
+*---- Aiguillage selon le cas ----------------------------------------*
+*
+*           MASS,RAID,AMOR,QUEL
+      GOTO ( 100, 200, 300, 400),ICAS
+*
+*
+*---- Cas MASS  [-M 0 ; 0 -M] ----------------------------------------*
+ 100  CONTINUE
+
+*---- 1er quadrant ----
+*-----Boucle sur les matrices de rigidite elementaires de RI2
+      DO 101 IMA=1,NRIGEL2
+
+         IMA1 = IMA
+*        COERIG
+         XCOEF2 =  (XOME**2) * RI2.COERIG(IMA)
+         RI1.COERIG(IMA1) = -1.D0 * XCOEF2
+*        IRIGEL(1,:)= meleme
+         RI1.IRIGEL(1,IMA1) = RI2.IRIGEL(1,IMA)
+         RI1.IRIGEL(2,IMA1) = RI2.IRIGEL(2,IMA)
+*        IRIGEL(3,:) = descr
+         DES2 = RI2.IRIGEL(3,IMA)
+         RI1.IRIGEL(3,IMA1) = DES2
+*        IRIGEL(4,:) = XMATRI
+         RI1.IRIGEL(4,IMA1) = RI2.IRIGEL(4,IMA)
+*        IRIGEL(5,:) = nhar
+         RI1.IRIGEL(5,IMA1) = RI2.IRIGEL(5,IMA)
+*        IRIGEL(6,:) =  < = >
+         RI1.IRIGEL(6,IMA1) = RI2.IRIGEL(6,IMA)
+*        IRIGEL(7,:) = symetrie
+         RI1.IRIGEL(7,IMA1) = RI2.IRIGEL(7,IMA)
+
+ 101  CONTINUE
+*-----fin de Boucle sur les matrices de rigidite elementaires de RI2
+
+
+*---- 4eme quadrant ----
+*-----Boucle sur les matrices de rigidite elementaires de RI3
+      DO 102 IMA=1,NRIGEL3
+
+         IMA1 = NRIGEL2 + IMA
+*        COERIG
+         XCOEF3 =  (XOME**2) * RI3.COERIG(IMA)
+         RI1.COERIG(IMA1) = -1.D0 * XCOEF3
+*        IRIGEL(1,:)= meleme
+         RI1.IRIGEL(1,IMA1) = RI3.IRIGEL(1,IMA)
+         RI1.IRIGEL(2,IMA1) = RI3.IRIGEL(2,IMA)
+*        IRIGEL(3,:) = descr
+         DES3 = RI3.IRIGEL(3,IMA)
+         segact,DES3
+         NLIGRP= DES3.LISINC(/2)
+         NLIGRD= DES3.LISDUA(/2)
+         segini,DES1=DES3
+*        on change le nom des Primal
+         do 112 ILIGRP = 1,NLIGRP
+            MOP3=DES3.LISINC(ILIGRP)
+            do IBMO = 1,NBMO
+                if (MOP3.eq.(MOPRIM(IBMO))) then
+                     DES1.LISINC(ILIGRP)  =   MOPRII(IBMO)
+                goto 112
+                endif
+             enddo
+             LMOP3=LONG(MOP3)
+             if(LMOP3.ge.4) then
+               write(ioimp,*) 'Pas de composante imaginaire connue ',
+     &         'associée à ',MOP3
+               write(ioimp,*) 'Veuillez choisir un nom d inconnue ',
+     &         'primale standard ou de moins de 4 caracteres'
+               MOTERR(1:4)=MOP3
+               call erreur(108)
+               RETURN
+             endif
+c            on construit un nom imaginaire a partir du nom fourni
+             write(MOP1,FMT='(A,A)') 'I',MOP3(1:3)
+             write(ioimp,*) '!!! On définit par défaut ',MOP1,
+     &       ' comme inconnue imaginaire de ',MOP3
+             DES1.LISINC(ILIGRP)  =   MOP1
+ 112     continue
+*        on change le nom des Dual
+         do 121 ILIGRD = 1,NLIGRD
+            MOD3=DES3.LISDUA(ILIGRD)
+            if(MOD3.eq.'FLX ') goto 121
+            do IBMO = 1,NBMO
+                if (MOD3.eq.(MODUAL(IBMO))) then
+                     DES1.LISDUA(ILIGRD)  =   MODUAI(IBMO)
+                goto 121
+                endif
+             enddo
+             LMOD3=LONG(MOD3)
+             if(LMOD3.ge.4) then
+               write(ioimp,*) 'Pas de composante imaginaire connue ',
+     &         'associée à ',MOD3
+               write(ioimp,*) 'Veuillez choisir un nom d inconnue ',
+     &         'duale standard ou de moins de 4 caracteres'
+               MOTERR(1:4)=MOD3
+               call erreur(108)
+               RETURN
+             endif
+c            on construit un nom imaginaire a partir du nom fourni
+             write(MOD1,FMT='(A,A)') 'I',MOD3(1:3)
+             write(ioimp,*) '!!! On définit par défaut ',MOD1,
+     &       ' comme inconnue imaginaire de ',MOD3
+             DES1.LISDUA(ILIGRD)  =   MOD1
+ 121     continue
+         segdes,DES3,DES1
+         RI1.IRIGEL(3,IMA1) = DES1
+*        IRIGEL(4,:) = XMATRI
+         RI1.IRIGEL(4,IMA1) = RI3.IRIGEL(4,IMA)
+*        IRIGEL(5,:) = +nhar
+         RI1.IRIGEL(5,IMA1) = abs(RI3.IRIGEL(5,IMA))
+*        IRIGEL(6,:) =  < = >
+         RI1.IRIGEL(6,IMA1) = RI3.IRIGEL(6,IMA)
+*        IRIGEL(7,:) = symetrie
+         RI1.IRIGEL(7,IMA1) = RI3.IRIGEL(7,IMA)
+
+ 102  CONTINUE
+*-----fin de Boucle sur les matrices de rigidite elementaires de RI2
+
+      GOTO 900
+*
+*
+*---- Cas RAID  [K 0 ; 0 K] ----------------------------------------*
+ 200  CONTINUE
+
+*---- 1er quadrant ----
+*-----Boucle sur les matrices de rigidite elementaires de RI2
+      DO 201 IMA=1,NRIGEL2
+
+         IMA1 = IMA
+*        COERIG
+         XCOEF2 =  RI2.COERIG(IMA)
+         RI1.COERIG(IMA1) = XCOEF2
+*        IRIGEL(1,:)= meleme
+         RI1.IRIGEL(1,IMA1) = RI2.IRIGEL(1,IMA)
+         RI1.IRIGEL(2,IMA1) = RI2.IRIGEL(2,IMA)
+*        IRIGEL(3,:) = descr
+         DES2 = RI2.IRIGEL(3,IMA)
+         RI1.IRIGEL(3,IMA1) = DES2
+*        IRIGEL(4,:) = XMATRI
+         RI1.IRIGEL(4,IMA1) = RI2.IRIGEL(4,IMA)
+*        IRIGEL(5,:) = nhar
+         RI1.IRIGEL(5,IMA1) = RI2.IRIGEL(5,IMA)
+*        IRIGEL(6,:) =  < = >
+         RI1.IRIGEL(6,IMA1) = RI2.IRIGEL(6,IMA)
+*        IRIGEL(7,:) = symetrie
+         RI1.IRIGEL(7,IMA1) = RI2.IRIGEL(7,IMA)
+
+ 201  CONTINUE
+*-----fin de Boucle sur les matrices de rigidite elementaires de RI2
+
+
+*---- 4eme quadrant ----
+*-----Boucle sur les matrices de rigidite elementaires de RI3
+      DO 202 IMA=1,NRIGEL3
+
+         IMA1 = NRIGEL2 + IMA
+*        COERIG
+         XCOEF3 =  RI3.COERIG(IMA)
+         RI1.COERIG(IMA1) = XCOEF3
+*        IRIGEL(1,:)= meleme
+         RI1.IRIGEL(1,IMA1) = RI3.IRIGEL(1,IMA)
+cbp          RI1.IRIGEL(2,IMA1) = RI3.IRIGEL(2,IMA)
+cbp .....debut modif du meleme .........................................
+cbp : s'il s'agit d'une relation avec multiplicateur, il est peut etre
+c    deja utilise (en tout cas comme on a changé les noms dinconnue,
+c    il y a un risque de le retrouver dans une autre matrice)
+c    => par securite, on duplique le noeud associe au LX
+         IPT3 = RI3.IRIGEL(1,IMA)
+         segact,IPT3
+         IF(IPT3.ITYPEL.eq.22) THEN
+           segact,MCOORD*mod
+           segini,IPT1=IPT3
+c          on suppose le LX en 1ere position (comme toujours a priori)
+           nmult = IPT3.NUM(/2)
+           IP1   = XCOOR(/1) / idimp1
+           NBPTS = IP1 + nmult
+           segadj,MCOORD
+           DO jmult=1,nmult
+c           creation d'un nouveau point associé au LX
+            IP3 = IPT3.NUM(1,jmult)
+            iref3 = (IP3-1)*idimp1
+            iref1 =  IP1   *idimp1
+            XCOOR(iref1 +1) = XCOOR(iref3 +1)
+            XCOOR(iref1 +2) = XCOOR(iref3 +2)
+            if(idim.eq.3) XCOOR(iref1 +3) = XCOOR(iref3 +3)
+            XCOOR(iref1 + idimp1) = XCOOR(iref3 + idimp1)
+            IP1 = IP1 + 1
+            IPT1.NUM(1,jmult) = IP1
+           ENDDO
+           segdes,IPT1,IPT3
+           RI1.IRIGEL(1,IMA1) = IPT1
+         ELSE
+           segdes,IPT3
+           RI1.IRIGEL(1,IMA1) = IPT3
+         ENDIF
+cbp .....fin modif  du meleme ..........................................
+*        IRIGEL(3,:) = descr
+         DES3 = RI3.IRIGEL(3,IMA)
+         segact,DES3
+         NLIGRP= DES3.LISINC(/2)
+         NLIGRD= DES3.LISDUA(/2)
+         segini,DES1=DES3
+*        on change le nom des Primal
+         do 212 ILIGRP = 1,NLIGRP
+            MOP3=DES3.LISINC(ILIGRP)
+c           on ne change pas le nom des inconnues LX, mais leur noeud
+            if(MOP3.eq.'LX  ') goto 212
+            do IBMO = 1,NBMO
+                if (MOP3.eq.(MOPRIM(IBMO))) then
+                     DES1.LISINC(ILIGRP)  =   MOPRII(IBMO)
+                goto 212
+                endif
+             enddo
+             LMOP3=LONG(MOP3)
+             if(LMOP3.ge.4) then
+               write(ioimp,*) 'Pas de composante imaginaire connue ',
+     &         'associée à ',MOP3
+               write(ioimp,*) 'Veuillez choisir un nom d inconnue ',
+     &         'primale standard ou de moins de 4 caracteres'
+               MOTERR(1:4)=MOP3
+               call erreur(108)
+               RETURN
+             endif
+c            on construit un nom imaginaire a partir du nom fourni
+             write(MOP1,FMT='(A,A)') 'I',MOP3(1:3)
+             write(ioimp,*) '!!! On définit par défaut ',MOP1,
+     &       ' comme inconnue imaginaire de ',MOP3
+             DES1.LISINC(ILIGRP)  =   MOP1
+ 212     continue
+*        on change le nom des Dual
+         do 221 ILIGRD = 1,NLIGRD
+            MOD3=DES3.LISDUA(ILIGRD)
+            if(MOD3.eq.'FLX ') goto 221
+            do IBMO = 1,NBMO
+                if (MOD3.eq.(MODUAL(IBMO))) then
+                     DES1.LISDUA(ILIGRD)  =   MODUAI(IBMO)
+                goto 221
+                endif
+             enddo
+             LMOD3=LONG(MOD3)
+             if(LMOD3.ge.4) then
+               write(ioimp,*) 'Pas de composante imaginaire connue ',
+     &         'associée à ',MOD3
+               write(ioimp,*) 'Veuillez choisir un nom d inconnue ',
+     &         'duale standard ou de moins de 4 caracteres'
+               MOTERR(1:4)=MOD3
+               call erreur(108)
+               RETURN
+             endif
+c            on construit un nom imaginaire a partir du nom fourni
+             write(MOD1,FMT='(A,A)') 'I',MOD3(1:3)
+             write(ioimp,*) '!!! On définit par défaut ',MOD1,
+     &       ' comme inconnue imaginaire de ',MOD3
+             DES1.LISDUA(ILIGRD)  =   MOD1
+ 221     continue
+         segdes,DES3,DES1
+         RI1.IRIGEL(3,IMA1) = DES1
+*        IRIGEL(4,:) = XMATRI
+         RI1.IRIGEL(4,IMA1) = RI3.IRIGEL(4,IMA)
+*        IRIGEL(5,:) = +nhar
+         RI1.IRIGEL(5,IMA1) = abs(RI3.IRIGEL(5,IMA))
+*        IRIGEL(6,:) =  < = >
+         RI1.IRIGEL(6,IMA1) = RI3.IRIGEL(6,IMA)
+*        IRIGEL(7,:) = symetrie
+         RI1.IRIGEL(7,IMA1) = RI3.IRIGEL(7,IMA)
+
+ 202  CONTINUE
+*-----fin de Boucle sur les matrices de rigidite elementaires de RI2
+
+      GOTO 900
+
+*
+*---- Cas AMOR  [0 -C ; C 0] ----------------------------------------*
+ 300  CONTINUE
+*
+*---- 2eme quadrant = -\bar{C} ----
+
+*-----Boucle sur les matrices de rigidite elementaires de RI2
+      DO 301 IMA=1,NRIGEL2
+
+         IMA1 = IMA
+*        COERIG
+         XCOEF2 =  XOME * RI2.COERIG(IMA)
+         RI1.COERIG(IMA1) = XCOEF2
+*        IRIGEL(1,:)= meleme
+         RI1.IRIGEL(1,IMA1) = RI2.IRIGEL(1,IMA)
+         RI1.IRIGEL(2,IMA1) = RI2.IRIGEL(2,IMA)
+
+*        IRIGEL(3,:) = descr
+         DES2 = RI2.IRIGEL(3,IMA)
+         segact,DES2
+         NLIGRP= DES2.LISINC(/2)
+         NLIGRD= DES2.LISDUA(/2)
+         if (NLIGRP.ne.NLIGRD) then
+           call ERREUR(756)
+           return
+         endif
+*        on crée un nouveau DESCR 2 fois plus long
+         segini,DES1=DES2
+         NLIG = NLIGRP
+         NLIGRP = 2 * NLIG
+         NLIGRD = 2 * NLIG
+         segadj,DES1
+*        on ajoute les noeuds + les noms de la partie imaginaire
+         do 311 ILIG = 1,NLIG
+            DES1.NOELEP(NLIG+ILIG) =  DES1.NOELEP(ILIG)
+            DES1.NOELED(NLIG+ILIG) =  DES1.NOELED(ILIG)
+            MOP2 = DES2.LISINC(ILIG)
+            do IBMO = 1,NBMO
+                if (MOP2.eq.(MOPRIM(IBMO))) then
+                  if ((DES2.LISDUA(ILIG)).ne.(MODUAL(IBMO))) then
+        write(6,*) 'non concordance entre l inconnue primale '
+        write(6,*) MOP2,' et duale ',DES2.LISDUA(ILIG)
+        call erreur(717)
+        return
+                  endif
+                  if ((DES2.NOELEP(ILIG)).ne.(DES2.NOELED(ILIG))) then
+        write(6,*) 'non concordance entre le noeud primal '
+        write(6,*) DES2.NOELEP(ILIG),' et dual ',DES2.NOELED(ILIG)
+        call erreur(717)
+        return
+                  endif
+*        on ajoutes les inconnues imaginaires + les noeuds associés
+                  DES1.LISINC(NLIG+ILIG) =  MOPRII(IBMO)
+                  DES1.LISDUA(NLIG+ILIG) =  MODUAI(IBMO)
+                  goto 311
+                endif
+             enddo
+c            on n'a pas trouve le primal dans la liste,
+c            on fabrique les noms primal et dual maginaire depuis reel
+c            la concordance n'est plus assuree
+             LMOP2=LONG(MOP2)
+             if(LMOP2.ge.4) then
+               write(ioimp,*) 'Pas de composante imaginaire connue ',
+     &         'associée à ',MOP2
+               write(ioimp,*) 'Veuillez choisir un nom d inconnue ',
+     &         'primale standard ou de moins de 4 caracteres'
+               MOTERR(1:4)=MOP2
+               call erreur(108)
+               RETURN
+             endif
+c            on construit un nom imaginaire a partir du nom fourni
+             write(MOP1,FMT='(A,A)') 'I',MOP2(1:3)
+             write(ioimp,*) '!!! On définit par défaut ',MOP1,
+     &       ' comme inconnue imaginaire de ',MOP2
+             DES1.LISINC(NLIG+ILIG)  =   MOP1
+c            idem pour le dual
+             MOD2=DES2.LISDUA(ILIG)
+             LMOD2=LONG(MOD2)
+             if(LMOD2.ge.4) then
+               write(ioimp,*) 'Pas de composante imaginaire connue ',
+     &         'associée à ',MOD2
+               write(ioimp,*) 'Veuillez choisir un nom d inconnue ',
+     &         'duale standard ou de moins de 4 caracteres'
+               MOTERR(1:4)=MOD2
+               call erreur(108)
+               RETURN
+             endif
+c            on construit un nom imaginaire a partir du nom fourni
+             write(MOD1,FMT='(A,A)') 'I',MOD2(1:3)
+             write(ioimp,*) '!!! On définit par défaut ',MOD1,
+     &       ' comme inconnue duale imaginaire de ',MOD2
+             DES1.LISDUA(NLIG+ILIG) =   MOD1
+ 311     continue
+         segdes,DES1
+         RI1.IRIGEL(3,IMA1) = DES1
+
+*        on regarde si UT existe
+         FLUT= .false.
+         JG = NLIG
+         segini,MLENTI
+         IF (FLAGFO) THEN
+         do ILIG = 1,NLIG
+cbp             if ((DES2.LISINC(ILIG)).eq.'UT  ') then
+            MOTEMP=DES2.LISINC(ILIG)
+            if (MOTEMP.eq.'UT  '.OR.MOTEMP.eq.'IUT ') then
+               LECT(ILIG) = 1
+               FLUT= .true.
+            endif
+         enddo
+         ENDIF
+         segdes,DES2
+
+*        IRIGEL(4,:) = XMATRI
+*        on cree une nouvelle matrice
+         XMATR2 = RI2.IRIGEL(4,IMA)
+         segact,XMATR2
+         NELRIG = XMATR2.RE(/3)
+         segini,XMATR1
+         IF (FLUT) THEN
+*        -- 2eme quadrant = -\bar{C} --
+            do j=1,NLIG
+              j1 = NLIG+j
+              if (LECT(j).eq.1) then
+*               la colonne j pointe vers la composante UT
+                do i=1,NLIG
+                do k=1,NELRIG
+                   XMATR1.RE(i,j1,k) = XMATR2.RE(i,j,k)
+                enddo
+                enddo
+              else
+                do i=1,NLIG
+                do k=1,NELRIG
+                   XMATR1.RE(i,j1,k) = -1.D0 * XMATR2.RE(i,j,k)
+                enddo
+                enddo
+              endif
+            enddo
+         ELSE
+*        -- 2eme quadrant = -{C} --
+            do k=1,NELRIG
+              do j=1,NLIG
+              j1 = NLIG+j
+                do i=1,NLIG
+                   XMATR1.RE(i,j1,k) = -1.D0 * XMATR2.RE(i,j,k)
+                enddo
+              enddo
+            enddo
+         ENDIF
+*           si possible, tous les quadrants dans la meme sous-rigidite
+         if (FLRI23) then
+            XMATR3 = RI3.IRIGEL(4,IMA)
+            segact,XMATR3
+         IF (FLUT) THEN
+*        -- 3eme quadrant = +\bar{C} --
+            do j=1,NLIG
+              if (LECT(j).eq.1) then
+*               la colonne j pointe vers la composante UT
+                do i=1,NLIG
+                i1 = NLIG+i
+                do k=1,NELRIG
+                   XMATR1.RE(i1,j,k) = -1.D0 * XMATR3.RE(i,j,k)
+                enddo
+                enddo
+              else
+                do i=1,NLIG
+                i1 = NLIG+i
+                do k=1,NELRIG
+                   XMATR1.RE(i1,j,k) = XMATR3.RE(i,j,k)
+                enddo
+                enddo
+              endif
+            enddo
+         ELSE
+*        -- 3eme quadrant = +{C} --
+            do k=1,NELRIG
+              do j=1,NLIG
+                do i=1,NLIG
+                   i1 = NLIG+i
+                   XMATR1.RE(i1,j,k) = XMATR3.RE(i,j,k)
+                enddo
+              enddo
+            enddo
+         ENDIF
+            segdes,XMATR3
+         endif
+         segdes,XMATR2
+         RI1.IRIGEL(4,IMA1) = XMATR1
+
+         segsup,MLENTI
+
+*        IRIGEL(5,:) = nhar
+         RI1.IRIGEL(5,IMA1) = RI2.IRIGEL(5,IMA)
+*        IRIGEL(6,:) =  < = >
+         RI1.IRIGEL(6,IMA1) = RI2.IRIGEL(6,IMA)
+*        IRIGEL(7,:) = symetrie
+         IF (FLAGFO.or.FLUT) THEN
+            RI1.IRIGEL(7,IMA1) = 2
+         ELSEIF((RI2.IRIGEL(7,IMA)).eq.0) THEN
+            RI1.IRIGEL(7,IMA1) = 1
+         ELSE
+            RI1.IRIGEL(7,IMA1) = 2
+         ENDIF
+         xmatr1.symre=ri1.irigel(7,ima1)
+         segdes xmatr1
+ 301  CONTINUE
+*-----fin de Boucle sur les matrices de rigidite elementaires de RI2
+
+*---- 3eme quadrant (s'il n'pas pu etre rempli dans la boucle 301) ----
+      if(FLRI23) goto 309
+
+*-----Boucle sur les matrices de rigidite elementaires de RI3
+      DO 302 IMA=1,NRIGEL3
+
+         IMA1 = NRIGEL2 + IMA
+*        COERIG
+         XCOEF3 =  XOME * RI3.COERIG(IMA)
+         RI1.COERIG(IMA1) = XCOEF3
+*        IRIGEL(1,:)= meleme
+         RI1.IRIGEL(1,IMA1) = RI3.IRIGEL(1,IMA)
+         RI1.IRIGEL(2,IMA1) = RI3.IRIGEL(2,IMA)
+
+*        IRIGEL(3,:) = descr
+         DES3 = RI3.IRIGEL(3,IMA)
+         segact,DES3
+         NLIGRP= DES3.LISINC(/2)
+         NLIGRD= DES3.LISDUA(/2)
+         if (NLIGRP.ne.NLIGRD) then
+           call ERREUR(756)
+           return
+         endif
+*        on crée un nouveau DESCR 2 fois plus long
+         segini,DES1=DES3
+         NLIG = NLIGRP
+         NLIGRP = 2 * NLIG
+         NLIGRD = 2 * NLIG
+         segadj,DES1
+*        on ajoute les noeuds + les noms de la partie imaginaire
+         do 312 ILIG = 1,NLIG
+            DES1.NOELEP(NLIG+ILIG) =  DES1.NOELEP(ILIG)
+            DES1.NOELED(NLIG+ILIG) =  DES1.NOELED(ILIG)
+            MOP3 = DES3.LISINC(ILIG)
+            do IBMO = 1,NBMO
+                if (MOP3.eq.(MOPRIM(IBMO))) then
+                  if ((DES3.LISDUA(ILIG)).ne.(MODUAL(IBMO))) then
+        write(6,*) 'non concordance entre l inconnue primale '
+        write(6,*) DES3.LISINC(ILIG),' et duale ',DES3.LISDUA(ILIG)
+        call erreur(717)
+        return
+                  endif
+                  if ((DES3.NOELEP(ILIG)).ne.(DES3.NOELED(ILIG))) then
+        write(6,*) 'non concordance entre le noeud primal '
+        write(6,*) DES3.NOELEP(ILIG),' et dual ',DES3.NOELED(ILIG)
+        call erreur(717)
+        return
+                  endif
+*        on ajoutes les inconnues imaginaires + les noeuds associés
+                  DES1.LISINC(NLIG+ILIG) =  MOPRII(IBMO)
+                  DES1.LISDUA(NLIG+ILIG) =  MODUAI(IBMO)
+                  goto 312
+                endif
+             enddo
+c            on n'a pas trouve le primal dans la liste,
+c            on fabrique les noms primal et dual maginaire depuis reel
+c            la concordance n'est plus assuree
+             LMOP3=LONG(MOP3)
+             if(LMOP3.ge.4) then
+               write(ioimp,*) 'Pas de composante imaginaire connue ',
+     &         'associée à ',MOP3
+               write(ioimp,*) 'Veuillez choisir un nom d inconnue ',
+     &         'primale standard ou de moins de 4 caracteres'
+               MOTERR(1:4)=MOP3
+               call erreur(108)
+               RETURN
+             endif
+c            on construit un nom imaginaire a partir du nom fourni
+             write(MOP1,FMT='(A,A)') 'I',MOP3(1:3)
+             write(ioimp,*) '!!! On définit par défaut ',MOP1,
+     &       ' comme inconnue imaginaire de ',MOP3
+             DES1.LISINC(NLIG+ILIG)  =   MOP1
+c            idem pour le dual
+             MOD3=DES3.LISDUA(ILIG)
+             LMOD3=LONG(MOD3)
+             if(LMOD3.ge.4) then
+               write(ioimp,*) 'Pas de composante imaginaire connue ',
+     &         'associée à ',MOD3
+               write(ioimp,*) 'Veuillez choisir un nom d inconnue ',
+     &         'duale standard ou de moins de 4 caracteres'
+               MOTERR(1:4)=MOD3
+               call erreur(108)
+               RETURN
+             endif
+c            on construit un nom imaginaire a partir du nom fourni
+             write(MOD1,FMT='(A,A)') 'I',MOD3(1:3)
+             write(ioimp,*) '!!! On définit par défaut ',MOD1,
+     &       ' comme inconnue duale imaginaire de ',MOD3
+             DES1.LISDUA(NLIG+ILIG) =   MOD1
+ 312     continue
+         segdes,DES1
+         RI1.IRIGEL(3,IMA1) = DES1
+
+*        on regarde si UT existe
+         FLUT= .false.
+         JG = NLIG
+         segini,MLENTI
+         IF (FLAGFO) THEN
+         do ILIG = 1,NLIG
+cbp             if ((DES3.LISINC(ILIG)).eq.'UT  ') then
+            MOTEMP=DES3.LISINC(ILIG)
+            if (MOTEMP.eq.'UT  '.OR.MOTEMP.eq.'IUT ') then
+               LECT(ILIG) = 1
+               FLUT= .true.
+            endif
+         enddo
+         ENDIF
+         segdes,DES3
+
+*        IRIGEL(4,:) = XMATRI
+*        on cree une nouvelle matrice
+         XMATR3 = RI3.IRIGEL(4,IMA)
+         segact,XMATR3
+         NELRIG = XMATR3.RE(/3)
+         segini,XMATR1
+         IF (FLUT) THEN
+*        -- 3eme quadrant = +\bar{C} --
+            do j=1,NLIG
+              if (LECT(j).eq.1) then
+*               la colonne j pointe vers la composante UT
+                do i=1,NLIG
+                i1 = NLIG+i
+                do k=1,NELRIG
+                   XMATR1.RE(i1,j,k) = -1.D0 * XMATR3.RE(i,j,k)
+                enddo
+                enddo
+              else
+                do i=1,NLIG
+                i1 = NLIG+i
+                do k=1,NELRIG
+                   XMATR1.RE(i1,j,k) = XMATR3.RE(i,j,k)
+                enddo
+                enddo
+              endif
+            enddo
+         ELSE
+*        -- 3eme quadrant = +{C} --
+            do k=1,NELRIG
+              do j=1,NLIG
+                do i=1,NLIG
+                   i1 = NLIG+i
+                   XMATR1.RE(i1,j,k) = XMATR3.RE(i,j,k)
+                enddo
+              enddo
+            enddo
+         ENDIF
+         segdes,XMATR3
+         RI1.IRIGEL(4,IMA1) = XMATR1
+
+         segsup,MLENTI
+
+*        IRIGEL(5,:) = +nhar
+         RI1.IRIGEL(5,IMA1) = abs(RI3.IRIGEL(5,IMA))
+*        IRIGEL(6,:) =  < = >
+         RI1.IRIGEL(6,IMA1) = RI3.IRIGEL(6,IMA)
+*        IRIGEL(7,:) = symetrie (2: quelconque)
+         RI1.IRIGEL(7,IMA1) = 2
+         xmatr1.symre=2
+         segdes,XMATR1
+
+ 302  CONTINUE
+*-----fin de Boucle sur les matrices de rigidite elementaires de RI2
+
+ 309  CONTINUE
+
+      GOTO 900
+
+
+*
+*---- Cas QUELconque  [a*K b*K ; c*K d*K] ----------------------------------------*
+ 400  CONTINUE
+
+*-----Boucle sur les matrices de rigidite elementaires de RI2
+      DO 401 IMA=1,NRIGEL2
+
+         IMA1 = IMA
+*        COERIG
+         XCOEF2 =  RI2.COERIG(IMA)
+         RI1.COERIG(IMA1) = XCOEF2
+*        IRIGEL(1,:)= meleme
+         RI1.IRIGEL(1,IMA1) = RI2.IRIGEL(1,IMA)
+         RI1.IRIGEL(2,IMA1) = RI2.IRIGEL(2,IMA)
+
+*        IRIGEL(3,:) = descr
+         DES2 = RI2.IRIGEL(3,IMA)
+         segact,DES2
+         NLIGRP= DES2.LISINC(/2)
+         NLIGRD= DES2.LISDUA(/2)
+         if (NLIGRP.ne.NLIGRD) then
+           call ERREUR(756)
+           return
+         endif
+*        on crée un nouveau descr 2 fois plus long
+         segini,DES1=DES2
+         NLIG = NLIGRP
+         NLIGRP = 2 * NLIG
+         NLIGRD = 2 * NLIG
+         segadj,DES1
+         do ILIG = 1,NLIG
+            do IBMO = 1,NBMO
+                if ((DES2.LISINC(ILIG)).eq.(MOPRIM(IBMO))) then
+                  if ((DES2.LISDUA(ILIG)).ne.(MODUAL(IBMO))) then
+        write(6,*) 'non concordance entre l inconnue primale '
+        write(6,*) DES2.LISINC(ILIG),' et duale ',DES2.LISDUA(ILIG)
+        call erreur(717)
+        return
+                  endif
+*        on ajoutes les inconnues imaginaires + les noeuds associés
+                  DES1.LISINC(NLIG+ILIG) =  MOPRII(IBMO)
+                  DES1.NOELEP(NLIG+ILIG) =  DES1.NOELEP(ILIG)
+                  DES1.LISDUA(NLIG+ILIG) =  MODUAI(IBMO)
+                  DES1.NOELED(NLIG+ILIG) =  DES1.NOELED(ILIG)
+                endif
+             enddo
+         enddo
+         segdes,DES1
+         RI1.IRIGEL(3,IMA1) = DES1
+
+*        IRIGEL(4,:) = XMATRI
+*        on cree une nouvelle matrice
+         XMATR2 = RI2.IRIGEL(4,IMA)
+         segact,XMATR2
+         NELRIG = XMATR2.RE(/3)
+         segini,XMATR1
+         if(COEFA.eq.0.D0) goto 411
+*        -- 1er quadrant --
+            do j=1,NLIG
+            do i=1,NLIG
+            do k=1,NELRIG
+               XMATR1.RE(i,j,k) = COEFA * XMATR2.RE(i,j,k)
+            enddo
+            enddo
+            enddo
+ 411     continue
+         if(COEFB.eq.0.D0) goto 412
+*        -- 2nd quadrant --
+            do j=1,NLIG
+              j1=NLIG+j
+              do i=1,NLIG
+              do k=1,NELRIG
+                 XMATR1.RE(i,j1,k) = COEFB * XMATR2.RE(i,j,k)
+              enddo
+              enddo
+            enddo
+ 412     continue
+         if(COEFC.eq.0.D0) goto 413
+*        -- 3eme quadrant --
+            do i=1,NLIG
+              i1 = NLIG+i
+              do j=1,NLIG
+              do k=1,NELRIG
+                 XMATR1.RE(i1,j,k) = COEFC * XMATR2.RE(i,j,k)
+              enddo
+              enddo
+            enddo
+ 413     continue
+         if(COEFD.eq.0.D0) goto 414
+*        -- 2nd quadrant --
+            do i=1,NLIG
+              i1 = NLIG+i
+              do j=1,NLIG
+                j1=NLIG+j
+                do k=1,NELRIG
+                   XMATR1.RE(i1,j1,k) = COEFD * XMATR2.RE(i,j,k)
+                enddo
+              enddo
+            enddo
+ 414     continue
+
+         segdes,XMATR2
+         RI1.IRIGEL(4,IMA1) = XMATR1
+
+*        IRIGEL(5,:) = nhar
+         RI1.IRIGEL(5,IMA1) = RI2.IRIGEL(5,IMA)
+*        IRIGEL(6,:) =  < = >
+         RI1.IRIGEL(6,IMA1) = RI2.IRIGEL(6,IMA)
+*        IRIGEL(7,:) = symetrie
+         RI1.IRIGEL(7,IMA1) = 2
+         xmatr1.symre=2
+         segdes,XMATR1
+
+ 401  CONTINUE
+*-----fin de Boucle sur les matrices de rigidite elementaires de RI2
+
+      GOTO 900
+
+
+*---- Desactivations des objets -------------------------------------*
+ 900  CONTINUE
+*
+      SEGDES,RI1,RI2
+      IF(FLAGFO) SEGDES,RI3
+
+*---- Verification de l'unicite de la relation supportée par un
+*     multiplicateur de lagrange s'il existe            -------------*
+
+
+
+*
+*---- Ecriture de la rigidite de sortie -----------------------------*
+      IPOIRF = RI1
+      IF(IRET.EQ.1) CALL ECROBJ('RIGIDITE',IPOIRF)
+*
+      RETURN
+*
+      END
+
+
+
+
+
+
+

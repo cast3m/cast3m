@@ -1,0 +1,286 @@
+C SSTE2     SOURCE    BP208322  15/06/22    21:23:08     8543
+
+*************************************************************************
+*************************************************************************
+*************************************************************************
+      SUBROUTINE SSTE2 (MATE,INPLAS,MELE,MELEME,MINTE,xMATRI,
+     .     NBELEM,NBPTEL,NBNN,LRE,MFR,
+     .     IVASTR,IVARI,IVADS,IVAMAT,NSTRS,NVARI,NMATT,
+     .     IVASTF,IVARIF,IVADEP,LHOOK,IRIGE7,
+     .     PRECIS,NITMAX,NMAXSSTEPS,NNUMER,DELTAX,KERRE)
+* entrees :
+*  mate   = numero de materiau elastique
+*  inplas = numero de materiau inelastique
+*  mele   = numero element fini
+*  meleme = pointeur du maillage
+*  minte
+*  nbelem = numero de elementos
+*  nbptel = nombre de points par element
+*  nbnn
+*  lre
+*  mfr
+*  ivastr =pointeur sur un segment mptval de contraintes
+*  ivari  =pointeur sur un segment mptval de variables internes
+*  ivads  =pointeur sur un segment mptval de increments deformations
+*  ivamat =pointeur sur un segment mptval de materiau
+*  lhook  =taille de la matrice de hooke
+*  nstrs  =nombre de composantes de contraintes
+*  nvari  =nombre de composantes de variables internes
+*  nmatt  =nombre de composnates de proprietes de materiau
+*  precis =precision dans les iterations internes
+* sorties :
+*  ivastf  =pointeur sur un segment mptval de contraintes
+*  ivarif  =pointeur sur un segment mptval de variables internes
+*  ivadep  =pointeur sur un segment mptval de deformations inelastiques
+*  kerre   =indicateur d'erreur
+*
+************************************************************************
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*
+-INC CCOPTIO
+-INC SMCHAML
+-INC SMELEME
+-INC SMCOORD
+-INC SMMODEL
+-INC SMINTE
+c-INC CCHAMP
+-INC SMRIGID
+*
+      SEGMENT MPTVAL
+        INTEGER      IPOS(NS)
+        INTEGER      NSOF(NS)
+        INTEGER      IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+      SEGMENT WRK0
+        REAL*8 XMAT(NMATT+2)
+      ENDSEGMENT
+      SEGMENT WRK1
+        REAL*8 DDHOOK(LHOOK,LHOOK)
+        REAL*8 SIG0(NSTRS)
+        REAL*8 DEPST(NSTRS)
+        REAL*8 DSIGT(NSTRS)
+        REAL*8 SIGF(NSTRS)
+        REAL*8 VAR0(NVARI)
+        REAL*8 VARF(NVARI)
+        REAL*8 DEFP(NSTRS)
+      ENDSEGMENT
+      SEGMENT WRK3
+        REAL*8 DDHOOK2(LHOOK,LHOOK)
+        REAL*8 SIGini(NSTRS)
+        REAL*8 DSIGTr(NSTRS)
+        REAL*8 VARini(NVARI)
+      ENDSEGMENT
+      SEGMENT WRK2
+        REAL*8 REL(LRE,LRE)
+        REAL*8 SHPWRK(6,NBNN)
+        REAL*8 BGENE(NSTRS,LRE)
+        REAL*8 XE(3,NBNN)
+      ENDSEGMENT
+      DIMENSION E(6,6)
+      call zero(E ,6,6 )
+      SEGINI WRK0,WRK1,WRK2,WRK3
+****************************************
+      nescri   =0
+      nues     =6
+      if (inplas.eq.111) then
+c MODELE MRS_LADE
+         nmodel   =21
+         ndimv    =4
+         nsubpos  =5
+         if (NNUMER.eq.0) THEN
+           nnumer=3
+           deltax=2.D0**(int(log10(1.D-6)/log10(2.D0)))
+         endif
+      else if (inplas.eq.112) then
+c MODELE J2
+         nmodel   =1
+         ndimv    =2
+         nsubpos  =3
+      else if (inplas.eq.113) then
+c MODELE RH_COULOMB
+         nmodel   =2
+         ndimv    =2
+         nsubpos  =3
+      endif
+
+****************************************
+*  bucle elementos
+      DO 1000 IB=1,NBELEM
+       DO IA1=1,NBNN
+        JA=(IDIM+1)*(MELEME.NUM(IA1,IB)-1)
+        DO IA2=1,IDIM
+          wrk2.XE(IA2,IA1)=MCOORD.XCOOR(JA+IA2)
+        ENDDO
+        wrk2.XE(3,IA1)=0.D0
+       ENDDO
+       CALL ZERO(REL,LRE,LRE)
+****************************************
+*  bucle puntos de gauss
+      DO 1100 IGAU=1,NBPTEL
+*  sig0 = tensiones iniciales
+            MPTVAL=IVASTR
+            DO IC=1,NSTRS
+               MELVAL=IVAL(IC)
+               IBMN=MIN(IB,VELCHE(/2))
+               IGMN=MIN(IGAU,VELCHE(/1))
+               SIG0(IC)=VELCHE(IGMN,IBMN)
+            enddo
+*  var0 = variables internas iniciales
+            MPTVAL=IVARI
+            DO IC=1,NVARI
+               MELVAL=IVAL(IC)
+               IBMN=MIN(IB,VELCHE(/2))
+               IGMN=MIN(IGAU,VELCHE(/1))
+               VAR0(IC)=VELCHE(IGMN,IBMN)
+            enddo
+*  depst = incremento de deformacion total
+            MPTVAL=IVADS
+            DO IC=1,NSTRS
+               MELVAL=IVAL(IC)
+               IBMN=MIN(IB,VELCHE(/2))
+               IGMN=MIN(IGAU,VELCHE(/1))
+               DEPST(IC)=VELCHE(IGMN,IBMN)
+            enddo
+*  xmat = caracteristicas materiales
+             MPTVAL=IVAMAT
+             DO IC=1,2
+               MELVAL=IVAL(IC)
+               IGMN=MIN(IGAU,VELCHE(/1))
+               IBMN=MIN(IB  ,VELCHE(/2))
+               XMAT(IC)=VELCHE(IGMN,IBMN)
+             ENDDO
+             XMAT(3)=0.D0
+             XMAT(4)=0.D0
+             DO IC=3,NMATT-3
+               MELVAL=IVAL(IC)
+               IGMN=MIN(IGAU,VELCHE(/1))
+               IBMN=MIN(IB  ,VELCHE(/2))
+               XMAT(IC+2)=VELCHE(IGMN,IBMN)
+             ENDDO
+****************************************
+             call MatHok(E,6,NSTRS,1)
+             do i=1,NSTRS
+              r_z =0.D0
+              do j=1,NSTRS
+               r_z = r_z+E(i,j)*DEPST(j)
+              enddo
+              DSIGT(i)=r_z
+             enddo
+             iincre=nint(VAR0(nsubpos+1))
+             if (iincre.le.0) iincre=NMAXSSTEPS
+             iincreold = iincre
+             iincreold2 = iincre
+             iflagrec=0
+100          continue
+             nsub=0
+                call substep (SIG0,VAR0,DSIGT,SIGF,VARF,DEFP,
+     .               DDHOOK,NSTRS,ndimv,LHOOK,
+     .               XMAT,KERRE,PRECIS,NITMAX,nescri,
+     .               nues,nmodel,NNUMER,DELTAX,NMAXSSTEPS,
+     .               nsub,ntotiter,iincre)
+
+c numero de substeps hechos:   nsub
+c numero total de iteraciones: ntotiter
+c tamaño del ultimo step !!:   iincre
+
+             if (kerre.eq.1) then
+               write(*,*)' Error tras substepping'
+               if ((inplas.eq.111).and.
+     .         ((nsub.ge.NMAXSSTEPS).or.(iflagrec.eq.1))) then
+                write(*,9998)'STOP',IB,IGAU,iincre,nsub,ntotiter
+                call DeterzonaMAC(sig0,4,var0,iplcon,iplcap,
+     .                            iplapex,1,6)
+                do i=1,NSTRS
+                  DSIGT(i)=SIG0(i)+DSIGT(i)
+                enddo
+                call DeterzonaMAC(dsigt,4,var0,iplcon,iplcap,
+     .                            iplapex,1,6)
+                iflagrec=0
+                return
+               else
+                write(*,9998)'Recompute',IB,IGAU,iincre,nsub,ntotiter
+                call DeterzonaMAC(sig0,4,var0,iplcon,iplcap,
+     .                            iplapex,1,6)
+                iincre=1
+                iflagrec=1
+                goto 100
+               endif
+             endif
+
+             if (iincre.ne.iincreold)
+     .          write(*,9999)'CHANGED',IB,IGAU,iincre,nsub
+
+             ratio = float(ntotiter)/float(nsub)
+             if (ratio.gt.NITMAX) then
+               iincren=max(nint(iincre/(ratio-4.D0)),1)
+               write(*,9999)'More iincre',IB,IGAU,iincre,iincren,ratio
+               iincre=iincren
+             else if ((ratio.lt.4.).and.(nsub.gt.1)) then
+               iincren=min(nint(iincre*(5.D0-ratio)),NMAXSSTEPS)
+               write(*,9999)'Less iincre',IB,IGAU,iincre,iincren,ratio
+               iincre=iincren
+             endif
+             VARF(nsubpos)  =nsub
+             VARF(nsubpos+1)=iincre
+9998         format(1x,a10,1x,5I9)
+9999         format(1x,a10,1x,4I9,2x,E10.4)
+****************************************
+*  sigf = tensiones finales
+            MPTVAL=IVASTF
+            DO IC=1,NSTRS
+               MELVAL=MPTVAL.IVAL(IC)
+               MELVAL.VELCHE(IGAU,IB)=SIGF(IC)
+            enddo
+*  varf = variables internas finales
+            MPTVAL=IVARIF
+            DO IC=1,NVARI
+               MELVAL=MPTVAL.IVAL(IC)
+               MELVAL.VELCHE(IGAU,IB)=VARF(IC)
+            enddo
+*  defp = incremento de deformations plasticas
+            MPTVAL=IVADEP
+            DO IC=1,NSTRS
+               MELVAL=MPTVAL.IVAL(IC)
+               MELVAL.VELCHE(IGAU,IB)=DEFP(IC)
+            enddo
+c calcula la matriz b = BGENE y el jacobiano DJAC
+            XDPGE=0.D0
+            YDPGE=0.D0
+            DIM3=1.D0
+            CALL BMATST(IGAU,NBPTEL,POIGAU,QSIGAU,ETAGAU,DZEGAU,
+     1                  MELE,MFR,NBNN,LRE,IFOUR,NSTRS,NIFOUR,DIM3,
+     2                  XE,SHPTOT,SHPWRK,BGENE,DJAC,XDPGE,YDPGE)
+            IF(abs(DJAC).LT.1.E-17) then
+               write(*,*)' Jacobiano cero, en elem', ib,' gauss',igau
+            endif
+            DJAC=ABS(DJAC)*MINTE.POIGAU(IGAU)
+            IF (IRIGE7.EQ.2)THEN
+               CALL BDBSTS(BGENE,DJAC,DDHOOK,LRE,NSTRS,REL)
+            ELSE
+               CALL BDBST(BGENE,DJAC,DDHOOK,LRE,NSTRS,REL)
+            ENDIF
+****************************************
+c  fin bucle puntos de gauss
+1100  continue
+c guarda la matriz de rigidez elemental REL en XMATRI.RE
+         IF (IRIGE7.EQ.2)THEN
+            CALL REMPMS(REL,LRE,RE(1,1,ib))
+         ELSE
+            CALL REMPMT(REL,LRE,RE(1,1,ib))
+         ENDIF
+****************************************
+c  fin bucle elementos
+1000  continue
+      segdes xmatri
+c desactivar segmentos de trabajo
+      SEGSUP WRK0,WRK1,WRK2
+      RETURN
+      END
+
+
+
+
+
+

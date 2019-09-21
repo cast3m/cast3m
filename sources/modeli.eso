@@ -1,0 +1,2618 @@
+C MODELI    SOURCE    GG250959  19/03/12    21:15:00     10159
+C----------------------------------------------------------------------C
+C                     OPERATEUR MODELE                                 C
+C                                                                      C
+C  Creation d'un objet MODELE                                          C
+C                                                                      C
+C  Syntaxe : MOD1 = MODL GEO1 TYPE_CAL TYPE_MAT ( TYPE_ELE ) ;         C
+C                                                                      C
+C    GEO1        MAILLAGE de base                                      C
+C    TYPE_CAL    MOT(S) pour definir la FORMULATION                    C
+C    TYPE_MAT    MOT(S) pour definir le MATERIAU                       C
+C    TYPE_ELE    MOT(S) pour definir les ELEMENTS FINIS a utiliser     C
+C    MOD1        Resultat de type MODELE                               C
+C----------------------------------------------------------------------C
+C  PPU : Modif pour les materiaux unidirectionels en plasticite
+
+      SUBROUTINE MODELI
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCHAMP
+-INC CCGEOME
+
+-INC SMELEME
+-INC SMMODEL
+      POINTEUR IMODE3.IMODEL,IMODE4.IMODEL,IMODE5.IMODEL
+-INC SMTABLE
+-INC SMLMOTS
+-INC SMCOORD
+
+      POINTEUR NOMID1.NOMID
+      SEGMENT ilmora
+         integer  LIMORA(100)
+      endsegment
+      SEGMENT LIMODE(0)
+      SEGMENT PLICON
+         integer mlicon(NLCON),tlicon(NLCON)
+      ENDSEGMENT
+
+      EXTERNAL LONG
+      PARAMETER (NBFORM=17,NBCON=10,NBEXT=7,NBDIF=1)
+      PARAMETER (N1MAX=300,N2MAX=200)
+      PARAMETER (NLOMAX=5)
+
+      DIMENSION LESMOD(N1MAX)
+      CHARACTER*4 deriv(1)
+      CHARACTER*4 MOTEF(N2MAX),LESTEF(N2MAX),MOCON(NBCON),MOEXT(NBEXT),
+     &            MODIF(NBDIF)
+      CHARACTER*4 MNLOCA(NLOMAX),MNLVAR(1)
+      CHARACTER*8 TAPIND,TYPOBJ,CHARIN,CHARRE,CMATE,PHAM
+      CHARACTER*8 PAR1,MDIINC,MDIDUA
+      CHARACTER*(LCONMO) CONM
+      CHARACTER*16 MOFORM(NBFORM),LESFOR(2),MOPROP(N1MAX),LESPRO(N1MAX)
+      CHARACTER*16 mderiv(6),LMENOM,LDINOM,OPTEMP(3)
+      CHARACTER*73 LMEFCT,LDIFCT
+      CHARACTER*512 MOTEMP,LMELIB,LDILIB
+      LOGICAL LOGRE,LOGIN,LMEEXT,LMENLX,LMEVIX,LOSTAT,LOMELA,LINOMID
+      LOGICAL LDIEXT,LDISOR,LOBBAR
+
+C      CHARACTER*4 MODEPL(11)
+      CHARACTER*4 mgauss(4)
+C      DATA MODEPL / 'UX  ','UY  ','UZ  ','UR  ','UZ  ','UT  ',
+C     &              'P   ','PI  ','T   ','TH  ','VEL ' /
+      DATA MGAUSS /'EPAI' , 'RIGI' , 'MASS' ,'CONT'/
+      DATA DERIV/'EPSI'/
+      DATA MDERIV/'LINEAIRE        ','QUADRATIQUE     ',
+     $            'TRUESDELL       ','JAUMANN         ',
+     $            'UTILISATEUR     ','FEFP            '/
+      DATA OPTEMP/'PHASE           ','ADVECTION       ',
+     $            'CONDUCTION      '/
+C----------------------------------------------------------------------C
+C              DEFINITION DES NOMS DE FORMULATIONS                     C
+C  formulation LIAISON : pour  operateurs DYNE et COMP
+C----------------------------------------------------------------------C
+      DATA MOFORM /
+     &     'THERMIQUE       ','MECANIQUE       ','LIQUIDE         ',
+     &     'POREUX          ','DARCY           ','CONTACT         ',
+     &     'MAGNETODYNAMIQUE','NAVIER_STOKES   ','MELANGE         ',
+     &     'EULER           ','FISSURE         ','LIAISON         ',
+     &     'THERMOHYDRIQUE  ','ELECTROSTATIQUE ','DIFFUSION       ',
+     &     'CHARGEMENT      ','METALLURGIE     ' /
+
+C (fdp) Ajout d'un nouveau mot clef 'LIBRE' ou 'LIE' pour les JOI1
+      DATA MOCON / 'CONS','INTE','DPGE','PHAS','STAT','LCOI','LCOS',
+     &             'LIBR','LIE ','NON_'/
+      DATA MOEXT / 'NUME','NOM_','PARA','C_MA','C_VA','LIB_','FCT_' /
+      DATA MODIF / 'INCO' /
+      DATA MNLVAR/ 'V_MO' /
+
+      CONM='                '
+      PHAM='        '
+      MDIINC='        '
+      MDIDUA='        '
+
+      NPINT  = 0
+      MN3    = 0
+      MFR    = 0
+C      MFRTMP = 0
+      lucvar = 0
+      lucmat = 0
+      lucmaf = 0
+      luparx = 0
+      lobbar = .false.
+
+C  Lecture d'un MAILLAGE ou d'une TABLE de sous-type DOMAINE
+      IPTABL = 0
+      IPGEOM = 0
+      IPGEO2 = 0
+      IReMOD = 0
+      CALL LIRTAB('DOMAINE',IPTABL,0,IRET)
+      IF (IERR.NE.0) RETURN
+
+      IF (IRET.EQ.0) THEN
+        CALL LIROBJ('MAILLAGE',IPGEOM,1,IRET)
+        IF (IERR.NE.0) RETURN
+C       Verification de l'unicite des elements
+        IPT1=IPGEOM
+        CALL UNIQMA(IPT1,NBDI1)
+        IF(NBDI1 .NE. 0)THEN
+          MOTERR(1:8)='MAILLAGE'
+          CALL ERREUR(1019)
+          RETURN
+        ENDIF
+
+      ELSE
+        IVALIN=0
+        XVALIN=REAL(0.D0)
+        LOGIN=.TRUE.
+        IOBIN=0
+        TAPIND='MOT     '
+        CHARIN='MAILLAGE'
+        TYPOBJ='MAILLAGE'
+        CALL ACCTAB(IPTABL,TAPIND,IVALIN,XVALIN,CHARIN,LOGIN,IOBIN,
+     .                     TYPOBJ,IVALRE,XVALRE,CHARRE,LOGRE,IOBRE)
+        IF (IERR.NE.0) RETURN
+        IPGEOM=IOBRE
+      ENDIF
+C
+C  Lecture d'une FORMULATION
+      ICOND=1
+      NFOR=0
+      NMAT=0
+      CALL MESLIR(-182)
+  51  IF (NFOR.NE.0) CALL MESLIR(-181)
+      CALL LIRMOT(MOFORM,NBFORM,IPFORM,ICOND)
+      IF (IERR.NE.0) RETURN
+      IF (IPFORM.EQ.0) GOTO 52
+      NFOR=NFOR+1
+      IF (NFOR.GT.2) THEN
+        CALL ERREUR(251)
+        RETURN
+      ENDIF
+      ICOND=0
+      LESFOR(NFOR)=MOFORM(IPFORM)
+      GOTO 51
+C  Cas d'une FORMULATION simple (NFOR=1)
+ 52   IF (NFOR.EQ.1) THEN
+        jderiv=mepsil
+        IF (LESFOR(1).EQ.'THERMIQUE') THEN
+          CALL MODEL1(MOPROP,NPROP,MOTEF,NBTEF,N1MAX,N2MAX)
+        ELSE IF(LESFOR(1).EQ.'MECANIQUE') THEN
+          CALL MODEL2(MOPROP,NPROP,MOTEF,NBTEF,N1MAX,N2MAX)
+        ELSE IF(LESFOR(1).EQ.'LIQUIDE') THEN
+          CALL MODEL3(MOPROP,NPROP,MOTEF,NBTEF,N1MAX,N2MAX)
+        ELSE IF(LESFOR(1).EQ.'POREUX') THEN
+          CALL MODEL6(MOPROP,NPROP,MOTEF,NBTEF,N1MAX,N2MAX)
+        ELSE IF(LESFOR(1).EQ.'DARCY') THEN
+          CALL MODEL7(MOPROP,NPROP,MOTEF,NBTEF,N1MAX,N2MAX)
+        ELSE IF(LESFOR(1).EQ.'CONTACT') THEN
+          CALL MODEL8(MOPROP,NPROP,MOTEF,NBTEF,N1MAX,N2MAX)
+        ELSE IF(LESFOR(1).EQ.'MAGNETODYNAMIQUE') THEN
+          CALL MODE10(MOPROP,NPROP,MOTEF,NBTEF,N1MAX,N2MAX)
+        ELSE IF(LESFOR(1).EQ.'NAVIER_STOKES') THEN
+          CALL MODE11(MOPROP,NPROP,MOTEF,NBTEF,N1MAX,N2MAX)
+        ELSE IF (LESFOR(1).EQ.'MELANGE') THEN
+          CALL MODE12(MOPROP,NPROP,MOTEF,NBTEF,N1MAX,N2MAX)
+          DO i=1,N1MAX
+            LESMOD(i)=0
+          ENDDO
+        ELSE IF(LESFOR(1).EQ.'EULER') THEN
+          CALL MODE13(MOPROP,NPROP,NBTEF,N1MAX)
+        ELSE IF(LESFOR(1).EQ.'FISSURE') THEN
+          CALL MODE14(MOPROP,NPROP,MOTEF,NBTEF,N1MAX,N2MAX)
+        ELSE IF(LESFOR(1).EQ.'LIAISON') THEN
+          CALL MODE15(MOPROP,NPROP,MOTEF,NBTEF,N1MAX,N2MAX)
+        ELSE IF(LESFOR(1).EQ.'THERMOHYDRIQUE') THEN
+          CALL MODE16(MOPROP,NPROP,MOTEF,NBTEF,N1MAX,N2MAX)
+        ELSE IF(LESFOR(1).EQ.'ELECTROSTATIQUE ') THEN
+          CALL MODE17(MOPROP,NPROP,MOTEF,NBTEF,N1MAX,N2MAX)
+        ELSE IF(LESFOR(1).EQ.'DIFFUSION       ') THEN
+          CALL MODE18(MOPROP,NPROP,MOTEF,NBTEF,N1MAX,N2MAX)
+        ELSE IF(LESFOR(1).EQ.'CHARGEMENT      ') THEN
+          CALL MODE19(MOPROP,NPROP,MOTEF,NBTEF,N1MAX,N2MAX)
+        ELSE IF(LESFOR(1).EQ.'METALLURGIE     ') THEN
+          CALL MODE21(MOPROP,NPROP,MOTEF,NBTEF,N1MAX,N2MAX)
+        ELSE
+          CALL ERREUR (251)
+        ENDIF
+        IF(IERR.NE.0) RETURN
+      ELSE
+C  Cas d'une FORMULATION couplee (NFOR=2)
+        jderiv=mepsil
+        IF ((LESFOR(1).EQ.'LIQUIDE'.AND.LESFOR(2).EQ.'MECANIQUE').OR.
+     .      (LESFOR(2).EQ.'LIQUIDE'.AND.LESFOR(1).EQ.'MECANIQUE')) THEN
+          CALL MODEL5(NPROP,MOTEF,NBTEF,N2MAX)
+          IF(IERR.NE.0) RETURN
+        ELSE
+          CALL ERREUR(251)
+          RETURN
+        ENDIF
+      ENDIF
+C
+C  Lecture eventuelle des proprietes du MODELE de MATERIAU
+      CALL MESLIR(-180)
+      ifrtt=0
+      IFROCA=0
+      ifacaf=0
+      isyme=0
+      nbga=10
+      nbdang=3
+      icavit=0
+      kjh=0
+      iraye=0
+      ICONV=0
+      NMAT=0
+      iprop=0
+      ipgeo2 = 0
+      IF (NPROP.EQ.0) GOTO 43
+ 41   IF (NMAT.NE.0) CALL MESLIR(-179)
+      CALL LIRMOT(MOPROP,NPROP,LAPROP,0)
+C*      if( laprop.ne.0) write(6,*) ' lecture de ', moprop(laprop)
+      IF (IERR.NE.0) RETURN
+C   ---------- Cas d'un MODELE de CONTACT
+      IF(LESFOR(1).EQ.'CONTACT') then
+        if(laprop.eq.3) then
+          call ecrobj('MAILLAGE',IPGEOM)
+          call impf
+          call lirobj('MAILLAGE',ipgeo2,1,iretou)
+          if(ierr.ne.0) return
+        endif
+        if(laprop.eq.5) then
+          ifrtt=0
+          ifroca=1
+C         call lirobj('MMODEL',IFROCA,1,iOK)
+C         IF(ierr.NE.0) return
+          Call lirobj('MAILLAGE',IBETON,1,IOK)
+          IF(ierr.NE.0) return
+        endif
+        if(laprop.eq.4) then
+          ifrtt=1
+        endif
+      ENDIF
+C   ---------- Cas d'un MODELE de METALLURGIE
+C              modele cree par T.L. en mai 2018
+      IF (lesfor(1).eq.'METALLURGIE' .AND. NMAT.le.4 ) THEN
+
+        NMAT=NMAT+1
+
+        IF( laprop .eq. 1 ) THEN
+C        On vas lire le LISTMOTS qui suit le mot-clef MOPROP(1)='PHASES'
+          CALL LIROBJ('LISTMOTS', lucvar, 1, IRETOU)
+          MLMOTS = lucvar
+          segact MLMOTS
+          NB_PHA = MLMOTS.MOTS(/2)
+C         On remplira ensuite MATMOD() avec lespro()
+          lespro(laprop) = MOPROP(laprop)
+        ENDIF
+
+        IF( laprop .eq. 2 ) THEN
+C        On vas lire le LISTMOTS qui suit le mot-clef MOPROP(2)='REACTIFS'
+          CALL LIROBJ('LISTMOTS', ireact, 1, IRETOU)
+          MLMOT1 = ireact
+          segact MLMOT1
+          NB_REA = MLMOT1.MOTS(/2)
+C         On remplira ensuite MATMOD() avec lespro()
+          lespro(laprop) = MOPROP(laprop)
+        ENDIF
+
+        IF( laprop .eq. 3 ) THEN
+C        On vas lire le LISTMOTS qui suit le mot-clef MOPROP(3)='PRODUITS'
+          CALL LIROBJ('LISTMOTS', iprodu, 1, IRETOU)
+          MLMOT2 = iprodu
+          segact MLMOT2
+          NB_PRO = MLMOT2.MOTS(/2)
+C         On remplira ensuite MATMOD() avec lespro()
+          lespro(laprop) = MOPROP(laprop)
+        ENDIF
+
+        IF( laprop .eq. 4 ) THEN
+C        On vas lire le LISTMOTS qui suit le mot-clef MOPROP(4)='TYPE'
+          CALL LIROBJ('LISTMOTS', lucmat, 1, IRETOU)
+          MLMOT3 = lucmat
+          segact MLMOT3
+          NB_TYP = MLMOT3.MOTS(/2)
+C         On remplira ensuite MATMOD() avec lespro()
+          lespro(laprop) = MOPROP(laprop)
+        ENDIF
+
+C       Les pointeurs lucvar et lucmat sont ensuite
+C       passees a inomid pour remplir les NOMID de l'objet MMODEL
+C       Les pointeurs lucvar, ireact, iprodu, lucmat seront mis
+C       dans le tableau IVAMOD de l'objet IMODEL
+
+        IF(NMAT .lt. 4) THEN
+C         On n'a pas encore recuperer toutes les donnees
+          go to 41
+
+        ELSE IF(NMAT .eq. 4) THEN
+
+C         On emet une erreur si les MLMOTS 'REACTIFS', 'PRODUITS' et
+C         'TYPES' n'ont pas ete luts
+          if(ireact .le. 0 .OR. iprodu .le. 0 .OR. lucmat .le. 0) then
+            CALL ERREUR(21)
+            RETURN
+          endif
+
+C         Autant de produits que de reactifs
+          if( NB_PRO .ne. NB_REA ) then
+            CALL ERREUR(1078)
+            RETURN
+          endif
+
+C         On initialise le MLMOTS des PHASES si celui ci n'a pas ete lut
+          icompt = 0
+          if( lucvar .le. 0) then
+            icompt = 1
+            NB_PHA = NB_REA + NB_PRO
+            JGM = NB_PHA
+            JGN = 4
+            SEGINI, MLMOTS
+            lucvar = MLMOTS
+C           On remplira ensuite MATMOD() avec lespro()
+            lespro(1) = MOPROP(1)
+          endif
+
+C         On a recuperer toutes les donnees, on effectue quelques tests
+          do ipha = 1, NB_PRO
+
+C           Produits differents du reactif pour chaque reaction
+            if( MLMOT1.MOTS(ipha) .eq. MLMOT2.MOTS(ipha) ) then
+              MOTERR(1:4)=MLMOT1.MOTS(ipha)
+              MOTERR(5:8)=MLMOT2.MOTS(ipha)
+              CALL ERREUR(1075)
+              RETURN
+            endif
+
+
+            irphas = 0
+            ipphas = 0
+            CALL PLACE(MLMOTS.MOTS, NB_PHA, irphas, MLMOT1.MOTS(ipha))
+            CALL PLACE(MLMOTS.MOTS, NB_PHA, ipphas, MLMOT2.MOTS(ipha))
+C             Si le nom du produit ou du reactif n'a pas ete lut dans le
+C             MLMOTS des PHASES :
+C               On le rajoute        si lucvar n'avait pas ete lut
+C               On emet une erreur   sinon
+            if(irphas .eq. 0) then
+              if( icompt .ge. 1 ) then
+                MLMOTS.MOTS(icompt) = MLMOT1.MOTS(ipha)
+                icompt = icompt + 1
+              else
+                MOTERR(1:4)=MLMOT1.MOTS(ipha)
+                CALL ERREUR(1080)
+                RETURN
+              endif
+            endif
+            if(ipphas .eq. 0) then
+              if( icompt .ge. 1 ) then
+                MLMOTS.MOTS(icompt) = MLMOT2.MOTS(ipha)
+                icompt = icompt + 1
+              else
+                MOTERR(1:4)=MLMOT2.MOTS(ipha)
+                CALL ERREUR(1080)
+                RETURN
+              endif
+            endif
+
+          enddo
+C         On corrige la taille de MLMOTS :
+          if( icompt .ge. 1 ) then
+            JGM = icompt - 1
+            JGN = 4
+            SEGADJ, MLMOTS
+          endif
+
+
+C         Un type de reaction definit pour chaque reaction
+          if( NB_TYP .ne. NB_PRO ) then
+            CALL ERREUR(1077)
+            RETURN
+          endif
+
+          LAPROP = 0
+
+          segdes MLMOTS, MLMOT1, MLMOT2, MLMOT3
+        ENDIF
+
+      ENDIF
+C   ---------- Cas d'un MODELE de THERMIQUE CONVECTION ou RAYONNEMENT
+      IF (lesfor(1).eq.'THERMIQUE' .AND. kjh.eq.0) then
+        IF (moprop(laprop).eq.'CONVECTION') then
+          ICONV=1
+          nmat=nmat+1
+          kjh=1
+          lespro(nmat)=moprop(laprop)
+          call model4(MOPROP,NPROP,MOTEF,NBTEF,N1MAX,N2MAX)
+          go to 41
+        ELSE IF (moprop(laprop).eq.'RAYONNEMENT') then
+          iraye=1
+          kjh=1
+          nmat=nmat+1
+          lespro(nmat)=moprop(laprop)
+          segini ilmora
+          call model9(MOPROP,NPROP,MOTEF,NBTEF,N1MAX,N2MAX)
+          go to 41
+        ENDIF
+      ENDIF
+C   ---------- Cas d'un MODELE de RAYONNEMENT
+      IF (iraye.eq.1) then
+        if(laprop.eq.1) icavit=1
+        if(laprop.eq.9) then
+          call lirent( nbdang,1,iretou)
+          if(ierr.ne.0) return
+        endif
+        if(laprop.eq.8) then
+          call lirent( nbga,1,iretou)
+          if(ierr.ne.0) return
+        endif
+        if(laprop.eq.7)then
+          isyme=1
+          call lirobj('POINT',ipp1,1,iretou)
+          call lirobj('POINT',ipp2,1,iretou)
+          if(idim.eq.3)call lirobj('POINT',ipp3,1,iretou)
+          if(ierr.ne.0) return
+        endif
+        if(laprop.eq.2) then
+          ifacaf=1
+          call lirobj('MAILLAGE',ipfac1,1,iretou)
+          call lirobj('MAILLAGE',ipfac2,1,iretou)
+          call lirobj('MAILLAGE',ipfac3,1,iretou)
+          call lirobj('MMODEL',imoco,1,iretou)
+         if(ierr.ne.0) return
+        endif
+      ENDIF
+C   ---------- Cas d'un MODELE de MELANGE
+      IF (LESFOR(1).EQ.'MELANGE') THEN
+        CALL LIROBJ('MMODEL',IPMOD,0,iOK)
+        IF (IERR.NE.0) RETURN
+C  ----- le melange par defaut est 'PARALLELE'
+        IF (iOK.NE.0) THEN
+          IF (LAPROP.EQ.0) LAPROP=3
+          LESMOD(NMAT+1)=IPMOD
+        ENDIF
+      ENDIF
+C
+      IF (LAPROP.EQ.0) GOTO 42
+      NMAT=NMAT+1
+      LESPRO(NMAT)=MOPROP(LAPROP)
+      GOTO 41
+C
+C  Option par defaut suivant la formulation
+  42  CONTINUE
+      IF (NMAT.NE.0) THEN
+C on teste tout de suite l'existence de la donnee de la derivee
+C il ne faut pas de modele de materiau commencant par deri
+        nmit=nmat
+        do i=1,nmit
+          if( lespro(i)(1:4).eq.'EPSI') then
+              call erreur(19)
+              return
+          endif
+        enddo
+C  on cherche le mot deri
+        CALL LIRMOT(deriv,1,itrou,0)
+        IF(itrou.ne.0) then
+          call lirmot(mderiv,5,iret,1)
+          if(ierr.ne.0) return
+          Jderiv=iret
+        ENDIF
+        IF (LESFOR(1).EQ.'THERMIQUE' ) THEN
+C         +---------------------------------------------------------+
+C         | FORMULATION THERMIQUE : 'ISOTROPE'                      |
+C         +---------------------------------------------------------+
+          IPROP = 3
+          IF (IDIM.EQ.1) IPROP = 1
+          CALL PLACE(MOPROP,IPROP,IPLAC,LESPRO(1))
+          IF (IPLAC.EQ.0) THEN
+            DO i=NMAT,1,-1
+              LESPRO(i+1)=LESPRO(i)
+            ENDDO
+            LESPRO(1)='ISOTROPE'
+            NMAT=NMAT+1
+          ELSEif(NMAT.EQ.1)THEN
+            NMAT=NMAT+1
+            LESPRO(2)='CONDUCTION'
+          ENDIF
+C  on ajoute le mot conduction si besoin avec phase et advection
+          idoico=0
+          idejco=0
+          DO i=1,nmat
+            CALL PLACE (OPTEMP,3,iplac,LESPRO(i))
+            if(iplac.eq.1.or.iplac.eq.2) idoico=1
+            if(iplac.eq.3) idejco=1
+          enddo
+          if( idoico.ne.0.and.idejco.eq.0) then
+            nmat=nmat+1
+            lespro(nmat)='CONDUCTION'
+          endif
+        ELSE IF (LESFOR(1).EQ.'MECANIQUE'.OR.
+     &           LESFOR(1).EQ.'POREUX') THEN
+C         +----------------------------------------------------------+
+C         | FORMULATION MECANIQUE / POREUX : 'ELASTIQUE' 'ISOTROPE'  |
+C         +----------------------------------------------------------+
+          IF (NMAT.GE.2)THEN
+            CALL MODELA(MOPROP,NMOD)
+            CALL PLACE(MOPROP,NMOD,IPLAC,LESPRO(2))
+            IF (IPLAC.EQ.0) THEN
+              DO i=NMAT,2,-1
+                LESPRO(i+1)=LESPRO(i)
+              ENDDO
+              LESPRO(2)='ISOTROPE'
+              NMAT=NMAT+1
+            ENDIF
+          ELSE IF (NMAT.EQ.1) THEN
+            LESPRO(2)='ISOTROPE'
+            NMAT=2
+          ENDIF
+C  MECANIQUE / POREUX : modele par defaut en comportement non lineaire
+          CALL MODNLI(MOPROP,NMOD)
+          CALL PLACE(MOPROP,NMOD,IPLAC,LESPRO(NMAT))
+C  Par defaut : PLASTIQUE ISOTROPE
+          IF (IPLAC.EQ.1) THEN
+            NMAT=NMAT+1
+            LESPRO(NMAT)='ISOTROPE'
+C  Par defaut : FLUAGE NORTON
+          ELSE IF (IPLAC.EQ.2) THEN
+            NMAT=NMAT+1
+            LESPRO(NMAT)='NORTON'
+C  Par defaut : VISCOPLASTIQUE CHABOCHE
+          ELSE IF (IPLAC.EQ.3) THEN
+            NMAT=NMAT+1
+            LESPRO(NMAT)='CHABOCHE'
+C  Par defaut : ENDOMMAGEMENT MAZARS
+          ELSE IF (IPLAC.EQ.4) THEN
+            NMAT=NMAT+1
+            LESPRO(NMAT)='MAZARS'
+C  Par defaut : ENDOMMAGEMENT PLASTIQUE P/Y
+          ELSE IF (IPLAC.EQ.5) THEN
+            NMAT=NMAT+1
+            LESPRO(NMAT)='PSURY'
+          ELSE IF (IPLAC.EQ.6) THEN
+C  Si 'MECANIQUE' OU 'POREUX' : pas de comportement par defaut
+C pour 'NON_LINEAIRE'
+              CALL ERREUR(945)
+              RETURN
+          ELSE IF (IPLAC.EQ.7) THEN
+C  Si 'MECANIQUE' : pas de comportement par defaut pour 'VISCO_EXTERNE'
+            IF (LESFOR(1).EQ.'MECANIQUE') THEN
+              CALL ERREUR(946)
+C  Si 'POREUX' : option non implementee
+            ELSE IF (LESFOR(1).EQ.'POREUX') THEN
+              CALL ERREUR(251)
+            ENDIF
+            RETURN
+          ENDIF
+        ELSE IF(LESFOR(1).EQ.'MAGNETODYNAMIQUE') THEN
+C         +---------------------------------------------------------------+
+C         | FORMULATION MAGNETODYNAMIQUE : 'POTENTIEL_VECTEUR' 'ISOTROPE' |
+C         +---------------------------------------------------------------+
+          IF (NMAT.EQ.1) THEN
+            IF (LESPRO(1).NE.'POTENTIEL_VECTEU') THEN
+              LESPRO(2)=LESPRO(1)
+              LESPRO(1)='POTENTIEL_VECTEU'
+            ELSE
+              LESPRO(2)='ISOTROPE'
+            ENDIF
+            NMAT=2
+          ENDIF
+        ELSE IF (LESFOR(1).EQ.'MELANGE') THEN
+C         +-------------------------------+
+C         | FORMULATION MELANGE : 'CEREM' |
+C         +-------------------------------+
+          NMAT1=NMAT
+          IF (NMAT.EQ.0) THEN
+            LESPRO(1)='CEREM'
+            NMAT=1
+          ENDIF
+        ELSE IF (LESFOR(1).EQ.'LIAISON') THEN
+C         +-------------------------------------------------+
+C         | FORMULATION  LIAISON : pas d''option par defaut |
+C         +-------------------------------------------------+
+        ELSE IF (LESFOR(1).EQ.'ELECTROSTATIQUE' ) THEN
+C         +-------------------------------------------+
+C         | FORMULATION  ELECTROSTATIQUE : 'ISOTROPE' |
+C         +-------------------------------------------+
+          IPROP = 3
+          IF (IDIM.EQ.1) IPROP = 1
+          CALL PLACE(MOPROP(1),IPROP,IPLAC,LESPRO(1))
+          IF (IPLAC.EQ.0) THEN
+            DO i=NMAT,1,-1
+              LESPRO(i+1)=LESPRO(i)
+            ENDDO
+            LESPRO(1)='ISOTROPE'
+            NMAT=NMAT+1
+          ENDIF
+        ELSE IF (LESFOR(1).EQ.'DIFFUSION' ) THEN
+C         +-------------------------------------------+
+C         | FORMULATION DIFFUSION : 'ISOTROPE' 'FICK' |
+C         +-------------------------------------------+
+          IPROP = 3
+          IF (IDIM.EQ.1) IPROP = 1
+          CALL PLACE(MOPROP(1),IPROP,IPLAC,LESPRO(1))
+          IF (IPLAC.EQ.0) THEN
+            DO i=NMAT,1,-1
+              LESPRO(i+1)=LESPRO(i)
+            ENDDO
+            LESPRO(1)='ISOTROPE'
+            NMAT=NMAT+1
+          ENDIF
+          CALL MODDIF(MOPROP,NMOD)
+          CALL PLACE(MOPROP,NMOD,IPLAC,LESPRO(NMAT))
+          IF (IPLAC.EQ.0) THEN
+            NMAT=NMAT+1
+            LESPRO(NMAT)='FICK'
+          ENDIF
+        ELSEIF(LESFOR(1).EQ.'CONTACT' ) THEN
+C         +----------------------------------+
+C         | FORMULATION CONTACT : UNILATERAL |
+C         +----------------------------------+
+          call place ( moprop,2,iplac,lespro(1))
+          if( iplac.eq.0) then
+           do iur=1,nmat
+             lespro(nmat+2-iur)=lespro (nmat +1-iur)
+           enddo
+           lespro(1)='UNILATERAL'
+           nmat=nmat+1
+          endif
+        ENDIF
+      ELSE
+C
+C       POUR LES MODELES CHARGEMENT IL N'Y A PAS DE CHOIX PAR DEFAUT
+C       L'UTILISATEUR DOIT SPECIFIER D'AUTRES MOT CLES APRES 'CHARGEMENT'
+C
+        IF (LESFOR(1).EQ.'CHARGEMENT') CALL ERREUR(251)
+C
+C  si nmat=0 on met le premier mot autorisé
+        NMAT=1
+        LESPRO(1)=MOPROP(1)
+        IF(LESFOR(1).EQ.'THERMIQUE') THEN
+          LESPRO(2)='CONDUCTION'
+          NMAT=NMAT+1
+        ELSE IF (LESFOR(1).EQ.'MECANIQUE'.OR.LESFOR(1).EQ.'POREUX'.OR.
+     &           LESFOR(1).EQ.'MAGNETODYNAMIQUE') THEN
+C  Option par defaut : MECANIQUE / POREUX ELASTIQUE ISOTROPE
+C                   ou MAGNETODYNAMIQUE POTENTIEL_VECTEUR ISOTROPE
+          NMAT=NMAT+1
+          LESPRO(NMAT)='ISOTROPE'
+C  Par defaut : DIFFUSION ISOTROPE FICK
+        ELSE IF (LESFOR(1).EQ.'DIFFUSION') THEN
+          NMAT=NMAT+1
+          IPROP = 4
+          IF (IDIM.EQ.1) IPROP = 2
+          LESPRO(NMAT)=MOPROP(IPROP)
+        ELSE IF (LESFOR(1).EQ.'NAVIER_STOKES'.OR.
+     &           LESFOR(1).EQ.'EULER') THEN
+C         +----------------------------------------------------------------+
+C         | Defaut pour une FORMULATION NAVIER_STOKES OU EULER : NEWTONIEN |
+C         +----------------------------------------------------------------+
+          NMAT = 1
+          LESPRO(NMAT)='NEWTONIEN'
+        ELSE IF (LESFOR(1).EQ.'FISSURE') THEN
+C         +-------------------------------------+
+C         | Defaut pour une FORMULATION FISSURE |
+C         +-------------------------------------+
+          NMAT = 3
+          LESPRO(1)='MASS'
+          LESPRO(2)='PARF'
+          LESPRO(3)='POISEU_BLASIUS'
+        ELSE IF(LESFOR(1).EQ.'CONTACT') THEN
+C         +---------------------------------------------------+
+C         | Defaut pour une FORMULATION CONTACT : UNILATERAL  |
+C         +---------------------------------------------------+
+          NMAT=1
+          LESPRO(1)='UNILATERAL'
+        ENDIF
+      ENDIF
+
+C  Lecture eventuelle des types d'ELEMENTS FINIS a utiliser
+ 43   ITEF=0
+      IF (NBTEF.EQ.0) GOTO 2
+      CALL MESLIR(-178)
+ 1    IF (ITEF.NE.0) CALL MESLIR(-177)
+      CALL LIRMOT(MOTEF,NBTEF,LETEF,0)
+      IF (IERR.NE.0) RETURN
+      IF (LETEF.EQ.0) GOTO 2
+      ITEF=ITEF+1
+      LESTEF(ITEF)=MOTEF(LETEF)
+      GOTO 1
+
+c  Lecture eventuelle de listmots
+ 2    continue
+      call lirobj('LISTMOTS',jlmot1,0,irmot1)
+      if (irmot1.eq.1) call lirobj('LISTMOTS',jlmot2,1,irmot2)
+
+C   lecture pour mecanique aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+C  En formulations 'MECANIQUE' et 'POREUX' : detection d'une loi non
+C  lineaire externe, le cas echeant saisie de donnees complementaires.
+C  Caracterisation : loi non lineaire externe si
+C  - famille 'VISCO_EXTERNE' ou
+C  - famille 'NON_LINEAIRE', materiau 'UTILISATEUR'.
+C  si pas loi externe lecture eventuelle des parametres externes
+      LMEEXT=.FALSE.
+      LMEVIX=.FALSE.
+      LMENLX=.FALSE.
+      LMENUM = 0
+      LMENOM = '                '
+      LMELIB = '                '
+      LMEFCT = '                '
+      LMELGB = 0
+      LMELGT = 0
+      LMEPTR = 0
+      LMEIVI = 0
+
+      IF ( (NFOR.EQ.1).AND.
+     .  (LESFOR(1).EQ.'MECANIQUE'.OR.LESFOR(1).EQ.'POREUX') ) THEN
+        DO i=1,NMAT
+          IF (LESPRO(i).EQ.'VISCO_EXTERNE') THEN
+            LMEVIX=.TRUE.
+            GOTO 203
+          ENDIF
+        ENDDO
+
+        IF (.NOT.LMEVIX) THEN
+          DO i=1,NMAT
+            IF (LESPRO(i).EQ.'UTILISATEUR') THEN
+              LMENLX = .TRUE.
+              GOTO 203
+            ENDIF
+          ENDDO
+        ENDIF
+C........N.B. LMEEXT exprime la condition (NFOR.EQ.1) ET
+C             (LESFOR(1).EQ.'MECANIQUE') ET (loi non lineaire externe)
+ 203     LMEEXT = LMEVIX.OR.LMENLX
+         IF ( LMEEXT ) THEN
+C  lecture et verif des noms des materiaux, des
+C  noms des variables internes,  des noms des parametre externe pour
+C loi externes
+ 210        CALL LIRMOT(MOEXT,NBEXT,LEXT,0)
+C           Si on ne trouve plus l'un des mots cles attendus, on sort
+            IF (LEXT.EQ.0) GOTO 211
+C           Lecture d'un entier sous 'NUME_LOI'
+            IF (LEXT.EQ.1) THEN
+               CALL LIRENT(LMENUM,1,IRET)
+               IF (IERR.NE.0) RETURN
+C           Valeur illicite du numero de la loi (superieur ou egal a 1)
+               IF (LMENUM.LT.1 .OR. LMENUM.GE.1000000) THEN
+                 INTERR(1) = LMENUM
+                 CALL ERREUR(36)
+                 CALL ERREUR(947)
+                 RETURN
+               ENDIF
+C           Lecture du nom de la loi sous 'NOM_LOI'
+            ELSE IF (LEXT.EQ.2) THEN
+               MOTEMP = ' '
+               CALL LIRCHA(MOTEMP,1,IRET)
+               IF (IERR.NE.0) RETURN
+               IRET = LONG(MOTEMP(1:IRET))
+               IF (IRET.GT.16) THEN
+                 INTERR(1) = IRET
+                 MOTERR = MOTEMP(1:IRET)
+                 CALL ERREUR(-2)
+                 CALL ERREUR(36)
+                 RETURN
+               ELSE IF (IRET.LE.0) THEN
+                 INTERR(1) = IRET
+                 MOTERR = 'NOM_LOI'
+                 CALL ERREUR(-2)
+                 CALL ERREUR(36)
+                 RETURN
+               ENDIF
+               LMENOM(1:IRET) = MOTEMP(1:IRET)
+C           Lecture d'un objet LISTMOTS sous 'PARA_LOI'
+            ELSE IF (LEXT.EQ.3) THEN
+               CALL LIROBJ('LISTMOTS',LUPARX,1,IRET)
+               IF (IERR.NE.0) RETURN
+C           Lecture d'un objet LISTMOTS sous 'C_MATERIAU'
+            ELSE IF (LEXT.EQ.4) THEN
+               CALL LIROBJ('LISTMOTS',LUCMAT,1,IRET)
+               IF (IERR.NE.0) RETURN
+C           Lecture d'un objet LISTMOTS sous 'C_VARINTER'
+            ELSE IF (LEXT.EQ.5) THEN
+               CALL LIROBJ('LISTMOTS',LUCVAR,1,IRET)
+               IF (IERR.NE.0) RETURN
+C           Lecture du chemin de la bibliotheque de la loi
+            ELSE IF (LEXT.EQ.6) THEN
+               MOTEMP = ' '
+               CALL LIRCHA(MOTEMP,1,IRET)
+               IF (IERR.NE.0) RETURN
+               IRET = LONG(MOTEMP(1:IRET))
+               IF (IRET.GT.510) THEN
+                 INTERR(1) = IRET
+                 MOTERR = MOTEMP(1:40)
+                 CALL ERREUR(-2)
+                 CALL ERREUR(36)
+                 RETURN
+               ENDIF
+               LMELIB(1:IRET) = MOTEMP(1:IRET)
+               LMELGB = IRET
+               LMEPTR = IRET
+C           Lecture du nom de la fonction de la loi
+            ELSE IF (LEXT.EQ.7) THEN
+               MOTEMP = ' '
+               CALL LIRCHA(MOTEMP,1,IRET)
+               IF (IERR.NE.0) RETURN
+               IRET = LONG(MOTEMP(1:IRET))
+               IF (IRET.LE.0 .OR. IRET.GT.72) THEN
+                 INTERR(1) = IRET
+                 MOTERR = MOTEMP(1:40)
+                 CALL ERREUR(-2)
+                 CALL ERREUR(36)
+                 RETURN
+               ENDIF
+               LMEFCT(1:IRET) = MOTEMP(1:IRET)
+               LMELGT = IRET
+            ENDIF
+C           On repete jusqu'a ce qu'on ne trouve plus aucun des
+C           mots cles attendus, regle de surcharge le cas echeant
+            GOTO 210
+ 211        CONTINUE
+C...........Verifications sur les donnees
+C           Il manque 'NUME_LOI' ou 'NOM_LOI' (toujours obligatoire)
+            IF (LMENUM.EQ.0 .AND. LMENOM.EQ.'                ') THEN
+              if (LMELGT.eq.0) then
+               CALL ERREUR(641)
+               RETURN
+              endif
+            ENDIF
+            IF (LMENUM.NE.0 .AND. LMENOM.NE.'                ') THEN
+               MOTERR(1:16) = 'NUME_LOINOM_LOI '
+               CALL ERREUR(135)
+               RETURN
+            ENDIF
+C Les liste des composantes ne doivent pas etre vides.
+            DO i = 1, 3
+              IF (i.EQ.1) mlmots = LUPARX
+              IF (i.EQ.2) mlmots = LUCMAT
+              IF (i.EQ.3) mlmots = LUCVAR
+              IF (MLMOTS.NE.0) THEN
+                SEGACT,mlmots
+                NBCOMP = mlmots.mots(/2)
+                SEGDES,mlmots
+                IF (NBCOMP.EQ.0) THEN
+                  CALL ERREUR(964)
+                  RETURN
+                ENDIF
+              ENDIF
+            ENDDO
+C Dans le cas d'un modele NON_LINEAIRE UTILISATEUR, on rajoute en fin de
+C liste des proprietes du modele, le numero ou le nom de la loi attribue
+C par l'utilisateur.
+            NMAT = NMAT + 1
+            LESPRO(NMAT) = '                '
+            IF (LMENUM.EQ.0) THEN
+              LESPRO(NMAT) = LMENOM
+              if (LMELGT.gt.0.and.LMENOM.eq.'                ') then
+c* On espere mettre un numero "unique" dans le nom !
+               segini,ilmora
+               write(LESPRO(NMAT)(1:16),'(I16)') ilmora
+               segsup,ilmora
+              endif
+            ELSE
+              WRITE(LESPRO(NMAT)(1:16),'(I16)') LMENUM
+            ENDIF
+C           Verifications pour une loi 'NON_LINEAIRE' 'UTILISATEUR'
+            IF ( LMENLX ) THEN
+C              Il manque les composantes materielles sous 'C_MATERIAU'
+               IF (LUCMAT.EQ.0) THEN
+                  CALL ERREUR(641)
+                  RETURN
+               ENDIF
+C              La liste des composantes materielles saisie sous
+C              'C_MATERIAU' ne doit pas etre vide
+               MLMOTS=LUCMAT
+               SEGACT,MLMOTS
+               NBCOMP = MOTS(/2)
+               SEGDES,MLMOTS
+               IF (NBCOMP.EQ.0) THEN
+                  CALL ERREUR(964)
+                  RETURN
+               ENDIF
+            ENDIF
+C Dans le cas d'une libraire externe, quelques verifications puis
+C recherche du pointeur de la fonction externe
+            IF (LMEPTR.GT.0) THEN
+             IF (LMELGT.EQ.0) THEN
+              IF (LMENUM.EQ.0) THEN
+                IRET = LONG(LMENOM)
+                i_z = INDEX(LMENOM(1:IRET),' ')
+                IF (i_z.NE.0) THEN
+           write(ioimp,*) 'PAS D ESPACE dans NOM_LOI en cas de LIB_LOI'
+                  CALL ERREUR(21)
+                  RETURN
+                ENDIF
+                LMEFCT(1:IRET) = LMENOM(1:IRET)
+                LMELGT = IRET
+              ELSE
+                IRET = 0
+                DO i = 1, 16
+                  IRET = IRET + 1
+                  IF (LESPRO(NMAT)(i:i).NE.' ') GOTO 220
+                ENDDO
+ 220            LMEFCT = 'umat_'//LESPRO(NMAT)(IRET:16)
+                LMELGT = 22-IRET
+              ENDIF
+             ENDIF
+              LMELIB = LMELIB(1:LMELGB)//CHAR(0)
+              LMEFCT = LMEFCT(1:LMELGT)//CHAR(0)
+              LMEPTR = 0
+              IP = -1
+              CALL PTRLOI(LMELIB,LMELGB,LMEFCT,LMELGT,IP,LMEPTR)
+              IF (LMEPTR.LE.0) THEN
+                WRITE(ioimp,*) 'ERROR : Option LIB_LOI'
+                CALL ERREUR(21)
+                RETURN
+              ENDIF
+            ENDIF
+         ELSE
+C  si pas lois externes lecture des noms des parametres externes
+           CALL LIRMOT(MOEXT(2),1,LEXT,0)
+           If(lext.ne.0) then
+             CALL LIROBJ('LISTMOTS',luparx,1,iret)
+             IF(IERR.NE.0) return
+           endif
+         ENDIF
+C           Verifications sur les parametres, si declares
+         IF (luparx.GT.0) THEN
+C     Si la temperature 'T   ' fait partie des parametres de
+C     la loi, elle doit etre declaree en tete
+            mlmots=luparx
+            SEGACT,MLMOTS
+            NBPARA=MOTS(/2)
+            IF (NBPARA.GT.0) THEN
+              DO IP = 1, NBPARA
+                IF (MOTS(IP).EQ.'T   ') THEN
+                  IF (IP.GT.1) THEN
+                    SEGDES,MLMOTS
+                    CALL ERREUR(948)
+                    RETURN
+                  ENDIF
+                  GOTO 221
+                ENDIF
+              ENDDO
+ 221          CONTINUE
+            ENDIF
+C     Pas de parametres redondants
+            IF (NBPARA.GT.1) THEN
+               DO 230 IP1 = 1, NBPARA-1
+                  PAR1 = MOTS(IP1)
+                  DO 231 IP2 = IP1+1, NBPARA
+                     IF (MOTS(IP2).EQ.PAR1) THEN
+                        SEGDES,MLMOTS
+                        CALL ERREUR(949)
+                        RETURN
+                     ENDIF
+ 231              CONTINUE
+ 230           CONTINUE
+            ENDIF
+            SEGDES,MLMOTS
+         ENDIF
+      ENDIF
+C  fin lecture mecanique aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+C Formulation 'DIFFUSION' : oooooooooooooooooooooooooooooooooooooooooooo
+C  - Detection d'une loi non lineaire externe (mot-cle 'UTILISATEUR')
+C  - Detection de la quantite de l'effet Soret (mot-cle 'SORET')
+C  - Lecture de l'inconnue "diffusant" (mot-cle 'INCO')
+C 3    CONTINUE
+      LDIEXT = .FALSE.
+      LDISOR = .FALSE.
+      LDINUM = 0
+      LDINOM = '                '
+      LDILIB = '                '
+      LDIFCT = '                '
+      LDILGB = 0
+      LDILGT = 0
+      LDIPTR = 0
+      IF (NFOR.EQ.1 .AND. LESFOR(1).EQ.'DIFFUSION') THEN
+C  -- Recherche des informations sur la presence d'une loi externe --
+        DO i=1,NMAT
+          LDIEXT = LESPRO(i).EQ.'UTILISATEUR'
+          LDISOR = LESPRO(i).EQ.'SORET'
+        ENDDO
+C - Lecture des informations pour la loi externe
+        IF (LDIEXT) THEN
+ 310      CONTINUE
+          CALL LIRMOT(MOEXT,NBEXT,LEXT,0)
+          IF (LEXT.EQ.0) GOTO 311
+C       Lecture d'un entier sous 'NUME_LOI'
+          IF (LEXT.EQ.1) THEN
+            CALL LIRENT(LDINUM,1,IRET)
+            IF (IERR.NE.0) RETURN
+            IF (LDINUM.LT.1 .OR. LDINUM.GE.1000000) THEN
+              INTERR(1) = LDINUM
+              CALL ERREUR(36)
+              CALL ERREUR(947)
+              RETURN
+            ENDIF
+C           Lecture du nom de la loi sous 'NOM_LOI'
+          ELSE IF (LEXT.EQ.2) THEN
+            MOTEMP = ' '
+            CALL LIRCHA(MOTEMP,1,IRET)
+            IF (IERR.NE.0) RETURN
+            IRET = LONG(MOTEMP(1:IRET))
+            IF (IRET.GT.16) THEN
+              INTERR(1) = IRET
+              MOTERR = MOTEMP(1:40)
+              CALL ERREUR(-2)
+              CALL ERREUR(36)
+              RETURN
+            ELSE IF (IRET.LE.0) THEN
+              INTERR(1) = IRET
+              MOTERR = 'NOM_LOI'
+              CALL ERREUR(-2)
+              CALL ERREUR(36)
+              RETURN
+            ENDIF
+            LDINOM(1:IRET) = MOTEMP(1:IRET)
+C        Lecture d'un objet LISTMOTS sous 'PARA_LOI'
+          ELSE IF (LEXT.EQ.3) THEN
+            CALL LIROBJ('LISTMOTS',luparx,1,IRET)
+            IF (IERR.NE.0) RETURN
+C       Lecture d'un objet LISTMOTS sous 'C_MATERIAU'
+          ELSE IF (LEXT.EQ.4) THEN
+            CALL LIROBJ('LISTMOTS',lucmat,1,IRET)
+            IF (IERR.NE.0) RETURN
+C       Lecture d'un objet LISTMOTS sous 'C_VARINTER'
+          ELSE IF (LEXT.EQ.5) THEN
+            CALL LIROBJ('LISTMOTS',lucvar,1,IRET)
+            IF (IERR.NE.0) RETURN
+C       Lecture du chemin de la bibliotheque de la loi
+          ELSE IF (LEXT.EQ.6) THEN
+             MOTEMP = ' '
+             CALL LIRCHA(MOTEMP,1,IRET)
+             IF (IERR.NE.0) RETURN
+             IRET = LONG(MOTEMP(I:IRET))
+             IF (IRET.GT.510) THEN
+               INTERR(1) = IRET
+               MOTERR = MOTEMP(1:40)
+               CALL ERREUR(-2)
+               CALL ERREUR(36)
+               RETURN
+             ENDIF
+             LDILIB(1:IRET) = MOTEMP(1:IRET)
+             LDILGB = IRET
+             LDIPTR = IRET
+C           Lecture du nom de la fonction de la loi
+          ELSE IF (LEXT.EQ.7) THEN
+             MOTEMP = ' '
+             CALL LIRCHA(MOTEMP,1,IRET)
+             IF (IERR.NE.0) RETURN
+             IRET = LONG(MOTEMP(1:IRET))
+             IF (IRET.LE.0 .OR. IRET.GT.72) THEN
+               INTERR(1) = IRET
+               MOTERR = MOTEMP(1:40)
+               CALL ERREUR(-2)
+               CALL ERREUR(36)
+               RETURN
+             ENDIF
+             LDIFCT(1:IRET) = MOTEMP(1:IRET)
+             LDILGT = IRET
+          ENDIF
+          GOTO 310
+ 311      CONTINUE
+C Verifications des informations obligatoires de la loi externe
+C       Il manque 'NUME_LOI' ou 'NOM_LOI' (toujours obligatoire)
+          IF (LDINUM.EQ.0 .AND. LDINOM.EQ.'                ') THEN
+           if (LDILGT.eq.0) then
+            CALL ERREUR(641)
+            RETURN
+           endif
+          ENDIF
+          IF (LDINUM.NE.0 .AND. LDINOM.NE.'                ') THEN
+            MOTERR(1:16) = 'NUME_LOINOM_LOI '
+            CALL ERREUR(135)
+            RETURN
+          ENDIF
+C       Il manque la liste 'C_MATERIAU'
+          IF (lucmat.EQ.0) THEN
+            CALL ERREUR(641)
+            RETURN
+          ENDIF
+C Les liste des composantes ne doivent pas etre vides.
+          DO i = 1, 3
+            IF (i.EQ.1) MLMOTS = luparx
+            IF (i.EQ.2) MLMOTS = lucmat
+            IF (i.EQ.3) MLMOTS = lucvar
+            IF (MLMOTS.NE.0) THEN
+              SEGACT,MLMOTS
+              NBCOMP = MOTS(/2)
+              SEGDES,MLMOTS
+              IF (NBCOMP.EQ.0) THEN
+                CALL ERREUR(964)
+                RETURN
+              ENDIF
+            ENDIF
+          ENDDO
+C Dans le cas d'un modele UTILISATEUR, on rajoute en fin de
+C liste des proprietes du modele, le numero attribue par l'utilisateur.
+          NMAT = NMAT + 1
+          LESPRO(NMAT) = '                '
+          IF (LDINUM.EQ.0) THEN
+            LESPRO(NMAT) = LDINOM
+            if (LDILGT.gt.0.and.LDINOM.eq.'                ') then
+c* On espere mettre un numero "unique" dans le nom !
+              segini,ilmora
+              write(LESPRO(NMAT)(1:16),'(I16)') ilmora
+              segsup,ilmora
+            endif
+          ELSE
+            WRITE(LESPRO(NMAT)(1:16),'(I16)') LDINUM
+          ENDIF
+C Dans le cas d'une libraire externe, quelques verifications puis
+C recherche du pointeur de la fonction externe
+          IF (LDIPTR.GT.0) THEN
+           IF (LDILGT.EQ.0) THEN
+            IF (LDINUM.EQ.0) THEN
+              IRET = LONG(LDINOM)
+              i_z = INDEX(LDINOM(1:IRET),' ')
+              IF (i_z.NE.0) THEN
+           write(ioimp,*) 'PAS D ESPACE dans NOM_LOI en cas de LIB_LOI'
+                CALL ERREUR(21)
+                RETURN
+              ENDIF
+              LDIFCT(1:IRET) = LDINOM(1:IRET)
+              LDILGT = IRET
+            ELSE
+              IRET = 0
+              DO i = 1, 16
+                IRET = IRET + 1
+                IF (LESPRO(NMAT)(i:i).NE.' ') GOTO 320
+              ENDDO
+ 320          LDIFCT = 'umat_'//LESPRO(NMAT)(IRET:16)
+              LDILGT = 22-IRET
+            ENDIF
+           ENDIF
+            LDILIB = LDILIB(1:LDILGB)//CHAR(0)
+            LDIFCT = LDIFCT(1:LDILGT)//CHAR(0)
+            LDIPTR = 0
+            IP = -1
+            CALL PTRLOI(LDILIB,LDILGB,LDIFCT,LDILGT,IP,LDIPTR)
+            IF (LDIPTR.LE.0) THEN
+              WRITE(ioimp,*) 'ERROR : Option LIB_LOI'
+              CALL ERREUR(21)
+              RETURN
+            ENDIF
+          ENDIF
+        ENDIF
+C - Lecture des informations pour la loi Soret :
+C - quantite dont le gradient est l'origine de l'effet ('T' par defaut)
+        IF (LDISOR) THEN
+          mlmots = 0
+          CHARIN = 'T       '
+C   Lecture du mot-cle 'PARA_LOI' et donnees associees
+          CALL LIRMOT(MOEXT(2),1,LEXT,0)
+          IF (IERR.NE.0) RETURN
+          IF (LEXT.EQ.1) THEN
+            CALL LIROBJ('LISTMOTS',mlmots,0,IRET)
+            IF (IERR.NE.0) RETURN
+            IF (IRET.EQ.0) THEN
+              CALL LIRCHA(CHARIN,1,IRETI)
+              IF (IERR.NE.0) RETURN
+              IRETI=LONG(CHARIN)
+              IF (IRETI.EQ.0) CALL ERREUR(643)
+            ELSE
+              SEGACT,mlmots
+              NBCOMP = mots(/2)
+              IF (NBCOMP.EQ.0) THEN
+                CALL ERREUR(964)
+              ELSE
+                CHARIN = MOTS(1)
+                IRETI = LONG(CHARIN)
+                IF (IRETI.EQ.0) CALL ERREUR(643)
+              ENDIF
+              SEGDES,mlmots
+            ENDIF
+            IF (IERR.NE.0) RETURN
+            IRETMA = 2
+C*8         IRETMA = 6
+            IF (IRETI.GT.IRETMA) THEN
+              INTERR(1)   = IRETMA
+              MOTERR(1:8) = CHARIN(1:IRETI)
+              CALL ERREUR(-353)
+            ENDIF
+            IRETI = MIN(IRETI,IRETMA)
+            CHARIN(IRETI+1:8) = ' '
+          ENDIF
+          JGM = 1
+          JGN = 8
+          SEGINI,mlmots
+          mots(1) = CHARIN
+          luparx = mlmots
+        ENDIF
+C  -- Pour la formulation DIFFUSION : lecture quantite (ddl) diffusant --
+C  -- On cherche a lire le mot 'INCO' suivi du nom de l'INCOnnue donne --
+C  -- soit par un LISTMOTS, soit par un MOT puis eventuellement du nom --
+C  -- de la grandeur DUALe donne par un objet de meme type que pour le --
+C  -- nom de l'inconnue.                                               --
+        CALL LIRMOT(MODIF,NBDIF,LEXT,0)
+        IF (LEXT.EQ.0) THEN
+C*8       MDIINC='CONC    '
+C*8       MDIDUA='QCONC   '
+          MDIINC='CO      '
+          MDIDUA='QCO     '
+        ELSE
+          MDIINC='        '
+          MDIDUA='Q       '
+          CHARIN='        '
+          CHARRE='        '
+          CALL LIROBJ('LISTMOTS',mlmots,0,IRET)
+          IF (IERR.NE.0) RETURN
+          IF (mlmots.NE.0) THEN
+            SEGACT,mlmots
+            NBCOMP = MOTS(/2)
+            IF (NBCOMP.EQ.0) THEN
+              CALL ERREUR(643)
+            ELSE
+              CHARIN=MOTS(1)
+              IRETI=LONG(CHARIN)
+              IF (IRETI.EQ.0) CALL ERREUR(643)
+            ENDIF
+            SEGDES,mlmots
+            IF (IERR.NE.0) RETURN
+            CALL LIROBJ('LISTMOTS',mlmots,0,IRETE)
+            IF (IERR.NE.0) RETURN
+            IF (mlmots.NE.0) THEN
+              SEGACT,mlmots
+              NBCOMP = MOTS(/2)
+              IF (NBCOMP.EQ.0) THEN
+                CALL ERREUR(643)
+              ELSE
+                CHARRE=MOTS(1)
+                IRETE=LONG(CHARRE)
+                IF (IRETE.EQ.0) CALL ERREUR(643)
+              ENDIF
+              SEGDES,mlmots
+              IF (IERR.NE.0) RETURN
+            ENDIF
+          ELSE
+            CALL LIRCHA(CHARIN,1,IRETI)
+            IF (IERR.NE.0) RETURN
+            IRETI = LONG(CHARIN(1:IRETI))
+            IF (IRETI.EQ.0) THEN
+              CALL ERREUR(643)
+              RETURN
+            ENDIF
+            CALL LIRCHA(CHARRE,0,IRETE)
+            IF (IERR.NE.0) RETURN
+            IF (IRETE.GT.0) THEN
+              IRETE = LONG(CHARRE(1:IRETE))
+              IF (IRETE.EQ.0) THEN
+                CALL ERREUR(643)
+                RETURN
+              ENDIF
+            ENDIF
+          ENDIF
+          IRETMA = 2
+C*8       IRETMA = 6
+          IF (IRETI.GT.IRETMA) THEN
+            INTERR(1)   = IRETMA
+            MOTERR(1:8) = CHARIN(1:IRETI)
+            CALL ERREUR(-353)
+          ENDIF
+          IRETI = MIN(IRETI,IRETMA)
+          MDIINC(1:IRETI)=CHARIN(1:IRETI)
+          IF (IRETE.EQ.0) THEN
+            MDIDUA(2:1+IRETI)=MDIINC(1:IRETI)
+          ELSE
+            IRETMA = IRETMA + 2
+            IF (IRETE.GT.IRETMA) THEN
+              INTERR(1)   = IRETMA
+              MOTERR(1:8) = CHARRE(1:IRETE)
+              CALL ERREUR(-353)
+            ENDIF
+            IRETE=MIN(IRETE,IRETMA)
+            MDIDUA(1:IRETE)=CHARRE(1:IRETE)
+          ENDIF
+        ENDIF
+c* Verification des noms de primale et duale lues
+        CALL VERMDI(MDIINC,MDIDUA)
+        IF (IERR.NE.0) RETURN
+c*
+      ENDIF
+C Fin Formulation 'DIFFUSION' oooooooooooooooooooooooooooooooooooooooooo
+
+C  Lecture eventuelle du NOM de CONSTITUANT, du nombre de POINTs
+C  d'INTEGRATION, du point support pour les modes en DEFOrmations
+C  PLANEs GENEralisees, du nom de la phase, de la formulation non_locale
+C  fin des lecture en 22
+
+C 674  CONTINUE
+      IPTGEN=0
+      IPMOD1=0
+      ngrig=0
+      ngmas=0
+      ngcon=0
+      npint=0
+      klcon= 0
+      kcons=0
+      ILIE=0
+      INLOC=0
+      INLVIA=0
+      LULVIA=0
+ 675  CALL LIRMOT(MOCON,NBCON,LECON,0)
+      IF (LECON.EQ.0) GOTO 22
+      IF (LECON.EQ.1) THEN
+        CALL LIRCHA(CONM,1,kcons)
+        IF (IERR.NE.0) RETURN
+      ELSE IF (LECON.EQ.2) THEN
+ 677    continue
+        legaus=0
+        CALL LIRMOT(MGAUSS,4,legaus,0)
+        if( legaus.eq.0.and.npint.eq.0) then
+           legaus=1
+        else
+           go to 675
+        endif
+        CALL LIRENT(NPINTT,1,IRET)
+        IF (IERR.NE.0) RETURN
+        if(legaus.eq.1) npint=npintt
+        if(legaus.eq.2) ngrig=npintt
+        if(legaus.eq.3) ngmas=npintt
+        if(legaus.eq.4) ngcon=npintt
+        MN3=1
+        IF (NPINT.ne.0.and.MOD(NPINT,2).EQ.0) THEN
+          CALL ERREUR(607)
+        ENDIF
+        go to 677
+      ELSE IF (LECON.EQ.3) THEN
+        CALL LIROBJ('POINT',IPTGEN,1,IRET)
+        IF (IERR.NE.0) RETURN
+C On transforme le point en maillage de POI1 (avec un seul element)
+        CALL CRELEM(IPTGEN)
+C On verifie s'il n'a pas deja ete preconditionne.
+        CALL CRECH1(IPTGEN,1)
+        meleme = IPTGEN
+        SEGDES,meleme
+      ELSE IF (LECON.EQ.4) THEN
+        CALL LIRCHA(PHAM,1,IRET)
+        IF(IERR.NE.0) RETURN
+      ELSE IF (LECON.EQ.5) THEN
+        CALL LIROBJ('MMODEL',IPMOD1,0,IRET)
+        IF (IERR.NE.0) RETURN
+      ELSE IF (LECON.EQ.6.OR.LECON.EQ.7) THEN
+        CALL LIROBJ('MMODEL',IPMOD2,0,IRET)
+        IF (IERR.NE.0) RETURN
+        if (ipmod2.gt.0) then
+         if (klcon.eq.0) then
+          nlcon = 10
+          segini plicon
+         endif
+          klcon = klcon + 1
+          if (klcon.gt.nlcon) then
+            nlcon = nlcon + 10
+            segadj plicon
+          endif
+          mlicon(klcon) = ipmod2
+          tlicon(klcon) = lecon
+        endif
+C (fdp) option 'LIE' pour les JOI1
+      ELSE IF (LECON.EQ.9) THEN
+        ILIE=1
+      ELSE IF (LECON.EQ.10) THEN
+        IF(LESFOR(1).EQ.'MECANIQUE'.OR.LESFOR(1).EQ.'POREUX') THEN
+          CALL MODNLO(MNLOCA,NLODIM)
+          IF(NLODIM.GT.NLOMAX) THEN
+             CALL ERREUR(6)
+          ELSE
+            CALL LIRMOT(MNLOCA,NLODIM,INLOC,1)
+            IF(IERR.NE.0) RETURN
+            CALL LIRMOT(MNLVAR,1,INLVIA,1)
+            IF(IERR.NE.0) RETURN
+            CALL LIROBJ('LISTMOTS',LULVIA,1,IRET)
+            IF(IERR.NE.0) RETURN
+          ENDIF
+        ELSE
+          CALL ERREUR(251)
+        ENDIF
+      ENDIF
+      GOTO 675
+ 22   CONTINUE
+
+C  Recuperation des caracteristiques du MAILLAGE dans MELEME
+C  on se pose le pb du maillage non conforme itypel=48 (SURE)
+c  qui contient les relations de conformite
+      MELEME=IPGEOM
+      IF (IPGEOM .EQ. 0) THEN
+        MOTERR='MAILLAGE'
+        CALL ERREUR(471)
+        RETURN
+      ENDIF
+      SEGACT,MELEME
+      NSOU  = MELEME.LISOUS(/1)
+      NSOU1 = MAX(1,NSOU)
+C      ICONFO=0
+      DO 38 INB=1,NSOU1
+        IF (NSOU.EQ.0) THEN
+          IPT2=MELEME
+        ELSE
+          IPT2=MELEME.LISOUS(INB)
+          SEGACT,IPT2
+        ENDIF
+C        IF (IPT2.ITYPEL.EQ.48) ICONFO=ICONFO+1
+  38  CONTINUE
+C
+C  Initialisation du segment MMODEL
+C
+      N1 = NSOU1
+      SEGINI,MMODEL
+      IPMODE = MMODEL
+
+C* Nom du constituant par defaut si non donne en entree
+      IF (kcons.EQ.0) WRITE(CONM,FMT='(I16)') IPMODE
+C **   IF (kcons.EQ.0) CONM='MODELI'
+
+      IF (IReMOD.NE.0) GOTO 70
+C  Remplissage du segment MMODEL
+      IF (LESFOR(1).EQ.'NAVIER_STOKES') MN3=2
+      IF (LESFOR(1).EQ.'EULER') MN3=2
+      IF (LESFOR(1).EQ.'DARCY') MN3=2
+      IF (LESFOR(1).EQ.'THERMOHYDRIQUE' ) mn3=2
+      IF(LESFOR(1).EQ.'MECANIQUE'.OR.lesfor(1).eq.'POREUX'.or.nfor.eq.2
+     $ .OR.LESFOR(1).EQ.'CHARGEMENT') THEN
+         IF(INLOC.NE.0) THEN
+           mn3=14
+         ELSE
+           mn3=12
+         ENDIF
+      ENDIF
+      IF (LESFOR(1).EQ.'LIQUIDE' )  mn3=12
+      IF (LESFOR(1).EQ.'LIAISON') mn3=12
+      IF (LESFOR(1).EQ.'ELECTROSTATIQUE') mn3=12
+      IF (LESFOR(1).EQ.'DIFFUSION') mn3=12
+
+C***********************************************************************
+C  Boucle sur les maillages elementaires de MELEME
+C***********************************************************************
+      DO 10 IM=1,NSOU1
+
+          NOBMOD=0
+          IF (LESFOR(1).EQ.'CONTACT') THEN
+            IF (IFROCA.NE.0) NOBMOD=2
+            IF (ifrtt.ne.0) nobmod=1
+          ELSE IF (LESFOR(1).EQ.'DIFFUSION') THEN
+            NOBDIF = NOBMOD
+            NOBMOD = NOBMOD + 3
+            IF (LDIPTR.GT.0) NOBMOD = NOBMOD + 1
+C*          ELSE IF ( (NFOR.EQ.1) .AND.
+C*     &              ( LESFOR(1).EQ.'MECANIQUE' .OR.
+C*     &                LESFOR(1).EQ.'POREUX'    ) ) THEN
+C* Modeles utilisateur en MECANIQUE :
+          ELSE IF (LMEEXT) THEN
+            NOBMEC = NOBMOD
+            IF (LMEPTR.GT.0) NOBMOD = NOBMOD + 2
+            IF (LMEVIX) NOBMOD = NOBMOD + 1
+          ELSE IF (lesfor(1).eq.'METALLURGIE') THEN
+C           On rangera les pointeurs sur les ListMots Phases,
+C           Reactifs, Produits et Types de Reactions dans IVAMOD
+            NOBMOD = 4
+          ENDIF
+          if(iraye.eq.1) nobmod=2*icavit+isyme*idim+ifacaf*4
+
+          SEGINI,IMODEL
+          KMODEL(IM)=IMODEL
+
+          IF (lesfor(1).eq.'METALLURGIE') then
+C           lucvar : les noms des phases
+            IVAMOD(1) = lucvar
+            TYMODE(1) = 'LISTMOTS'
+C           reacti : les noms des reactifs
+            IVAMOD(2) = ireact
+            TYMODE(2) = 'LISTMOTS'
+C           produi : les noms des produits
+            IVAMOD(3) = iprodu
+            TYMODE(3) = 'LISTMOTS'
+C           lucmat : les noms des types de reactions
+            IVAMOD(4) = lucmat
+            TYMODE(4) = 'LISTMOTS'
+          ENDIF
+
+          IF (LESFOR(1).EQ.'CONTACT')THEN
+            IF (IFROCA.EQ.1) THEN
+              imamod=ipgeo2
+              ipt1=ipgeo2
+              segact ipt1
+              ityp1=ipt1.itypel
+              segdes ipt1
+              TYMODE(1)='MAILLAGE'
+              IVAMOD(1)=IPGEOM
+              TYMODE(2)='MAILLAGE'
+              IVAMOD(2)=IBETON
+              ipgeom=ipgeo2
+            ENDIF
+            IF (ifrtt.eq.1) then
+              ivamod(1)=ipgeo2
+              tymode(1)='MAILLAGE'
+              if (ipgeo2.eq.0) then
+               call erreur(641)
+               return
+              endif
+            ENDIF
+          ENDIF
+c*          IF (LESFOR(1).EQ.'THERMIQUE')THEN
+          if(iraye.ne.0) then
+            limora(im)= nobmod+1-n1
+            if(icavit.ne.0) then
+              tymode(1)='ENTIER'
+              ivamod(1)=nbga
+              tymode(2)='ENTIER'
+              ivamod(2)=nbdang
+              if(isyme.eq.1) then
+                tymode(3 )='POINT'
+                tymode(4)='POINT'
+                if(idim.eq.3)tymode(5)='POINT'
+                ivamod(3 )=ipp1
+                ivamod(4)=ipp2
+                if(idim.eq.3)ivamod(5)=ipp3
+              endif
+            endif
+c*            ENDIF
+            if(ifacaf.ne.0) then
+              tymode(1)='MAILLAGE'
+              tymode(2)='MAILLAGE'
+              tymode(3)='MAILLAGE'
+              tymode(4)='MMODEL'
+              ivamod(1)=ipfac1
+              ivamod(2)=ipfac2
+              ivamod(3)=ipfac3
+              ivamod(4)=imoco
+            endif
+          endif
+          IF (LESFOR(1).EQ.'DIFFUSION') THEN
+            TYMODE(NOBDIF+1)=MDIINC
+            IVAMOD(NOBDIF+1)=LDINUM
+            TYMODE(NOBDIF+2)=MDIDUA
+            IVAMOD(NOBDIF+2)=LDINUM
+            IF (LDIPTR.GT.0) THEN
+              CALL POSCHA(LDILIB(1:LDILGB)//'='//LDIFCT(1:LDILGT),i_z)
+              TYMODE(NOBDIF+3)='LDIEXT  '
+              IVAMOD(NOBDIF+3)=LDIPTR
+              TYMODE(NOBDIF+4)='MOT     '
+              IVAMOD(NOBDIF+4)=i_z
+            ENDIF
+          ENDIF
+          IF (LMEEXT) THEN
+            IF (LMEPTR.GT.0) THEN
+              CALL POSCHA(LMELIB(1:LMELGB)//'='//LMEFCT(1:LMELGT),i_z)
+              TYMODE(NOBMEC+1)='LMEEXT  '
+              IVAMOD(NOBMEC+1)=LMEPTR
+              TYMODE(NOBMEC+2)='MOT     '
+              IVAMOD(NOBMEC+2)=i_z
+              NOBMEC = NOBMEC + 2
+            ENDIF
+            IF (LMEVIX) THEN
+              LMEIVI = NOBMEC + 1
+              TYMODE(LMEIVI)='IVIEX   '
+              IVAMOD(LMEIVI)=0
+            ENDIF
+          ENDIF
+
+        CONMOD=CONM
+        conmod(17:24)=PHAM
+C  kich liaison conditionelle
+         IF(LESFOR(1).EQ.'LIAISON'.AND.klcon.gt.0) THEN
+           do ilc = 1,klcon
+            mmode2 = mlicon(ilc)
+            segact mmode2
+            if (mmode2.kmodel(/1).gt.1) then
+C  liaison conditionnelle mal specifiee
+              call erreur(5)
+              segdes mmode2
+              return
+            endif
+            imode2 = mmode2.kmodel(1)
+            segact imode2
+            if (imode2.formod(1).ne.'LIAISON') THEN
+              call erreur(5)
+              segdes imode2,mmode2
+              return
+            endif
+            if (tlicon(ilc).eq.6) TYMODE(ilc)='CONDINFE'
+            if (tlicon(ilc).eq.7) TYMODE(ilc)='CONDSUPE'
+            IVAMOD(ilc)=IMODE2
+              segdes imode2,mmode2
+           enddo
+           segsup plicon
+         ENDIF
+C  fin liaison conditionnelle
+        IF (NSOU.EQ.0) THEN
+          ITYP1=ITYPEL
+          IMAMOD=IPGEOM
+          NBNN=NUM(/1)
+        ELSE
+          IPT1=LISOUS(IM)
+          SEGACT,IPT1
+          ITYP1=IPT1.ITYPEL
+          IMAMOD=IPT1
+          NBNN=IPT1.NUM(/1)
+          SEGDES,IPT1
+        ENDIF
+
+C +--------------------------------------------------------------------+
+C | Determination de la valeur de NEFMOD pour IMODEL                   |
+C +--------------------------------------------------------------------+
+C  Affectation du type d'ELEMENTS FINIS si donnes par utilisateur
+
+C       cas des SURE (relation de conformite) :
+C       NEPAPA = si EF specifique demande -> on utilise ses inconnues
+        NEPAPA=0
+        IF(ITYP1.eq.48) then
+
+          NEFMOD=259
+          IF (ITEF.GT.0) THEN
+            DO i=1,ITEF
+              CALL PLACE(NOMTP,LNOMTP,MELE,LESTEF(i))
+              IF (MELE.NE.0) NEPAPA = MELE
+            ENDDO
+          ENDIF
+          IF(NEPAPA.EQ.0) THEN
+c         2D -> on choisit les inconnues du QUA4  pour toute formulation
+            IF(IDIM.EQ.2) THEN
+              NEPAPA=8
+c         3D -> on choisit les inconnues du CUB8  pour toute formulation
+            ELSEIF(IDIM.EQ.3) THEN
+              NEPAPA=14
+            ELSE
+              CALL ERREUR(610)
+            ENDIF
+          ENDIF
+          GOTO 11
+        ENDIF
+        IF (ITEF.NE.0) THEN
+C  Cas de la FORMULATION 'NAVIER_STOKES'
+          IF (LESFOR(1).EQ.'NAVIER_STOKES') THEN
+            IF (LESTEF(1).EQ.'LINE')THEN
+              NEFMOD=0
+              IF (ITYP1.EQ. 3) NEFMOD=129
+              IF (ITYP1.EQ. 7) NEFMOD=130
+              IF (ITYP1.EQ.11) NEFMOD=131
+              IF (ITYP1.EQ.33) NEFMOD=132
+              IF (ITYP1.EQ.34) NEFMOD=133
+              IF (ITYP1.EQ.35) NEFMOD=134
+              IF (ITYP1.EQ.36) NEFMOD=135
+              IF (NEFMOD.EQ.0) GOTO 99
+            ELSE IF(LESTEF(1).EQ.'MACR')THEN
+              NEFMOD=0
+              IF (ITYP1.EQ. 3) NEFMOD=136
+              IF (ITYP1.EQ. 7) NEFMOD=137
+              IF (ITYP1.EQ.11) NEFMOD=138
+              IF (ITYP1.EQ.33) NEFMOD=139
+              IF (ITYP1.EQ.34) NEFMOD=140
+              IF (ITYP1.EQ.35) NEFMOD=141
+              IF (ITYP1.EQ.36) NEFMOD=142
+C  Il nous manque la pyramide
+              IF (NEFMOD.EQ.0) GOTO 99
+            ELSE IF (LESTEF(1).EQ.'QUAF') THEN
+              NEFMOD=0
+              IF (ITYP1.EQ. 3) NEFMOD=143
+              IF (ITYP1.EQ. 7) NEFMOD=144
+              IF (ITYP1.EQ.11) NEFMOD=145
+              IF (ITYP1.EQ.33) NEFMOD=146
+              IF (ITYP1.EQ.34) NEFMOD=147
+              IF (ITYP1.EQ.35) NEFMOD=148
+              IF (ITYP1.EQ.36) NEFMOD=149
+C Il nous manque la pyramide
+              IF (NEFMOD.EQ.0) GO TO 99
+            ELSE IF (LESTEF(1).EQ.'LINB') THEN
+              NEFMOD=0
+              IF (ITYP1.EQ. 3) NEFMOD=158
+              IF (ITYP1.EQ. 7) NEFMOD=159
+              IF (ITYP1.EQ.11) NEFMOD=160
+              IF (ITYP1.EQ.33) NEFMOD=161
+              IF (ITYP1.EQ.34) NEFMOD=162
+C             IF (ITYP1.EQ.35) NEFMOD=163
+C             IF (ITYP1.EQ.36) NEFMOD=164
+C Il nous manque la pyramide et le tetrahedre
+              IF (NEFMOD.EQ.0) GOTO 99
+            ELSE
+              DO i=1,ITEF
+                CALL PLACE(NOMTP,LNOMTP,MELE,LESTEF(i))
+                IF (MELE.EQ.0) GOTO 99
+                MEGE=NUMGEO(MELE)
+                IF (MEGE.EQ.0) GOTO 99
+                IF (MEGE.EQ.ITYP1) GOTO 610
+              ENDDO
+              GO TO 99
+ 610          NEFMOD=MELE
+            ENDIF
+C  Cas de la FORMULATION 'EULER'
+          ELSE IF (LESFOR(1).EQ.'EULER') THEN
+            NEFMOD=0
+            IF (ITYP1.EQ. 2) NEFMOD=ITYP1
+            IF (ITYP1.EQ. 4) NEFMOD=ITYP1
+            IF (ITYP1.EQ. 8) NEFMOD=ITYP1
+            IF (ITYP1.EQ.14) NEFMOD=ITYP1
+            IF (ITYP1.EQ.16) NEFMOD=ITYP1
+            IF (ITYP1.EQ.23) NEFMOD=ITYP1
+            IF (ITYP1.EQ.25) NEFMOD=ITYP1
+            IF (NEFMOD.EQ.0) GOTO 99
+C  Cas des autres FORMULATIONs
+          ELSE
+            DO i=1,ITEF
+              if(lestef(i)(1:4).eq.'BBAR') lobbar = .true.
+              if (lobbar) CALL MODE20(ITYP1,LESTEF(I))
+              CALL PLACE(NOMTP,LNOMTP,MELE,LESTEF(i))
+              IF (MELE.EQ.0) GOTO 99
+              MEGE=NUMGEO(MELE)
+              IF (MEGE.EQ.0) GOTO 99
+              IF (MEGE.EQ.ITYP1) GOTO 6
+c kich cas du POI1
+              if (ityp1.eq.1) goto 6
+            ENDDO
+            GOTO 99
+C  Cas particulier pour les elements polygonaux
+ 6          IF (ITYP1.EQ.32) THEN
+              MELE=MELE+NBNN-3
+              IF (NBNN.GT.14) GOTO 99
+            ENDIF
+            NEFMOD=MELE
+          ENDIF
+C  Affectation des elements finis de maniere automatique
+        ELSE
+C  Cas des milieux POREUX
+          IF (LESFOR(1).EQ.'POREUX') THEN
+            NEFMOD=0
+            IF (ITYP1.EQ. 6) NEFMOD=79
+            IF (ITYP1.EQ.10) NEFMOD=80
+            IF (ITYP1.EQ.15) NEFMOD=81
+            IF (ITYP1.EQ.24) NEFMOD=82
+            IF (ITYP1.EQ.17) NEFMOD=83
+            IF (ITYP1.EQ.29) NEFMOD=108
+            IF (ITYP1.EQ.30) NEFMOD=109
+            IF (ITYP1.EQ.31) NEFMOD=110
+            IF (NEFMOD.EQ.0) GOTO 99
+C  Cas des elements de frottement (formulation FROTTEMENT)
+          ELSE IF (LESFOR(1).EQ.'CONTACT') THEN
+C *          NEFMOD=22   pv est passe par la
+            NEFMOD=0
+            if(ifrtt.eq.1) then
+            IF (ITYP1.EQ.22.AND.IDIM.EQ.2) NEFMOD=107
+            IF (ITYP1.EQ.22.AND.IDIM.EQ.3) NEFMOD=165
+            elseif(ifroca.ne.0) then
+            IF (ITYP1.EQ.22.AND.IDIM.EQ.2)  NEFMOD=261
+            IF (ITYP1.EQ.22.AND.IDIM.EQ.3)  NEFMOD=262
+            endif
+C             IF (NEFMOD.EQ.0) GOTO 99
+C  Cas des elements hybrides (imposes en DARCY)
+          ELSE IF (LESFOR(1).EQ.'DARCY') THEN
+            NEFMOD=0
+            IF (ITYP1.EQ. 3) NEFMOD=143
+C           IF (ITYP1.EQ. 4) NEFMOD=99
+C           IF (ITYP1.EQ. 8) NEFMOD=100
+C           IF (ITYP1.EQ.23) NEFMOD=101
+C           IF (ITYP1.EQ.16) NEFMOD=102
+C           IF (ITYP1.EQ.14) NEFMOD=103
+            IF (ITYP1.EQ. 7) NEFMOD=99
+            IF (ITYP1.EQ.11) NEFMOD=100
+            IF (ITYP1.EQ.35) NEFMOD=101
+            IF (ITYP1.EQ.34) NEFMOD=102
+            IF (ITYP1.EQ.33) NEFMOD=103
+            IF (NEFMOD.EQ.0) GOTO 99
+C  Cas de la formulation MAGNETODYNAMIQUE
+          ELSE IF (LESFOR(1).EQ.'MAGNETODYNAMIQUE') THEN
+            NEFMOD=0
+            IF (ITYP1.EQ. 4) NEFMOD=128
+            IF (NEFMOD.EQ.0) GOTO 99
+C  Cas de la formulation 'NAVIER_STOKES'
+          ELSE IF (LESFOR(1).EQ.'NAVIER_STOKES') THEN
+            IF (ILNAVI.EQ.0) THEN
+              CALL MESLIR(-341)
+              GOTO 990
+            ELSEIF (ILNAVI.EQ.1) THEN
+C         LICE
+              NEFMOD=0
+              IF (ITYP1.EQ. 3) NEFMOD=195
+              IF (ITYP1.EQ. 7) NEFMOD=196
+              IF (ITYP1.EQ.11) NEFMOD=197
+              IF (ITYP1.EQ.33) NEFMOD=198
+              IF (ITYP1.EQ.34) NEFMOD=199
+              IF (ITYP1.EQ.35) NEFMOD=200
+              IF (ITYP1.EQ.36) NEFMOD=201
+              IF (NEFMOD.EQ.0) GOTO 99
+            ELSEIF (ILNAVI.EQ.2) THEN
+C         LIMS
+              NEFMOD=0
+              IF (ITYP1.EQ. 3) NEFMOD=202
+              IF (ITYP1.EQ. 7) NEFMOD=203
+              IF (ITYP1.EQ.11) NEFMOD=204
+              IF (ITYP1.EQ.33) NEFMOD=205
+              IF (ITYP1.EQ.34) NEFMOD=206
+              IF (ITYP1.EQ.35) NEFMOD=207
+              IF (ITYP1.EQ.36) NEFMOD=208
+              IF (NEFMOD.EQ.0) GOTO 99
+            ELSEIF (ILNAVI.EQ.3) THEN
+C         LBMS
+              NEFMOD=0
+              IF (ITYP1.EQ. 3) NEFMOD=209
+              IF (ITYP1.EQ. 7) NEFMOD=210
+              IF (ITYP1.EQ.11) NEFMOD=211
+              IF (ITYP1.EQ.33) NEFMOD=212
+              IF (ITYP1.EQ.34) NEFMOD=213
+              IF (ITYP1.EQ.35) NEFMOD=214
+              IF (ITYP1.EQ.36) NEFMOD=215
+              IF (NEFMOD.EQ.0) GOTO 99
+            ELSEIF (ILNAVI.EQ.4) THEN
+C         MCCE
+              NEFMOD=0
+              IF (ITYP1.EQ. 3) NEFMOD=216
+              IF (ITYP1.EQ. 7) NEFMOD=217
+              IF (ITYP1.EQ.11) NEFMOD=218
+              IF (ITYP1.EQ.33) NEFMOD=219
+              IF (ITYP1.EQ.34) NEFMOD=220
+              IF (ITYP1.EQ.35) NEFMOD=221
+              IF (ITYP1.EQ.36) NEFMOD=222
+              IF (NEFMOD.EQ.0) GOTO 99
+            ELSEIF (ILNAVI.EQ.5) THEN
+C         MCP1
+              NEFMOD=0
+              IF (ITYP1.EQ. 3) NEFMOD=223
+              IF (ITYP1.EQ. 7) NEFMOD=224
+              IF (ITYP1.EQ.11) NEFMOD=225
+              IF (ITYP1.EQ.33) NEFMOD=226
+              IF (ITYP1.EQ.34) NEFMOD=227
+              IF (ITYP1.EQ.35) NEFMOD=228
+              IF (ITYP1.EQ.36) NEFMOD=229
+              IF (NEFMOD.EQ.0) GOTO 99
+            ELSEIF (ILNAVI.EQ.6) THEN
+C         MCMS
+              NEFMOD=0
+              IF (ITYP1.EQ. 3) NEFMOD=230
+              IF (ITYP1.EQ. 7) NEFMOD=231
+              IF (ITYP1.EQ.11) NEFMOD=232
+              IF (ITYP1.EQ.33) NEFMOD=233
+              IF (ITYP1.EQ.34) NEFMOD=234
+              IF (ITYP1.EQ.35) NEFMOD=235
+              IF (ITYP1.EQ.36) NEFMOD=236
+              IF (NEFMOD.EQ.0) GOTO 99
+            ELSEIF (ILNAVI.EQ.7) THEN
+C         QFCE
+              NEFMOD=0
+              IF (ITYP1.EQ. 3) NEFMOD=237
+              IF (ITYP1.EQ. 7) NEFMOD=238
+              IF (ITYP1.EQ.11) NEFMOD=239
+              IF (ITYP1.EQ.33) NEFMOD=240
+              IF (ITYP1.EQ.34) NEFMOD=241
+              IF (ITYP1.EQ.35) NEFMOD=242
+              IF (ITYP1.EQ.36) NEFMOD=243
+              IF (NEFMOD.EQ.0) GOTO 99
+            ELSEIF (ILNAVI.EQ.8) THEN
+C         QFP1
+              NEFMOD=0
+              IF (ITYP1.EQ. 3) NEFMOD=244
+              IF (ITYP1.EQ. 7) NEFMOD=245
+              IF (ITYP1.EQ.11) NEFMOD=246
+              IF (ITYP1.EQ.33) NEFMOD=247
+              IF (ITYP1.EQ.34) NEFMOD=248
+              IF (ITYP1.EQ.35) NEFMOD=249
+              IF (ITYP1.EQ.36) NEFMOD=250
+              IF (NEFMOD.EQ.0) GOTO 99
+            ELSEIF (ILNAVI.EQ.9) THEN
+C         QFMS
+              NEFMOD=0
+              IF (ITYP1.EQ. 3) NEFMOD=251
+              IF (ITYP1.EQ. 7) NEFMOD=252
+              IF (ITYP1.EQ.11) NEFMOD=253
+              IF (ITYP1.EQ.33) NEFMOD=254
+              IF (ITYP1.EQ.34) NEFMOD=255
+              IF (ITYP1.EQ.35) NEFMOD=256
+              IF (ITYP1.EQ.36) NEFMOD=257
+              IF (NEFMOD.EQ.0) GOTO 99
+            ENDIF
+C  Cas de la formulation 'EULER'
+          ELSE IF (LESFOR(1).EQ.'EULER') THEN
+            NEFMOD=0
+            IF (ITYP1.EQ. 2) NEFMOD=ITYP1
+            IF (ITYP1.EQ. 4) NEFMOD=ITYP1
+            IF (ITYP1.EQ. 8) NEFMOD=ITYP1
+            IF (ITYP1.EQ.14) NEFMOD=ITYP1
+            IF (ITYP1.EQ.16) NEFMOD=ITYP1
+            IF (ITYP1.EQ.23) NEFMOD=ITYP1
+            IF (ITYP1.EQ.25) NEFMOD=ITYP1
+            IF (NEFMOD.EQ.0) GOTO 99
+C  Cas des autres formulations
+          ELSE
+            NEFMOD=ITYP1
+c kich cas du POI1
+            if (ityp1.eq.1) nefmod = 45
+C  Cas particuliers des elements polygonaux
+            IF (NEFMOD.EQ.32) NEFMOD=111+NBNN -3
+C  Cas particuliers des elements finis pour IDIM=1
+            IF (IDIM.EQ.1) THEN
+              NEFMOD=0
+              IF (LESFOR(1).EQ.'THERMIQUE') THEN
+                IF (ICONV.NE.0 .OR. iraye.NE.0) THEN
+                  IF (ITYP1.EQ.1) NEFMOD=45
+                  IF (ITYP1.EQ.2) NEFMOD=ITYP1
+                ELSE
+                  IF (ITYP1.EQ.2) NEFMOD=191
+                  IF (ITYP1.EQ.3) NEFMOD=192
+                ENDIF
+              ELSE IF (LESFOR(1).EQ.'MECANIQUE') THEN
+                IF (ITYP1.EQ.2) NEFMOD=193
+                IF (ITYP1.EQ.3) NEFMOD=194
+              ELSE IF (LESFOR(1).EQ.'FISSURE') THEN
+                IF (ITYP1.EQ.2) NEFMOD=ITYP1
+              ELSE IF (LESFOR(1).EQ.'ELECTROSTATIQUE') THEN
+                IF (ITYP1.EQ.2) NEFMOD=193
+                IF (ITYP1.EQ.3) NEFMOD=194
+              ELSE IF (LESFOR(1).EQ.'DIFFUSION') THEN
+* En attendant le retour a la normale pour la diffusion, on ajoute une
+* enieme rustine en mettant les memes elements qu'en thermique.
+**                IF (ITYP1.EQ.2) NEFMOD=193
+**                IF (ITYP1.EQ.3) NEFMOD=194
+                IF (ITYP1.EQ.2) NEFMOD=191
+                IF (ITYP1.EQ.3) NEFMOD=192
+              ENDIF
+            ENDIF
+            IF (NEFMOD.EQ.0) GOTO 99
+            MELE=NEFMOD
+          ENDIF
+        ENDIF
+C +--------------------------------------------------------------------+
+C | Fin de la valeur de NEFMOD pour IMODEL                             |
+C +--------------------------------------------------------------------+
+
+C  Poursuite du remplissage du IM-eme modele elementaire IMODEL
+        IF (NMAT.NE.0) THEN
+          IF (LESFOR(1).EQ.'MELANGE') THEN
+            MATMOD(1)=LESPRO(1)
+          ELSE
+            DO i=1,NMAT
+              MATMOD(i)=LESPRO(i)
+            ENDDO
+          ENDIF
+        ENDIF
+
+ 11     CONTINUE
+        DO i=1,NFOR
+          FORMOD(i)=LESFOR(i)
+        ENDDO
+        IF (MN3.NE.0) INFMOD(1)=NPINT
+C (fdp) Pour les elements JOI1 seulement, on stocke -1*ILIE dans
+C       INFMOD(9) (il semble que INFMOD(8) soit utilise par-ci par-la)
+        IF (ILIE.NE.0) THEN
+          IF (NEFMOD.NE.265) THEN
+            CALL ERREUR(19)
+            GOTO 990
+          ENDIF
+          INFMOD(9)=-1*ILIE
+        ENDIF
+*  AM  cas non-local
+        IF(INLOC.NE.0) THEN
+          INFMOD(13)=-1*INLOC
+          INFMOD(14)=LULVIA
+        ENDIF
+        IF (NPINT.NE.0.AND.NEFMOD.NE.28) THEN
+          CALL ERREUR(608)
+          GOTO 990
+        ENDIF
+C  Verification de l'existence du MMODEL
+        IF(ITYP1.NE.48) THEN
+          CALL NOMATE(FORMOD,NFOR,MATMOD,NMAT,CMATE,IMATE,INATU)
+          IF (CMATE.EQ.' ') THEN
+            write(ioimp,*) ' petit probleme apres nomate'
+            CALL ERREUR(251)
+            GOTO 990
+          ENDIF
+        ENDIF
+C* Petit cas particulier en cas de modele VISCO_EXTERNE :
+C* On recupere IVIEX stocke dans INATU (cf. NOMATE)
+        IF (INATU.LE.-2) THEN
+          IVIEX = -2 - INATU
+          INATU = -2
+C*          TYMODE(LMEIVI)='IVIEX   '
+          IVAMOD(LMEIVI)= IVIEX
+        ENDIF
+C
+        ideriv=jderiv
+        CMATEE=CMATE
+        IMATEE=IMATE
+        INATUU=INATU
+C +--------------------------------------------------------------------+
+C | initialisation des nomid (NOMS des composantes)                    |
+C +--------------------------------------------------------------------+
+C  initialisation des nomid
+        IF (FORMOD(1).NE.'NAVIER_STOKES'.AND.FORMOD(1).NE.'EULER'.AND.
+     &      FORMOD(1).NE.'MELANGE' ) THEN
+c         linomid=false quand on ne veut pas aller dans inomid
+          if (formod(1).EQ.'LIAISON') then
+            linomid=.false.
+          else
+            linomid=.true.
+            do jn = 1,matmod(/2)
+              if (matmod(jn).eq.'MODAL'    .or.
+     &            matmod(jn).eq.'STATIQUE' .or.
+     &            matmod(jn).eq.'IMPEDANCE'     ) linomid =.false.
+            enddo
+          endif
+
+          if(ITYP1.EQ.48) then
+C  cas particulier des relations de conformite
+c         pour les SURE
+c         on recupere les noms de composantes 'DEPLACEM' et 'FORCES'
+c         des éléments parents (NEPAPA => QUA4 ou CUB8)
+            segini,IMODE5=IMODEL
+            IMODE5.NEFMOD=NEPAPA
+            call inomid(IMODE5,'        ',iret,lucvar,lucmat,
+     &                             lucmaf,luparx)
+            LNOMID(1)=IMODE5.LNOMID(1)
+            LNOMID(2)=IMODE5.LNOMID(2)
+            segsup,IMODE5
+            NOMID=LNOMID(1)
+            SEGACT,NOMID
+            NOMID=LNOMID(2)
+            SEGACT,NOMID
+          else
+            if (linomid) call inomid(imodel,'        ',
+     &                             iret,lucvar,lucmat,lucmaf,luparx)
+          endif
+
+        ELSE
+          linomid=.true.
+        ENDIF
+
+C  Quelques tests supplementaires en attendant mieux
+        IF (LESFOR(1).EQ.'THERMIQUE') THEN
+C          nnz = MATMOD(/2)
+          iplaz = 0
+          call place(MATMOD,MATMOD(/2),iplaz,'PHASE')
+          IF (iplaz.ne.0 ) THEN
+c    test que les elements sont lineaires
+            ipt4 = imamod
+            segact ipt4
+            itt = ipt4.itypel
+c*            segdes ipt4
+            if (kdegre(itt) .gt. 2) then
+              call erreur(982)
+              goto 990
+            endif
+          ENDIF
+        endif
+        IF (LESFOR(1).EQ.'MECANIQUE') THEN
+C  Cas du materiau unidirectionnel
+          IF (IMATE.EQ.4) THEN
+            MFR=NUMMFR(NEFMOD)
+C  Cas des cerces : sans interet !
+            IF (MFR.EQ.27) THEN
+              CALL ERREUR(251)
+              GOTO 990
+            ENDIF
+C  Cas de la plasticite
+            IF (INATU.NE.0) THEN
+C  OK si massif bidim ou si coque tridim dans le cas acier_uni
+              IF (INATU.EQ.40)THEN
+                IF ((MFR.NE.1.OR.IFOUR.GT.0).AND.
+     .             ((MFR.NE.3.AND.MFR.NE.9).OR.IFOUR.NE.2)) THEN
+                  CALL ERREUR(251)
+                  GOTO 990
+                ENDIF
+C  Dans les autres cas, on n'autorise pour le moment que COQ2 et massif
+              ELSE IF (MELE.NE.44.AND.MFR.NE.1) THEN
+                CALL ERREUR(251)
+                GOTO 990
+              ENDIF
+            ENDIF
+          ENDIF
+C
+C   Cas du materiau 'ZONE_COHESIVE'
+          IF (IMATE.EQ.12) THEN
+            MFR=NUMMFR(NEFMOD)
+            IF (MFR.NE.77) THEN
+              CALL ERREUR(251)
+              GOTO 990
+            ENDIF
+          ENDIF
+
+C  Cas du modele section : on n'autorise pour le moment que TIMO
+          IF (CMATE.EQ.'SECTION'.AND.MELE.NE.84) THEN
+            CALL ERREUR(251)
+            GOTO 990
+          ENDIF
+        ENDIF
+C  Le modele de GURSON n'est possible qu'en 3D, axisymetrique ou
+C  deformations planes
+        IF (INATU.EQ.38) THEN
+          IF ( (IFOUR.NE.0).AND.(IFOUR.NE.2).AND.(IFOUR.NE.-1) ) THEN
+            MOTERR(1:8)='GURSON'
+            MOTERR(9:16)='MECANIQU'
+            INTERR(1) = IFOUR
+            CALL ERREUR (81)
+            GOTO 990
+          ENDIF
+        ENDIF
+
+C  Le modele ISS_GRANGE n'est utilisable qu'en 3D
+        IF ((INATU.EQ.151).AND.(IFOUR.NE.2)) THEN
+          INTERR(1) = IFOUR
+          CALL ERREUR (709)
+          GOTO 990
+        ENDIF
+C  Le modele RUP_THER n'est utilisable qu'en 3D
+        IF ((INATU.EQ.152).AND.(IFOUR.NE.2)) THEN
+          INTERR(1) = IFOUR
+          CALL ERREUR (709)
+          GOTO 990
+        ENDIF
+C  Le modele COULOMB n'est utilisable qu'en 3D avec les éléments JOI1
+        IF ((INATU.EQ.34).AND.(IFOUR.NE.2)
+     .     .AND.(NUMMFR(NEFMOD).EQ.75)) THEN
+          INTERR(1) = IFOUR
+          CALL ERREUR (709)
+          GOTO 990
+        ENDIF
+C.. Restrictions en formulation 'MECANIQUE' avec une loi de
+C   comportement non lineaire externe
+C   Rappel : LMEEXT exprime la condition (NFOR.EQ.1) ET
+C     (LESFOR(1).EQ.'MECANIQUE') ET (loi non lineaire externe)
+        IF ( LMEEXT ) THEN
+C         En formulation 'MECANIQUE', les lois non lineaires externes
+C         n'autorisent qu'une seule composante de temperature
+C         => incompatibilite avec des modeles de coques n'ayant pas
+C         de points d'integration dans l'epaisseur (trois composantes
+C         dans ce cas, 'TINF', 'T   ' et 'TSUP')
+C         Le test ci-dessous est coherent avec celui de IDTEMP.
+          MFR = NUMMFR(NEFMOD)
+          IF ( (MFR.EQ.3.OR.MFR.EQ.5.OR.MFR.EQ.9).AND.
+     .           (NPINT.EQ.0) ) THEN
+            CALL ERREUR(951)
+            GOTO 990
+          ENDIF
+C         Les lois de la famille 'VISCO_EXTERNE' ne s'appliquent pour
+C         l'instant qu'aux elements massifs, avec option de calcul 3D
+C         Et restriction pour l'instant a 'VISCO_EXTERNE' 'GENERAL'
+          IF ( LMEVIX ) THEN
+            IF ((MFR.NE.1.AND.MFR.NE.31) .OR. IFOUR.NE.2) THEN
+              KERRE = 950
+            ELSE IF ( IVIEX.NE.1 ) THEN
+              KERRE = 958
+            ELSE
+              KERRE = 0
+            ENDIF
+            IF (KERRE.NE.0) THEN
+              CALL ERREUR(KERRE)
+              GOTO 990
+            ENDIF
+          ENDIF
+        ENDIF
+C  Formulation 'THERMIQUE' 'CONVECTION'
+C  Adequation EF de type COQue et mot 'INFERIEURE' / 'SUPERIEURE'
+        IF (ICONV.EQ.1) THEN
+          CALL PLACE(LESPRO,NMAT,ISUP,'SUPERIEURE')
+          CALL PLACE(LESPRO,NMAT,IINF,'INFERIEURE')
+          ITOT = ISUP+IINF
+          IF (ITOT.NE.0.AND.NEFMOD.NE.27.AND.NEFMOD.NE.41.AND.
+     .        NEFMOD.NE.44.AND.NEFMOD.NE.49.AND.NEFMOD.NE.56) THEN
+            CALL ERREUR(16)
+            GOTO 990
+          ENDIF
+          IF (ITOT.EQ.0.AND.(NEFMOD.EQ.27.OR.NEFMOD.EQ.41.OR.
+     .        NEFMOD.EQ.44.OR.NEFMOD.EQ.49.OR.NEFMOD.EQ.56)) THEN
+            CALL ERREUR(513)
+            GOTO 990
+          ENDIF
+        ENDIF
+
+C Formulation 'DIFFUSION' :
+        IF (LESFOR(1) .EQ. 'DIFFUSION') THEN
+C -     Verification sur les types de FORMULATION et/ou d'elements
+          MFR1 = NUMMFR(nefmod)
+          IF ((IFOUR.EQ.2 .AND. NEFMOD.GE.4 .AND. NEFMOD.LT.11) .OR.
+     &        (MFR1.NE.1 .AND. MFR1.NE.3 .AND. MFR1.NE.5 .AND.
+     &         MFR1.NE.7 .AND. MFR1.NE.9 .AND. MFR1.NE.73.AND.
+     &         MFR1.NE.27)) THEN
+            CALL ERREUR(16)
+            GOTO 99
+          ENDIF
+
+C - Modele UTILISATEUR :
+C   Verification que les composantes "lineaires" sont declarees
+          IF (LDIEXT) THEN
+            CALL IDDILI(IMATE,0, MOCOMP,NBROBL,NBRFAC)
+            MLMOTS = MOCOMP
+            MLMOT1 = lucmat
+            SEGACT,MLMOT1
+            NBCOMP = MLMOT1.MOTS(/2)
+            ICOMP = 0
+            DO i = 1, NBROBL
+              CALL PLACE(MLMOT1.MOTS,NBCOMP,IPLAC,MOTS(i))
+              IF (IPLAC.EQ.0) THEN
+                WRITE(IOIMP,80) MOTS(i)
+ 80             FORMAT('La composante obligatoire ',A8,' est absente')
+              ELSE
+                ICOMP = ICOMP+1
+              ENDIF
+            ENDDO
+            SEGDES,MLMOT1
+            SEGSUP,MLMOTS
+            IF (ICOMP.NE.NBROBL) THEN
+              GOTO 99
+            ENDIF
+          ENDIF
+        ENDIF
+C Formulation 'ELECTROSTATIQUE' :
+C Petite verification (a priori sans probleme)
+        IF (LESFOR(1) .EQ. 'ELECTROSTATIQUE') THEN
+          MFR1 = NUMMFR(nefmod)
+          IF (MFR1.NE.1) THEN
+            CALL ERREUR(21)
+            GOTO 99
+          ENDIF
+        ENDIF
+
+C kich
+c  11     CONTINUE
+C  initialisation du infele et des segment d'integration
+        IF (LESFOR(1).EQ.'MECANIQUE' .OR. LESFOR(1).EQ.'POREUX'.OR.
+     $      LESFOR(1).EQ.'LIQUIDE' .OR. LESFOR(1).EQ.'DIFFUSION' .OR.
+     $      LESFOR(1).EQ.'ELECTROSTATIQUE' .OR.
+     $      LESFOR(1).EQ.'CHARGEMENT' .OR.
+     $      NFOR.EQ.2 ) THEN
+           infele(2)=npint
+           infele(3)=ngmas
+           infele(4)=ngcon
+           infele(6)=ngrig
+           call prquoi (imodel)
+        endif
+
+C  initialisation des nomid (cas particuliers)
+        if (.not.linomid) then
+           if (irmot1.eq.1) then
+             mlmot5 = jlmot1
+             mlmot6 = jlmot2
+             segact mlmot5,mlmot6
+             if (mlmot5.mots(/2).ne.mlmot6.mots(/2)) call erreur(26)
+             lucvar = jlmot1
+             lucmat = jlmot2
+             nobmod = 2
+             segadj imodel
+             ivamod(1) = jlmot1
+             ivamod(2) = jlmot2
+             tymode(1) = 'LISTMOTS'
+             tymode(2) = 'LISTMOTS'
+           endif
+         call prquoi (imodel)
+         call inomid(imodel,'        ',iret,lucvar,lucmat,lucmaf,luparx)
+        endif
+C kich
+C  Verification de non redondance des nom des composantes
+C  sauf pour les formulations Navier_Stokes et Euler
+        mfr2 = 0
+        IF (FORMOD(1).NE.'NAVIER_STOKES'.AND.FORMOD(1).NE.'EULER'.AND.
+     $      FORMOD(1).NE.'CHARGEMENT') THEN
+          ipmo=imodel
+          mfr1=NUMMFR(nefmod)
+          mfr2 = infele(13)
+          segact imodel*mod
+          CALL cotemo(ipmo,mfr2)
+          IF (IERR.NE.0) RETURN
+        ENDIF
+C        IF (IM.EQ.1) MFRTMP=mfr1
+
+C  Point support pour les modes en defo. GENE (IFOUR=-3, 7 a 11, 14)
+C  Ce point n'est pris en compte que si cela est necessaire
+        MFR3=MFR2
+        IF (FORMOD(1).EQ.'CHARGEMENT') MFR3=INFELE(13)
+        CALL INFDPG(mfr3,IFOUR, LOGRE,ndpge)
+        IF (LOGRE) THEN
+C Erreur si ce point support n'est pas fourni avec le mot-cle GENE.
+          IF (IPTGEN.EQ.0) THEN
+            CALL ERREUR(925)
+            RETURN
+          ENDIF
+          imodel.IPDPGE = IPTGEN
+        ELSE
+          IF (IPTGEN.NE.0) THEN
+            write(ioimp,*) 'Mot-cle GENE + Point ignores...'
+          ENDIF
+          imodel.IPDPGE = 0
+        ENDIF
+        SEGDES,IMODEL
+ 10   CONTINUE
+C ****************************************************
+C  fin de boucle sur les sous-parties du maillages
+C *************************************************
+
+      DO 68 K=1,MMODEL.KMODEL(/1)
+        IMODE5=MMODEL.KMODEL(K)
+        SEGACT IMODE5
+        IF (IMODE5.NEFMOD.NE.22 ) GOTO 68
+        IPT3=IMODE5.IMAMOD
+        SEGACT IPT3
+  68  CONTINUE
+      IPMODE=MMODEL
+C construction modeles elementaires pour MELANGE cccccccccccccc
+C une loi de melange pointe sur des modeles
+C elementaires de meme support
+      lomela = .true.
+      IF (LESFOR(1).eq.'MELANGE') THEN
+        segini limode
+      do  500 ilm = 1,NMAT1
+       IF (LESMOD(ilm).GT.0) THEN
+         n1 = nsou1
+         segini mmode2
+         WRITE(CONM,FMT='(I16)') mmode2
+         segsup mmode2
+         do 511 im = 1,nsou1
+          imodel = kmodel(im)
+          IF (ilm.eq.1) THEN
+            segact  imodel*mod
+            nmat = 1
+            mn3 = infmod(/1)
+            nfor = 1
+            nobmod = ivamod(/1)
+            segadj imodel
+          ELSE
+            segact imodel
+            MN3 = infmod(/1)
+            NFOR = 1
+            NMAT = 1
+            NOBMOD = 0
+            segini imode2
+            imode2.imamod = imamod
+            imode2.nefmod = nefmod
+            if (mn3.gt.0) then
+              do imm = 1,mn3
+                imode2.infmod(imm) = infmod(imm)
+              enddo
+            endif
+            imode2.formod(1) = 'MELANGE'
+            imode2.IPDPGE = IPDPGE
+            imode2.conmod = conm
+            imode2.conmod(17:24) = pham
+            imodel = imode2
+            limode(**) = imodel
+            matmod(1) = lespro(ilm)
+          ENDIF
+c         lmomat = 0
+c         lmovar = 0
+         MMODE1 = LESMOD(ilm)
+         SEGACT MMODE1
+          kbmod = ivamod(/1)
+          nobmod =  kbmod + MMODE1.KMODEL(/1)
+          segadj imodel
+          DO 515 im1 = 1,MMODE1.KMODEL(/1)
+           imode1 = mmode1.kmodel(im1)
+           segact imode1
+           mfo1 = imode1.formod(/2)
+           mma1 = imode1.matmod(/2)
+           if (imode1.conmod(17:24).eq.'        ') then
+            write(ioimp,*) 'pas de nom de phase pour MELANGE '
+            lomela = .false.
+           endif
+           IF (imodel.imamod.eq.imode1.imamod) THEN
+C  quelques verifs
+             if (matmod(1).eq.'SERIE'.and.im1.gt.1) then
+               do im2 =  1,MMODE1.KMODEL(/1)
+                imode2 = mmode1.kmodel(im2)
+                segact imode2
+                mfo2 = imode2.formod(/2)
+                mma2 = imode2.matmod(/2)
+       if (mfo1.eq.mfo2.and.imode1.formod(mfo1).eq.imode2.formod(mfo2))
+     &  then
+C * pas de phase identique dans la meme fomulation
+C *      if (imode1.conmod(17:24).eq.imode2.conmod(17:24)) lomela =.false.
+          if (mma1.ne.mma2.OR.
+     & imode1.matmod(mma1).ne.imode2.matmod(mma2)) lomela = .false.
+
+        endif
+               enddo
+             endif
+             IF (.NOT.lomela) THEN
+C ***  detruire
+C 509          CONTINUE
+              do  imu1 = 1,MMODE1.KMODEL(/1)
+                IMODE1 = MMODE1.KMODEL(imu1)
+                segdes imode1
+              enddo
+              segdes mmode1
+              call erreur(251)
+              goto 990
+             ENDIF
+C ***
+             kbmod = kbmod + 1
+             tymode(kbmod) = 'IMODEL'
+             ivamod(kbmod) = imode1
+           ENDIF
+  515    CONTINUE
+
+          nobmod = kbmod
+          segadj imodel
+          MFR = NUMMFR(NEFMOD)
+          CALL IDMATR(MFR,IMODEL,IPNOMC,NOBL,NFAC)
+          segdes imodel
+ 511    continue
+        do 503 im1 = 1,MMODE1.KMODEL(/1)
+          IMODE1 = MMODE1.KMODEL(im1)
+          segdes imode1
+ 503    continue
+        segdes mmode1
+       ELSE
+         do im = 1,nsou1
+          imodel = kmodel(im)
+          segact  imodel*mod
+          nmat = 1
+          segadj imodel
+         enddo
+       ENDIF
+ 500   continue
+       n1i = kmodel(/1)
+       N1 = kmodel(/1) + limode(/1)
+       segadj mmodel
+       do 502 is = 1,limode(/1)
+         kmodel(n1i + is) = limode(is)
+ 502   continue
+       segsup limode
+      ENDIF
+C fin des lois melanges ccccccccccccccccccccccccccccccccccccccccccccc
+C
+C    traitement si en entree des modèles
+ 70   CONTINUE
+      IF (iremod.gt.0) THEN
+        do im = 1,kmodel(/1)
+           imodel = kmodel(im)
+           segact imodel*mod
+       if (CONM.NE.'                ') conmod = CONM
+       if (PHAM.NE.'        ') conmod(17:24) = PHAM
+C  Point support pour les modes en defo. GENE (IFOUR=-3, 7 a 11, 14)
+           mfr2 = infele(13)
+           IF (FORMOD(1).EQ.'CHARGEMENT') MFR2=0
+           CALL INFDPG(mfr2,IFOUR, LOGRE,ndpge)
+           IF (LOGRE) THEN
+C Erreur si le point support n'est pas fourni avec le mot-cle GENE.
+             IF (IPTGEN.EQ.0) THEN
+               CALL ERREUR(925)
+               RETURN
+             ENDIF
+             imodel.IPDPGE = IPTGEN
+           ELSE
+C*             IF (IPTGEN.NE.0) THEN
+C*               write(ioimp,*) 'Mot-cle GENE + Point ignores...'
+C*             ENDIF
+             imodel.IPDPGE = 0
+           ENDIF
+       if (NPINT.GT.0) write(ioimp,*) 'ne change pas le nb pts inte'
+           segdes imodel
+        enddo
+      ENDIF
+C en cas de modele STAT ddddddddddddddddddddddddddddddddddddddddddd
+C cas du mot cle STAT : pointer le modele elementaire approprie
+
+      IF (ipmod1.gt.0) THEN
+         MMODE1 = ipmod1
+         SEGACT MMODE1
+         DO im1 = 1,MMODE1.KMODEL(/1)
+          IMODE1 = MMODE1.KMODEL(im1)
+          segact imode1
+         ENDDO
+         DO im = 1,kmodel(/1)
+          imodel = kmodel(im)
+          segact imodel*mod
+          nobmod = ivamod(/1)
+          nobmod = nobmod + 1
+            nfor = formod(/2)
+            nmat = matmod(/2)
+            mn3 = infmod(/1)
+          segadj imodel
+          kbmod = 0
+          do im1 = 1,MMODE1.KMODEL(/1)
+            imode1 = mmode1.kmodel(im1)
+            imomo = imode1
+            lostat = .true.
+C  criteres de verif assez faibles ...
+           if (imode1.nefmod.eq.nefmod.and.
+     & imode1.imamod.ne.imamod.and.
+     & imode1.matmod(/2).eq.matmod(/2).and.
+     & imode1.formod(/2).eq.formod(/2)) then
+             do lmo = 1,formod(/2)
+               if (formod(lmo).ne.imode1.formod(lmo)) lostat = .false.
+             enddo
+             do lmo = 1,matmod(/2)
+              if (matmod(lmo).ne.imode1.matmod(lmo)) lostat = .false.
+             enddo
+           else
+             lostat = .false.
+           endif
+           if (lostat.and.formod(1).eq.'MELANGE') then
+C  verifs supplementaires : les modeles de ivamod sont ils bien construi
+             lomela = .true.
+             if ((nobmod - imode1.ivamod(/1)).gt.1) lomela = .false.
+             if (imode1.ivamod(/1).gt.0) then
+              do ivm3 = 1,imode1.ivamod(/1)
+                  IF(imode1.tymode(ivm3).eq.'IMODEL') THEN
+                    imode3 = imode1.ivamod(ivm3)
+                    segact imode3
+                  ENDIF
+              enddo
+             endif
+             IF (nobmod.gt.1) THEN
+             do ivm1 = 1,(nobmod-1)
+              imode2 = ivamod(ivm1)
+              segact imode2
+cc
+              if (imode2.ivamod(/1).ge.1) then
+              do ivm2 = 1,imode2.ivamod(/1)
+               if (imode2.tymode(ivm2).eq.'STATIO') then
+                 imode4 = imode2.ivamod(ivm2)
+                 segact imode4
+                 if (imode1.ivamod(/1).ge.1) then
+                 do ivm3 = 1,imode1.ivamod(/1)
+                  IF(imode1.tymode(ivm3).eq.'IMODEL') THEN
+                    imode3 = imode1.ivamod(ivm3)
+cc
+             lostat = .true.
+C  criteres de verif assez faibles ...
+           if (imode3.nefmod.eq.imode4.nefmod.and.
+     & imode3.imamod.eq.imode4.imamod.and.
+     & imode3.matmod(/2).eq.imode4.matmod(/2).and.
+     & imode3.conmod(17:24).eq.imode4.conmod(17:24).and.
+     & imode3.formod(/2).eq.imode4.formod(/2)) then
+             do lmo = 1,imode4.formod(/2)
+       if (imode4.formod(lmo).ne.imode3.formod(lmo)) lostat = .false.
+             enddo
+             do lmo = 1,imode4.matmod(/2)
+       if (imode4.matmod(lmo).ne.imode3.matmod(lmo)) lostat = .false.
+             enddo
+           else
+             lostat = .false.
+           endif
+           if (lostat) then
+              segdes imode4
+              goto 75
+           endif
+cc
+                  ENDIF
+                 enddo
+                 else
+                  lostat = .false.
+                 endif
+               endif
+                segdes imode4
+              enddo
+C
+              else
+               lomela = .false.
+              endif
+ 75           lomela = lomela.and.lostat
+              segdes imode2
+             enddo
+             ENDIF
+             lostat = lomela
+             do ivm3 = 1,imode1.ivamod(/1)
+c               imode1 = imomo
+                  IF(imode1.tymode(ivm3).eq.'IMODEL') THEN
+                    imode3 = imode1.ivamod(ivm3)
+                    segdes imode3
+                  ENDIF
+             enddo
+           endif
+           if (lostat) then
+             kbmod = kbmod + 1
+             tymode(nobmod) = 'STATIO'
+             ivamod(nobmod) = imomo
+             goto 79
+           endif
+          enddo
+C *** ca se passe mal
+          if (kbmod.ne.1) then
+              do  im1 = 1,MMODE1.KMODEL(/1)
+                IMODE1 = MMODE1.KMODEL(im1)
+                segdes imode1
+              enddo
+              segdes mmode1
+              write(ioimp,*) ' STATIO EN DEFAUT voir notice '
+              call erreur(251)
+              goto 990
+          endif
+C ***
+ 79       segdes imodel
+         ENDDO
+         DO im1 = 1,MMODE1.KMODEL(/1)
+          IMODE1 = MMODE1.KMODEL(im1)
+          segdes imode1
+         ENDDO
+         SEGDES MMODE1
+      ENDIF
+C  fin du modele STAT ddddddddddddddddddddddddddddddddddddddddddddddd
+
+      IF (IPGEOM.NE.0) SEGDES,MELEME
+C  Ecriture de l'objet MODELE cree
+      SEGDES,MMODEL
+      CALL ECROBJ('MMODEL',IPMODE)
+      RETURN
+
+C  Traitement des ERREURS
+ 99   CONTINUE
+      CALL ERREUR(21)
+ 990  CONTINUE
+      DO imu = 1, kmodel(/1)
+        imodel = kmodel(imu)
+        IF (imodel.NE.0) SEGSUP,imodel
+      ENDDO
+      SEGSUP,MMODEL
+      IF (IPGEOM.NE.0) SEGDES,MELEME
+      RETURN
+
+      END
+
+

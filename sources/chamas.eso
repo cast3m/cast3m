@@ -1,0 +1,144 @@
+C CHAMAS    SOURCE    FANDEUR   17/12/20    21:15:14     9649
+
+C=======================================================================
+C=                            C H A M A S                              =
+C=                            -----------                              =
+C=                                                                     =
+C=  Fonction :                                                         =
+C=  ----------                                                         =
+C=   Calcul des flux equivalents a des sources volumiques dans le cas  =
+C=   des elements MASSIFs (1D, 2D, 3D).                                =
+C=                                                                     =
+C=  Parametres :  (E)=Entree  (S)=Sortie                               =
+C=  ------------                                                       =
+C=   IPMODE  (E)   Pointeur du MMODEL a traiter                        =
+C=   IFORMU  (E)   Entier indiquant la formulation du modele a traiter =
+C=   IPCHSO  (E)   Pointeur du MCHAML de sources                       =
+C=   IPCHEB  (E)   Pointeur du MCHAML de CARACTERISTIQUES              =
+C=                 (Inutilise ici)                                     =
+C=   ISUPCH  (E)   Support des champs en entree                        =
+C=   NOMDUA  (E)   Nom de la composante du champ de flux equivalents   =
+C=   IPCHAL  (S)   Pointeur sur le champ des flux equivalents          =
+C=======================================================================
+
+      SUBROUTINE CHAMAS (IPMODE,IFORMU, IPCHSO,IPCHEB,ISUPCH, NOMDUA,
+     &                   IPCHAL)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+
+-INC SMCHAML
+-INC SMMODEL
+
+      SEGMENT INFO
+        INTEGER INFELL(JG)
+      ENDSEGMENT
+
+      CHARACTER*(*) NOMDUA
+
+      MMODEL = IPMODE
+C*      SEGACT,MMODEL              <- Actif en E/S (non modifie)
+      NSOU=KMODEL(/1)
+C =====
+      MCHELM = IPCHAL
+c*      SEGACT,MCHELM              <- Actif en E/S et modifiable
+c*      NSZC = MCHELM.IMACHE(/1)   <- On a ici : NSZC = NSOU
+C =====
+      MCHEL1 = IPCHSO
+c*      SEGACT,MCHEL1              <- Actif en E/S (non modifie)
+      NSZ1 = MCHEL1.IMACHE(/1)
+
+C  3 - BOUCLE SUR LES ZONES ELEMENTAIRES DU MODELE (ISOU)
+C ========================================================
+      DO 100 ISOU = 1, NSOU
+C =====
+C  3.1 - Modele elementaire ISOU
+C =====
+        IMODEL = mmodel.KMODEL(ISOU)
+**        SEGACT,IMODEL
+C =====
+C  3.2 - Recherche dans le MCHAML des sources (IPCHSO) du maillage
+C        (IMAMOD) associe au modele elementaire iSou, puis recuperation
+C        du MCHAML elementaire de sources associe (IPSONO)
+C =====
+        IPSONO = 0
+        DO is = 1, NSZ1
+          IF (MCHEL1.IMACHE(is).EQ.imodel.IMAMOD .AND.
+     &        MCHEL1.CONCHE(is).EQ.imodel.CONMOD) THEN
+            mchaml = MCHEL1.ICHAML(is)
+            SEGACT,mchaml
+c il faudrait chercher la composante si le champ en a plus qu'une.
+            IPSONO = mchaml.IELVAL(1)
+            SEGDES,mchaml
+            GOTO 10
+          ENDIF
+        ENDDO
+ 10     CONTINUE
+        IF (IPSONO.EQ.0) GOTO 100
+C =====
+C  3.3 - Recuperation d'informations sur l'element fini du modele
+C        elementaire iSou (NEF)
+C =====
+        NEF   = imodel.NEFMOD
+        IPGEO = imodel.IMAMOD
+        IF (IFORMU.EQ.1 .OR. IFORMU.EQ.2 .OR. IFORMU.EQ.3) THEN
+C* A ce jour : diffusion = thermique (en attendant retour diffusion = mecanique)
+C*        IF (IFORMU.EQ.1 .OR. IFORMU.EQ.2) THEN
+          IF (ISUPCH.EQ.6) THEN
+            CALL TSHAPE(NEF,'GAUSS',IPINTE)
+          ELSE
+            write(ioimp,*) 'CHAMAS : inchorence IFORMU ISUPCH'
+            CALL ERREUR(5)
+            RETURN
+          ENDIF
+        ELSE
+          IF (imodel.INFMOD(/1).LT.2+ISUPCH) THEN
+            CALL ELQUOI(NEF,0,ISUPCH,ipinf,imodel)
+            IF (IERR.NE.0) RETURN
+            info = ipinf
+            IPINTE = info.INFELL(11)
+            SEGSUP,info
+          ELSE
+            IPINTE = imodel.INFMOD(2+ISUPCH)
+          ENDIF
+        ENDIF
+C =====
+C  3.4 - Calcul des flux nodaux equivalents (segment MELVAL)
+C =====
+        IF (IDIM.EQ.3) THEN
+          CALL CHAMA3(IPSONO,IPGEO,IPINTE,IPCHEQ)
+        ELSE IF (IDIM.EQ.2) THEN
+          CALL CHAMA2(IPSONO,IPGEO,IPINTE,IPCHEQ)
+        ELSE IF (IDIM.EQ.1) THEN
+          CALL CHAMA1(IPSONO,IPGEO,IPINTE,IPCHEQ)
+        ENDIF
+        IF (IERR.NE.0) GOTO 100
+C =====
+C  3.5 - Initialisation du MCHAML des flux de chaleur nodaux equivalents
+C        (MCHAML) associe au modele elementaire iSou (maillage IMAMOD)
+C        Remplissage des donnees associees a MCHAML dans MCHELM (global)
+C =====
+        N2 = 1
+        SEGINI,MCHAML
+        mchaml.NOMCHE(1) = NOMDUA
+        mchaml.TYPCHE(1) = 'REAL*8'
+        mchaml.IELVAL(1) = IPCHEQ
+        SEGDES,MCHAML
+
+        mchelm.CONCHE(ISOU) = imodel.CONMOD
+        mchelm.IMACHE(ISOU) = IPGEO
+        mchelm.ICHAML(ISOU) = MCHAML
+        mchelm.INFCHE(ISOU,3) = NIFOUR
+        mchelm.INFCHE(ISOU,6) = 1
+
+C===
+ 100  CONTINUE
+C===
+C Fin de la boucle sur les sous-modeles elementaires
+
+      RETURN
+      END
+
+

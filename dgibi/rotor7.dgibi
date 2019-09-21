@@ -1,0 +1,908 @@
+* fichier : rotor7.dgibi
+************************************************************************
+* Section : Mecanique Dynamique
+************************************************************************
+***********************************************************************
+*
+*   rotor7.dgibi
+*
+*   Cas test basé sur rotor2.dgibi et rotor6.dgibi [Ex. Lalanne p.13]
+*   Modélisation 3D : rotor dans le repère tournant
+*                     stator dans le repere fixe
+*
+*   B. Prabel, novembre 2012 :
+*   -teste le calcul de deformee centrifuge NL :
+*    forces suiveuses + grands deplacements
+*   -analyse de stabilité associée
+*
+***********************************************************************
+
+
+******************************************************
+***                                                ***
+***                   PROCEDURES                   ***
+***                                                ***
+******************************************************
+
+
+*=======================================================
+*
+* procedure : CHARMECA
+* chargement centrifuge de type forces suiveuses
+* appels    : PASAPAS -> UNPAS -> CHARMECA
+* creation  : BP 15/09/2011
+* nomenclature :
+* TATA = table PRECED de UNPAS = table PRECED de PASAPAS (entrée/sortie)
+* time = temps (entrée)
+* addi_second = F a ajouter au second membre
+* addi_matrice = dF/du (=dF/dx en grand depl) a ajouter a l'operateur K
+*                du Newton de unpas
+*
+*=======================================================
+DEBPROC CHARMECA TATA*'TABLE' time*'FLOTTANT';
+
+*=== RECUP =============================================
+
+* du pas IT
+  IT = TATA . 'WTABLE' . 'PAS';
+* de omega = vitesse de rotation (Hz)
+*          = paramètre de chargement
+*          = time
+  omeg  = (2. * pi) * time ;
+*   mess '======  appel a CHARMECA ======= Omega =' time 'Hz pas' IT;
+  omeg2 = omeg ** 2 ;
+
+* du vecteur rotation (supposé de direction fixe)
+  VROT = TATA . 'VEC_ROTATION';
+
+* du modele, materiau et maillage associé au rotor
+  MODROT = TATA . 'MODELE_ROTOR';
+  MATROT = TATA . 'CARACTERISTIQUES_ROTOR';
+  MESHROT = EXTR MODROT 'MAILLAGE';
+
+*=== CALCUL DE KCENT1 ===================================
+
+* bp (rem ianis) 13/10/2011 : rho n'est pas constant en grand deplacement
+* pour imposer conservation de la masse il faut ecrire qqchose comme :
+  si (exis TATA 'JACOBIEN');
+    DJAC0 = redu (TATA . 'JACOBIEN' . 0) MODROT;
+*     RHO0  = exco MATROT 'RHO' 'RHO' ;
+    RHO0  = CHAN (exco MATROT 'RHO' 'RHO') MODROT 'MASSE';
+    DJAC1 = JACO MODROT;
+    TATA . 'JACOBIEN' . IT = DJAC1;
+*     DJAC01 = CHAN (DJAC0 / DJAC1) MODROT 'RIGIDITE';
+    DJAC01 = CHAN (DJAC0 / DJAC1) MODROT 'MASSE';
+*     RHO1 = RHO0 * DJAC01 ;
+*   on change DJAC01 en type rigidite pour truander calpaq.eso ...
+    RHO1 = RHO0 * (CHAN DJAC01 'TYPE' 'RIGIDITE');
+    KCENT1 = KENT 'CENTRIFUGE' MODROT RHO1 VROT;
+  sino;
+* ici on fait + simple
+    KCENT1 = KENT 'CENTRIFUGE' MODROT MATROT VROT;
+  fins;
+
+*=== CALCUL DE FCENT ===================================
+
+  XYZ =  (NOMC (COOR 1 MESHROT) 'UX' 'NATURE' 'DIFFUS') ET
+         (NOMC (COOR 2 MESHROT) 'UY' 'NATURE' 'DIFFUS') ET
+         (NOMC (COOR 3 MESHROT) 'UZ' 'NATURE' 'DIFFUS');
+*   FCENT = (-1.*omeg2) * KCENT1 * (XYZ- XYZ0);
+  FCENT = (-1.*omeg2) * KCENT1 * XYZ;
+
+*=== RESULTATS ========================================
+
+* on fournit les resultats dans la table TCENT
+  TCENT = tabl;
+  TCENT . 'ADDI_SECOND'= FCENT;
+* Fournit-on KCENT1 dans ADDI_MATRICE? (oui par défaut...)
+  si (exis TATA  'ADDI_MATRICE' );
+    FLMATR= TATA . 'ADDI_MATRICE';
+  sino;
+    FLMATR= VRAI;
+  fins;
+  si (FLMATR);
+    TCENT . 'ADDI_MATRICE'= (omeg2 * KCENT1);
+  fins;
+
+*=== MENAGE ===========================================
+
+* on detruit ce qui ne sert a rien
+  si (non FLMATR);
+    DETR KCENT1 'ELEMENTAIRE';
+  finsi;
+  DETR XYZ;
+
+FINPROC TCENT;
+*=======================================================
+
+
+
+*=======================================================
+*
+* procedure : PERSO1
+* procedure d'analyses (calcul des modes reels, complexes ...)
+* autour de la position d equilibre NL centrifuge definie par Omega
+* appels    : BRASERO -> BRASERO2 -> BRASENL -> pasapas -> PERSO1
+* creation  : BP 15/09/2011
+*
+*=======================================================
+DEBPROC PERSO1 TATA*'TABLE';
+
+
+*=== RECUP DE WTAB , CONV, ICHG  =======================
+
+  WTAB = TATA . 'WTABLE';
+
+* On commence par créer un indice PAS_CHARGEMENT dans WTABLE
+* (initialement à 0)
+  SI (non (exis WTAB 'PAS_CHARGEMENT'));
+    WTAB . 'PAS_CHARGEMENT' = WTAB . 'PAS';
+    ICHG = WTAB . 'PAS_CHARGEMENT';
+    mess 'on crée WTAB . PAS_CHARGEMENT '
+         'initialisé depuis WTAB . PAS =' ICHG;
+  FINSI;
+
+* On ne travaille que sur les pas ayant convergés
+  SI (WTAB.'CONV');
+    WTAB . 'PAS_CHARGEMENT' = (WTAB . 'PAS_CHARGEMENT') + 1;
+    ICHG = WTAB . 'PAS_CHARGEMENT';
+    mess '== appel a PERSO1 : CONV '
+         '->  on incremente WTAB . PAS_CHARGEMENT =' ICHG;
+*=> ICHG = 1 , 2 , ... NOMEG
+  SINON;
+* *   on redémarre l'algo depuis  l etat 0
+*     si (mult WTAB . 'ISOUSPAS' 4);
+*       mess 'on redemarre l algo depuis l etat 0'  ;
+*       WTAB . 'FOR'    = WTAB . 'FOR0';
+* *       WTAB . 'TEMPS0' = TATA . 'ESTIMATION' . 'TEMPS';
+*       WTAB . 'TEMPS0' = 0.;
+*       TATA . 'ESTIMATION' . 'DEPLACEMENTS'
+*       = 0. * TATA . 'ESTIMATION' . 'DEPLACEMENTS';
+*       TATA . 'ESTIMATION' . 'CONTRAINTES'
+*       = 0. * TATA . 'ESTIMATION' . 'CONTRAINTES';
+*       TATA . 'ESTIMATION' . 'REACTIONS'
+*       = 0. * TATA . 'ESTIMATION' . 'REACTIONS';
+*       TATA . 'ESTIMATION' . 'DEFORMATIONS'
+*       = 0. * TATA . 'ESTIMATION' . 'DEFORMATIONS';
+*
+*     fins;
+    ICHG = WTAB . 'PAS_CHARGEMENT';
+    mess '== appel a PERSO1 : NC AU PAS_CHARGEMENT=' ICHG
+         ' -> on quitte ';
+    QUIT PERSO1;
+  FINS;
+
+
+*=== RECUP =============================================
+
+* pas de temps
+  time   = WTAB . 'T_FINAL';
+*   ipas   = WTAB . 'PAS';
+*bp: ce n est pas IPAS qu il faut mais ICHG (défini dans pasapas)
+*    pour le cas ou on a un pas nonconvergé
+  si (neg time (extr TATA . 'TEMPS_CALCULES' ICHG));
+    mess 'pb pour definir le PAS_CHARGEMENT utilisé';
+    erre 21;
+  fins;
+  u1     = TATA . 'ESTIMATION' . 'DEPLACEMENTS';
+  sig1   = TATA . 'ESTIMATION' . 'CONTRAINTES';
+
+* on recupère omega = vitesse de rotation (Hz)
+* = paramètre de chargement = time dans notre cas
+  omeg  = (2. * pi) * time ;
+  omeg2 = omeg ** 2 ;
+
+* du vecteur rotation (supposé de direction fixe)
+  VROT = TATA . 'VEC_ROTATION';
+
+* du modele, materiau et maillage associé au rotor
+  MODROT = TATA . 'MODELE_ROTOR';
+  MATROT = TATA . 'CARACTERISTIQUES_ROTOR';
+  MESHROT = EXTR MODROT 'MAILLAGE';
+* du modele, materiau et maillage associé au rotor + stator
+  MODTOT = TATA . 'MODELE';
+  MATTOT = TATA . 'CARACTERISTIQUES';
+  MESHTOT = EXTR MODTOT 'MAILLAGE';
+
+
+*=== ANALYSES ELEMENTAIRES ==============================
+  mess '   ANALYSES PAS DE CHARGE=' ICHG ' - Omega=' time 'Hz';
+* couleur des courbes
+  mycoul1 = MOTS VIOL BLEU TURQ VERT  ORAN ROUG AZUR
+                 VIOL BLEU TURQ VERT  ORAN ROUG AZUR;
+
+* on se place sur la configuration deformee
+  GEOM0 = FORM;
+  GEOM2 = 'FORM' u1;
+*  FORM  GEOM2;
+  FLRECA = faux;
+
+  SI (EXIS TATA 'ANALYSES');
+
+    TABANA = TATA . 'ANALYSES';
+
+*---ANALYSE de DEFO_CENTRIFUGE ---------------------------
+    si (exis TABANA 'DEFO_CENTRIFUGE');
+      MESS '   ANALYSE DEFO_CENTRIFUGE';
+*    -on trace ?
+      si (exis TABANA . 'DEFO_CENTRIFUGE' 'SAUVDEFO');
+      si (exis TABANA . 'DEFO_CENTRIFUGE' . 'SAUVDEFO' time);
+        trac (VMIS sig1 modtot mattot) modtot
+        'TITR' (chai 'DEFO CENTRIFUGE - pas' ICHG
+                     ' \W=' time 'Hz - \s_{VM}');
+      fins;
+      fins;
+*    -points de mesure ?
+      si(exis TABANA . 'DEFO_CENTRIFUGE'  'RESULTATS');
+        TRES1 = TABANA . 'DEFO_CENTRIFUGE' . 'RESULTATS';
+        si (exis TRES1 'TEMPS_RESULTATS');
+          TRES1 . 'TEMPS_RESULTATS'
+          = TRES1 . 'TEMPS_RESULTATS' et time;
+        sino;
+          TRES1 . 'TEMPS_RESULTATS' = prog time;
+        fins;
+        NMES1 = dime TRES1;
+        iMES1 = 0;
+        repe BMES1 NMES1;
+          iMES1 = iMES1 + 1;
+          si (non (exis TRES1 iMES1)); iter BMES1; fins;
+          xval1 = EXTR u1 TRES1 . iMES1 . 'P_MESURE'
+                          TRES1 . iMES1 . 'DIRECTION';
+          si (exis TRES1 . iMES1  'RESULTATS');
+            TRES1 . iMES1 . 'RESULTATS'
+            = TRES1 . iMES1 . 'RESULTATS' et xval1;
+          sino;
+            TRES1 . iMES1 . 'RESULTATS' = prog xval1;
+          fins;
+        fin  BMES1;
+*.......eventuellement tracé des mesures.........................
+        si (exis TABANA 'TEMPS_AFFICHAGE_RESULTATS');
+        si (exis TABANA . 'TEMPS_AFFICHAGE_RESULTATS' time );
+          ev1ux = VIDE 'EVOLUTIO';
+          ev1uy = VIDE 'EVOLUTIO';
+          ev1uz = VIDE 'EVOLUTIO';
+          Tdess1x = tabl; Tdess1x . 'TITRE' = tabl; iMES1x=0;
+          Tdess1y = tabl; Tdess1y . 'TITRE' = tabl; iMES1y=0;
+          Tdess1z = tabl; Tdess1z . 'TITRE' = tabl; iMES1z=0;
+          iMES1 = 0;
+          repe BMES1 NMES1;
+            iMES1 = iMES1 + 1;
+            si (non (exis TRES1 iMES1)); iter BMES1; fins;
+            TRES1 . iMES1 . 'RESULTATS_EVOL'
+            = EVOL (extr mycoul1 iMES1) 'MANU'
+              '\W (Hz)' (TRES1 . 'TEMPS_RESULTATS')
+              'u (m)' (TRES1 . iMES1 . 'RESULTATS') ;
+            si (ega TRES1 . iMES1 . 'DIRECTION' 'UX');
+              ev1ux = ev1ux et TRES1 . iMES1 . 'RESULTATS_EVOL';
+              iMES1x = iMES1x + 1;
+              Tdess1x . 'TITRE' . iMES1x = TRES1 . iMES1 . 'TITRE';
+            fins;
+            si (ega TRES1 . iMES1 . 'DIRECTION' 'UY');
+              ev1uy = ev1uy et TRES1 . iMES1 . 'RESULTATS_EVOL';
+              iMES1y = iMES1y + 1;
+              Tdess1y . 'TITRE' . iMES1y = TRES1 . iMES1 . 'TITRE';
+            fins;
+            si (ega TRES1 . iMES1 . 'DIRECTION' 'UZ');
+              ev1uz = ev1uz et TRES1 . iMES1 . 'RESULTATS_EVOL';
+              iMES1z = iMES1z + 1;
+              Tdess1z . 'TITRE' . iMES1z = TRES1 . iMES1 . 'TITRE';
+            fins;
+          fin  BMES1;
+          mytit1 = chai 'déformée centrifuge au pas ' ICHG ;
+          dess ev1ux
+          'GRIL' 'POINT' 'GRIS'    'TITR' mytit1
+          'POSX' 'CENT' 'POSY' 'CENT' 'LEGE' 'NO' Tdess1x;
+          dess ev1uy
+          'GRIL' 'POINT' 'GRIS'    'TITR' mytit1
+          'POSX' 'CENT' 'POSY' 'CENT' 'LEGE' 'NO' Tdess1y;
+          dess ev1uz
+          'GRIL' 'POINT' 'GRIS'    'TITR' mytit1
+          'POSX' 'CENT' 'POSY' 'CENT' 'LEGE' 'NO' Tdess1z;
+        fins;
+        fins;
+      fins;
+    fins;
+
+*---ANALYSE de MODES_COMPLEXES ---------------------------
+    si (exis TABANA 'MODES_COMPLEXES');
+      MESS '   ANALYSE MODES_COMPLEXES';
+*    -calcul des matrices elementaires
+      FLRECA = vrai;
+*     Cas 3D Rotor + stator
+*     recup des matrices elementaires existantes
+      si (exis TATA  'RIGIDITE_CONSTANTE');
+        KCSTTOT = TATA . 'RIGIDITE_CONSTANTE' ;
+      fins;
+      liatot = TATA . 'BLOCAGES_MECANIQUES' ;
+*     calcul des matrices elementaires
+      RIGTOT = RIGI modtot mattot;
+      Ksigm1 = KSIG MODROT MATROT sig1;
+      Kcent1 = KENT 'CENTRIFUGE' MODROT MATROT VROT;
+      Kcent1 = omeg2 * Kcent1;
+      MASTOT = MASS modtot mattot ;
+      Gcori1 = CORI MODROT MATROT VROT;
+      Gcori1 = omeg * Gcori1;
+*     assemblage + imped pour mode reel (VIBR) et complexe (VIBC)
+      RIGVIBR = IMPE
+         (RIGTOT et KCSTTOT et liatot et Ksigm1 et Kcent1) 'RAIDEUR';
+      MASVIBR = -1.*(IMPE (MASTOT) 'MASSE');
+      AMOVIBR = IMPE (Gcori1) 'AMORTISSEMENT';
+
+*    -calcul des  MODES_REELS
+      MESS '   -MODES_REELS';
+*    -calcul du  MODES_COMPLEXES
+      MESS '   -MODES_COMPLEXES';
+
+    fins;
+
+*---Analyse BALOURD --------------------------------------
+
+*---Analyse TOURNANT --------------------------------------
+
+  FINSI;
+
+
+*=== MENAGE DES MATRICES ELEMENTAIRES inutiles ===========
+  SI (FLRECA);
+    DETR RIGTOT;  DETR Ksigm1;  DETR Kcent1;
+    DETR MASTOT;  DETR Gcori1;
+    DETR RIGVIBR 'ELEMENTAIRE';
+    DETR MASVIBR 'ELEMENTAIRE';
+    DETR AMOVIBR 'ELEMENTAIRE';
+  FINS;
+
+
+*=== CONFIGURATION DE REFERENCE = DEFORMEE ==============
+* on revient a la configuration initiale pour pasapas
+  FORM  GEOM0;
+
+
+*=== ON FORME LA RIGIDITE_CONSTANTE DU PAS SUIVANT ==============
+
+  SI ((ICHG + 1) <eg (dime TATA . 'TEMPS_CALCULES'));
+    txtcst = chai '   CREATION RIGIDITE_CONSTANTE (=';
+*   Prochaine vitesse de rotation
+    time2 =  extr TATA . 'TEMPS_CALCULES' (ICHG + 1);
+    omeg  = (2. * pi) * time2 ;
+    omeg2 = omeg ** 2 ;
+*   Recup des matrices elementaires
+*   + Formation de la matrice constante (pour OMEGA>0)
+*   tq : K^dyn(OMEGA) =  HKCST2 + OMEGA*HCCST2 + OMEGA**2 * HMCST2
+    KCSTTOT = mot 'NONDEFINI';
+    si (exis TATA 'RAIDEUR_CONSTANTE');
+      HKCST2 = TATA . 'RAIDEUR_CONSTANTE'; KCSTTOT = HKCST2;
+      txtcst = chai txtcst 'K^cst';
+    fins;
+    si (exis TATA 'AMORTISSEMENT_CONSTANT');
+      HCCST2 = TATA . 'AMORTISSEMENT_CONSTANT';
+      si (ega KCSTTOT'NONDEFINI'); KCSTTOT = omeg * HCCST2;
+      sino;            KCSTTOT = KCSTTOT et (omeg * HCCST2);
+      fins;
+      txtcst = chai txtcst '+ W*C^cst';
+    fins;
+    si (exis TATA 'MASSE_CONSTANTE');
+      HMCST2 = TATA . 'MASSE_CONSTANTE';
+      si (ega KCSTTOT'NONDEFINI'); KCSTTOT = omeg2 * HMCST2;
+      sino;            KCSTTOT = KCSTTOT et (omeg2 * HMCST2);
+      fins;
+      txtcst = chai txtcst '+ W²*M^cst';
+    fins;
+*   Matrice constante fournie a PASAPAS
+    si(neg KCSTTOT 'NONDEFINI');
+      TATA . 'RIGIDITE_CONSTANTE' = KCSTTOT;
+      TATA . 'WTABLE' . 'RIGIDITE_CONSTANTE' = KCSTTOT;
+    fins;
+    txtcst = chai txtcst ') POUR Omega= ' time2 'Hz'
+    MESS txtcst;
+
+  FINSI;
+
+  SAUT LIGN;
+
+
+FINPROC;
+*=======================================================
+
+
+
+******************************************************
+***                                                ***
+***                 OPTIONS                        ***
+***                                                ***
+******************************************************
+
+COMPLET = FAUX;
+* COMPLET = VRAI;
+
+opti dime 3 elem cub8 ;
+*opti debug 1;
+
+*** inclinaison du disque (dx =0.1m) ***
+    dxdisq = 0.;
+    dxdisq = 0.1E-3;
+    dxdisqE = enti (10000. * dxdisq);
+    si (COMPLET); prefix = chai 'rotor7_COMPLET';
+    sinon;        prefix = chai 'rotor7';
+    fins;
+
+*** tracés **
+    GRAPH = VRAI ;
+*   GRAPH = FAUX ;
+    OPTI 'TRAC' 'PSC' ;
+    fic2tra = chai prefix '.ps';
+    OPTI 'FTRA' fic2tra;
+    OPTI 'EPTR' 5 'POTR' 'HELVETICA_16';
+    eye1 = 5. -10. 3. ;
+*   eye1 = 50. 100. 30.;
+
+*** sauvegarde ***
+    fic2xdr = chai prefix '.xdr';
+
+
+
+***************************************************
+***                                             ***
+***                 MAILLAGE                    ***
+***                                             ***
+***************************************************
+
+*** géométrie ***
+Ltot = 0.40 ;
+L1 = Ltot/3.;
+L2 = 2.*Ltot/3.;
+Re1 = 0.01 ;
+Ri2 = 0.01 ;
+Re2 = 0.15 ;
+* hvol = 0.03;
+hvol = 0.005;
+
+
+*** arbre + volant ***
+
+* Sections circulaires de l'arbre et du volant d'inertie
+p0 = 0. 0. 0.;
+vaxe = 1. 0. 0.;
+p1 =  0. Re1 0. ;
+p1e = 0. Re2 0. ;
+p2 =  0. 0.  Re1 ;
+p3 =  0. ((-1.)*Re1) 0. ;
+p4 =  0. 0. ((-1.)*Re1) ;
+
+*finesse du maillage
+ n1 = 3;  n2 = 5;
+ naxe1 = 10;  naxe2 = 2;  naxe3 = 10;  naxe4 = 10;
+
+p1axe = p0;
+p2axe = p0 plus ((L1 - (0.5*hvol))*vaxe);
+p3axe = p0 plus ((L1 + (0.5*hvol))*vaxe);
+p4axe = p0 plus ((L2)*vaxe);
+p5axe = p0 plus ((Ltot)*vaxe);
+pbal = p1e  plus ((L1 - (0.5*hvol))*vaxe);
+
+* Section circulaire de l'arbre
+  p1p = p0 PLUS (0.2*(p1 MOIN p0)) ;
+  p2p = p0 PLUS (0.2*(p2 MOIN p0)) ;
+  p3p = p0 PLUS (0.2*(p3 MOIN p0)) ;
+  p4p = p0 PLUS (0.2*(p4 MOIN p0)) ;
+  cer1 = (cer3 (2*n1) p1 p2 p3) ;
+  cer1p = (cer3 (2*n1) p1p p2p p3p) ;
+  cer2 = (cer3 (2*n1) p3 p4 p1) ;
+  cer2p = (cer3 (2*n1) p3p p4p p1p) ;
+  secarbre = (REGL cer1 cer1p) et (COUT cer1p p0)
+          et (REGL cer2 cer2p) et (COUT cer2p p0) ;
+  elim secarbre (1.E-4*Re1) ;
+
+* Section circulaire  du volant d'inertie
+secvolan = (rota 360. (4*n1) (d n2 p1 p1e) p0 vaxe) et secarbre;
+ELIM secvolan (1.E-4*Re1) ;
+*
+*volume obtenu par translation
+vol1 = secarbre volu naxe1 tran  ((L1 - (0.5*hvol))*vaxe);
+vol2 = (secvolan plus ((L1 - (0.5*hvol))*vaxe))
+        volu naxe2  tran (hvol*vaxe);
+vol3 = (secarbre plus ((L1 + (0.5*hvol))*vaxe))
+        volu naxe3  tran ((L2 - (L1 + (0.5*hvol)))*vaxe);
+vol4 = (secarbre plus (L2*vaxe))
+        volu naxe4  tran ((Ltot - L2)*vaxe);
+voltot = vol1 et vol2 et vol3 et vol4;
+elim 0.0001 (voltot et p1axe et p2axe et
+              p3axe et p4axe et p5axe et pbal);
+*
+*on recupere les aretes necessaires pour les liaisons avec le stator
+ligrot1 = ARET secarbre ;
+facrot2 = FACE vol4 2 ; ligrot2 = ARET facrot2 ;
+facrot3 = FACE vol4 1 ; ligrot3 = ARET facrot3 ;
+facrot4 = face vol2 1 ; ligrot4 = aret facrot4 ;
+
+* tracé
+si (GRAPH);
+  trac eye1 ( (coul ligrot1 rose) et (coul ligrot2 roug)
+           et (coul ligrot3 TURQ) et voltot) 'CACH'
+      'TITR' 'Maillage du rotor';
+  rp1 = @REPERE (prog 0.5 0.2 0.2) 'ORAN';
+  trac eye1 (voltot et rp1) CACH;
+fins;
+
+
+***********************************************************
+***                                                     ***
+***     CREATION D UN DEFAUT DE GEOMETRIE
+***                                                     ***
+***********************************************************
+
+* creation du chpoint de defaut
+  y2 = coor vol2 2;
+  y2max = ABS (maxi y2 'ABS');
+  u666 = (nomc y2 'UX') * (dxdisq / y2max);
+si (GRAPH);
+  trac eye1 (vect u666 'DEPL') (u666 exco 'UX') (voltot)
+  TITR 'champ de défaut';
+fins;
+  depl vol2 'PLUS' u666 ;
+
+
+
+***************************************************
+***                                             ***
+***       MODELES, MATERIAUX et MATRICES        ***
+***                                             ***
+***************************************************
+
+***************************************************
+*** Données Matériaux et Supports
+
+* arbre et disque en acier
+  Ey1 = 2.E+11 ;
+  Nu1 = 0.3 ;
+  Rho1 = 7800. ;
+
+* Raideur et amortissement des supports
+   bet= 0.0002;
+   Ky = 50000. ;   Kz = 50000.;
+   Cy = Ky*bet ;   Cz = Kz*bet;
+
+
+***************************************************
+*** Rotor 3D ***
+mod1 = MODE voltot 'MECANIQUE' 'ELASTIQUE' 'ISOTROPE';
+mat1 = MATE mod1 'YOUN' Ey1 'NU' Nu1 'RHO' Rho1;
+*=> ses matrices seront calculées par PASAPAS
+
+
+***************************************************
+*** Stator ***
+* on pose le deplacement du stator u^{sta} = (e_X e_Y e_Z) *
+*  x:   0
+*  y:  UY cos (OMEGA t) - IUY sin (OMEGA t)
+*  z:  UZ cos (OMEGA t) - IUZ sin (OMEGA t)
+
+* Palier 1 : point ps10
+ps10 = bary ligrot1 ;
+* Palier 2 : point ps20
+ps20 = bary ligrot2 ;
+* on rassemble (possible?)
+MESHpal = (MANU 'POI1' ps10) et ps20 ;
+NBN1 = nbno MESHpal;
+
+*=> on crée les ressorts avec MANU + IMPE
+        PKAPUI3D = (1./NBN1) * (PROG KY 0. 0. KZ );
+        LDIRAP = MOTS UY UZ;
+        RIGAPP = MANU 'RIGI' MESHpal LDIRAP PKAPUI3D;
+        K_HARM = IMPE RIGAPP 'RAIDEUR' ;
+*=> on crée les amortisseurs avec MANU + IMPE
+        PCAPUI3D  = (1./NBN1) *  (PROG  CY  0. 0. CZ);
+        DAMA3D = MANU 'RIGI' MESHpal LDIRAP PCAPUI3D;
+        C_HARM = IMPE DAMA3D  1. 'AMOR'   ;
+        C_CONV = IMPE DAMA3D     'RAIDEUR';
+
+* On aura a ajouter dans PASAPAS la raideur "constante" la matrice :
+* K_HARM + OMEGA * C_HARM
+
+
+***************************************************
+*** Liaison Palier 1 ***
+*on crée un point fictif pr10r pour y condenser les deplacements moyens...
+*...du rotor
+ligrot11 = chan ligrot1 'POI1';
+pr10r = bary ligrot11 ;
+nrot1 = nbno ligrot11 ;
+chprot1x = (MANU 'CHPO' ligrot11 1 'UX' (1./(nrot1)) NATURE DIFFUS)
+        ET (MANU 'CHPO' pr10r    1 'UX' -1.          NATURE DIFFUS);
+chprot1y = (MANU 'CHPO' ligrot11 1 'UY' (1./(nrot1)) NATURE DIFFUS)
+        ET (MANU 'CHPO' pr10r    1 'UY' -1.          NATURE DIFFUS);
+chprot1z = (MANU 'CHPO' ligrot11 1 'UZ' (1./(nrot1)) NATURE DIFFUS)
+        ET (MANU 'CHPO' pr10r    1 'UZ' -1.          NATURE DIFFUS);
+* liarot1 = (RELA chprot1y) et (RELA chprot1z);
+liarot1 = (RELA chprot1x) et (RELA chprot1y) et (RELA chprot1z);
+* on fait le changement de repere stator / rotor
+liasr1 = (rela 'UY' ps10 - 'UY' pr10r)
+     et (rela 'IUY' ps10 - 'UZ' pr10r)
+     et (rela  'UZ' ps10 - 'UZ' pr10r)
+     et (rela 'IUZ' ps10 + 'UY' pr10r) ;
+*blocage moteur (RX_M)
+xc1 yc1 zc1 = COOR ligrot11 ;
+xc0 yc0 zc0 = COOR pr10r ;
+xc1 = xc1 - (MANU 'CHPO' ligrot11 1 'SCAL' xc0 'NATURE' 'DIFFUS');
+yc1 = yc1 - (MANU 'CHPO' ligrot11 1 'SCAL' yc0 'NATURE' 'DIFFUS');
+zc1 = zc1 - (MANU 'CHPO' ligrot11 1 'SCAL' zc0 'NATURE' 'DIFFUS');
+REF0 = (xc1**2) + (yc1**2)  + (zc1**2);
+REF1 = (  1. /nrot1)*(CHAN COMP (yc1) 'UZ');
+REF2 = ((-1.)/nrot1)*(CHAN COMP (zc1) 'UY');
+RRX = CHAN 'ATTRIBUT' ((REF1 ET REF2)/REF0) NATURE diffus;
+liaRX1 = RELA (RRX ET (MANU CHPO pr10r 1 'RX' -1. NATURE diffus));
+bloRX1 = BLOQ pr10r 'RX';
+
+
+***************************************************
+*** Liaison Palier 2 ***
+*on crée un point fictif pr20r pour y condenser les deplacements moyens...
+*...du rotor
+ligrot21 = chan ligrot2 'POI1';
+pr20r = bary ligrot21 ;
+nrot2 = nbno ligrot21 ;
+chprot2y = (MANU 'CHPO' ligrot21 1 'UY' (1./(nrot2)) NATURE DIFFUS)
+        ET (MANU 'CHPO' pr20r    1 'UY' -1.          NATURE DIFFUS);
+chprot2z = (MANU 'CHPO' ligrot21 1 'UZ' (1./(nrot2)) NATURE DIFFUS)
+        ET (MANU 'CHPO' pr20r    1 'UZ' -1.          NATURE DIFFUS);
+liarot2 = (RELA chprot2y) et (RELA chprot2z);
+* on fait le changement de repere stator / rotor
+liasr2 = (rela 'UY' ps20 - 'UY' pr20r)
+     et (rela 'IUY' ps20 - 'UZ' pr20r)
+     et (rela  'UZ' ps20 - 'UZ' pr20r)
+     et (rela 'IUZ' ps20 + 'UY' pr20r) ;
+*blocage moteur (RX_M)
+xc1 yc1 zc1 = COOR ligrot21 ;
+xc0 yc0 zc0 = COOR pr20r ;
+xc1 = xc1 - (MANU 'CHPO' ligrot21 1 'SCAL' xc0 'NATURE' 'DIFFUS');
+yc1 = yc1 - (MANU 'CHPO' ligrot21 1 'SCAL' yc0 'NATURE' 'DIFFUS');
+zc1 = zc1 - (MANU 'CHPO' ligrot21 1 'SCAL' zc0 'NATURE' 'DIFFUS');
+REF0 = (xc1**2) + (yc1**2)  + (zc1**2);
+REF1 = (  1. /nrot1)*(CHAN COMP (yc1) 'UZ');
+REF2 = ((-1.)/nrot1)*(CHAN COMP (zc1) 'UY');
+RRX = CHAN 'ATTRIBUT' ((REF1 ET REF2)/REF0) NATURE diffus;
+liaRX2 = RELA (RRX ET (MANU CHPO pr20r 1 'RX' -1. NATURE diffus));
+bloRX2 = BLOQ pr20r 'RX';
+
+***************************************************
+*** Blocage axial et moteur? ***
+blo1x = bloq pr10r 'UX';
+
+***************************************************
+*** assemblage des CL et liaisons
+  liatot = liarot1 et liasr1
+        et liarot2 et liasr2 et blo1x
+        et liaRX1 et bloRX1
+        et liaRX2 et bloRX2;
+
+***********************************************************
+***                                                     ***
+***                     PT DE MESURE                    ***
+***                                                     ***
+***********************************************************
+TMES = tabl;
+TMES . 1 = TABL;
+TMES . 1 . 'P_MESURE' = p1axe ;
+TMES . 1 . 'DIRECTION' = mot 'UY';
+TMES . 1 . 'TITRE' = mot 'UY (x=0)';
+TMES . 2 = TABL;
+TMES . 2 . 'P_MESURE' = p1axe ;
+TMES . 2 . 'DIRECTION' = mot 'UZ';
+TMES . 2 . 'TITRE' = mot 'UZ (x=0)';
+TMES . 3 = TABL;
+TMES . 3 . 'P_MESURE' = p5axe ;
+TMES . 3 . 'DIRECTION' = mot 'UY';
+TMES . 3 . 'TITRE' = mot 'UY (x=L)';
+TMES . 4 = TABL;
+TMES . 4 . 'P_MESURE' = p5axe ;
+TMES . 4 . 'DIRECTION' = mot 'UZ';
+TMES . 4 . 'TITRE' = mot 'UZ (x=L)';
+TMES . 5 = TABL;
+TMES . 5 . 'P_MESURE' = pbal ;
+TMES . 5 . 'DIRECTION' = mot 'UY';
+TMES . 5 . 'TITRE' = mot 'UY (x=L/3)';
+TMES . 6 = TABL;
+TMES . 6 . 'P_MESURE' = pbal ;
+TMES . 6 . 'DIRECTION' = mot 'UZ';
+TMES . 6 . 'TITRE' = mot 'UZ (x=L/3)';
+TMES . 7 = TABL;
+TMES . 7 . 'P_MESURE' = pbal ;
+TMES . 7 . 'DIRECTION' = mot 'UX';
+TMES . 7 . 'TITRE' = mot 'UX (x=L/3)';
+nmes = dime TMES;
+
+* tracé
+  imes = 0;
+  repe BMES (nmes/2);  imes = imes + 2;
+    si(ega &BMES 1);  ptsmes =  TMES . imes . 'P_MESURE';
+    sino;    ptsmes = ptsmes et TMES . imes . 'P_MESURE';
+    fins;
+  fin  BMES;
+  ptsmes = ptsmes COUL 'ROUG';
+si (GRAPH);
+  trac (voltot et ptsmes)
+    'TITR' 'Points de mesure';
+fins;
+
+
+
+
+***********************************************************
+***                                                     ***
+***                     ANALYSES NL                     ***
+***                                                     ***
+***********************************************************
+
+***************************************************
+* chargement = vitesse de rotation
+si (COMPLET);
+  promeg  = prog 0. 1. PAS 1. 30. PAS 5. 170. PAS 10. 1200.;
+  prodefo = prog 0. 25 26 130 145 700 720 1200.;
+  proresu = prog 0. 1. 5. 10. 13. 14. 15. 17. 20. PAS 20. 200.
+                  PAS 200. 1200.;
+sino;
+*   promeg  = prog  0. 1. PAS 1. 30. PAS 5. 170. PAS 10. 200.;
+*   promeg  = prog  0. PAS 2. 30. PAS 10. 160. PAS 20. 200.;
+  promeg  = prog  0. PAS 2. 24. 25. 26. PAS 2. 30. PAS 10. 110.
+                115. PAS 2.5 145. 150.
+                160. PAS 20. 200.;
+  prodefo = prog  0. 24 26 130 145 200 ;
+  proresu = prog  0. PAS 10. 30. 50. PAS 50. 200.;
+fins;
+
+
+***************************************************
+* REMPLISSAGE DE LA TABLE PASAPAS
+
+  TAB2 = tabl 'PASAPAS';
+
+  TAB2 . 'MODELE'             = MOD1;
+  TAB2 . 'CARACTERISTIQUES'   = MAT1;
+
+* definition du rotor :
+  TAB2 . 'MODELE_ROTOR'       = MOD1;
+  TAB2 . 'CARACTERISTIQUES_ROTOR'       = MAT1;
+  TAB2 . 'VEC_ROTATION'       = vaxe;
+  TAB2 . 'JACOBIEN'     = tabl ;
+  TAB2 . 'JACOBIEN' . 0 = jaco MOD1 ;
+
+* blocage, liaison et autres matrices
+  TAB2 . 'BLOCAGES_MECANIQUES'= liatot;
+* on initialise RIGIDITE_CONSTANTE pour OMEGA=0,
+* puis sera actualisée par PERSO1
+  TAB2 . 'RIGIDITE_CONSTANTE' = K_HARM;
+  TAB2 . 'RAIDEUR_CONSTANTE'  = K_HARM;
+  TAB2 . 'AMORTISSEMENT_CONSTANT' = C_HARM;
+*   TAB2 . 'MASSE_CONSTANTE' = M_HARM;
+
+* liste des Omegas (en Hz)
+  TAB2 . 'TEMPS_CALCULES'     = PROMEG;
+
+* Fcentrifuges suiveuses + grands deplacements
+  TAB2 . 'GRANDS_DEPLACEMENTS'= VRAI;
+  TAB2 . 'PROCEDURE_CHARMECA' = VRAI;
+  TAB2 . 'K_SIGMA'            = VRAI;
+*   TAB2 . 'K_CENT'             = VRAI;
+
+* appel a perso1 + demande d'autres analyses
+  TAB2 . 'PROCEDURE_PERSO1'   = VRAI;
+  TAB2 . 'ANALYSES' = tabl;
+  TAB2 . 'ANALYSES'  . 'DEFO_CENTRIFUGE' = tabl ;
+  TAB2 . 'ANALYSES'  . 'DEFO_CENTRIFUGE' . 'SAUVDEFO'  = prodefo;
+  TAB2 . 'ANALYSES'  . 'DEFO_CENTRIFUGE' . 'RESULTATS' = TMES;
+  TAB2 . 'ANALYSES'  . 'TEMPS_AFFICHAGE_RESULTATS'     = proresu;
+*   TAB2 . 'ANALYSES'  . 'MODES_COMPLEXES' = 10;
+
+* autres parametres de pasapas
+* (1E-4 et 200 par defaut dans pasapas, ici on fixe 1.E-6 et 10)
+  TAB2 . 'PRECISION'          = 1E-6;
+  TAB2 . 'MAXSOUSPAS'         = 10;
+  TAB2 . 'MAXITERATION'       = 100;
+
+* nouveaux parametres de PV
+*   TAB2 . 'PREDICTEUR'         = mot 'HPP';
+  TAB2 . 'STABILITE' = faux;
+*   TAB2 . 'STABILITE' = vrai;
+  TAB2 . 'LINESEARCH' = faux;
+*  TAB2 . 'LINESEARCH' = vrai;
+*   TAB2 . 'PREDICTEUR' = mot 'HPP';
+
+* 1er choix de parametres possible :
+* on reactualise K^el si dEpsilon > ..(10E-2 par defaut)
+*      TAB2 . 'REAC_GRANDS' = 1.E-5;
+*     TAB2 . 'REAC_GRANDS' = 1.E-4;
+
+* 2nd choix de parametres possible :
+* bp 28/11/2012 : 3 nouvelles options pour pasapas
+  TAB2 . 'INITIALISATION' = faux;
+  TAB2 . 'RENORMALISATION' = vrai;
+*   1.E-3 est deja la valeur par defaut : on s'assure de la conserver
+    TAB2 . 'MAXDEFOR' = 1.E-3;
+*   TAB2 . 'MAXDEFOR' = 1.E-4;
+* TAB2 . 'CONVERGENCE_MONOTONE' = vrai;
+
+
+
+***************************************************
+* APPEL A PASAPAS
+
+  PASAPAS TAB2;
+
+
+temp impr ;
+
+
+***************************************************
+* TEST DE BON FONCTIONNEMENT
+***************************************************
+
+* on verifie qu'on a passé 2 (ou 3 si COMPLET) resonances
+u1 =  tab2 . 'ANALYSES' . 'DEFO_CENTRIFUGE' . 'RESULTATS' . 1
+     . 'RESULTATS_EVOL';
+*   promeg  = prog 0. 1. PAS 1. 30. PAS 5. 170. PAS 10. 1200.;
+profin =  prog 0. PAS 0.2 30. PAS 1. (extr promeg (dime promeg));
+u1spl = IPOL profin u1 'SPLI';
+u1splev = evol manu profin u1spl OCEA;
+dess u1splev;
+
+* resonance 1 entre 25 et 26Hz
+i25 = POSI 25. 'DANS' profin 1.E-8;
+i26 = POSI 26. 'DANS' profin 1.E-8;
+li25 = lect i25 PAS 1 i26;
+pro25 = extr profin li25;
+u25   = extr u1spl  li25;
+Ome25 = IPOL 0. u25 pro25; mess '1^ere resonance a ' Ome25;
+Ome25th = 25.608;
+errOme = prog (1. - (Ome25 / Ome25th)) ;
+
+* resonance 1 entre 130 et 150Hz
+i130 = POSI 135. 'DANS' profin 1.E-7;
+i150 = POSI 145. 'DANS' profin 1.E-7;
+li140 = lect i130 PAS 1 i150;
+pro140 = extr profin li140;
+u140   = extr u1spl  li140;
+Ome140 = IPOL 0. u140 pro140; mess '2^eme resonance a ' Ome140;
+Ome140th = 138.66;
+errOme = errOme et (1. - (Ome140 / Ome140th)) ;
+
+SI (COMPLET);
+* resonance 1 entre 710 et 720Hz
+  i710 = POSI 710. 'DANS' profin 1.E-6;
+  i720 = POSI 720. 'DANS' profin 1.E-6;
+  li715 = lect i710 PAS 1 i720;
+  pro715 = extr profin li715;
+  u715   = extr u1spl  li715;
+  Ome715 = IPOL 0. u715 pro715; mess '3^eme resonance a ' Ome715;
+  Ome715th = 714.60;
+  errOme = errOme et (1. - (Ome715 / Ome715th)) ;
+FINS;
+
+list errOme;
+errmax = maxi errOme 'ABS' ;
+SI (errmax > 0.03);   ERRE 5 ;
+SINON ;               ERRE 0 ;
+FINSI ;
+
+
+
+FIN ;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

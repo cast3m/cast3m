@@ -1,0 +1,602 @@
+C ECOU40    SOURCE    BP208322  17/03/01    21:17:14     9325
+      SUBROUTINE ECOU40(MATE,INPLAS,MELE,IPMAIL,NBPTEL,IMAT,ICAR,
+     1     NUMAT,NUCAR,IVASTR,IVARI,IVADEF,IVADET,
+     1     IVADS,IVAMAT,IVACAR,
+     2     IPH1,IPH2,IPH3,ITHHER,LHOOK,NSTRS,NVARI,NMATT,NCARR,
+     3     CMATE,PRECIS,JECHER,IPOTAB,ISTEP,NPINT,JNOID,LOGSUC,
+     4     N2EL,N2PTEL,NBNO,NBPGAU,LW,IVASTF,IVARIF,IVADEP,KERRE)
+***********************************************************************
+*      ecoulement inelastique   appele par ecoul1
+c ppu  modif pour les materiaux unidirectionels en plastique
+*      MATERIAUX: -ENDOMMAGEABLES
+***********************************************************************
+* entrees :
+*
+*  mate   = numero de materiau elastique
+*  inplas = numero de materiau inelastique
+*  mele   = numero  element fini
+*  ipmail = pointeur du maillage
+*  nbptel = nombre de points par element
+*  imat   = pointeur sur un segment mptval de materiau (utilise par calsig)
+*  icar   = pointeur sur un segment mptval de caracteristiques
+*           geometriques (utilise par calsig)
+*  numat  = nb de composantes du melval de imat
+*  nucar  = nb de composantes du melval de icar
+*  ivastr =pointeur sur un segment mptval de contraintes
+*  ivari  =pointeur sur un segment mptval de variables internes
+*  ivadef =pointeur sur un segment mptval de deformations
+*  ivads  =pointeur sur un segment mptval de contraintes  (increments)
+*  ivamat =pointeur sur un segment mptval de materiau
+*  ivacar =pointeur sur un segment mptval de cacarteristiques geometrique
+*  iph1  = pointeur sur un mchaml de temperatures au debut du pas
+*  iph2  = pointeur sur un mchaml de temperatures a la fin du pas
+*  iph3  = pointeur sur un mchaml de temperatures de reference
+*  ithher = 0 si pas de chargement thermique
+*         = 1 si chargement thermique mais materiau constant
+*         = 2 si chargement thermique et mat. dependant de la temperature
+*  ipch1,ipch2,ipch3,ithher ne servent que pour les materiaux
+*        endommageables de lemaitre quand ils dependent de la temperature
+*  lhook  =taille de la matrice de hooke
+*  nstrs  =nombre de composantes de contraintes
+*  nvari  =nombre de composantes de variables internes
+*  nmatt  =nombre de composnates de proprietes de materiau
+*  ncarr  =nombre de composnates de caracteristiques geometriques
+*  cmate  =nom du materiau
+*  precis =precision dans les iterations internes
+*  jecher =0 ou 1 pour action dans ecoule
+*  jnoid  =0 ou 1 pour action dans ecoule
+*  ipotab =pointeur sur segment table
+*  istep  =indicateur d'action pour calcul nonlocal
+*        =0 dans le cas d'un calcul local (normal)
+*        =1 ou 2 dans le cas d'un calcul nonlocal
+*        =1 pour calcul des fonctions seuil uniquement
+*        =2 pour calcul des variables dissipatives a partir
+*           des fonctions seuil moyennees prealablement par nloc
+*
+* sorties :
+*  ivastf  =pointeur sur un segment mptval de contraintes
+*  ivarif  =pointeur sur un segment mptval de variables internes
+*  ivadep  =pointeur sur un segment mptval de deformations inelastiques
+*  kerre   =indicateur d'erreur
+*
+*  p dowlatyari  fev. 1992
+*
+*  c. la borderie fev 92 restructuration et reecriture de certains
+*                        passages pour une meilleure lisibilite
+*
+*                 avril 92 ajout istep pour le non local
+*                 dec 92 modif pour poutres timoschenko
+*
+************************************************************************
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*
+-INC CCOPTIO
+-INC SMCHAML
+-INC SMELEME
+-INC SMCOORD
+-INC SMMODEL
+-INC SMINTE
+-INC CCHAMP
+c=======================================================================
+c  la variable kerre regit les impressions d erreurs dans plast
+c      toutes erreurs de ecoule gerees dans ce sous programme
+c   kerre=0 tout ok
+c        de 1 a 6  s aligner sur valeurs donnees par ecoinc
+c     =   7  un element tuyau a une epaisseur nulle
+c     =  21  on ne trouve pas d intersection avec la surface de charge
+c     =  22  sig0 a l exterieur de la surface de charge
+c
+c             anomalies avec la courbe de traction
+c     =  30 limite elastique nulle
+c     =  31 trop de points
+c     =  32 pas assez de points
+c     =  33 pente incorrecte
+c     =  34 module d'young nul
+c     =  35 manque l'origine
+c     =  36 pente a l'origine non egale a e
+c     =  37 manque la courbe de traction
+c     =  38 nu devrait etre nul
+c
+c     =  48 donnees erronnees pour drucker-prager
+c     =  49 matrice singuliere dans iter internes drucker-prager
+c     =  51 pb dans drucker prager option non disponible
+c     =  52 pb dans drucker prager donnees incompatibles
+c     =  53 pb dans drucker prager solution impossible
+c     =  54 les valeurs admissibles pour istep sont 0 1 ou 2
+c     =  55 modele non implante en non local
+c     =  56 probleme dans l'integration du modele mazars
+c     =  57  ....
+c     =  58  ....
+c     =  59  ....
+c     =  60 pb donnees du cam-clay
+c
+c     =  99 cas non encore disponible
+c=======================================================================
+*
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS)    ,NSOF(NS)
+        INTEGER      IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+*
+      SEGMENT WRK0
+       REAL*8 XMAT(NCXMAT)
+      ENDSEGMENT
+*
+      SEGMENT WR00
+       CHARACTER*16 TYMAT(NCXMAT)
+       REAL*8 XMAT1(NCXMAT),XMAT2(NCXMAT)
+      ENDSEGMENT
+*
+      SEGMENT WRK1
+        REAL*8 DDHOOK(LHOOK,LHOOK),SIG0(NSTRS),DEPST(NSTRS)
+        REAL*8 SIGF(NSTRS),VAR0(NVARI),VARF(NVARI)
+        REAL*8 DEFP(NSTRS),XCAR(ICARA)
+      ENDSEGMENT
+*
+      SEGMENT WRK2
+        REAL*8 TRAC(LTRAC)
+      ENDSEGMENT
+*
+      SEGMENT WRK22
+      REAL*8 XXE(3,NBNN)
+      ENDSEGMENT
+*
+      SEGMENT WRK3
+        REAL*8 WORK(LW),WORK2(LW2)
+      ENDSEGMENT
+*
+      SEGMENT WRK4
+        REAL*8 XE(3,NBBB)
+      ENDSEGMENT
+*
+      SEGMENT WRK5
+        REAL*8 EPIN0(NSTRS),EPINF(NSTRS),EPST0(NSTRS)
+      ENDSEGMENT
+*
+      SEGMENT WRK6
+        REAL*8 BB(NSTRS,NNVARI),R(NSTRS),XMU(NSTRS)
+        REAL*8 S(NNVARI),QSI(NNVARI),DDR(NSTRS),BBS(NSTRS)
+        REAL*8 SIGMA(NSTRS),SIGGD(NSTRS),XMULT(NSTRS),PROD(NSTRS)
+      ENDSEGMENT
+*
+      SEGMENT WRK7
+        REAL*8 F(NCOURB,2),W(NCOURB),TRUC(NCOURB)
+      ENDSEGMENT
+*
+      SEGMENT WRK8
+        REAL*8 DD(NSTRS,NSTRS),DDV(NSTRS,NSTRS),DDINV(NSTRS,NSTRS)
+      ENDSEGMENT
+*
+      SEGMENT WRK9
+        REAL*8 YOG(NYOG),YNU(NYNU),YALFA(NYALFA),YSMAX(NYSMAX)
+        REAL*8 YN(NYN),YM(NYM),YKK(NYKK),YALFA1(NYALF1)
+        REAL*8 YBETA1(NYBET1),YR(NYR),YA(NYA),YKX(NYKX),YRHO(NYRHO)
+        REAL*8 SIGY(NSIGY)
+        INTEGER NKX(NNKX)
+      ENDSEGMENT
+*
+      SEGMENT WR10
+        INTEGER IABLO1(NTABO1)
+        REAL*8  TABLO2(NTABO2)
+      ENDSEGMENT
+*
+      SEGMENT WR11
+        INTEGER IABLO3(NTABO3)
+        REAL*8  TABLO4(NTABO4)
+      ENDSEGMENT
+*
+      SEGMENT WTRAV
+        REAL*8 DDAUX(LHOOK,LHOOK),VALMAT(NUMAT)
+        REAL*8 VALCAR(NUCAR),DSIGT(NSTRS)
+        REAL*8 TXR(IDIM,IDIM),DDHOMU(LHOOK,LHOOK)
+        REAL*8 XLOC(3,3),XGLOB(3,3)
+        REAL*8 D1HOOK(LHOOK,LHOOK),ROTHOO(LHOOK,LHOOK)
+      ENDSEGMENT
+*
+      SEGMENT WPOUT
+         REAL*8  X(2),Y(2),Z(2)
+      ENDSEGMENT
+*
+*  Commun NECOU utilisé dans ECOINC
+*
+      COMMON/NECOU/NCOURB,IPLAST,IT,IMAPLA,ISOTRO,
+     . ITYP,IFOURB,IFLUAG,
+     . ICINE,ITHER,IFLUPL,ICYCL,IBI,
+     . JFLUAG,KFLUAG,LFLUAG,
+     . IRELAX,JNTRIN,MFLUAG,JSOUFL,JGRDEF
+*
+*  Commun IECOU: sert de fourre-tout pour les initialisations
+*  d'entiers
+*
+      COMMON/IECOU/NYOG,NYNU,NYALFA,NYSMAX,NYN,NYM,NYKK,
+     .  NYALF1,NYBET1,NYR,NYA,NYRHO,NSIGY,NNKX,NYKX,IND,
+     .  NSOM,NINV,NINCMA,NCOMP,JELEM,LEGAUS,INAT,NCXMAT,
+     .  LTRAC,MFR,IELE,NHRM,NBNN,NBELEM,ICARA,
+     .  LW2,NDEF,NSTRSS,MFR1,NBGMAT,NELMAT,MSOUPA,
+     .  NUMAT1,LENDO,NBBB,NNVARI,KERR1,MELEME,
+     .  icou45,icou46,icou47,icou48,icou49,icou50,
+     .  icou51,icou52,icou53,icou54,icou55,icou56
+     .  icou57,icou58
+*
+*  Commun XECOU: sert de fourre-tout pour les initialisations
+*  de réels
+*
+      COMMON/XECOU/DTOPTI,TSOM,TCAR,DTT,DT,TREFA,TEMP0
+*
+      LOGICAL LOGVIS,LOGIN,LOGRE,LOGSUC
+      LOGICAL LUNI1,LUNI2
+      DIMENSION BID(6),BID2(6),CRIGI(12),CMASS(12)
+*
+      CHARACTER*72 CHARRE
+      CHARACTER*8  CMATE
+c
+*
+*   mise à disposition des temperatures tini tfin tref
+*   aux points de gauss
+*
+         TETA1=-1.E35
+         TETA2=-1.E35
+         TETREF=-1.E35
+         TREFA=-1.E35
+         IF (ITHHER.EQ.1.OR.ITHHER.EQ.2) THEN
+            MCHAM3=IPH1
+            MCHAM4=IPH2
+            MCHAM5=IPH3
+            SEGACT MCHAM3
+            SEGACT MCHAM4
+            SEGACT MCHAM5
+            MELVA3=MCHAM3.IELVAL(1)
+            MELVA4=MCHAM4.IELVAL(1)
+            MELVA5=MCHAM5.IELVAL(1)
+            SEGACT MELVA3
+            SEGACT MELVA4
+            SEGACT MELVA5
+         ENDIF
+c
+c
+c   Initialisations de variables
+c---------------------------------
+c      - mise à zéro des variables du commun NECOU si besoin
+c      - modèles viscoplastiques:
+c                  . on récupère le pas de temps
+c                  . on récupère le nombre maximal de sous-pas
+c                  . on met IND=1
+c      - initialisation des dimensions des tableaux des segments
+c   Sorties: en plus du commun NECOU, on range les autres données
+c   initialisées dans les COMMON IECOU et XECOU
+c   Sauf pour KERRE,LW,LOGVIS,LUNI1 et LUNI2 qui sont sortis comme
+c   argument de DEFINI
+c
+      CALL DEFINI(MELE,NCARR,NSTRS,NMATT,CMATE,MATE,
+     .           ISTEP,INPLAS,NPINT,IPOTAB,IVADEF,
+     .           IPMAIL,IVAMAT,
+     .           ITHHER,NUMAT,NUCAR,LOGVIS,
+     .           LUNI1,LUNI2,LW,KERRE)
+      IF (KERRE.EQ.999) RETURN
+c
+c  Initialisations des segments de travail
+c
+      IF ((CMATE.EQ.'ORTHOTRO'.OR.CMATE.EQ.'ANISOTRO'.OR.
+     1     CMATE.EQ.'UNIDIREC').AND.(MFR.EQ.1.OR.MFR.EQ.31
+     1     .OR.MFR.EQ.33)) THEN
+        CALL RESHPT(1,NBNO,IELE,MELE,NPINT,IPTR1,IRT1)
+        MINTE2=IPTR1
+        SEGACT MINTE2
+        SEGINI WRK22
+      ENDIF
+c
+      IF (LOGVIS) SEGINI WRK8
+      SEGINI WRK0,WR00,WRK1,WRK2,WRK3,WRK5
+      IF(MFR.EQ.7.OR.MFR.EQ.13.OR.LUNI1)THEN
+         SEGINI WRK4
+      ENDIF
+*      IF(INPLAS.EQ.34)THEN
+*        SEGINI WRK8
+*      ENDIF
+c
+      SEGINI WTRAV
+*
+*
+*       boucle sur les elements
+*
+      DO 1000 IB=1,NBELEM
+*
+*  Matériaux orthotropes, anisotropes et unidirectionnels
+*  en formulation massive:
+*     - on cherche  les coordonnees des noeuds de l element ib
+*     - calcul des axes locaux
+*  Cas particulier de l'ACIER_UNI
+*
+      CALL DEFROT(CMATE,MFR,NBNN,IB,MELE,LUNI1,IPTR1,
+     .     MELEME,WRK4,WRK22,WTRAV)
+*
+*
+*       boucle sur les points de gauss
+*
+         DO 1100 IGAU=1,NBPTEL
+*
+*  -recuperation de valmat et de valcar
+*  -on recupere les contraintes initiales
+*  -on recupere les variables internes
+*  -on recupere les deformations inelastiques initiales si besoin
+*  -on recupere les increments de deformations totales
+*  -on cherche la section de l'element ib
+*  -prise en compte de l'epaisseur et de l'excentrement
+*  dans le cas des coques minces avec ou sans cisaillement
+*  transverse
+*
+      CALL DEFVAL(NUMAT1,NBPTEL,NDEF,
+     .     IMAT,IVACAR,ICAR,IVASTR,IVARI,IVADEF,IVADET,
+     .     IVADS,MFR,CMATE,INPLAS,IB,IGAU,IND,
+     .     WTRAV,WRK1,WRK5,SECT,EPAIST)
+*
+*     on recupere les constantes du materiau
+*     calcul des contraintes effectives en milieu poreux
+*
+      CALL DEFMAT(NMATT,NSTRS,MFR,MELE,INPLAS,
+     .        IVAMAT,IB,IGAU,CMATE,MATE,LUNI1,LUNI2,
+     .        WRK1,WRK5,WRK0,WR00,WTRAV,CMASS,CRIGI,COB,XMOB,
+     .        BID,BID2,KERR0)
+      IF (KERR0.EQ.99) THEN
+         KERRE=99
+         GOTO 1000
+      ELSE IF (KERR0.EQ.10) THEN
+         GOTO 1000
+      ENDIF
+*
+* >>>>>>>>>>   fin du traitement du materiau
+*
+*        on recupere les caracteristiques geometriques
+*
+      CALL DEFCAR(NCARR,IB,IGAU,MFR,MELE,IVACAR,
+     .           WRK1)
+*
+*
+*          quelques impressions si iimpi = 99
+*
+*      IF(IIMPI.EQ.99) THEN
+*         WRITE(IOIMP,66770) IB,IGAU
+*66770    format(////////2x,'element  ',i6,2x,'point  ',i3//)
+*         WRITE(IOIMP,66771) MATE,INPLAS
+*66771    format('0  mate=',i4,2x,'inplas=',i4/)
+*         WRITE(IOIMP,66772) (SIG0(I),I=1,NSTRS)
+*66772    format(2x,'  sig0 '/(6(1x,1pe12.5)))
+*         WRITE(IOIMP,66773) (VAR0(I),I=1,NVARI)
+*66773    format(2x,'  var0 '/(6(1x,1pe12.5)))
+*         WRITE(IOIMP,66774) (DEPST(I),I=1,NSTRS)
+*66774    format(2x,'  depst '/(6(1x,1pe12.5)))
+*         WRITE(IOIMP,66775) (XMAT(I),I=1,NMATT)
+*66775    format(2x,'  xmat  '/(6(1x,1pe12.5)))
+*         IF(IVACAR.NE.0)THEN
+*            WRITE(IOIMP,66776) (XCAR(I),I=1,ICARA)
+*66776       format(2x,'  xcar  '/(6(1x,1pe12.5)))
+*         ENDIF
+*      ENDIF
+*
+*   mise à disposition des temperatures tini tfin tref
+*   aux points de gauss
+*
+         IF (ITHHER.EQ.1.OR.ITHHER.EQ.2) THEN
+            IBMN=MIN(IB,MELVA3.VELCHE(/2))
+            IGMN=MIN(IGAU,MELVA3.VELCHE(/1))
+            TETA1=MELVA3.VELCHE(IGMN,IBMN)
+            IBMN=MIN(IB,MELVA4.VELCHE(/2))
+            IGMN=MIN(IGAU,MELVA4.VELCHE(/1))
+            TETA2=MELVA4.VELCHE(IGMN,IBMN)
+            IBMN=MIN(IB,MELVA5.VELCHE(/2))
+            IGMN=MIN(IGAU,MELVA5.VELCHE(/1))
+            TETREF=MELVA5.VELCHE(IGMN,IBMN)
+         ENDIF
+*
+*
+*---------------------------------------------------------------------
+*
+*                  ecoulement selon les modeles
+*
+*---------------------------------------------------------------------
+*
+            IF (INPLAS .EQ. 30) THEN
+c
+c      modele d'endommagement mazars ( beton )
+c
+               CALL MAZZZ (WRK0,WRK1,WRK5,NSTRSS,NVARI,NMATT,ISTEP,
+     &                                             ICARA,KERRE,MFR1)
+c
+            ELSE IF (INPLAS .EQ. 31) THEN
+c
+c      modele d'endommagement unilateral ( beton )
+c
+               CALL CLBBBB (WRK0,WRK1,WRK5,NSTRSS,NVARI,NMATT,ISTEP,
+     &                                       ICARA,KERRE,MFR1,IFOURB)
+c
+            ELSE IF (INPLAS .EQ. 37) THEN
+c
+c      modele rotating crack
+c
+               CALL ROTATI (WRK0,WRK1,WRK5,NSTRSS,NVARI,NMATT,ISTEP,
+     &                                       ICARA,KERRE)
+c
+            ELSE IF (INPLAS .EQ. 88) THEN
+c      modele SIC_SIC
+c
+      CALL SICSIC(WRK0,WRK1,WRK22,WRK5,WTRAV,CMATE,N2EL,
+     &                 N2PTEL,IB,IGAU,EPAIST,NVARI,NBPGAU,MELE,NPINT,
+     &                   SECT,LHOOK,CRIGI,NMATT,ISTEP,KERRE)
+c
+            ELSE IF (INPLAS .EQ. 89) THEN
+C  HINTE
+C  MODELE INTERFACE 2D
+
+      CALL HINTE(SIG0,NSTRSS,DEPST,VAR0,NVARI,XMAT,NMATT,
+     . XCAR,SIGF,VARF,DEFP,PRECIS,MFR1,KERRE)
+C
+
+            ELSE IF (INPLAS .EQ. 96) THEN
+C
+C     MODELE D'ENDOMMAGEMENT + PLASTICITE ANISOTROPE MICROPLANS
+C
+               CALL MICROP (WRK0,WRK1,NSTRSS,NVARI,NMATT,
+     &                                 ICARA,KERRE,MFR1,IFOURB)
+*
+            ELSE IF (INPLAS .EQ. 97) THEN
+C
+C      MODELE D'ENDOMMAGEMENT VISCOUNILATERAL ( BETON )
+C
+               CALL JFDDDD (WRK0,WRK1,WRK5,NSTRSS,NVARI,NMATT,ISTEP,
+     &                                   ICARA,KERRE,MFR1,IFOURB,DT)
+*
+            ELSE IF (INPLAS .EQ. 98) THEN
+C
+C     MODELE D'ENDOMMAGEMENT + PLASTICITE ISOTROPE MICROPLANS
+C
+               CALL MICROI (WRK0,WRK1,NSTRSS,NVARI,NMATT,
+     &                                 ICARA,KERRE,MFR1,IFOURB)
+*
+* BCN
+            ELSE IF (INPLAS .EQ. 118) THEN
+C      Modified Von Mises model
+            CALL MVMMM (WRK0,WRK1,WRK5,NSTRSS,NVARI,NMATT,ISTEP,
+     &                                     ICARA,KERRE,MFR1)
+            ELSE IF (INPLAS .EQ. 134) THEN
+C   Modele de desmorat
+          CALL DESMNL(WRK0,WRK1,WRK5,NSTRSS,NVARI,LHOOK,ISTEP,
+     &              NMATT,ICARA,KERRE,MFR1)
+            ELSE IF (INPLAS .EQ. 135) THEN
+*      Modele plastique endommageable ENDO_PLAS
+               CALL ENPLAS(XMAT,NMATT,VAR0,VARF,NVARI,SIG0,
+     &                    SIGF,DEPST,NSTRS,KERRE,ISTEP)
+C   Fatigue damage model
+            ELSE IF (INPLAS .EQ. 141) THEN
+                CALL FATTT (WRK0,WRK1,WRK5,NSTRSS,NVARI,NMATT,ISTEP,
+     &                                          ICARA,KERRE,MFR1,DT)
+
+
+            ELSE
+               KERRE = 99
+            ENDIF
+*
+*   Erreurs
+*      - problèmes de convergence
+*
+      CALL DEFER1(JNOID,KERR1,KERRE,LOGSUC)
+*
+*      - autres problèmes
+*
+ 1990 CALL DEFER2(INPLAS,MFR,MELE,IB,IGAU,
+     .           KERR1,KERRE)
+ 1998 IF (KERRE.NE.0) THEN
+         IF (LOGVIS) SEGSUP WRK8
+         SEGSUP WRK0,WR00,WRK1,WRK2,WRK3,WRK5,WTRAV
+         IF(MFR.EQ.7.OR.MFR.EQ.13.OR.LUNI1) THEN
+            SEGSUP WRK4
+         ENDIF
+         IF ((CMATE.EQ.'ORTHOTRO'.OR.CMATE.EQ.'ANISOTRO'.OR.
+     1     CMATE.EQ.'UNIDIREC').AND.(MFR.EQ.1.OR.MFR.EQ.31
+     1     .OR.MFR.EQ.33)) THEN
+           SEGDES MINTE2
+           SEGSUP WRK22
+         ENDIF
+         IF (ITHHER.EQ.1.OR.ITHHER.EQ.2) THEN
+            SEGDES MELVA3
+            SEGDES MELVA4
+            SEGDES MELVA5
+            SEGDES MCHAM3
+            SEGDES MCHAM4
+            SEGDES MCHAM5
+         ENDIF
+         RETURN
+      ENDIF
+c
+c
+c     remplissage du segment contenant les contraintes a la fin
+*     ( rearrangement pour milieu poreux ),
+c     les variables internes finales
+c     et les increments de deformations plastiques
+c
+      CALL DEFSIG(MFR,NDEF,
+     .     INPLAS,IND,WRK1,WRK5,WTRAV,
+     .     IVASTF,IVARIF,IVADEP,COB,XMOB,IB,IGAU,
+     .     CMATE,MATE,MELE,KERRER)
+      IF (KERRER.NE.0) GOTO 1000
+c
+c
+c    fin de la boucle sur les points de gauss
+c
+1100     continue
+c
+c    special poutres et tuyaux  sauf timoschenko
+c
+      CALL DEFPOU(MFR,MELE,MELEME,IB,WRK4,IVASTF)
+c
+c     fin de la boucle sur les elements
+c
+1000  continue
+*
+*  FIN: modèles visqueux, on stocke le pas de temps
+*  optimal en indice 'dtopti'
+*
+      CALL DEFFIN(INPLAS,TSOM,NSOM,NCOMP,NINV,NINCMA,
+     .     TCAR,DTOPTI,IPOTAB,KERRE)
+      IF (LOGVIS) SEGSUP WRK8
+*
+      SEGSUP WRK0,WR00,WRK1,WRK2,WRK3,WRK5,WTRAV
+      IF(MFR.EQ.7.OR.MFR.EQ.13.OR.LUNI1) THEN
+         SEGSUP WRK4
+      END IF
+*      IF(INPLAS.EQ.34) THEN
+*        SEGSUP WRK8
+*      END IF
+      IF ((CMATE.EQ.'ORTHOTRO'.OR.CMATE.EQ.'ANISOTRO'.OR.
+     1     CMATE.EQ.'UNIDIREC').AND.(MFR.EQ.1.OR.MFR.EQ.31
+     1     .OR.MFR.EQ.33)) THEN
+        SEGDES MINTE2
+        SEGSUP WRK22
+      ENDIF
+*
+      IF (ITHHER.EQ.1.OR.ITHHER.EQ.2) THEN
+            SEGDES MELVA3
+            SEGDES MELVA4
+            SEGDES MELVA5
+            SEGDES MCHAM3
+            SEGDES MCHAM4
+            SEGDES MCHAM5
+      ENDIF
+*
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,1406 @@
+* fichier :  ale_mecaflu.dgibi
+************************************************************************
+* Section : Fluides Transitoire
+* Section : Fluides Ale
+************************************************************************
+
+***************************************************************
+*                                                             *
+* NOM         : ale_mecaflu.dgibi                             *
+* DESCRIPTION : fiche de validation CASTEM2000                *
+*               Mécanique des Fluides                         *
+*               Equations de Navier-Stokes en description ALE *
+*               (Arbitraire Lagrange-Euler)                   *
+*               géométrie initiale : cavité rectangulaire (2D)*
+* FONCTIONS                                                   *
+*   TESTEES   : 'NS' option 'CENTREE' & 'ALE' incompressible  *
+* (entre             formulation non conservative             *
+*   autres)          éléments QUA4                            *
+*               'FORME' pour les déplacements du maillage     *
+*               'LAPN' option 'EF' 'IMPL'                     *
+*                      pour le calcul de la vitesse du        *
+*                      maillage                               *
+*                                                             *
+* AUTEUR      : Stéphane GOUNAND (CEA/DRN/DMT/SEMT/TTMF)      *
+*               e-mail : gounand@semt2.smts.cea.fr            *
+*                                                             *
+***************************************************************
+*                                                             *
+* VERSION     : v1, 29/12/97, version initiale                *
+* HISTORIQUE  : v1, 29/12/97, création                        *
+* HISTORIQUE  :                                               *
+* HISTORIQUE  :                                               *
+* HISTORIQUE  :                                               *
+*                                                             *
+***************************************************************
+*                                                             *
+* Priere de completer la partie HISTORIQUE apres modification *
+* du jeu de donnees afin de faciliter la maintenance          *
+*                                                             *
+***************************************************************
+*
+* DESCRIPTION DETAILLEE :
+*
+* Géométrie :
+* ---------
+*   A l'instant initial, le fluide est au repos dans une
+* cavité rectangulaire LxH ouverte (comme une gouttière).
+* Le fluide est newtonien,visqueux et incompressible.
+* Il est soumis à l'accélération de la pesanteur.
+*
+*    z
+*      ^
+*      |
+*
+*      |                |
+*      |                |
+*     R|----------------|Q
+*      |                |    |
+*      |                |    |  g
+*      |H               |    |
+*      |     L          |    \/
+*      ------------------ - - - - - -> x
+*     O                  P
+* On modélise son comportement par les équations de
+* Navier-Stokes en description ALE (les noeuds du maillage
+* sont mobiles). On désigne par v, la vitesse absolue du
+* fluide aux noeuds du maillage et par w, la vitesse absolue
+* de déplacement des noeuds du maillage.
+* Dans la description ALE, seul le terme de convection des
+* équations de Navier-Stokes change, il s'écrit :
+*   (v-w).grad(v)
+* Si w=0, on retrouve la description eulérienne classique.
+* Si w=v, le terme de convection disparait => description
+* lagrangienne.
+* Dans le cas général, il nous faut une équation qui precrit w.
+*
+* Condition initiale :
+* ------------------
+* A l'instant t=0, on imprime un pulse de pression sur la
+* surface libre (RQ) de la forme :
+*           P(t) = A Dirac(t) cos(pi x / L)
+* Celle-ci se met à osciller librement.
+*
+* Conditions aux limites :
+* ----------------------
+* - contrainte nulle sur la surface ;
+* - v.n = 0 sur les bords (il faut que Q et R puissent se
+* déplacer).
+*
+* Prescription de w :
+* -----------------
+* Trois facons de prescrire w ont été implémentés
+* (voir aussi plus loin les procédures correspondantes) :
+* - LAGR : lagrangienne : w=v
+* - SLAG : surface lagrangienne : w|surf=v|surf
+*                            et   Laplacien(w)=0 sur le
+*                            domaine.
+* - CVS2LF : on impose w // Oz ie les points du maillage
+* doivent se déplacer uniquement verticalement.
+* Ceci nous amène à résoudre une équation de convection 1D sur la
+* surface qui est discrétisée en DF centrées <=> EF centrés.
+*
+* Tests effectués :
+* ---------------
+* - on prescrit w par CVS2LF (le plus compliqué) ;
+* - on vérifie que le volume se conserve (les schémas utilisés
+* ne conservent PAS, a priori, le volume) ;
+* - on compare les ordonnées des points Q et R en fonction du
+* temps (zQ(t) et zR(t)) avec les profils obtenus par une
+* autre simulation numérique (Ramaswamy).
+*
+*                         Voir rapport CEA/DMT 97/371
+*                               pour plus de précisions
+*
+*************************************************************
+* Références : - Gounand, S. 1997
+*                Simulation Numérique d'écoulements à surface
+*                libre.
+*                Rapport CEA/DMT 97/371.
+*              - Ramaswamy, B. 1990
+*                Numerical simulation of unsteady viscous
+*                free surface flow
+*                J. Comp. Phys. Vol. 90 pp. 396-430.
+*              - Ramaswamy, B. & Kawahara, M. 1987
+*                Lagrangian finite element analysis applied
+*                to viscous free surface fluid flow.
+*                Int. J. for Num. Meth. in Fluids
+*                Vol. 7 pp. 953-984.
+*
+***************************************************************
+*
+* JEU DE DONNEE :
+*
+prg = ('CHAINE' 'Non Linear Oscillations (NS ALE)') ;
+**** Options
+* court = VRAI  : le cas-test s'effectue en une trentaine
+*                 de secondes.
+* court = FAUX  : le cas-test est plus long. On ne raffine
+*                 pas le maillage mais on allonge le temps
+*                 de simulation, ce qui permet une "vrai"
+*                 comparaison sur zQ(t) et zR(t) avec les
+*                 résultat de notre ami Ramaswamy.
+* graph = VRAI  : on trace les graphiques (historiques, champs)
+*                 On met graph = faux pour la fiche
+*                 de validation.
+* inta  = VRAI si on est en interactif ;  0 sinon
+*
+* N.B. si inta et graph sont VRAIs, on a droit au film des
+*      champs de vitesses en fin d'exécution...
+*
+*
+* discconv : option de discrétisation des termes de
+*            convection pour les équations de Navier-Stokes
+*            info 'NS' ;  pour les choix possibles
+*
+court = VRAI ;
+graph = FAUX ;
+inta  = FAUX ;
+typelem = 'QUA4' ;
+discconv = 'CENTREE' ;
+*
+* Méthodes de déplacement du maillage (vmail) :
+* LAGR - déplacement lagrangien du maillage
+* SLAG - surface lagrangienne, vitesse intérieure interpolée
+*        par un laplacien.
+*  TOTAL : le contour entier est lagrangien (w=v)
+*  INTBOR : la surface libre est lagrangienne (w|surf = v|surf)
+*           Sur le fond, w=0
+*           Sur les bords : interpolation linéaire de w
+*  BORLIB : meme chose que INTBOR sauf :
+*           Sur les bords : condition de Neumann pour le
+*                           laplacien
+* CVS2LF - w // axe z sur la surface => eqn conv resolue
+*          par un schéma Leap-Frog (disc centrée dérivée 1°)
+*          Options : idem SLAG sauf TOTAL.
+*
+*vmail = 'LAGR' ;  optlapn = 'TOTAL' ;
+*vmail = 'SLAG' ;
+*   optlapn = 'TOTAL' ;
+*   optlapn = 'INTBOR' ;
+*   optlapn = 'BORLIB' ;
+vmail = 'CVS2LF' ;
+   optlapn = 'INTBOR' ;
+*   optlapn = 'BORLIB' ;
+'OPTION' 'DIME' 2 'ELEM' typelem ;
+'OPTION' 'ECHO' 1 ;
+'SI' ('NON' inta) ;
+  'OPTION' 'TRAC' 'PS' ;
+'SINON' ;
+**od = 'TEXTE' 'OPTION DONN 3' ;
+'FINSI' ;
+
+*************************************************************
+**** Définition de quelques (!) procédures :
+*
+
+** **** D'intéret général :
+
+* -> LOG10 :
+*     LOG base10
+* -> CALCERR :
+*     Erreur relative entre deux champoints (norme Linfini)
+* -> TRMAIL :
+*     Tracé d'un maillage
+* -> TRVIT :
+*     Tracé d'un chpoint de vitesse VECT SOMMET
+* -> TRCH :
+*     Tracé d'un chpoint SCAL
+
+** **** Spécifique à l'ALE :
+
+* Elles sont en grand nombre car il faut gérer soi-meme les
+* dicrétisations temporelle et spatiale (domaine mobile).
+* On ne peut pas utiliser (pour l'instant ?) EXEC pour s'en
+* occuper.
+* En outre, on propose plusieurs méthodes pour déplacer le
+* maillage.
+
+* -> CREMAIL :
+*     Création de la cavité et de tous les sous-maillages
+*     nécessaires.
+*     Tout ce qui concerne la géométrie doit se trouver ici
+* -> CDXHAUT :
+*     Création des deltax pour la surface libre (ici $haut)
+*     pour utilisation dans la procedure CVS2LF
+*     (Différences Finies)
+* -> INITVAR :
+*     Initialisation de la table des variables
+*     Variables aux instants n+1/2 et n-1/2 (si nécessaire)
+* -> INITPDT :
+*     Initialisation de la table des pas de temps
+*     Tout ce qui concerne le calcul du pas de temps
+* -> INITHIST :
+*     Initialisation de la table des historiques
+*     Toutes les listes de scalaires
+* -> INITSAUV :
+*     Initialisation de la table des sauvegardes
+*     Sauvegarde des champoints dans une table indicée
+*     par un entier associé à un de pas de temps
+* -> MAJPDT :
+*     Mise à jour de la table des pas de temps
+*     i.e calcul du nouveau
+* -> MAJHIST :
+*     Mise à jour des différents historiques
+* -> MAJSAUV :
+*     On sauvegarde les différents champoints dans une table
+
+* -> SUMMARY :
+*     Affiche un résumé des paramètres
+* -> TRTOUT :
+*     Trace tous les champs
+** NB : pour simplifier, on ne transmet pas les paramètres à
+**      SUMMARY et TRTOUT. C'est de la mauvaise programmation...
+* -> MESI :
+*     Affichage du message pour la boucle d'itérations
+* -> MEST :
+*     Affichage du message pour l'avance d'un pas de temps
+
+* -> CALCON :
+*     Calcul de la contrainte appliquée sur la surface au premier
+*     pas de temps
+* -> PREPAS :
+*     Faire le premier pas de temps
+* -> CVIT :
+*     Faire un pas de temps : termes sources      en n-1/2
+*                             matrice-masse       en n
+*                             divergence-pression en n+1/2
+* -> LAGR :
+*     vitesse du fluide (v) =>
+*     vitesse du maillage (w) en LAGRangien (soit w=v)
+* -> SLAG :
+*     on choisit w|surf = v|surf (Surface LAGrangienne)
+*     on interpole ensuite w sur le reste du maillage par
+*     une équation au laplacien
+* -> CVS2LF :
+*     on calcule w|surf avec v|surf en imposant w|surf // Oy
+*     => eqn convection sur la surface.
+*     Elle est discrétisée en différences finies centrées
+*     d'où le nom : ConVection Surface ordre 2 (schéma de
+*     type Leap-Frog)
+*     on interpole ensuite w sur le reste du maillage par
+*     une équation au laplacien
+* ---> IVECT :
+*     Interpolation d'un vecteur entre deux points sur
+*     un segment. Un chpoint VECT => 2 chpos SCAL
+* ---> LAPC :
+*     Résolution d'une équation scalaire en implicite ;
+*     Laplacien + conditions Dirichlet ou Neumann
+*
+* -> ETENDRE :
+*     Procédure qui étend un champoint VECT SOMMET a tous les
+*     points (FACE, CENTRE...) du maillage total
+* -> CINVPDTM :
+*     Calcul du pas de temps dit "de maillage"
+
+** **** Post-traitement :
+
+* -> FILMVIT :
+*     Construit une somme de déformées pour faire un film
+*     avec les champs de vitesse sauvegardés
+* -> TRHIST
+*     Tracé des historiques (la non plus, les paramètres ne
+*     sont pas transmis).
+
+*
+*     LOG base10
+*
+'DEBPROC' LOG10 machin*'FLOTTANT' ;
+'SI' (machin '<EG' 0.D0) ; a = -365.25 ;
+  'MESSAGE' 'Procédure LOG10 : donnée <= 0' ;
+'SINON' ; a = (('LOG' machin) / ('LOG' 10.)) ;
+'FINSI' ;
+'FINPROC' a ;
+
+*
+*     Erreur relative entre deux champoints (norme Linfini)
+*
+'DEBPROC' CALCERR vitp1*'CHPOINT  ' vit*'CHPOINT  ' ;
+'ARGUMENT' cle*'MOT     ' ;
+'SI' ('EGA' cle 'ECHELLE') ;
+  'ARGUMENT' vref*'FLOTTANT' ;
+  'SI' (vref '<EG' 0.D0) ;
+     'ERREUR' 'L échelle doit etre positive' ;
+  'FINSI' ;
+'SINON' ;
+  mavp1 = 'MAXIMUM' vitp1 'ABS' ;
+  mav   = 'MAXIMUM' vit 'ABS' ;
+  pmav  = 'PROG' mavp1 mav ;
+  mimav = 'MINIMUM' pmav ;
+  mamav = 'MAXIMUM' pmav ;
+  'SI' (mamav '<EG' 0.D0) ;
+     'ERREUR' 'Les deux champs sont nuls' ;
+  'FINSI' ;
+  'SI' (mimav '<EG' 0.D0) ;
+     'MESSAGE' 'Procédure CALCERR : un des champs est nul' ;
+     'MESSAGE' '                    => option MOYENNE' ;
+     cle = 'MOYENNE' ;
+  'FINSI' ;
+  'SI' ('EGA' cle 'MINMAX') ;
+    vref = mimav ;
+  'SINON' ;
+    'SI' ('EGA' cle 'MOYENNE') ;
+      vref = (mimav '+' mamav ) '/' 2.0D0 ;
+    'SINON' ;
+      'ERREUR' 'Mauvaise option' ;
+    'FINSI' ;
+  'FINSI' ;
+'FINSI' ;
+'FINPROC' (('MAXIMUM' (vitp1 '-' vit) 'ABS') '/' vref) ;
+
+*
+*     Tracé d'un maillage
+*
+'DEBPROC' TRMAIL mailp*'MAILLAGE' tphyp/'FLOTTANT' ;
+'SI' ('EXISTE' tphyp) ;
+  'TRACER' mailp 'TITR' ('CHAINE' 'Maillage à t=' tphyp) ;
+'SINON' ;
+  'TRACER' mailp 'TITR' 'Maillage' ;
+'FINSI' ;
+'FINPROC' ;
+
+*
+*     Tracé d'un chpoint de vitesse VECT SOMMET
+*
+'DEBPROC' TRVIT vitp*'CHPOINT ' vitp2/'CHPOINT ' ;
+'ARGUMENT' mailp*'MAILLAGE' ;
+titvp = 'Vitesses' ;
+'REPETER' OPT ;
+  'ARGUMENT' cle/'MOT     ' ;
+  'SI' ('NON' ('EXISTE' cle)) ;
+    'QUITTER' OPT ;
+  'FINSI' ;
+  'SI' ('EGA' cle 'AMPLIF') ;
+    'ARGUMENT' amp*'FLOTTANT' ;
+  'FINSI' ;
+  'SI' ('EGA' cle 'TEMPS') ;
+    'ARGUMENT' tphp*'FLOTTANT' ;
+    titvp = ('CHAINE' titvp ' à t=' tphp) ;
+  'FINSI' ;
+'FIN' OPT ;
+'SI' ('NEG' ('TYPE' amp) 'FLOTTANT') ;
+  mvp = ('MAXIMUM'  vitp 'ABS') ;
+  'SI' (mvp '<EG' 0.D0) ;
+*    'ERREUR' 'Champ de vitesses nul' ;
+    'MESSAGE' 'TRVIT : Champ de vitesses nul' ;
+    'QUITTER' TRVIT ;
+  'SINON' ;
+    xp yp = 'COORDONNEE' mailp ;
+    rp = 'PROG' (('MAXIMUM' xp) '-' ('MINIMUM' xp))  (('MAXIMUM' yp) '-' ('MINIMUM' yp)) ;
+    amp = ('MAXIMUM' rp) '/' (15.D0 '*' mvp) ;
+  'FINSI' ;
+'FINSI' ;
+ungp = 'VECTEUR' vitp amp 'UX' 'UY' 'JAUNE' ;
+'SI' ('EXISTE' vitp2) ;
+  ungp2 = 'VECTEUR' vitp2 amp 'UX' 'UY' 'ROUGE' ;
+  ungp = (ungp2 'ET' ungp) ;
+'FINSI' ;
+'TRACER'  ungp mailp 'TITR' titvp ;
+'FINPROC';
+
+*
+*     Tracé d'un chpoint SCAL
+*
+'DEBPROC' TRCH vvp*'CHPOINT ' ;
+'SI' ('NEG' ('DIME' ('EXTRAIRE' vvp 'COMP')) 1) ;
+  'ERREUR' 'Il faut un champ à UNE composante' ;
+'FINSI' ;
+tvvp = 'EXTRAIRE' vvp 'TYPE' ;
+'SI' ('EGA' tvvp 'CENTRE  ') ;
+  'ARGUMENT' $tdefp*'TABLE   ' cle*'MOT     ' ;
+  'SI' ('EGA' cle 'TRICHE') ;
+    vvp = ('ELNO' $tdefp ('KCHT' $tdefp 'SCAL' tvvp vvp)) ;
+    mvvp = ($tdefp . 'MAILLAGE') ;
+    tm = mvvp ;
+  'SINON' ;
+    'SI' ('EGA' cle 'NORMAL') ;
+      tm = ($tdefp . 'MAILLAGE') ;
+      mvvp = 'MODELISER' tm 'THERMIQUE' ;
+      vvp  = ('KCHA' $tdefp 'CHAM' vvp) ;
+    'SINON' ;
+        'ERREUR' 'Mauvaise option' ;
+    'FINSI' ;
+  'FINSI' ;
+'SINON' ;
+  'SI' ('EGA' tvvp 'FACE    ') ;
+    'ERREUR' 'Les CHPOINTs FACE ne sont pas traités...' ;
+  'SINON' ;
+    'SI' ('NON' ('EGA' tvvp 'SOMMET  ')) ;
+      'MESSAGE' 'CHPOINT non créé par KCHT...' ;
+    'FINSI' ;
+    'ARGUMENT' mvvp*'MAILLAGE' ;
+    tm = mvvp ;
+  'FINSI' ;
+'FINSI' ;
+'ARGUMENT' nomvp/'MOT     ' tphp/'FLOTTANT' cmvvp/'MAILLAGE' ;
+'ARGUMENT' nbisov/'ENTIER  ' ;
+'SI' ('EXISTE' nomvp) ;
+  titvp = ('CHAINE' nomvp ' ; chpoint SCAL ' tvvp ) ;
+'SINON' ;
+  titvp = ('CHAINE' 'Chpoint SCAL ' tvvp) ;
+'FINSI' ;
+'SI' ('EXISTE' tphp) ;
+  titvp = ('CHAINE' titvp ' à t=' tphp) ;
+'FINSI' ;
+'SI' ('NON' ('EXISTE' cmvvp)) ;
+  cmvvp = 'CONTOUR' tm ;
+'FINSI' ;
+maxvvp = ('MAXIMUM' vvp 'ABS') ;
+minvvp = ('MINIMUM' vvp 'ABS') ;
+'SI' (maxvvp '<EG' (minvvp 'ABS')) ;
+*    'ERREUR' 'Champ constant' ;
+    'MESSAGE' ('CHAINE' 'TRCH : Champ constant = ' maxvvp ) ;
+    'QUITTER' TRCH ;
+'FINSI' ;
+'SI' ('EXISTE' nbisov) ;
+  'TRACER' vvp mvvp cmvvp nbisov 'TITR' titvp ;
+'SINON' ;
+  'TRACER' vvp mvvp cmvvp 'TITR' titvp ;
+'FINSI' ;
+'FINPROC' ;
+
+*
+*     Création de la cavité et de tous les sous-maillages
+*     nécessaires.
+*     Tout ce qui concerne la géométrie doit se trouver ici
+*
+'DEBPROC' CREMAIL $cav*'TABLE   ' ;
+'ARGUMENT'  l*'FLOTTANT'  h*'FLOTTANT' ;
+'ARGUMENT' nl*'ENTIER  ' nh*'ENTIER  ' ;
+'ARGUMENT' egeom*'FLOTTANT' ;
+p00 = 0.D0 0.D0 ;  pl0 = l 0.D0 ;
+p0h = 0.D0 h  ;    plh = l h  ;
+dxg = 1.0D0 ;  dxd = 1.0D0 ;  dyb = 1.0D0 ;  dyh = 1.0D0 ;
+'REPETER' OPT ;
+  'ARGUMENT' cle/'MOT     ' ;
+  'SI' ('NON' ('EXISTE' cle)) ;
+    'QUITTER' OPT ;
+  'FINSI' ;
+  'SI' ('EGA' cle 'DX') ;
+    'ARGUMENT' dgp*'FLOTTANT' ddp*'FLOTTANT' ;
+    dxmoy = l '/' nl ;
+    dxg = dgp '*' dxmoy ;  dxd = ddp '*' dxmoy ;
+  'FINSI' ;
+  'SI' ('EGA' cle 'DY') ;
+    'ARGUMENT' dbp*'FLOTTANT' dhp*'FLOTTANT' ;
+    dymoy = h '/' nh ;
+    dyb = dbp '*' dymoy ;  dyh = dhp '*' dymoy ;
+  'FINSI' ;
+'FIN' OPT ;
+bas   = pl0 'DROIT' (-1 '*' nl) p00 'DINI' dxd 'DFIN' dxg ;
+haut  = p0h 'DROIT' (-1 '*' nl) plh 'DINI' dxg 'DFIN' dxd ;
+rwall = plh 'DROIT' (-1 '*' nh) pl0 'DINI' dyh 'DFIN' dyb ;
+lwall = p00 'DROIT' (-1 '*' nh) p0h 'DINI' dyb 'DFIN' dyh ;
+$cav . 'dxg' = dxg ;  $cav . 'dxd' = dxd ;
+$cav . 'dyb' = dyb ;  $cav . 'dyh' = dyh ;
+mt = 'DALLER' haut rwall bas lwall ;
+$mt = 'DOMA' mt 'IMPR' ;
+mt = ($mt . 'MAILLAGE') ;  'TASSER' mt ;
+cmt = ('CONTOUR' mt)  ;  lmt = chan ligne $mt.maillage ;
+*haut  = 'CHANGER' haut SEG2   ;  bas   = 'CHANGER' bas SEG2 ;
+*lwall = 'CHANGER' lwall SEG2 ;   rwall = 'CHANGER' rwall SEG2 ;
+$cmt   = 'DOMA' cmt   'INCL' $mt egeom ;
+$lmt   = 'DOMA' lmt   'INCL' $mt egeom ;
+$haut  = 'DOMA' haut  'INCL' $mt egeom ;
+$bas   = 'DOMA' bas   'INCL' $mt egeom ;
+$lwall = 'DOMA' lwall 'INCL' $mt egeom ;
+$rwall = 'DOMA' rwall 'INCL' $mt egeom ;
+'ELIMINATION'  (mt 'ET' lmt 'ET' bas 'ET' rwall 'ET' haut  'ET' lwall) egeom ;
+contini = 'COULEUR' cmt 'ROUG' ;
+
+$cav . 'l' = l ;  $cav . 'nl' = nl ;
+$cav . 'h' = h ;  $cav . 'nh' = nh ;
+$cav . 'volini' = 'MESURE' mt ;
+$cav . '$mt' = $mt ;
+$cav . '$cmt'    = $cmt ;    $cav . '$lmt'  = $lmt ;
+$cav . '$haut'   = $haut ;   $cav . '$bas'  = $bas ;
+$cav . '$lwall'  = $lwall ;  $cav .'$rwall' = $rwall ;
+$cav . 'contini' =  (contini 'PLUS' (egeom egeom)) ;
+$cav . 'cnfini'  = FORM ;
+*   Définition des conditions aux limites pour Navier-Stokes
+*   VN nulle sur lwall, rwall et bas
+clr = 'MANUEL' 'CHPO'  (lwall 'ET' rwall) 1 '1UN' 0.D0 'NATU' 'DISCRET';
+cb  = 'MANUEL' 'CHPO'  (bas) 1 '2UN' 0.D0 'NATU' 'DISCRET' ;
+$cav . 'CLIM' = (clr 'ET' cb) ;
+'MESSAGE' 'Procédure CREMAIL : table MAILLAGE créée' ;
+'FINPROC' $cav ;
+
+*
+*     Création des deltax pour la surface libre (ici $haut)
+*     pour utilisation dans la procedure CVS2LF
+*     (Différences Finies)
+*
+'DEBPROC' CDXHAUT $h*'TABLE   ' ;
+h = ($h . 'MAILLAGE') ;
+xc = 'KCHT' $h 'SCAL' 'SOMMET' ('COORDONNEES' 1 h) ;
+xh = 'PROG' ;
+'REPETER' BBB ($h . 'NPTD') ;
+  ppp = h 'POIN' (&BBB) ;
+  xh = (xh 'ET' ('PROG' ('EXTRAIRE' xc 'SCAL' ppp))) ;
+'FIN' BBB ;
+psg  = 'LECT' 1 'PAS' 1 (($h . 'NPTD') '-' 1) ;
+psd  = 'LECT' 2 'PAS' 1  ($h . 'NPTD') ;
+$h . 'psgg' = 'LECT' 1 'PAS' 1 (($h . 'NPTD') '-' 2) ;
+$h . 'psm'  = 'LECT' 2 'PAS' 1 (($h . 'NPTD') '-' 1) ;
+$h . 'psdd' = 'LECT' 3 'PAS' 1 ($h . 'NPTD') ;
+$h . 'dxh' = ('EXTRAIRE' psd xh) '-' ('EXTRAIRE' psg xh) ;
+'FINPROC' $h ;
+
+*
+*     Initialisation de la table des variables
+*     Variables aux instants n+1/2 et n-1/2 (si nécessaire)
+*
+'DEBPROC' INITVAR $v*'TABLE   ' ;
+'ARGUMENT' $c*'TABLE   ' ;
+$mt = $c . '$mt' ;
+* Champoints
+$v . 'unm05'    = 'KCHT' $mt 'VECT' 'SOMMET' (0.D0 0.D0) ;
+$v . 'wnm05'    = 'KCHT' $mt 'VECT' 'SOMMET' (0.D0 0.D0) ;
+$v . 'wnp05i'   = 'KCHT' $mt 'VECT' 'SOMMET' (0.D0 0.D0) ;
+$v . 'unp05i'   = 'KCHT' $mt 'VECT' 'SOMMET' (0.D0 0.D0) ;
+$v . 'unp05im1' = 'KCHT' $mt 'VECT' 'SOMMET' (0.D0 0.D0) ;
+$v . 'anp05i'   = 'KCHT' $mt 'VECT' 'SOMMET' (0.D0 0.D0) ;
+$v . 'pnp05i'   = 'KCHT' $mt 'SCAL' 'CENTRE' 0.D0 ;
+$v . 'dnp05i'   = 'KCHT' $mt 'SCAL' 'CENTRE' 0.D0 ;
+* Configuration
+$v . 'deltaxn' = 'KCHT' $mt 'VECT' 'SOMMET' (0.D0 0.D0) ;
+$v . 'cnfn'    = 'FORME' ;
+$v . 'cnfnm05' = 'FORME' ;
+$v . 'cnfnp05i' = 'FORME' ;
+'MESSAGE' 'Procédure INITVAR : table VARIABLE créée' ;
+'FINPROC' $v ;
+
+*
+*     Initialisation de la table des pas de temps
+*     Tout ce qui concerne le calcul du pas de temps
+*
+'DEBPROC' INITPDT $t*'TABLE   ' ;
+'ARGUMENT' alfa*'FLOTTANT' gamma*'FLOTTANT' ;
+'ARGUMENT' dtini*'FLOTTANT' poini*'ENTIER  ' ;
+* Entiers
+$t . 'nupdt' = 0 ;
+$t . 'iter' = 0 ;
+* Réels
+$t . 'tphyn' = 0.D0 ;   $t . 'tpscpu' = 0.D0 ;
+$t . 'alfa'  = alfa ;
+$t . 'gamma' = gamma ;  $t . 'poini'  = poini ;
+$t . 'conv'  = dtini ;  $t . 'diff'   = dtini ;
+$t . 'mail'  = dtini ;  $t . 'moy'    = 0.D0 ;
+$t . 'min'   = dtini ;
+'MESSAGE' 'Procédure INITPDT : table PASDETPS créée' ;
+'FINPROC' $t ;
+
+*
+*     Initialisation de la table des historiques
+*     Toutes les listes de scalaires
+*
+'DEBPROC' INITHIST $h*'TABLE   ' ;
+* Listes
+$h . 'ltps'  = 'PROG' ;
+$h . 'liter' = 'PROG' ;
+$h . 'lzq'   = 'PROG' ;  $h . 'lzr'  = 'PROG' ;
+$h . 'ldv'   = 'PROG' ;  $h . 'lvol' = 'PROG' ;
+$h . 'lpdt'  = 'TABLE' 'LPDT' ; hl = $h . 'lpdt' ;
+hl . 'conv'  = 'PROG' ;  hl . 'diff' = 'PROG' ;
+hl . 'mail'  = 'PROG' ;  hl . 'moy'  = 'PROG' ;
+hl . 'min'   = 'PROG' ;
+'MESSAGE' 'Procédure INITHIST : table HIST créée' ;
+'FINPROC' $h ;
+
+*
+*     Initialisation de la table des sauvegardes
+*     Sauvegarde des champoints dans une table indicée
+*     par un entier associé à un pas de temps
+*
+'DEBPROC' INITSAUV $s*'TABLE   ' ;
+* Entiers
+$s . 'ntrc' = 0 ;
+* Listes
+$s . 'lttrc' = 'PROG' ;
+* Tables
+$s . 'DELTAX'   = 'TABLE' 'DELTAX' ;
+$s . 'VITESSE'  = 'TABLE' 'VITESSE' ;
+*$s . 'PRESSION' = 'TABLE' 'PRESSION' ;
+*$s . 'DIVV'    = 'TABLE' 'DIVV' ;
+'MESSAGE' 'Procédure INITSAUV : table SAUV créée' ;
+'FINPROC' $s ;
+
+*
+*     Mise à jour de la table des pas de temps
+*     i.e calcul du nouveau
+*
+'DEBPROC' MAJPDT $p*'TABLE   ' ;
+dtcr = ($p . 'alfa')  '*' ($p . 'conv') ;
+dtdr = ($p . 'alfa')  '*' ($p . 'diff') ;
+dtmr = ($p . 'gamma') '*' ($p . 'mail') ;
+dti = ('MINIMUM' ('PROG' dtcr dtdr dtmr)) ;
+dtmoy = ($p . 'moy') ;
+npdt = ($p . 'nupdt') ;  poi = ($p . 'poini') ;
+$p . 'moy' = (((npdt '+' poi) '*' dtmoy) '+' dti) / (npdt '+' poi '+' 1) ;
+$p.'min' = ('MINIMUM' ('PROG' dti ($p . 'moy'))) ;
+'FINPROC' $p ;
+
+*
+*     Mise à jour des différents historiques
+*
+'DEBPROC' MAJHIST $h*'TABLE   ' $c*'TABLE   ' ;
+'ARGUMENT' $p*'TABLE   ' $v*'TABLE   ' ;
+$h . 'ltps'  = (($h . 'ltps')  'ET' ('PROG' ($p . 'tphyn'))) ;
+$h . 'liter' = (($h . 'liter') 'ET' ('PROG' ($p . 'iter'))) ;
+r = (($c . '$haut' . 'MAILLAGE') 'POINT' 'INITIAL') ;
+q = (($c . '$haut' . 'MAILLAGE') 'POINT' 'FINAL') ;
+hini = ($c . 'h') ;  volini = ($c . 'volini') ;
+$h . 'lzr' = (($h . 'lzr') 'ET'  ('PROG' (('COORDONNEE' 2 r) '-' hini))) ;
+$h . 'lzq' = (($h . 'lzq') 'ET'  ('PROG' (('COORDONNEE' 2 q) '-' hini))) ;
+$h . 'ldv' = (($h . 'ldv') 'ET'  ('PROG' ('MAXIMUM' ($v . 'dnp05i') 'ABS'))) ;
+$h . 'lvol' = (($h . 'lvol') 'ET'  ('PROG' ((('MESURE' ($c . '$mt' . 'MAILLAGE')) '-' volini)  '/' volini))) ;
+$hl = ($h . 'lpdt') ;
+$hl . 'conv' = (($hl . 'conv') 'ET' ('PROG' ($p . 'conv'))) ;
+$hl . 'diff' = (($hl . 'diff') 'ET' ('PROG' ($p . 'diff'))) ;
+$hl . 'moy'  = (($hl . 'moy')  'ET' ('PROG' ($p . 'moy'))) ;
+$hl . 'mail' = (($hl . 'mail') 'ET' ('PROG' ($p . 'mail'))) ;
+$hl . 'min'  = (($hl . 'min')  'ET' ('PROG' ($p . 'min'))) ;
+'FINPROC' $h ;
+
+*
+*     On sauvegarde les différents champoints dans une table
+*
+'DEBPROC' MAJSAUV $s*'TABLE   ' ;
+'ARGUMENT' $v*'TABLE   ' $p*'TABLE   ' ;
+$s . 'ntrc' = (($s . 'ntrc') '+' 1) ;
+$s . 'lttrc' = (($s . 'lttrc') 'ET' ('PROG' ($p . 'tphyn'))) ;
+$s . 'DELTAX' . ($s . 'ntrc')   = 'COPIE' ($v . 'deltaxn') ;
+$s . 'VITESSE' . ($s . 'ntrc')  = 'COPIE' ($v . 'unp05i') ;
+*$s . 'PRESSION' . ($s . 'ntrc') = 'COPIE' ($v . 'pnp05i') ;
+*$s . 'DIVV' . ($s . 'ntrc') = 'COPIE' ($v . 'dnp05i') ;
+'FINPROC' $s ;
+
+*
+*     Affiche un résumé des paramètres
+*
+'DEBPROC' SUMMARY ;
+'SAUTER' 'LIGNE' ;
+'MESSAGE' ('CHAINE' 'Programme : ' prg) ;
+'SAUTER' 'LIGNE' ;
+'MESSAGE' ('CHAINE' '***  GEOMETRIE :') ;
+'MESSAGE' ('CHAINE' 'Boite carrée : ' l ' x' h) ;
+'MESSAGE' ('CHAINE' '      soient :  ' nl 'x' nh '='  (nl '*' nh) ' éléments ' typelem) ;
+*'MESSAGE' ('CHAINE' '      soient :  ' (nl '*' nh '*' 4)
+* ' éléments linéaires') ;
+'SAUTER' 'LIGNE' ;
+'MESSAGE' ('CHAINE' '***  PHYSIQUE :') ;
+'MESSAGE' ('CHAINE' 'Gravité : ' ('COORDONNEES' 2 g) ' uz ; viscosité :' nu) ;
+'MESSAGE' ('CHAINE' 'Intensité Dirac Pression : ' pt0) ;
+'SAUTER' 'LIGNE' ;
+'MESSAGE' ('CHAINE' '***  NUMERIQUE :') ;
+'MESSAGE' ('CHAINE' 'Mode de déplacement du maillage : ' vmail ' ' optlapn) ;
+'MESSAGE' ('CHAINE' 'Discrétisation ' discconv ' des termes de convection.');
+'MESSAGE' ('CHAINE' ' Alfa  = ' alfa) ;
+'MESSAGE' ('CHAINE' ' Gamma = ' gamma) ;
+'MESSAGE' ('CHAINE' ' Cvg (bcl iter) = ' cvg) ;
+'MESSAGE' ('CHAINE' ' Poids (pdt1) = ' poini) ;
+'SAUTER' 'LIGNE' ;
+'MESSAGE' ('CHAINE' '***  TEMPS :') ;
+'MESSAGE' ('CHAINE' 'Temps physique : ' ($pdt . 'tphyn')) ;
+'MESSAGE' ('CHAINE' 'Temps CPU      : ' ($pdt . 'tpscpu')) ;
+'FINPROC' ;
+
+*
+*     Trace tous les champs
+*
+'DEBPROC' TRTOUT ;
+$mt = ($cavite . '$mt') ; mtm = ($mt . 'MAILLAGE') ;
+cini = ($cavite . 'contini') ;
+TRMAIL (mtm 'ET' cini) ($pdt . 'tphyn') ;
+'SI' ('NON' inta) ;
+  TRVIT  ($var . 'unm05') (('CONTOUR' mtm) 'ET' cini) 'AMPLIF' ampvit 'TEMPS' ($pdt . 'tphyn') ;
+'SINON' ;
+  TRVIT  ($var . 'unm05') ($var . 'wnm05') (('CONTOUR' mtm) 'ET' cini) 'AMPLIF' ampvit 'TEMPS' ($pdt . 'tphyn') ;
+'FINSI' ;
+TRCH   ($var . 'pnp05i') $mt 'NORMAL' 'Pression' ($pdt . 'tphyn') ;
+'FINPROC' ;
+
+*
+*     Affichage du message pour la boucle d'itérations
+*
+'DEBPROC' MESI $v*'TABLE   ' $p*'TABLE   ' ;
+'SI' ('EGA' ($p . 'iter') 1) ;
+  'MESSAGE' ('CHAINE' 'Iter'/1 'Dtconv'/7 'Dtdiff'/21  'Dtmaill'/35 'Dt'/49 'Erreur (log)'/61) ;
+'FINSI' ;
+'MESSAGE' ('CHAINE' ($p . 'iter')*3 ($p . 'conv')/5  ($p . 'diff')/19 ($p . 'mail')/33 ($p . 'min')/47  (LOG10 ($v . 'erri'))/61 ) ;
+'FINPROC' ;
+
+*
+*     Affichage du message pour l'avance d'un pas de temps
+*
+'DEBPROC' MEST $v*'TABLE   ' $p*'TABLE   ' ;
+'MESSAGE' ('CHAINE' '----- Nupdt'/1 'Tphy'/15 'Dt'/29  'Max(div)'/43 'Min(pres)'/57) ;
+'MESSAGE' ('CHAINE' ($p . 'nupdt')*9 ($p . 'tphyn')/13 ($p . 'min')/27 ('MAXIMUM' ($v . 'dnp05i') 'ABS')/41 ('MINIMUM' ($v . 'pnp05i') 'ABS')/55) ;
+'FINPROC' ;
+
+*
+*     Calcul de la contrainte appliquée sur la surface au premier
+*     pas de temps
+*
+'DEBPROC' CALCON $h*'TABLE   ' ac*'FLOTTANT' ;
+lini = 'ABS' ( ('COORDONNEE' 1  (($h . 'MAILLAGE') 'POINT' 'INITIAL')) '-' ('COORDONNEE' 1  (($h . 'MAILLAGE') 'POINT' 'FINAL'))) ;
+xhaut = 'COORDONNEE' 1 ($h . 'CENTRE') ;
+xts = 'NOMC' 'UX' ('KCHT' $h 'SCAL' 'CENTRE' 0.D0)  'NATU' 'DISCRET' ;
+yts = 'NOMC' 'UY'  (ac '*' ('COS' ((180.D0 '/' lini) '*' xhaut)))  'NATU' 'DISCRET' ;
+'FINPROC' ('KCHT' $h 'VECT' 'CENTRE' (xts 'ET' yts)) ;
+
+*
+*     Faire le premier pas de temps
+*
+'DEBPROC' PREPAS $v*'TABLE   ' $p*'TABLE   ' ;
+'ARGUMENT' $c*'TABLE   ' ;
+'ARGUMENT' tsu*'CHPOINT ' nu*'FLOTTANT' g*'POINT   ' ;
+$mt = $c . '$mt' ;  $haut = $c . '$haut' ;
+rv = 'EQEX' $mt 'OPTI' 'ALE' 'CENTREE' 'ZONE' $mt   'OPER' 'NS' nu g 'CN' 'INCO' 'UN' 'ZONE' $haut 'OPER' 'TOIM' 'PSURF' 'INCO' 'UN' ;
+rv . 'PRESSION' = 'EQPR' $mt  'ZONE' $mt   'OPER' 'PRESSION' 0.D0 ;
+rvp = rv . 'PRESSION' ;
+rv . 'INCO' = 'TABLE' 'INCO' ;
+rv . 'INCO' . 'UN' = 'COPIE' ($v . 'unm05') ;
+rv . 'INCO' . 'CN' = 'KCHT' $mt 'VECT' 'SOMMET' (0.D0 0.D0) ;
+rv . 'INCO' . 'PSURF' = 'KOPS' tsu '/' ($p . 'min') ;
+rv . 'CLIM' = 'COPIE' ($c . 'CLIM') ;
+******
+* Calcul des matrices masse diagonales
+'KDIA' rv ;
+rvp . 'CLIM' = rv . 'CLIM' ;
+rv . 'KIZD' . 'UN' = ('KOPS' (rv . 'KIZD' . 'UN') 'CLIM' (rv . 'CLIM') 1) ;
+rvp . 'DIAGV'    = (rv . 'KIZD' . 'UN') ;
+
+* Calcul des matrices de la divergence
+rvp . 'MATC'     = 'KMAB' rvp ;
+rvp . 'PRESSION' = 'KCHT' (rvp . 'DOMAINE')  'SCAL' 'CENTRE' 0.0D0 ;
+* Calcul des termes source
+nbop = 'DIMENSION' (rv . 'LISTOPER') ;
+'REPETER' BLOP nbop ;
+  nomper  = 'EXTRAIRE' &BLOP (rv . 'LISTOPER') ;
+  notable = 'MOT' ('TEXTE' ('CHAINE' &BLOP nomper)) ;
+  ('TEXTE' nomper) (rv . notable) ;
+'FIN' BLOP ;
+'OUBLIER' $mt 'MATESI' ;  'OUBLIER' $mt 'XXPSOML' ;
+'OUBLIER' $mt 'XXDXDY' ;  'OUBLIER' $mt 'XXVOLUM' ;
+dt = ($p . 'min') ;
+rv . 'PASDETPS' . 'DELTAT' = dt ;
+
+* Calcul de la pression
+rvp . 'DELTAT' = dt ;
+dm1f = 'KOPS' ('KOPS' (rv . 'KIZG' . 'UN') '/'  (rv . 'KIZD' . 'UN'))  '-'  ('KOPS' (rv . 'INCO' . 'UN')  '/' dt) ;
+P = 'KMF' (rvp . 'MATC') dm1f ;
+rvp . 'FORCE' = 'KCHT' (rvp . 'DOMAINE') 'SCAL' 'CENTRE' 0.D0 ;
+'KRES' rvp P 'BETA' (rvp . 'KBETA') (rvp . 'BETA') 'PIMP' (rvp . 'KPIMP') (rvp . 'PIMP') ;
+rvp . 'PRESSION' = P ;
+rvp . 'GRADP'    = 'KMTP' (rvp . 'MATC')   (rvp . 'PRESSION') ;
+rv . 'KIZG' . 'UN' = ('KOPS' (rv . 'KIZG' . 'UN')  '-'  (rvp . 'GRADP')) ;
+* Avance en temps
+$v . 'unp05im1' = ('COPIE' ($v . 'unp05i')) ;
+$v . 'unp05i'   = ('KOPS' (rv . 'INCO' . 'UN')  '-'  ('KOPS' ('KOPS' (rv . 'KIZG' . 'UN') '/' (rv . 'KIZD' . 'UN')) '*' dt)) ;
+$v . 'pnp05i'  = rvp . 'PRESSION' ;
+$v . 'dnp05i'  = ('KMF' (rvp . 'MATC') ($v . 'unp05i')) ;
+$p . 'conv' = rv . 'PASDETPS' . 'DTCONV' ;
+$p . 'diff' = rv . 'PASDETPS' . 'DTDIFU' ;
+$p . 'iter' = ($p . 'iter' '+' 1) ;
+FINPROC $v $p ;
+
+*
+*     Faire un pas de temps : termes sources      en n-1/2
+*                             matrice-masse       en n
+*                             divergence-pression en n+1/2
+*
+'DEBPROC' CVIT $c*'TABLE   ' $v*'TABLE   ' $p*'TABLE   ' ;
+'ARGUMENT' nu*'FLOTTANT' g*'POINT   ' dc*'MOT     ' ;
+$mt = $c . '$mt' ;
+rv = 'EQEX' $mt 'OPTI' 'ALE' dc 'ZONE' $mt   'OPER' 'NS' nu g 'CN' 'INCO' 'UN' ;
+rv . 'PRESSION' = 'EQPR' $mt  'ZONE' $mt 'OPER' 'PRESSION' 0.D0 ;
+rvp = rv . 'PRESSION' ;
+rv . 'INCO' = 'TABLE' 'INCO' ;
+rv . 'INCO' . 'UN' = ('COPIE' ($v . 'unm05')) ;
+rv . 'INCO' . 'CN' = ('KOPS' (rv . 'INCO' . 'UN')  '-'  ($v . 'wnm05')) ;
+rv . 'PASDETPS' . 'PDTIMP' = ($p . 'min') ;
+rv . 'CLIM' = ($c . 'CLIM') ;
+*****
+* Calcul des matrices masse diagonales
+'FORME' ($v . 'cnfn') ;
+'KDIA' rv ;
+rvp . 'CLIM' = rv . 'CLIM' ;
+rv . 'KIZD' . 'UN' = ('KOPS' (rv . 'KIZD' . 'UN') 'CLIM' (rv . 'CLIM') 1) ;
+rvp . 'DIAGV'    = (rv . 'KIZD' . 'UN') ;
+
+* Calcul des matrices de la divergence
+'FORME' ($v . 'cnfnp05i') ;
+rvp . 'MATC'     = 'KMAB' rvp ;
+rvp . 'PRESSION' = 'KCHT' (rvp . 'DOMAINE')  'SCAL' 'CENTRE' 0.0D0 ;
+* Calcul des termes source
+'FORME' ($v . 'cnfnm05') ;
+'NS' (rv . '1NS') ;
+'OUBLIER' $mt 'MATESI' ;  'OUBLIER' $mt 'XXPSOML' ;
+'OUBLIER' $mt 'XXDXDY' ;  'OUBLIER' $mt 'XXVOLUM' ;
+dt = ($p . 'min') ;
+rv . 'PASDETPS' . 'DELTAT' = dt ;
+
+* Calcul de la pression
+'FORME' ($v . 'cnfnp05i') ;
+rvp . 'DELTAT' = dt ;
+dm1f = 'KOPS' ('KOPS' (rv . 'KIZG' . 'UN') '/'  (rv . 'KIZD' . 'UN'))  '-'  ('KOPS' (rv . 'INCO' . 'UN')  '/' dt) ;
+P = 'KMF' (rvp . 'MATC') dm1f ;
+rvp . 'FORCE' = 'KCHT' (rvp . 'DOMAINE') 'SCAL' 'CENTRE' 0.D0 ;
+'KRES' rvp P 'BETA' (rvp . 'KBETA') (rvp . 'BETA') 'PIMP' (rvp . 'KPIMP') (rvp . 'PIMP') ;
+rvp . 'PRESSION' = P ;
+rvp . 'GRADP'    = 'KMTP' (rvp . 'MATC')   (rvp . 'PRESSION') ;
+rv . 'KIZG' . 'UN' = ('KOPS' (rv . 'KIZG' . 'UN')  '-'  (rvp . 'GRADP')) ;
+* Avance en temps
+$v . 'unp05im1' = ('COPIE' ($v . 'unp05i')) ;
+$v . 'unp05i'   = ('KOPS' (rv . 'INCO' . 'UN')  '-'  ('KOPS' ('KOPS' (rv . 'KIZG' . 'UN') '/'  (rv . 'KIZD' . 'UN')) '*' dt)) ;
+$v . 'pnp05i'  = rvp . 'PRESSION' ;
+$v . 'dnp05i'  = ('KMF' (rvp . 'MATC') ($v . 'unp05i')) ;
+$p . 'conv' = rv . 'PASDETPS' . 'DTCONV' ;
+$p . 'diff' = rv . 'PASDETPS' . 'DTDIFU' ;
+'FINPROC' $v $p ;
+
+*
+*     vitesse du fluide (v) =>
+*     vitesse du maillage (w) en Lagrangien
+*
+'DEBPROC' LAGR veuler*'CHPOINT '  'ARGUMENT' $c/'TABLE   ' dumby1/'MOT     ' dumby2/'CONFIGUR' ;
+'FINPROC' ('COPIE' veuler) ;
+
+*
+*     on choisit w|surf = v|surf (Surface LAGrangienne)
+*     on interpole ensuite w sur le reste du maillage par
+*     une équation au laplacien
+*
+'DEBPROC' SLAG veuler*'CHPOINT ' $c*'TABLE   ' ;
+'ARGUMENT' optlap*'MOT     ' conflap*'CONFIGUR' ;
+$haut  = ($c . '$haut')  ;  $bas   = ($c . '$bas') ;
+$lwall = ($c . '$lwall') ;  $rwall = ($c . '$rwall') ;
+$cmt = ($c . '$cmt') ;
+$mt  = ($c . '$mt') ;
+haut  = ($haut . 'MAILLAGE') ;  bas   = ($bas . 'MAILLAGE') ;
+lwall = ($lwall . 'MAILLAGE') ; rwall = ($rwall . 'MAILLAGE') ;
+sauvform = 'FORME' ;
+'FORME' conflap ;
+'SI' ('EGA' optlap 'INTBOR') ;
+  vithx = 'KCHT' $haut 'SCAL' 'SOMMET' ('EXCO' 'UX' veuler) ;
+  vithy = 'KCHT' $haut 'SCAL' 'SOMMET' ('EXCO' 'UY' veuler) ;
+  vlwx vlwy = IVECT $lwall veuler ;
+  vrwx vrwy = IVECT $rwall veuler ;
+  vcx = 'KCHT' $cmt  'SCAL' 'SOMMET' 0.D0 vithx vlwx vrwx ;
+  vmx = LAPC $mt vcx ;
+  vcy = 'KCHT' $cmt  'SCAL' 'SOMMET' 0.D0 vithy vlwy vrwy ;
+  vmy = LAPC $mt vcy ;
+'SINON' ;
+  'SI' ('EGA' optlap 'BORLIB') ;
+    vithx = 'KCHT' $haut 'SCAL' 'SOMMET' ('EXCO' 'UX' veuler) ;
+    vithy = 'KCHT' $haut 'SCAL' 'SOMMET' ('EXCO' 'UY' veuler) ;
+    vcx = 'KCHT' $cmt  'SCAL' 'SOMMET' 0.D0 vithx ;
+    vmx = LAPC $mt vcx ;
+    vcy = vithy 'ET' ('KCHT' $bas 'SCAL' 'SOMMET' 0.D0) ;
+    vmy = LAPC $mt vcy ;
+  'SINON' ;
+    'SI' ('EGA' optlap 'TOTAL') ;
+      vcx = 'KCHT' $cmt 'SCAL' 'SOMMET' ('EXCO' 'UX' veuler) ;
+      vmx = LAPC $mt vcx ;
+      vcy = 'KCHT' $cmt 'SCAL' 'SOMMET' ('EXCO' 'UY' veuler) ;
+      vmy = LAPC $mt vcy ;
+    'SINON' ;
+      'ERREUR' 'Pas la bonne option pour le laplacien...' ;
+    'FINSI' ;
+  'FINSI' ;
+'FINSI' ;
+vitx = 'NOMC' 'UX' vmx 'NATU' 'DISCRET' ;
+vity = 'NOMC' 'UY' vmy 'NATU' 'DISCRET' ;
+'FORME' sauvform ;
+'FINPROC' ('KCHT' $mt 'VECT' 'SOMMET' (vitx 'ET' vity)) ;
+
+*
+*     on calcule w|surf avec v|surf en imposant w|surf // Oy
+*     => eqn convection sur la surface.
+*     Elle est discrétisée en différences finies centrées
+*     d'où le nom : ConVection Surface ordre 2 (schéma de
+*     type Leap-Frog)
+*     on interpole ensuite w sur le reste du maillage par
+*     une équation au laplacien
+*
+'DEBPROC' CVS2LF veuler*'CHPOINT ' $c*'TABLE   ' ;
+'ARGUMENT' optlap*'MOT     ' conflap*'CONFIGUR' ;
+$haut  = ($c . '$haut') ;   $bas   = ($c . '$bas') ;
+$lwall = ($c . '$lwall') ;  $rwall = ($c . '$rwall') ;
+$cmt = ($c . '$cmt') ;
+$mt = ($c . '$mt') ;
+haut  = ($haut . 'MAILLAGE') ;  bas   = ($bas . 'MAILLAGE') ;
+lwall = ($lwall . 'MAILLAGE') ; rwall = ($rwall . 'MAILLAGE') ;
+** Calcul de withy, withx est nul
+* Calcul des paramètres pour le schéma aux différences finies
+nblh = ($haut . 'NELD') ;  nbph = ($haut . 'NPTD') ;
+dxh = ($haut . 'dxh')  ;  psm = ($haut . 'psm') ;
+psg = ($haut . 'psgg') ;  psd = ($haut . 'psdd') ;
+hc = 'KCHT' $haut 'SCAL' 'SOMMET' ('COORDONNEE' 2 haut) ;
+uc = 'KCHT' $haut 'SCAL' 'SOMMET' ('EXCO' 'UX' veuler) ;
+vc = 'KCHT' $haut 'SCAL' 'SOMMET' ('EXCO' 'UY' veuler) ;
+h = 'PROG' ;  u = 'PROG' ;  v = 'PROG' ;  sdtl = 'PROG' ;
+'REPETER' BBB nbph ;
+  ppp = haut 'POINT' (&BBB) ;
+  h = h 'ET' ('PROG' ('EXTRAIRE' hc 'SCAL' ppp)) ;
+  u = u 'ET' ('PROG' ('EXTRAIRE' uc 'SCAL' ppp)) ;
+  v = v 'ET' ('PROG' ('EXTRAIRE' vc 'SCAL' ppp)) ;
+'FIN' BBB ;
+vi   = 'EXTRAIRE' v   psm ;  ui = 'EXTRAIRE' u psm ;
+*vip1   = 'EXTRAIRE' v   psd ;  uip1 = 'EXTRAIRE' u psd ;
+*vim1   = 'EXTRAIRE' v   psg ;  uim1 = 'EXTRAIRE' u psg ;
+hi   = 'EXTRAIRE' h   psm ;
+hip1 = 'EXTRAIRE' h   psd ;
+him1 = 'EXTRAIRE' h   psg ;
+dxi  = 'EXTRAIRE' dxh psm ;  dxim1 = 'EXTRAIRE' dxh psg ;
+* points intermédaires
+dxi2 = dxi '*' dxi   ;  dxim12 = dxim1 '*' dxim1 ;
+dxp  = dxi '+' dxim1 ;  dxf    = dxim1 '*' dxi   ;
+dxm  = dxi '-' dxim1 ;
+hxi = ((((dxim12 '*' hip1) '-' (dxi2 '*' him1) '/' dxp) '+' ( dxm    '*' hi  )) '/' dxf) ;
+lwithy = vi '-' (ui '*' hxi) ;
+* 1er point
+lwithy = 'INSE' lwithy 1 ('EXTRAIRE' v 1) ;
+* dernier point
+lwithy = (lwithy 'ET' ('PROG' ('EXTRAIRE' v nbph))) ;
+  sdtl  = (ui '/' dxim1) '+' (ui '/' dxi) ;
+  dtmax = 1.D0 '/' ('MAXIMUM' sdtl) ;
+  'MESSAGE' 'Procédure CVS2LF : dtmax =' dtmax ;
+withyg = 'MANUEL' 'CHPO' ($haut . 'SOMMET') 1 'SCAL' lwithy ;
+withy = 'KCHT' $haut 'SCAL' 'SOMMET' withyg ;
+
+* Interpolation de wity a partir de withy sur le reste du
+* maillage
+sauvform = 'FORME' ;
+'FORME' conflap ;
+'SI' ('EGA' optlap 'INTBOR') ;
+  vlwx vlwy = IVECT $lwall veuler ;
+  vrwx vrwy = IVECT $rwall veuler ;
+  vcy = 'KCHT' $cmt  'SCAL' 'SOMMET' 0.D0 withy vlwy vrwy ;
+  vmy = LAPC $mt vcy ;
+'SINON' ;
+  'SI' ('EGA' optlap 'BORLIB') ;
+    vcy = withy 'ET' ('KCHT' $bas 'SCAL' 'SOMMET' 0.D0) ;
+    vmy = LAPC $mt vcy ;
+  'SINON' ;
+    'ERREUR' 'Pas la bonne option pour le laplacien...' ;
+  'FINSI' ;
+'FINSI' ;
+witx = 'NOMC' 'UX' ('KCHT' $mt 'SCAL' 'SOMMET' 0.D0)  'NATU' 'DISCRET' ;
+wity = 'NOMC' 'UY' vmy 'NATU' 'DISCRET' ;
+'FORME' sauvform ;
+'FINPROC' ('KCHT' $mt 'VECT' 'SOMMET' (witx 'ET' wity)) ;
+
+*
+*     Interpolation d'un vecteur entre deux points sur
+*     un segment. Un chpoint VECT => 2 chpos SCAL
+*
+'DEBPROC' IVECT $dom*'TABLE   ' chv*'CHPOINT' ;
+dom = ($dom . 'MAILLAGE') ;  nbd = ($dom . 'NPTD') ;
+cyd = 'COORDONNEES' 2 dom ;
+yd  = 'PROG' ;
+'REPETER' BBB nbd ;
+   ppp = dom 'POINT' (&BBB) ;
+   yd = yd 'ET' ('PROG' ('EXTRAIRE' cyd 'SCAL' ppp )) ;
+'FIN' BBB ;
+di = dom 'POINT' 'INITIAL' ;  df = dom 'POINT' 'FINAL' ;
+yi   = 'EXTRAIRE' yd 1 ;
+yf   = 'EXTRAIRE' yd nbd ;
+vdxi = 'EXTRAIRE' chv 'UX' di ;
+vdxf = 'EXTRAIRE' chv 'UX' df ;
+vdyi = 'EXTRAIRE' chv 'UY' di ;
+vdyf = 'EXTRAIRE' chv 'UY' df ;
+ax = (vdxf '-' vdxi) '/' (yf '-' yi) ;
+bx = vdxi '-' (ax '*' yi) ;
+lvdx = 'PROG' 'LINE' 'A' ax 'B' bx yd ;
+ay = (vdyf '-' vdyi) '/' (yf '-' yi) ;
+by = vdyi '-' (ay '*' yi) ;
+lvdy = 'PROG' 'LINE' 'A' ay 'B' by yd ;
+dom1 = chan 'POI1' dom ;
+vdx = 'MANUEL' 'CHPO' dom1 1 'SCAL' lvdx 'NATURE' 'DISCRET' ;
+vdy = 'MANUEL' 'CHPO' dom1 1 'SCAL' lvdy 'NATURE' 'DISCRET' ;
+'FINPROC' vdx vdy ;
+
+*
+*     Résolution d'une équation scalaire en implicite ;
+*     Laplacien + conditions Dirichlet ou Neumann
+*
+'DEBPROC' LAPC $dom*'TABLE   ' condlim*'CHPOINT ' ;
+rt = 'EQEX' $dom 'OPTI' 'EF' 'IMPL' 'ZONE' $dom 'OPER' 'LAPN' 1.D0 'INCO' 'SCAL' ;
+rt . 'INCO' = 'TABLE' 'INCO' ;
+rt . 'INCO' . 'SCAL' = 'KCHT' $mt 'SCAL' 'SOMMET' 0.D0 ;
+rt . 'CLIM' = condlim ;
+EXEC rt ;
+*  'OUBLIER' $mt 'MATESI' ;
+*  'OUBLIER' $mt 'XXDXDY' ; 'OUBLIER' $mt 'XXVOLUM' ;
+*  'OUBLIER' $mt 'XXDIAME' ; 'OUBLIER' $mt 'XXDIEMIN' ;
+'FINPROC' (rt . 'INCO' . 'SCAL') ;
+
+*
+*     Procédure qui étend un champoint VECT SOMMET a tous les
+*     points (FACE, CENTRE...) du maillage total
+*
+'DEBPROC' ETENDRE $c*'TABLE   ' depli*'CHPOINT ' ;
+$mt = ($c . '$mt') ;  $lmt = ($c . '$lmt') ;
+deplic = 'NOEL' $mt depli ;
+deplil = 'KCHT' $lmt 'VECT' 'SOMMET' depli ;
+deplif = 'NOEL' $lmt deplil ;
+deplif = 'KCHT' $mt  'VECT' 'FACE'   deplif ;
+deplic = 'KCHT' $mt  'VECT' 'CENTRE' deplic ;
+'FINPROC' (depli 'ET' deplic 'ET' deplif) ;
+
+*
+*     Calcul du pas de temps dit "de maillage"
+*
+'DEBPROC' CINVPDTM dvit*'CHPOINT ' $mt*'TABLE   ' ;
+gdvitx = ('EXCO' 'UX' ('KOPS' ('KCHT' $mt 'SCAL' 'SOMMET' ('EXCO' 'UX' dvit)) 'GRAD' $mt)) ;
+gdvity = ('EXCO' 'UY' ('KOPS' ('KCHT' $mt 'SCAL' 'SOMMET' ('EXCO' 'UY' dvit)) 'GRAD' $mt)) ;
+lmg = 'PROG' ('MINIMUM' gdvitx) ('MINIMUM' gdvity) ;
+'FINPROC' ('MINIMUM' lmg) ;
+
+*
+*     Construit une somme de déformées pour faire un film
+*     avec les champs de vitesse sauvegardés
+*
+'DEBPROC' FILMVIT $s*'TABLE   ' $v*'TABLE   ' ;
+indmax = ($s . 'ntrc') ;
+$s . 'anim' = 'TABLE' 'ANIM' ;
+'REPETER' BCL1 indmax ;
+  ind = &BCL1 ;
+  dx = ($s . 'DELTAX' . ind) ;
+  vv = 'VECTEUR' ($s . 'VITESSE' . ind)  ampvit 'UX' 'UY' 'JAUNE' ;
+  $s . 'anim' . ind =  ('DEFORME' ($cavite . '$mt' . 'MAILLAGE') dx 1.D0 vv) ;
+'FIN' BCL1 ;
+'FINPROC' (@STBL ($s . 'anim')) ;
+*
+*     Tracé d'historiques
+*
+'DEBPROC' TRHIST ;
+ltps  = ($hist . 'ltps') ;
+liter = ($hist . 'liter') ; ldv  = ($hist . 'ldv') ;
+lvol  = ($hist . 'lvol') ;  ltps = ($hist . 'ltps') ;
+lzr   = ($hist . 'lzr') ;   lzq  = ($hist . 'lzq') ;
+$hl = ($hist . 'lpdt') ;
+lpdt  = ($hl . 'min') ;
+*evpdt = 'EVOL' 'MANU' 'TEMPS' ltps 'PDT' lpdt ;
+*'DESSIN' evpdt 'MIMA' 'TITR' 'Pas de temps' ;
+
+ltco = ('LOG' (($hl . 'conv') '*' ($pdt . 'alfa')))  '/' ('LOG' 10.) ;
+ltdi = ('LOG' (($hl . 'diff') '*' ($pdt . 'alfa')))  '/' ('LOG' 10.) ;
+ltma = ('LOG' (($hl . 'mail') '*' ($pdt . 'gamma')))  '/' ('LOG' 10.) ;
+ltmo = ('LOG' ($hl . 'moy')) '/' ('LOG' 10.) ;
+ltmi = ('LOG' ($hl . 'min')) '/' ('LOG' 10.) ;
+evco = 'COULEUR' ('EVOL' 'MANU' 'TEMPS' ltps 'dtconv' ltco) 'BLEU' ;
+evdi = 'COULEUR' ('EVOL' 'MANU' 'TEMPS' ltps 'dtdiff' ltdi) 'ROUG' ;
+evma = 'COULEUR' ('EVOL' 'MANU' 'TEMPS' ltps 'dtdiff' ltma) 'JAUN' ;
+evmo = 'COULEUR' ('EVOL' 'MANU' 'TEMPS' ltps 'dtdiff' ltmo) 'VERT' ;
+evmi = 'COULEUR' ('EVOL' 'MANU' 'TEMPS' ltps 'dtdiff' ltmi) 'BLAN' ;
+tabt = 'TABLE' ;  tabt . 'TITRE' = 'TABLE' ;
+tabt . 1 = 'TIRL' ;  tabt . 'TITRE' . 1 = 'Pdt diffusion' ;
+tabt . 2 = 'TIRR' ;  tabt . 'TITRE' . 2 = 'Pdt maillage' ;
+tabt . 3 = 'TIRM' ;  tabt . 'TITRE' . 3 = 'Pdt moyen' ;
+tabt . 4 = 'NOLI' ;  tabt . 'TITRE' . 4 = 'Pdt minimum' ;
+tabt . 5 = 'TIRC' ;  tabt . 'TITRE' . 5 = 'Pdt convection' ;
+
+* On ne dessine pas le pdt de conv en lagrangien (infini)
+'SI' ('NON' ('EGA' vmail 'LAGR')) ;
+  evtot = (evdi 'ET' evma 'ET' evmo 'ET' evmi 'ET' evco) ;
+'SINON' ;
+  evtot = (evdi 'ET' evma 'ET' evmo 'ET' evmi) ;
+'FINSI' ;
+'DESSIN' evtot 'MIMA' 'TITR' 'Pas de temps' 'LEGE' tabt ;
+
+maxy = (('ENTIER' ('MAXIMUM' liter)) '+' 1.) ;
+tity = 'CHAINE' 'Nb Iter (Total = ' ('ENTIER'  ('RESULT' liter))  ' ;  Cpu = ' ($pdt . 'tpscpu') ')' ;
+evit = 'EVOL' 'MANU' 'TEMPS' ltps 'NITER' liter ;
+'DESSIN' evit 'YBOR' 1. maxy 'MIMA' 'TITR' tity ;
+
+ldv  = (('LOG' ldv) '/' ('LOG' 10.)) ;
+evdv = 'EVOL' 'MANU' 'TEMPS' ltps 'DIVV (log)' ldv ;
+'DESSIN' evdv 'MIMA' 'TITR' 'Div v' ;
+
+'FINPROC' ;
+
+*
+**  Fin de la définition des procédures
+**************************************************************
+
+**************************************************************
+**  Début du 'main'
+*
+**** Définition des constantes
+* l, h, nl, nh : données pour la boite carrée
+* dh, db, dg, dd : densités (facultatives) pour la boite
+* egeom : erreur géométrique pour 'ELIMINATION'
+* cvg : critère de convergence pour la boucle d'itérations
+* nitmax : nombre maximum d'itérations
+* minnz : zéro pour ne pas avoir de pbs avec / , LOG ...
+* nu, g, rho : paramètres pour l'eau
+* minnu, ming : squizzage de certains termes dans NS
+* alfa : paramètre pour NS
+* gamma : coeff. gamma = 1 => le maillage dégénère
+* psauv : fréquence de sauvegarde des chpoints
+* tmax : temps d'arret
+* pt0 : coeff intensité du cos de pression sur la surface
+* dtini : 1er pas de temps
+* poids du dt initial dans dtmoy
+l = 4.8D0 ;  nl = 14 ;
+h = 4.0D0 ;  nh = 22 ;
+db = 3.0D0 ;  dh = 0.3D0 ;
+dg = 2.0D0 ;  dd = 0.5D0 ;
+egeom = 1.D-4 ;
+cvg  = 1.D-6 ;
+npdtmax = -1 ;
+nitmax  = -1 ;
+minnz = 1.D-13 ;
+nu   = 1.D-2 ;      minnu = nu '*' minnz ;
+g = (0.D0 -1.D0) ;  ming = (0.D0 0.D0) ;
+rho  = 1.D3 ;
+alfa = 0.8D0 ;
+gamma = 0.01D0 ;
+psauv = 1 ;
+*pt0 = -1.D0 ;   dtini = 0.25D0 ;
+pt0 = -1.D0 ;   dtini = 2.5D-6 ;
+poini = 0 ;
+'SI' ('NON' court) ;
+  tmax = 4.0D0 ;  ptrc = 1.0D0 ;  ttrc = ptrc ;
+*  tmax = 60.0D0 ;  ptrc = 10.0D0 ;  ttrc = ptrc ;
+*  fsauv = 'CHAINE'  'nlt' ('ENTIER' tmax) vmail optlapn
+*   'a' ('ENTIER' (alfa '*' 10))
+*   'c' ('ENTIER' ((LOG10 cvg) '-' 0.5D0))
+*   'g' ('ENTIER' ((LOG10 gamma) '-' 0.5D0)) 'po' poini '.sauv' ;
+'SINON' ;
+  tmax = 0.25D0 ;  ptrc = 0.05D0 ;  ttrc = ptrc ;
+*  tmax = 0.25D0 ;  ptrc = 0.25D0 ;  ttrc = ptrc ;
+*  fsauv = '/test4/gounand/ale/dumb' ;
+'FINSI' ;
+
+**** Création des maillages
+$cavite = 'TABLE' 'MAILLAGE' ;
+$cavite = CREMAIL $cavite l h nl nh egeom ;
+*  'DX' dg dd 'DY' db dh ;
+
+'SI' ('EGA' vmail 'CVS2LF') ;
+  CDXHAUT ($cavite . '$haut') ;
+'FINSI' ;
+
+**** Initialisation des tables diverses
+$var  = 'TABLE' 'VARIABLE' ;
+$pdt  = 'TABLE' 'PASDETPS' ;
+$hist = 'TABLE' 'HIST' ;
+$sauv = 'TABLE' 'SAUV' ;
+INITVAR $var $cavite ;
+INITPDT $pdt alfa gamma dtini poini ;
+INITHIST $hist ;
+'SI' (graph 'ET' inta) ;
+    INITSAUV $sauv ;
+'FINSI' ;
+'TEMPS' 'ZERO' ;  SUMMARY ;  'TEMPS' 'ZERO' ;
+
+
+**** Premier pas de temps
+* Calcul de la contrainte à appliquer sur la surface
+rits = CALCON ($cavite . '$haut') pt0 ;
+* Calcul des champs à l'instant dtini
+*           Peu d'avance en temps => pas de diffusion
+*           Dirac => champ de pression du à g négligeable
+$var $pdt = PREPAS $var $pdt $cavite rits minnu ming ;
+* Pour ne pas avoir une estimation de pas de temps avec 0
+$var . 'wnp05i' = ('TEXTE' vmail)  ($var . 'unp05i') $cavite optlapn ($cavite . 'cnfini') ;
+$var . 'erri' =  CALCERR ($var . 'unp05i') ($var . 'unp05im1') 'MINMAX' ;
+$pdt . 'nupdt' = (($pdt . 'nupdt') '+' 1) ;
+$var . 'unm05' = ('COPIE' ($var . 'unp05i')) ;
+$var . 'wnm05' = ('COPIE' ($var . 'wnp05i')) ;
+ampvit = l '/' (10.D0 '*' ('MAXIMUM' ($var . 'unm05') 'ABS')) ;
+MESI $var $pdt ;  MEST $var $pdt ;
+'SI' graph ;
+  TRTOUT ;
+  'SI' inta ;
+    MAJSAUV $sauv $var $pdt ;
+  'FINSI' ;
+'FINSI' ;
+
+***** Boucle sur les pas de temps
+'REPETER' TITER npdtmax ;
+**** Boucle d'itérations
+* Initialisation
+  $pdt . 'iter' = 0 ;
+  $var . 'unp05i' = ('COPIER'  ($var . 'unm05')) ;
+  $var . 'wnp05i' = ('COPIER'  ($var . 'wnm05')) ;
+  'FORME' ($var . 'cnfnm05') ;
+  $var . 'cnfnp05i' = 'FORME' ;
+* Estimation du pas de temps pour le maillage
+  pm = CINVPDTM ($var . 'wnm05') ($cavite . '$mt') ;
+  $pdt . 'mail' = (-1.0D0 '/' pm) ;
+  MAJPDT $pdt ;
+* Boucle
+  'REPETER' BITER nitmax ;
+* On bouge le maillage -> xn+1/2(i)
+    'FORME' ($var . 'cnfnp05i') ;
+    $var . 'wnp05i' = ('TEXTE' vmail)  ($var . 'unp05i')  $cavite optlapn ($cavite . 'cnfini') ;
+    dxns2 =  (ETENDRE $cavite  ('KOPS' (0.5D0 '*' ($pdt . 'min'))  '*'   ($var . 'wnp05i'))) ;
+    'FORME' ($var . 'cnfn') ;
+    $var . 'cnfnp05i' = 'FORME' dxns2 ;
+* Calcul de un+1/2(i)
+    $var $pdt = CVIT $cavite $var $pdt nu g discconv ;
+    $var . 'erri' = (CALCERR ($var . 'unp05i')  ($var . 'unp05im1') 'MINMAX') ;
+    $pdt . 'iter'   = (($pdt . 'iter') '+' 1) ;
+    MESI $var $pdt ;
+    'SI' (($var . 'erri') '<' cvg) ;
+      'QUITTER' BITER ;
+    'FINSI' ;
+  'FIN' BITER ;
+* On avance d'un pas de temps :
+* estimation des maillages xn+1/2
+*                       et xn+1 avec le dernier u calculé
+  'FORME' ($var . 'cnfnp05i') ;
+  $var . 'wnp05i' = ('TEXTE' vmail)  ($var . 'unp05i')  $cavite optlapn ($cavite . 'cnfini') ;
+  dxns2 = (ETENDRE $cavite  ('KOPS' (0.5D0 '*' ($pdt . 'min'))  '*'  ($var . 'wnp05i'))) ;
+  $var . 'deltaxn' = (($var . 'deltaxn')  '+' (2.0D0 '*' dxns2)) ;
+  $pdt . 'nupdt'   = (($pdt . 'nupdt') '+' 1) ;
+  $pdt . 'tphyn'   = (($pdt . 'tphyn') '+' ($pdt . 'min')) ;
+  $var . 'unm05' = ('COPIE' ($var . 'unp05i')) ;
+  $var . 'wnm05' = ('COPIE' ($var . 'wnp05i')) ;
+  'FORME' ($var . 'cnfn') ;
+  $var . 'cnfnm05' = 'FORME' dxns2 ;
+* Sauvegarde éventuelle des champs à n-1/2
+  'SI' (('MULT' ($pdt . 'nupdt') psauv) 'ET' graph 'ET' inta) ;
+    MAJSAUV $sauv $var $pdt ;
+  'FINSI' ;
+  $var . 'cnfn'    = 'FORME' dxns2 ;
+* Sauvegarde du reste (volume, pos des points) à n
+  MAJHIST $hist $cavite $pdt $var ;
+  'SI' ((($pdt . 'tphyn') '>EG' ttrc) 'ET' graph) ;
+    TRTOUT ; ttrc = ttrc '+' ptrc ;
+  'FINSI' ;
+  MEST $var $pdt ;
+  'SI' (($pdt . 'tphyn') '>' tmax) ;
+    'QUITTER' TITER ;
+  'FINSI' ;
+  'MENAGE' ;
+'FIN' TITER ;
+
+TABTPS = 'TEMPS' 'NOEC' ;
+$pdt . 'tpscpu' = TABTPS.'TEMPS_CPU'.'INITIAL' ;
+
+** Sauvegarde
+'SI' ('EXISTE' ($cavite . '$mt') 'MATESI') ;
+  'OUBLIER' ($cavite . '$mt') 'MATESI' ;
+'FINSI' ;
+'MENAGE' ;
+*'OPTION' 'SAUV' fsauv ;
+*'SAUVER' ;
+
+*
+**  Fin du 'main'
+**************************************************************
+
+**************************************************************
+**  Début du post-traitement
+*
+'SI' graph ;
+  'SI' inta ;
+    'FORME' ($cavite . 'cnfini') ;
+    fv = FILMVIT $sauv $var ;
+    'TRACER' fv 'ANIME' ;
+    'OUBLIER' fv ;  MENAGE ;
+  'FINSI' ;
+  TRHIST;
+'FINSI' ;
+
+*** Les tests...
+ltps = ($hist . 'ltps') ;  lvol = ($hist . 'lvol') ;
+lzr   = ($hist . 'lzr') ;   lzq  = ($hist . 'lzq') ;
+** Ici, on teste la conservation du volume du domaine
+critere1 = 'MAXIMUM' lvol 'ABS' ;
+* Résultat obtenu le 29/12/97 :
+* critere1 = .9806970050855623D-14
+limite1 = 1.D-10 ;
+'SI' graph ;
+  evvol = 'EVOL' 'MANU' 'TEMPS'  ltps 'VOLUME' lvol ;
+  'DESSIN' evvol 'AXES' 'MIMA'  'TITR' 'Ecart au volume initial' ;
+'FINSI' ;
+
+ltrram = ('PROG' 0.0 0.4 0.9 1.55 2.35 3.1 3.9 4.7 5.65 6.75 7.75 8.6 9.25 9.95 10.65 11.35 11.9 12.45)  '*' (4. '/' 12.) ;
+ltqram = ('PROG' 0.0 0.5 1. 1.6 2.25 2.9 3.7 4.4 5.1 6.1 7.1 7.9 8.6 9.2 9.9 10.5 11.1 11.6 12. 12.45)  '*' (4. '/' 12.) ;
+lzrram = ('PROG' 0.0 0.45 1.05 1.6 2.4 2.95 3.5 3.8 3.95 3.95  3.75 3.25 2.8 2.15 1.6 0.9 0.3 -0.25)  '*' ((-2.) '/' 11.8) ;
+lzqram = ('PROG' 0.0 0.75 1.35 2.3 3.25 4.15 5.15 5.8 6.3 6.5 6.4 5.85 5.25 4.5 3.8 3. 2.25 1.45 0.75 0.25)  '*' (2. '/' 11.8) ;
+* Comparaison des profils zQ(t) et zR(t) de Ramaswami aux notres
+* on les remet sur ltps par interpolation linéaire
+lzrint = 'IPOL' ltps ltrram lzrram ;
+lzqint = 'IPOL' ltps ltqram lzqram ;
+* échelles pour r et q
+echr = 'MINIMUM' ('PROG' ('MAXIMUM' lzr 'ABS') ('MAXIMUM' lzrram 'ABS') ('MAXIMUM' lzrint 'ABS')) ;
+echq = 'MINIMUM' ('PROG' ('MAXIMUM' lzq 'ABS') ('MAXIMUM' lzqram 'ABS') ('MAXIMUM' lzqint 'ABS')) ;
+echrq = 'MINIMUM' ('PROG' echr echq) ;
+critere2 = ('MAXIMUM' (lzrint '-' lzr) 'ABS') '/' echrq ;
+critere3 = ('MAXIMUM' (lzqint '-' lzq) 'ABS') '/' echrq ;
+* Résultats obtenus le 29/12/97 :
+* critere2 = .4174969242483980D-01
+* critere3 = .9776923547482334D-01
+limite2 = 0.05D0 ;
+limite3 = 0.12D0 ;
+
+'SI' graph ;
+  evzq = 'COULEUR'  ('EVOL' 'MANU' 'TEMPS' ltps 'zQ' lzq) 'ROSE' ;
+  evzr = 'COULEUR'  ('EVOL' 'MANU' 'TEMPS' ltps 'zR' lzr) 'TURQ' ;
+  evzqint = 'COULEUR'  ('EVOL' 'MANU' 'TEMPS' ltps 'zQint' lzqint) 'ROUG' ;
+  evzrint = 'COULEUR'  ('EVOL' 'MANU' 'TEMPS' ltps 'zRint' lzrint) 'BLEU' ;
+  evzqram = 'COULEUR'  ('EVOL' 'MANU' 'TEMPS' ltqram 'zQram' lzqram) 'JAUN' ;
+  evzrram = 'COULEUR'  ('EVOL' 'MANU' 'TEMPS' ltrram 'zRram' lzrram) 'VERT' ;
+  tabevzqr = 'TABLE' ;  tabevzqr . 'TITRE' = 'TABLE' ;
+  tabevzqr . 1 = 'NOLI' ;
+  tabevzqr . 'TITRE' . 1 = 'zQ (Castem 2000)' ;
+  tabevzqr . 2 = 'NOLI' ;
+  tabevzqr . 'TITRE' . 2 = 'zR (Castem 2000)' ;
+  tabevzqr . 3 = 'TIRR' ;
+  tabevzqr . 'TITRE' . 3 = 'zQ (Rama. interpolé)' ;
+  tabevzqr . 4 = 'TIRR' ;
+  tabevzqr . 'TITRE' . 4 = 'zR (Rama. interpolé)' ;
+  tabevzqr . 5 = 'NOLI MARQ CARR' ;
+  tabevzqr . 'TITRE' . 5 = 'zQ (Ramaswami)' ;
+  tabevzqr . 6 = 'NOLI MARQ CARR' ;
+  tabevzqr . 'TITRE' . 6 = 'zR (Ramaswami)' ;
+  'DESSIN' (evzq 'ET' evzr 'ET' evzqint 'ET' evzrint 'ET' evzqram 'ET' evzrram)  'MIMA' 'TITR' 'Amplitude de Q et R'  'XBOR' 0. tmax 'LEGE' 'AXES' tabevzqr ;
+'FINSI' ;
+*
+** Affichage des messages et des erreurs éventuelles
+*
+  'OPTION' 'ECHO' 0 ;
+  SUMMARY ;
+  'SAUTER' 2 'LIGNE' ;
+  'MESSAGE' 'Debriefing :' ;
+  'MESSAGE' '------------' ;
+  'MESSAGE' 'Conservation relative du volume' ;
+  'MESSAGE' 'Valeur / Limite :' ;
+  'MESSAGE' ('CHAINE' 'FORMAT' '(D24.16)' critere1 ' / ' limite1) ;
+  'SAUTER' 'LIGNE' ;
+  'MESSAGE' 'Comparaison d ordonnées (points extremes de la surface)' ;
+  'MESSAGE' 'avec une autre simulation numérique (Ramaswamy)' ;
+  'MESSAGE' 'zR(t) (Erreur / Limite) :' ;
+  'MESSAGE' ('CHAINE' 'FORMAT' '(D24.16)' critere2 ' / ' limite2) ;
+  'MESSAGE' 'zQ(t) (Erreur / Limite) :' ;
+  'MESSAGE' ('CHAINE' 'FORMAT' '(D24.16)' critere3 ' / ' limite3) ;
+  'SAUTER' 'LIGNE' ;
+  'MESSAGE' ('CHAINE' 'Temps CPU / Temps CPU (29/12/97) (interactif) : ') ;
+  'MESSAGE' ('CHAINE' ('ENTIER' (($pdt . 'tpscpu') '/' 100.0D0)) ' / ~28' ' secondes') ;
+'SI' ('OU' (critere1 '>' limite1) ('OU' (critere2 '>' limite2) (critere3 '>' limite3))) ;
+  'ERREUR' 5 ;
+'FINSI' ;
+'MESSAGE' 'Tout s est bien passé' ;
+'OPTION' 'ECHO' 1 ;
+'SI' inta ;  'OPTION' 'DONN' 5 ;  'FINSI' ;
+*
+**  Fin du post-traitement
+**************************************************************
+'FIN' ;
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,595 @@
+C FSURMA    SOURCE    CB215821  16/04/15    21:15:27     8907
+
+      SUBROUTINE FSURMA(IPMODL,IPCHPS,IPVECT,JPMAIL,IPCARA, IPFTP)
+
+C_______________________________________________________________________
+C
+C   CALCULE LES FORCES SURFACIQUES APPLIQUEES SUR DES MASSIFS
+C
+C   ENTREES :
+C   ---------
+C
+C    IPMODL   OBJET MODELE  SUR LEQUEL S APPLIQUE LA FORCE
+C    IPCHPS   CHPOINT CONTENANT LES VALEURS DES FORCES AUX NOEUDS
+C             DE LA FACE D UN MASSIF, SINON 0 (ET IPVECT NON NUL)
+C    IPVECT   VECTEUR REPRESENTANT LA FORCE (=0 SI IPCHPS NON NUL)
+C    JPMAIL   POINTEUR SUR LE MAILLAGE SI ON A LU UN VECTEUR IPVECT
+C             SINON 0 (IPCHPS NON NUL)
+C    IPCARA   MCHAML CONTENANT LES CARACTERISTIQUES UTILES
+C
+C  SORTIES  :
+C  ----------
+C
+C    IPFTP  = CHPOINT DES FORCES NODALES EQUIVALENTES
+C             0 EN CAS D'ERREUR (IERR peut alors etre non nulle)
+C
+C_______________________________________________________________________
+C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+C
+-INC CCOPTIO
+-INC CCHAMP
+C
+-INC SMCHAML
+-INC SMCHPOI
+-INC SMCOORD
+-INC SMELEME
+-INC SMINTE
+-INC SMMODEL
+C
+      SEGMENT INFO
+        integer INFELL(JG)
+      ENDSEGMENT
+      SEGMENT NOTYPE
+        CHARACTER*16 TYPE(NBTYPE)
+      ENDSEGMENT
+C
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS)    ,NSOF(NS)
+        INTEGER      IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+C
+      DIMENSION VEC(3),IPT(3)
+      CHARACTER*4 mfors(3)
+      CHARACTER*4 MOSTRI,MOAPPU,MOGEOM
+      CHARACTER*8 MOT
+      CHARACTER*(NCONCH) CONM
+      PARAMETER (NINF=3)
+      DIMENSION INFOS(NINF)
+C
+      PARAMETER (INTYPC = 3)
+C
+      LOGICAL ltelq,lsupfo
+C
+      DATA MOAPPU /'APPU'/, MOSTRI /'STRI'/, MOGEOM /'GEOM'/
+      DATA MOT/'FORCES'/
+
+C=  LEFMAS   Liste des numeros d'elements finis faces de MASSIFs
+C=  NEFMAS   Longueur de cette liste
+      PARAMETER ( NEFMAS = 6 )
+      DIMENSION LEFMAS(NEFMAS)
+C ============
+C  Elements MASSIFs  SEG2 SEG3 TRI3 QUA4 TRI6 QUA8
+      DATA LEFMAS /    2,   3,  31,  32,  33,  34 /
+*
+* 0) QUELQUES INITIALISATIONS
+*
+      IPFTP = 0
+      MFR   = 0
+      NHRM = NIFOUR
+C= Composantes du CHPOINT IPCHPS a retenir (si besoin)
+      IF (IFOMOD.EQ.2) THEN
+        nfors = 3
+        mfors(1) = 'FX  '
+        mfors(2) = 'FY  '
+        mfors(3) = 'FZ  '
+      ELSE IF (IFOMOD.EQ.-1) THEN
+        nfors = 2
+        mfors(1) = 'FX  '
+        mfors(2) = 'FY  '
+        mfors(3) = '    '
+      ELSE IF (IFOMOD.EQ.0) THEN
+        nfors = 2
+        mfors(1) = 'FR  '
+        mfors(2) = 'FZ  '
+        mfors(3) = '    '
+      ELSE IF (IFOMOD.EQ.1) THEN
+        nfors = 3
+        mfors(1) = 'FR  '
+        mfors(2) = 'FZ  '
+        mfors(3) = 'FT  '
+      ELSE
+        CALL ERREUR(21)
+        RETURN
+      ENDIF
+C  Cas des modes de calculs en DEFORMATIONS GENERALISEES
+      IF (IFOUR.EQ.-3) THEN
+        NDPGE = 3
+      ELSE IF (IFOUR.EQ.11) THEN
+        NDPGE = 2
+      ELSE IF (IFOUR.EQ. 7.OR.IFOUR.EQ. 8.OR.IFOUR.EQ. 9.OR.
+     &         IFOUR.EQ.10.OR.IFOUR.EQ.14) THEN
+        NDPGE = 1
+      ELSE
+        NDPGE = 0
+      ENDIF
+*
+*  ON RECUPERE LES COORDONNEES DU VECTEUR FORCE CONSTANT SI DONNE
+*  TEST SI LE VECTEUR N'EST PAS NUL
+*
+      IF (IPVECT.NE.0) THEN
+        IREF = (IPVECT-1)*(IDIM+1)
+        VEC(1) = XCOOR(IREF+1)
+        VEC(2) = XCOOR(IREF+2)
+        VECN = VEC(1)**2 + VEC(2)**2
+        IF (IDIM.EQ.3) THEN
+          VEC(3) = XCOOR(IREF+3)
+          VECN = VECN + VEC(3)**2
+        ENDIF
+C*        VECN = SQRT(VECN)
+        IF (VECN.LE.0.D0) THEN
+          CALL ERREUR(277)
+          RETURN
+        ENDIF
+      ELSE
+        VEC(1) = 0.D0
+        VEC(2) = 0.D0
+        VEC(3) = 0.D0
+      ENDIF
+C
+C  ON CREE L OBJET GEOMETRIQUE CONTENANT TOUS LES PTS DU CHPOINT DE
+C  FORCES IPCHPS S'IL EST FOURNI SINON ON SE SERVIRA DE JPMAIL
+C  CE MAILLAGE SERA POINTE PAR LA VARIABLE IGEOM DANS LA SUITE
+C
+      IF (JPMAIL.EQ.0) THEN
+        IGEOM = 0
+        ltelq = .false.
+        MCHPOI = IPCHPS
+        SEGACT,MCHPOI
+        DO i = 1,IPCHP(/1)
+          MSOUPO = IPCHP(i)
+          SEGACT,MSOUPO
+          NC = NOCOMP(/2)
+          DO j = 1, NC
+            CALL PLACE(mfors,nfors,imo,NOCOMP(j))
+            IF (imo.NE.0) THEN
+              IF (IGEOM.EQ.0) THEN
+                IGEOM = IGEOC
+              ELSE
+                IPP2 = IGEOC
+                CALL FUSE(IGEOM,IPP2,IPPT,ltelq)
+                IF (IERR.NE.0) RETURN
+                IGEOM = IPPT
+              ENDIF
+              GOTO 10
+            ENDIF
+          ENDDO
+ 10       CONTINUE
+          SEGDES,MSOUPO
+        ENDDO
+        SEGDES,MCHPOI
+        IF (IGEOM.EQ.0) THEN
+          CALL ERREUR(21)
+          RETURN
+        ENDIF
+      ELSE
+        IGEOM = JPMAIL
+      ENDIF
+C
+C  PRE-TRAITEMENT DU CHAMP DE CARACTERISTIQUES SI NECESSAIRE
+C  - VERIFICATION DU LIEU SUPPORT DU MCHAML DE CARACTERISTIQUES
+C  - DEFINITION DE SEGMENTS UTILES
+C
+      ISUPCA = 0
+      MOCARA = 0
+      MOTYPC = 0
+      NCARA  = 0
+      NCARF  = 0
+C
+      IF (IFOUR.EQ.-2) THEN
+        IF (IPCARA.NE.0) THEN
+C
+          CALL QUESUP(IPMODL,IPCARA,INTYPC,1,ISUPCA,iret)
+          IF (IERR.NE.0 .OR. ISUPCA.GT.1) RETURN
+C
+          NBROBL = 0
+          NBRFAC = 1
+          SEGINI,NOMID
+          LESFAC(1) = 'DIM3'
+          MOCARA = NOMID
+C
+          NBTYPE = 1
+          SEGINI,NOTYPE
+          TYPE(1) = 'REAL*8'
+          MOTYPC = NOTYPE
+C
+          NCARA = NBROBL
+          NCARF = NBRFAC
+        ENDIF
+      ENDIF
+C
+      NCARR = NCARA + NCARF
+C
+C  PRE-TRAITEMENT DES DONNEES :
+C  - PETIT MODELE UTILE ASSOCIE A LA SURFACE ELEMENTAIRE TRAITEE
+C    LE IMODEL EST MODIFIE PAR AJUSTEMENT DES QUE NECESSAIRE
+C
+      N1 = 1
+      SEGINI,MMODE1
+      IPMOD1 = MMODE1
+      NFOR = 0
+      NMAT = 0
+      MN3  = 0
+      NOBMOD = 0
+      SEGINI,IMODE1
+      IMODE1.CMATEE = 'ISOTROPE'
+      MMODE1.KMODEL(1) = IMODE1
+C
+C------------------------------------------- BOUCLE sur les SOUS-MODELES
+C
+      MMODEL = IPMODL
+      SEGACT,MMODEL
+      NSOUS = KMODEL(/1)
+      IRRT = 0
+C
+      DO 100 ISOUS = 1, NSOUS
+C
+C ... ON RECUPERE L INFORMATION GENERALE
+C
+        IMODEL = KMODEL(ISOUS)
+        SEGACT,IMODEL
+C
+C       TRAITEMENT DU SOUS-MODELE
+C
+        IPMAIL= IMAMOD
+        MELM  = NEFMOD
+        CONM  = CONMOD
+C
+        IF (MELM.EQ.22) GOTO 101
+C
+        IVACAR = 0
+        IVAFOR = 0
+        lsupfo = .FALSE.
+        IPTINT = 0
+C
+C ... ON RECUPERE L'"ENVELOPPE" DU MAILLAGE MASSIF DU SOUS-MODELE
+C
+        CALL ECROBJ('MAILLAGE',IPMAIL)
+        IF (IDIM.EQ.3) THEN
+          CALL ENVELO
+        ELSE IF (IDIM.EQ.2) THEN
+          CALL PRCONT
+c*      ELSE IF (IDIM.EQ.1) THEN
+        ELSE
+          CALL PREX1D
+        ENDIF
+        IF (IERR.NE.0) GOTO 101
+        CALL LIROBJ('MAILLAGE',ienvel,1,iret)
+        IF (IERR.NE.0) GOTO 101
+C
+C ... SI le CHPOINT de force IPCHPS a ete donne, on cherche la partie de
+C     l'"enveloppe" s'appuyant strictement sur le support du CHPOINT.
+C ... SINON on cherche l'intersection entre l'enveloppe et JPMAIL=IGEOM.
+C
+        IF (JPMAIL.EQ.0) THEN
+          CALL ECROBJ('MAILLAGE',IGEOM)
+          CALL ECRCHA(MOSTRI)
+          CALL ECRCHA(MOAPPU)
+          CALL ECROBJ('MAILLAGE',ienvel)
+          CALL EXTREL(irr,0,iret)
+        ELSE
+          CALL INTERB(ienvel,IGEOM,irr,IPT3)
+        ENDIF
+C
+C ... ON N'A PAS TROUVE D'ELEMENTS COMMUNS A IGEOM ET A IPMAIL
+C     (IPMAIL = "ENVELOPPE" DU MAILLAGE DU SOUS-MODELE IMODEL)
+C
+        IF (irr.GT.0) GOTO 101
+C
+C ... On recupere les elements communs a IGEOM et IPMAIL -> IPT3 !
+C
+        IF (JPMAIL.EQ.0) THEN
+          CALL LIROBJ('MAILLAGE',IPT3,1,iret)
+          IF (IERR.NE.0) GOTO 101
+        ENDIF
+C
+C   RECHERCHE DES NOMS DE COMPOSANTES
+C
+        IF (lnomid(2).NE.0) THEN
+          MOFORC = lnomid(2)
+        ELSE
+          lsupfo = .TRUE.
+          CALL IDFORC(MFR,IFOUR,MOFORC,NFORC,NFORF)
+        endif
+        nomid=MOFORC
+        SEGACT,nomid
+        NFORC = lesobl(/2)
+        NFORF = 0
+        NCOMP = NFORC - NDPGE
+C
+C   Mise a jour de IMODE1 avec les donnees necessaires de IMODEL
+C
+        NFOR = FORMOD(/2)
+        NMAT = MATMOD(/2)
+        SEGADJ,IMODE1
+        IMODE1.CONMOD = CONM
+        DO i = 1, NFOR
+          IMODE1.FORMOD(i) = FORMOD(i)
+        ENDDO
+        DO i = 1, NMAT
+          IMODE1.MATMOD(i) = MATMOD(i)
+        ENDDO
+C
+C     ON DETERMINE LA FORMULATION ASSOCIEE A L OBJET
+C     GEOMETRIQUE ELEMENTAIRE DE SURFACE
+C
+        SEGACT,IPT3
+        MJB = IPT3.LISOUS(/1)
+        IPT2 = IPT3
+C
+C     BOUCLE SUR LES SOUS-ZONES DE LA PARTIE COMMUNE
+C
+        DO 110 IB = 1,MAX(1,MJB)
+          IRRT = IRRT + 1
+          IF (MJB.NE.0) THEN
+            IPT2 = IPT3.LISOUS(IB)
+            SEGACT,IPT2
+          ENDIF
+          IPOGEO = IPT2
+          NBEL  = IPT2.NUM(/2)
+          NBNN  = IPT2.NUM(/1)
+          LETYP = IPT2.ITYPEL
+*
+*        PETIT TEST SUR LE TYPE
+*
+          IF (LETYP.EQ.1 .AND. IDIM.NE.1) THEN
+            CALL ERREUR(16)
+            GOTO 102
+          ENDIF
+*
+          CALL TYPFAC(MELM,NBNN,MELE)
+C
+C        ERREUR : IMPOSSIBLE D UTILISER L OPERATEUR FSUR POUR
+C                 LES ELEMENTS DE FORMULATION MELM
+C
+          IF (MELE.EQ.0) THEN
+            MOTERR(1:8) = NOMTP(MELM)
+            CALL ERREUR(193)
+            GOTO 102
+          ENDIF
+*        ERREUR L ELEMENT N EST PAS ENCORE IMPLEMENTE
+          imo = 0
+          CALL PLACE2(LEFMAS,NEFMAS,imo,MELE)
+          IF (imo.EQ.0) THEN
+            MOTERR(1:4) = NOMTP(MELE)
+            MOTERR(5:12)='FSURMA  '
+            CALL ERREUR(86)
+            GOTO 102
+          ENDIF
+C
+C        ON CREE L OBJET MODEL ASSOCIE A LA SURFACE ELEMENTAIRE
+C
+          SEGACT,IMODE1*MOD
+          IMODE1.IMAMOD=IPOGEO
+          IMODE1.NEFMOD=MELE
+C
+C        INFORMATION SUR L'ELEMENT FINI
+C
+          CALL ELQUOI(MELE,0,INTYPC,IPINF,IMODE1)
+          IF (IERR.NE.0) GOTO 102
+          INFO = IPINF
+          IPTINT=INFELL(11)
+          MFR   =INFELL(13)
+          IPPORE=0
+          IF (MFR.EQ.33) IPPORE=NBNN
+          SEGSUP,INFO
+C
+          MINTE=IPTINT
+          IF (IPTINT.NE.0) SEGACT,MINTE
+*
+*     ON TRANSFORME LE CHPOINT DE VECTEUR EN MCHAML
+*
+          IPCHMS = 0
+          IPT(1) = 0
+          IPT(2) = 0
+          IPT(3) = 0
+          IF (IPCHPS.NE.0) THEN
+c*        IF (IPVECT.EQ.0) THEN <- Test equivalent
+            CALL CHAME1(0,IPMOD1,IPCHPS,' ',IPCHMS,1)
+            IF (IERR.NE.0) GOTO 102
+            MCHEL1 = IPCHMS
+            SEGACT,MCHEL1
+*     On ne doit avoir qu'une zone !
+            IF (MCHEL1.ICHAML(/1).NE.1) THEN
+              WRITE(IOIMP,*) 'Contacter le support (FSURMA 402)'
+              CALL ERREUR(21)
+              GOTO 102
+            ENDIF
+            MCHAM1 = MCHEL1.ICHAML(1)
+            SEGACT,MCHAM1
+            DO 15 i = 1, MCHAM1.NOMCHE(/2)
+              CALL PLACE(mfors,nfors,imo,MCHAM1.NOMCHE(i))
+              IF (imo.NE.0) THEN
+                IPT(imo) = MCHAM1.IELVAL(i)
+c*                segment active et desactive dans FSMA.D (ci-dessous)
+c*                MELVA1 = IPT(imo)
+c*                SEGACT,MELVA1
+              ENDIF
+ 15         CONTINUE
+            SEGDES,MCHAM1,MCHEL1
+          ENDIF
+C
+C        INITIALISATION DU CHELEM ELEMENTAIRE DES FORCES NODALES
+C
+          N1=1
+          L1=6
+          N3=5
+          SEGINI MCHELM
+          TITCHE='FORCES'
+          IFOCHE=IFOUR
+          IPCHEL=MCHELM
+C
+          IMACHE(1)=IPOGEO
+          INFCHE(1,1)=0
+          INFCHE(1,2)=0
+          INFCHE(1,3)=NHRM
+          INFCHE(1,4)=IPTINT
+          INFCHE(1,5)=0
+C
+C        RECHERCHE DE LA TAILLE DES MELVALS
+C
+          N1PTEL=NBNN
+          N1EL  =NBEL
+          N2PTEL=0
+          N2EL  =0
+C
+C        CREATION DU MCHAML DE LA SOUS ZONE
+C
+          N2 = NCOMP
+          SEGINI,MCHAML
+          ICHAML(1)=MCHAML
+          NS=1
+          NCOSOU = NCOMP
+          SEGINI,MPTVAL
+          IVAFOR=MPTVAL
+          NOMID=MOFORC
+          DO ICOMP=1,NCOMP
+            NOMCHE(ICOMP)=LESOBL(ICOMP)
+            TYPCHE(ICOMP)='REAL*8'
+            SEGINI,MELVAL
+            IELVAL(ICOMP)=MELVAL
+            IVAL(ICOMP)=MELVAL
+          ENDDO
+*
+*____________________________________________________________________
+*
+* TRAITEMENT DU CHAMP DE CARACTERISTIQUES
+*____________________________________________________________________
+*
+          IF (MOCARA.NE.0) THEN
+*
+*        CREATION DU TABLEAU INFOS
+*
+            CALL IDENT (IPMAIL,CONM,IPCARA,0,INFOS,IRTD)
+            IF (IRTD.EQ.0) THEN
+              SEGSUP MCHELM
+              RETURN
+            ENDIF
+*
+            CALL KOMCHA(IPCARA,IPMAIL,CONM,MOCARA,MOTYPC,0,
+     &                                       INFOS,3,IVACAR)
+            IF (IERR.NE.0) GOTO 9100
+*
+            IF (ISUPCA.EQ.1) THEN
+              CALL VALCHE(IVACAR,NCARR,IPTINT,IPPORE,MOCARA,MELE)
+            ENDIF
+*
+          ENDIF
+C
+C  CALCUL DES FORCES NODALES EQUIVALENTES
+C  BRANCHEMENT SUIVANT LE TYPE DES ELEMENTS
+C
+C           CAS DES ELEMENTS MASSIFS BIDIMENSIONNELS
+C           FACES ASSOCIEES SEG2 OU SEG3
+C
+          IF (MELE.EQ.2 .OR. MELE.EQ.3) THEN
+C
+            CALL FSMA2D(IPT,IPOGEO,IPTINT,IPVECT,VEC,IVAFOR,IVACAR)
+C
+C           CAS DES ELEMENTS MASSIFS TRIDIMENSIONNELS
+C           FACES ASSOCIEES FAC3,FAC4,FAC6 OU FAC8
+C
+          ELSE IF (MELE.EQ.31 .OR. MELE.EQ.32 .OR. MELE.EQ.33 .OR.
+     &            MELE.EQ.34) THEN
+C
+            CALL FSMA3D(IPT,IPOGEO,IPTINT,IPVECT,VEC,IVAFOR)
+C
+          ELSE
+C
+C           ERREUR L ELEMENT N EST PAS ENCORE IMPLEMENTE
+C
+            GOTO 9100
+         ENDIF
+C
+C        ON TRANSFORME LE CHAM/ELEM EN CHAM/POIN
+C        ET ON ADDITIONNE LES CHAM/POIN ELEMENTAIRES
+C
+         CALL CHAMPO(IPCHEL,0,IPCHPO,IRET)
+C*       CALL DTCHAM(IPCHEL)
+         IF (IRET.EQ.0) THEN
+            GOTO 9100
+         ENDIF
+         IF (IRRT.GT.1) THEN
+            CALL ADCHPO(IPCHPO,IPFTP,IPPT,1.D0,1.D0)
+****        CALL ECRCHA(MOGEOM)
+            CALL DTCHPO(IPCHPO)
+****        CALL ECRCHA(MOGEOM)
+            CALL DTCHPO(IPFTP)
+            IF (IPPT.EQ.0) THEN
+               GOTO 9100
+            ENDIF
+            IPFTP=IPPT
+         ELSE
+            IPFTP=IPCHPO
+         ENDIF
+
+ 9100     CONTINUE
+          IF (IPTINT.NE.0) SEGDES,MINTE
+c*        IF (IPCHMS.NE.0) CALL DTCHAM(IPCHMS)
+c*        CALL DTMVAL(IVAFOR,3)
+          IF (MOCARA.NE.0) THEN
+            IF (ISUPCA.EQ.1) THEN
+              CALL DTMVAL(IVACAR,3)
+            ELSE
+              CALL DTMVAL(IVACAR,1)
+            ENDIF
+          ENDIF
+
+          IF (MJB.NE.0) THEN
+            SEGDES,IPT2
+          ENDIF
+ 110    CONTINUE
+*
+ 102    CONTINUE
+        IF (IPTINT.NE.0) SEGDES,MINTE
+        nomid = MOFORC
+        SEGDES,nomid
+        IF (lsupfo) SEGSUP,nomid
+        SEGDES,IPT3
+ 101    CONTINUE
+        SEGDES,IMODEL
+        IF (IERR.NE.0) GOTO 900
+C
+ 100  CONTINUE
+*--------------------------------- FIN de la BOUCLE sur les SOUS-MODELES
+*
+      IF (IRRT.EQ.0) THEN
+        IPFTP = 0
+         CALL ERREUR(395)
+        GOTO 900
+      ENDIF
+C
+C
+C     GESTION FINALE DES SEGMENTS
+C
+ 900  CONTINUE
+      IF (MOCARA.NE.0) THEN
+        NOMID = MOCARA
+        SEGSUP,NOMID
+        NOTYPE = MOTYPC
+        SEGSUP,NOTYPE
+      ENDIF
+      SEGSUP,IMODE1,MMODE1
+      SEGDES,MMODEL
+
+      RETURN
+      END
+
+
+
+
+
+
+

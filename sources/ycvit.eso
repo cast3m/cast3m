@@ -1,0 +1,1982 @@
+C YCVIT     SOURCE    CHAT      05/01/13    04:16:48     5004
+      SUBROUTINE YCVIT
+     &     (HR,RPG,DRR,LE,NEL,K0,NPTI,NPTS,NPTU,IES,NP,IAXI,
+     &     IPADI,IPADS,IPADU,IKOMP,IKAS,
+     &     RO,IKR,
+     &     COEFF,IK1,RGE,IKG,NELG,TN,IKT,TREF,IKREF,
+     &     AMUT,GN,UN,TK,TE,
+     &     F,GK,GE,GE1,
+     &     VOLU,COTE,NELZ,IDCEN,IMODEL,
+     &     DT,DTT1,DTT2,NUEL,DIAEL,DIAM)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+C***********************************************************************
+C  APPELE PAR NSKE
+C  CE SP DISCRETISE LES EQUATIONS DE NAVIER STOKES COUPLEES
+C  AUX DEUX EQUATIONS DU MODELE K - EPSILON
+C    EN 2D SUR LES ELEMENTS QUA4 ET TRI3      PLAN OU AXI
+C    EN 3D SUR LES ELEMENTS CUB8 ET PRI6
+C  LES OPERATEURS SONT "SOUS-INTEGRES"
+C
+C***
+C
+C                    MODELE K - EPSILON
+C
+C
+C    CONSTANTES :  CNU=0.09D0  C1=1.41D0  C2=1.92D0
+C                   SGT=0.9D0  SGK=1.D0   SGE=1.3D0
+C
+C     P --> TABLEAU P
+C
+C    LE NU TURBULENT EST CALCULE PAR ELEMENT
+C    IL N EST PAS TRANSMIS EN ARGUMENT
+C
+C
+C***********************************************************************
+
+      DIMENSION UN(NPTU,IES),GN(NPTI,IES),TK(NPTI),TE(NPTI)
+      DIMENSION AMUT(*),RO(*)
+      DIMENSION COTE(NELZ,IES),VOLU(NELZ)
+
+C NOMBRE DE NOEUDS MAX PAR ELEMENT NPX
+      PARAMETER (NPX=9)
+
+C LONGUEUR DES REGISTRES VECTORIELS DE LA MACHINE CIBLE
+
+      PARAMETER (LRV=64)
+C
+      DIMENSION IPADI(*),IPADS(*),IPADU(*),LE(NP,*)
+      DIMENSION HR(NEL,NP,IES),RPG(*),DRR(NP,NEL)
+      DIMENSION QGGT(8,8),Q1(8,8),Q2(8,8),Q3(8,8)
+      SAVE QGGT,Q1,Q2,Q3
+
+      DIMENSION F(NPTS,IES),GK(NPTS),GE(NPTS),GE1(NPTS)
+
+-INC CCVQUA4
+-INC CCREEL
+*-
+-INC CCOPTIO
+-INC SMCOORD
+C* -TABLEAUX ADDITIONNELS POUR LA VECTORISATION   **********************
+C
+C ---- ILS CONDUISENT A UN SURCOUT DE LRV*(59+25NPX) MOTS. AVEC NPX=9
+C      ET LRV=128 ON OBTIENT 37KMOTS (0.3 MEGAOCTETS) ET CECI QUELLE
+C      SOIT LA NOMBRE TOTAL D'ELEMENTS DU MAILLAGE
+C ------------------------------------------------------------------
+      DIMENSION AIRE(LRV),COEF(LRV),AL(LRV),AH(LRV),AP(LRV)
+      DIMENSION XMB(LRV),XMH (LRV)
+      DIMENSION CFM(LRV)
+C     DIMENSION CF1(LRV),CF2(LRV),CF3(LRV)
+C
+      DIMENSION DR(LRV,NPX)
+      DIMENSION UIX(LRV,NPX),UIY(LRV,NPX),UIZ(LRV,NPX)
+      DIMENSION GIX(LRV,NPX),GIY(LRV,NPX),GIZ(LRV,NPX)
+      DIMENSION AK(LRV,NPX),AE(LRV,NPX)
+C
+      DIMENSION UM(LRV),UMI(LRV,3),AKM(LRV),AEM(LRV),ARO(LRV)
+      DIMENSION P(LRV),PG(LRV),ANUT(LRV),
+     ;     DUDX(LRV),DUDY(LRV),DUDZ(LRV),DVDX(LRV),DVDY(LRV),
+     ;     DVDZ(LRV),DWDX(LRV),DWDY(LRV),DWDZ(LRV),
+     ;     DTDX(LRV),DTDY(LRV),DTDZ(LRV)
+C
+      DIMENSION C1P(LRV),C1G(LRV),COEFT(LRV),COEFK(LRV),COEFE(LRV)
+C
+      DIMENSION BE1(LRV,NPX)
+C
+C
+C ---- TABLEAUX POUR L'OPTION RAPIDE -------------------------------
+C      DANS LA TRIPLE BOUCLE SUR K,I,J ON PEUT SORTIR UN MAXIMUM
+C      D'OPERATIONS DE LA BOUCLES LA PLUS INTERNE. LES TABLEAUX CI-
+C      DESSOUS PERMETTENT DE STOCKER LES VALEURS CALCULEES
+C ------------------------------------------------------------------
+C***
+      DIMENSION COEFF(*),RGE(NELG,IES)
+      DIMENSION TN(*),TREF(*)
+
+      DIMENSION RGX(LRV),RGY(LRV),RGZ(LRV)
+      DIMENSION SAF1(LRV,9),SAF2(LRV,9),SAF3(LRV,9)
+      DIMENSION SAFK(LRV,9),SAFE(LRV,9)
+      DIMENSION AL2(LRV),AH2(LRV),AP2(LRV)
+      DIMENSION GRADGX(LRV,3),GRADGY(LRV,3),GRADGZ(LRV,3)
+      DIMENSION GRADK (LRV,3),GRADE (LRV,3)
+      DIMENSION UPGX(LRV),UPIGX(LRV,3),UPGY(LRV),UPIGY(LRV,3)
+      DIMENSION UPGZ(LRV),UPIGZ(LRV,3)
+      DIMENSION UPK (LRV),UPIK (LRV,3),UPE (LRV),UPIE (LRV,3)
+      DIMENSION BM(LRV),BPGX(LRV),BPGY(LRV),BPGZ(LRV)
+      DIMENSION         BPK (LRV),BPE (LRV)
+      DIMENSION GXCXT(LRV),GXCYT(LRV),GXCZT(LRV)
+      DIMENSION GXCXY(LRV),GXCXZ(LRV),GXCYZ(LRV)
+      DIMENSION GYCXT(LRV),GYCYT(LRV),GYCZT(LRV)
+      DIMENSION GYCXY(LRV),GYCXZ(LRV),GYCYZ(LRV)
+      DIMENSION GZCXT(LRV),GZCYT(LRV),GZCZT(LRV)
+      DIMENSION GZCXY(LRV),GZCXZ(LRV),GZCYZ(LRV)
+      DIMENSION GKCXT(LRV),GKCYT(LRV),GKCZT(LRV)
+      DIMENSION GKCXY(LRV),GKCXZ(LRV),GKCYZ(LRV)
+      DIMENSION GECXT(LRV),GECYT(LRV),GECZT(LRV)
+      DIMENSION GECXY(LRV),GECXZ(LRV),GECYZ(LRV)
+
+      DIMENSION CONST(2,7)
+
+      SAVE IPAS
+      DATA IPAS/0/
+
+C Constantes du modèle RNG
+C      DATA CNU,C1,C2,C3/0.0845D0,1.42D0,1.68D0,0.8D0/
+C      DATA SGT,SGK,SGE /0.9D0,0.7179D0,0.7179D0/
+C
+C Modèle standard
+C     DATA CNU,C1,C2,C3,SGT,SGE/0.09D0,1.41D0,1.92D0,0.8D0,0.9D0,1.3D0/
+C
+C IMODEL=1 modele Standard   IMODEL=2 modele RNG
+C
+C
+C*** Variation des constantes en fonction du modèle
+      DATA (CONST(1,j),j=1,4) /0.09D0,1.41D0,1.92D0,0.8D0/
+      DATA (CONST(1,j),j=5,7) /0.9D0,1.D0,1.3D0/
+      DATA (CONST(2,j),j=1,4) /0.0845D0,1.42D0,1.68D0,0.8D0/
+      DATA (CONST(2,j),j=5,7) /0.9D0,0.7179D0,0.7179D0/
+C***
+C
+CDIR$ VECTOR
+CDIR$ IVDEP
+
+C      WRITE(IOIMP,*)' Debut YCVIT'
+C      WRITE(IOIMP,*)' NELZ,ies=',nelz,ies
+C      WRITE(IOIMP,1002)cote
+C      WRITE(IOIMP,*)' Avt precaution ies=',ies
+C
+C           INITIALISATIONS DIVERSES
+C
+       zxzini = sqrt(xpetit)
+      DTM1=0.D0
+
+C     IF(IPAS.EQ.0)CALL CALHRG(QGGT,IES)
+      IF(IPAS.EQ.0)CALL CALHRH(QGGT,Q1,Q2,Q3,IES)
+      NK=K0
+C                           ********
+C                           *  2D  *
+C                           ********
+C
+C      IMODEL=3
+C Suite de la definition des constantes
+C      IF(IMODEL.EQ.3) THEN
+C       IMO=2
+C      ELSE
+C       IMO=1
+C      ENDIF
+C
+C  (IMODEL=1 modèle Standard ; IMODEL=2 modèle RNG)
+      CNU=CONST(IMODEL,1)
+      C1=CONST(IMODEL,2)
+      C2=CONST(IMODEL,3)
+      C3=CONST(IMODEL,4)
+      SGT=CONST(IMODEL,5)
+      SGK=CONST(IMODEL,6)
+      SGE=CONST(IMODEL,7)
+C
+      IF(IES.EQ.3)GO TO 10
+C
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+C                           DIFFERENCES TRIANGLE / QUADRANGLE
+      QUA4=0.D0
+      IF(NP.EQ.4)QUA4=1.D0
+
+C
+C K  EST LE NUMERO DE L'ELEMENT
+C KP PERMET DE SE SITUER A L'INTERIEUR DES TABLEAUX DE LRV ELEMENTS
+C --- CALCUL DU NOMBRE DE PAQUETS DE LRV ELEMENTS ---
+      NNN=MOD(NEL,LRV)
+      IF(NNN.EQ.0) NPACK=NEL/LRV
+      IF(NNN.NE.0) NPACK=1+(NEL-NNN)/LRV
+      KPACKD=1
+      KPACKF=NPACK
+C
+C*** BOUCLE SUR LES PAQUETS D'ELEMENTS ***
+C
+      DO 70001 KPACK=KPACKD,KPACKF
+C
+C --- POUR CHAQUE PAQUET DE LRV ELEMENTS
+         KDEB=1+(KPACK-1)*LRV
+         KFIN=MIN(NEL,KDEB+LRV-1)
+C      WRITE(IOIMP,*)' KPACK=',KPACK
+C
+         DO 70002 K=KDEB,KFIN
+            KP=K-KDEB+1
+            NK=K+K0
+            K1=1+(1-IK1)*(NK-1)
+            AIRE(KP)=VOLU(NK)
+            COEF(KP)=COEFF(K1)
+            AL(KP)=COTE(NK,1)
+            AH(KP)=COTE(NK,2)
+            AL2(KP)=1.D0/AL(KP)/AL(KP)
+            AH2(KP)=1.D0/AH(KP)/AH(KP)
+            XMB (KP)=(AL(KP)+AH(KP))*0.5D0
+70002    CONTINUE
+C      WRITE(IOIMP,*)' Apr bcl 70002,,,,,,,,,,,,,,,,,,,,,,,, '
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Initialisation des UMI,UMIT avant accumulation
+         DO 7005 K=KDEB,KFIN
+            KP=K-KDEB+1
+            UMI(KP,1)=zxzini
+            UMI(KP,2)=zxzini
+            GRADGX(KP,1)=zxzini
+            GRADGX(KP,2)=zxzini
+            GRADGY(KP,1)=zxzini
+            GRADGY(KP,2)=zxzini
+            AKM(KP)=zxzini
+            AEM(KP)=zxzini
+            UPIK(KP,1)=zxzini
+            UPIK(KP,2)=zxzini
+            UPIE(KP,1)=zxzini
+            UPIE(KP,2)=zxzini
+            GRADK(KP,1)=zxzini
+            GRADK(KP,2)=zxzini
+            GRADE(KP,1)=zxzini
+            GRADE(KP,2)=zxzini
+            DUDX(KP)=0.D0
+            DUDY(KP)=0.D0
+            DVDX(KP)=0.D0
+            DVDY(KP)=0.D0
+            DTDX(KP)=0.D0
+            DTDY(KP)=0.D0
+            C1P(KP)=C1
+            C1G(KP)=0.D0
+            PG(KP)=0.D0
+ 7005    CONTINUE
+
+         DO 7006 I=1,NP
+            DO 6006 K=KDEB,KFIN
+               KP=K-KDEB+1
+               NF=IPADI(LE(I,K))
+               NFU=IPADU(LE(I,K))
+               DR(KP,I)=DRR(I,K)
+               UMI(KP,1)=UMI(KP,1)+UN(NFU,1)*DR(KP,I)
+               UMI(KP,2)=UMI(KP,2)+UN(NFU,2)*DR(KP,I)
+               UIX(KP,I)=UN(NFU,1)
+               UIY(KP,I)=UN(NFU,2)
+               GIX(KP,I)=GN(NF,1)
+               GIY(KP,I)=GN(NF,2)
+               AK(KP,I)=TK(NF)
+               AE(KP,I)=TE(NF)
+               GRADGX(KP,1)=GRADGX(KP,1)+HR(K,I,1)*GIX(KP,I)
+               GRADGX(KP,2)=GRADGX(KP,2)+HR(K,I,2)*GIX(KP,I)
+               GRADGY(KP,1)=GRADGY(KP,1)+HR(K,I,1)*GIY(KP,I)
+               GRADGY(KP,2)=GRADGY(KP,2)+HR(K,I,2)*GIY(KP,I)
+               AKM(KP)=AKM(KP)+TK(NF)*DR(KP,I)
+               AEM(KP)=AEM(KP)+TE(NF)*DR(KP,I)
+               GRADK(KP,1)=GRADK(KP,1)+HR(K,I,1)*AK(KP,I)
+               GRADK(KP,2)=GRADK(KP,2)+HR(K,I,2)*AK(KP,I)
+               GRADE(KP,1)=GRADE(KP,1)+HR(K,I,1)*AE(KP,I)
+               GRADE(KP,2)=GRADE(KP,2)+HR(K,I,2)*AE(KP,I)
+C *** CALCUL DU TERME DE PRODUCTION ****************************
+               DUDX(KP) = DUDX(KP)+HR(K,I,1)*UN(NFU,1)
+               DUDY(KP) = DUDY(KP)+HR(K,I,2)*UN(NFU,1)
+               DVDX(KP) = DVDX(KP)+HR(K,I,1)*UN(NFU,2)
+               DVDY(KP) = DVDY(KP)+HR(K,I,2)*UN(NFU,2)
+ 6006       CONTINUE
+ 7006    CONTINUE
+
+C     WRITE(IOIMP,*)'Initialisation SAF1,SAF2,SBF '
+C
+C Initialisation des variables d'accumulation SAF1,SAF2,SBF
+C
+         IF(IKOMP.EQ.0)THEN
+
+            DO 70060 K=KDEB,KFIN
+               KP=K-KDEB+1
+               ARO(KP)=1.D0
+70060       CONTINUE
+
+            IF(IKAS.EQ.2)THEN
+               DO 70061 I=1,NP
+                  DO 60061 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     SAF1(KP,I)=0.D0
+                     SAF2(KP,I)=0.D0
+                     SAFK(KP,I)=0.D0
+                     SAFE(KP,I)=0.D0
+60061             CONTINUE
+70061          CONTINUE
+            ELSEIF(IKAS.EQ.3)THEN
+               DO 70021 K=KDEB,KFIN
+                  KP=K-KDEB+1
+                  NK=K+K0
+                  NKG=1+(1-IKG)*(NK-1)
+                  RGX(KP)=RGE(NKG,1)
+                  RGY(KP)=RGE(NKG,2)
+70021          CONTINUE
+               DO 70062 I=1,NP
+                  DO 60062 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     SAF1(KP,I)=(-RGX(KP))*DR(KP,I)
+                     SAF2(KP,I)=(-RGY(KP))*DR(KP,I)
+                     SAFK(KP,I)=0.D0
+                     SAFE(KP,I)=0.D0
+                     NKG=1+(1-IKG)*(NK-1)
+                     DTDX(KP)=DTDX(KP)+HR(K,I,1)*RGE(NKG,1)
+                     DTDY(KP)=DTDY(KP)+HR(K,I,2)*RGE(NKG,2)
+60062             CONTINUE
+70062          CONTINUE
+            ELSEIF(IKAS.EQ.5)THEN
+               DO 70022 K=KDEB,KFIN
+                  KP=K-KDEB+1
+                  NK=K+K0
+                  NKG=1+(1-IKG)*(NK-1)
+                  RGX(KP)=RGE(NKG,1)
+                  RGY(KP)=RGE(NKG,2)
+70022          CONTINUE
+               DO 70063 I=1,NP
+                  DO 60063 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     NF=1+(1-IKT)*(IPADS(LE(I,K))-1)
+                     NFR=1+(1-IKREF)*(IPADS(LE(I,K))-1)
+                     SAF1(KP,I)=(-RGX(KP)*(TREF(NFR)-TN(NF)))*DR(KP,I)
+                     SAF2(KP,I)=(-RGY(KP)*(TREF(NFR)-TN(NF)))*DR(KP,I)
+                     SAFK(KP,I)=0.D0
+                     SAFE(KP,I)=0.D0
+                     DTDX(KP)=DTDX(KP)+HR(K,I,1)*TN(NF)
+                     DTDY(KP)=DTDY(KP)+HR(K,I,2)*TN(NF)
+60063             CONTINUE
+70063          CONTINUE
+            ENDIF
+
+         ELSEIF(IKOMP.EQ.1)THEN
+
+            DO 70020 K=KDEB,KFIN
+               KP=K-KDEB+1
+               NK=K+K0
+               NKR=1+(1-IKR)*(NK-1)
+               ARO(KP)=RO(NKR)
+70020       CONTINUE
+
+            IF(IKAS.EQ.4)THEN
+               DO 70064 I=1,NP
+                  DO 60064 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     SAF1(KP,I)=0.D0
+                     SAF2(KP,I)=0.D0
+                     SAFK(KP,I)=0.D0
+                     SAFE(KP,I)=0.D0
+60064             CONTINUE
+70064          CONTINUE
+            ELSEIF(IKAS.EQ.5)THEN
+               DO 70024 K=KDEB,KFIN
+                  KP=K-KDEB+1
+                  NK=K+K0
+                  NKG=1+(1-IKG)*(NK-1)
+                  RGX(KP)=RGE(NKG,1)
+                  RGY(KP)=RGE(NKG,2)
+70024          CONTINUE
+               DO 70065 I=1,NP
+                  DO 60065 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     SAF1(KP,I)=-RGX(KP)*DR(KP,I)
+                     SAF2(KP,I)=-RGY(KP)*DR(KP,I)
+                     SAFK(KP,I)=0.D0
+                     SAFE(KP,I)=0.D0
+60065             CONTINUE
+70065          CONTINUE
+            ENDIF
+         ENDIF
+
+         DO 7007 K=KDEB,KFIN
+            KP=K-KDEB+1
+            NK=K+K0
+            AKM(KP)=ABS(AKM(KP))/AIRE(KP)+zxzini
+            AEM(KP)=ABS(AEM(KP))/AIRE(KP)+zxzini
+            UMI(KP,1)=UMI(KP,1)/AIRE(KP)
+            UMI(KP,2)=UMI(KP,2)/AIRE(KP)
+            UM(KP)=UMI(KP,1)*UMI(KP,1)+UMI(KP,2)*UMI(KP,2)
+            UM(KP)=SQRT(UM(KP))
+            AX=GRADGX(KP,1)*GRADGX(KP,1)+GRADGX(KP,2)*GRADGX(KP,2)
+            AX=SQRT(AX)+zxzini
+            GRADGX(KP,1)=GRADGX(KP,1)/AX
+            GRADGX(KP,2)=GRADGX(KP,2)/AX
+            AY=GRADGY(KP,1)*GRADGY(KP,1)+GRADGY(KP,2)*GRADGY(KP,2)
+            AY=SQRT(AY)+zxzini
+            GRADGY(KP,1)=GRADGY(KP,1)/AY
+            GRADGY(KP,2)=GRADGY(KP,2)/AY
+            UPGX(KP)=GRADGX(KP,1)*UMI(KP,1)+GRADGX(KP,2)*UMI(KP,2)
+            UPIGX(KP,1)=UPGX(KP)*GRADGX(KP,1)
+            UPIGX(KP,2)=UPGX(KP)*GRADGX(KP,2)
+            UPGY(KP)=GRADGY(KP,1)*UMI(KP,1)+GRADGY(KP,2)*UMI(KP,2)
+            UPIGY(KP,1)=UPGY(KP)*GRADGY(KP,1)
+            UPIGY(KP,2)=UPGY(KP)*GRADGY(KP,2)
+
+            AX=GRADK(KP,1)*GRADK(KP,1)+GRADK(KP,2)*GRADK(KP,2)
+            AX=SQRT(AX)+zxzini
+            GRADK(KP,1)=GRADK(KP,1)/AX
+            GRADK(KP,2)=GRADK(KP,2)/AX
+            UPK(KP)=GRADK(KP,1)*UMI(KP,1)+GRADK(KP,2)*UMI(KP,2)
+            UPIK(KP,1)=UPK(KP)*GRADK(KP,1)
+            UPIK(KP,2)=UPK(KP)*GRADK(KP,2)
+
+            AX=GRADE(KP,1)*GRADE(KP,1)+GRADE(KP,2)*GRADE(KP,2)
+            AX=SQRT(AX)+zxzini
+            GRADE(KP,1)=GRADE(KP,1)/AX
+            GRADE(KP,2)=GRADE(KP,2)/AX
+            UPE(KP)=GRADE(KP,1)*UMI(KP,1)+GRADE(KP,2)*UMI(KP,2)
+            UPIE(KP,1)=UPE(KP)*GRADE(KP,1)
+            UPIE(KP,2)=UPE(KP)*GRADE(KP,2)
+
+            ANUT(KP)=CNU*AKM(KP)*AKM(KP)/AEM(KP)
+            AMUT(NK)=ARO(KP)*ANUT(KP)
+            COEFT(KP)=COEF(KP)+AMUT(NK)
+            COEFK(KP)=COEF(KP)+ANUT(KP)/SGK
+            COEFE(KP)=COEF(KP)+ANUT(KP)/SGE
+C --- 2. CALCUL DU TERME DE PRODUCTION PROPREMENT DIT ----------
+            PTEMP=( (DUDY(KP)+DVDX(KP))**2
+     $            + 2.D0*(DUDX(KP)**2+DVDY(KP)**2) )
+            P(KP)=PTEMP
+ 7007    CONTINUE
+C------------ANCIENNE VERSION--------------------
+C      IF(IAXI.NE.0) THEN
+C        DO 70012 K=KDEB,KFIN
+C        KP=K+1-KDEB
+C        P(KP)=P(KP)+2.D0*(UMI(KP,1)*UMI(KP,1))/(RPG(K)*RPG(K))
+C70012   CONTINUE
+C      END IF
+C
+C      IF(IKAS.EQ.5.AND.IKOMP.EQ.0)THEN
+C        IF(IMODEL.EQ.1)THEN
+C        DO 70113 K=KDEB,KFIN
+C        KP=K+1-KDEB
+C        PG(KP)=(RGX(KP)*DTDX(KP)+RGY(KP)*DTDY(KP))/SGT
+C        IF(PG(KP).GT.0.D0)C1G(KP)=C1
+C70113   CONTINUE
+C        ELSEIF(IMODEL.EQ.2)THEN
+C        DO 70213 K=KDEB,KFIN
+C        KP=K+1-KDEB
+C        PG(KP)=(RGX(KP)*DTDX(KP)+RGY(KP)*DTDY(KP))/SGT
+C          RF    =-PG(KP)/(P(KP)+PG(KP)+zxzini)
+C          IF(PG(KP).GT.0.D0)RF=0.D0
+C          C1G(KP)=C1*(1.D0+C3*RF)
+C          C1P(KP)=C1*(1.D0+C3*RF)
+C70213   CONTINUE
+C        ENDIF
+C      ELSEIF(IKAS.EQ.2.AND.IKOMP.EQ.0)THEN
+C        IF(IMODEL.EQ.1)THEN
+C        DO 70114 K=KDEB,KFIN
+C        KP=K+1-KDEB
+C        PG(KP)=(DTDX(KP)+DTDY(KP))/SGT
+C        IF(PG(KP).GT.0.D0)C1G(KP)=C1
+C70114   CONTINUE
+C        ELSEIF(IMODEL.EQ.2)THEN
+C        DO 70214 K=KDEB,KFIN
+C        KP=K+1-KDEB
+C        PG(KP)=(DTDX(KP)+DTDY(KP))/SGT
+C          RF    =-PG(KP)/(P(KP)+PG(KP)+zxzini)
+C          IF(PG(KP).GT.0.D0)RF=0.D0
+C          C1G(KP)=C1*(1.D0+C3*RF    )
+C          C1P(KP)=C1*(1.D0+C3*RF    )
+C70214   CONTINUE
+C        END IF
+C      END IF
+C-------------VERSION POUR RNG---------------
+         IF(IKAS.EQ.5.AND.IKOMP.EQ.0)THEN
+            DO 70213 K=KDEB,KFIN
+               KP=K+1-KDEB
+               PG(KP)=(RGX(KP)*DTDX(KP)+RGY(KP)*DTDY(KP))/SGT
+               RF    =-PG(KP)/(P(KP)+PG(KP)+zxzini)
+               IF(PG(KP).GT.0.D0)RF=0.D0
+               C1G(KP)=C1*(1.D0+C3*RF)
+               C1P(KP)=C1*(1.D0+C3*RF)
+70213       CONTINUE
+         ELSEIF(IKAS.EQ.2.AND.IKOMP.EQ.0)THEN
+            DO 70214 K=KDEB,KFIN
+               KP=K+1-KDEB
+               PG(KP)=(DTDX(KP)+DTDY(KP))/SGT
+               RF    =-PG(KP)/(P(KP)+PG(KP)+zxzini)
+               IF(PG(KP).GT.0.D0)RF=0.D0
+               C1G(KP)=C1*(1.D0+C3*RF    )
+               C1P(KP)=C1*(1.D0+C3*RF    )
+70214       CONTINUE
+         END IF
+
+         IF(IMODEL.EQ.2) THEN
+            ETA0=4.377D0
+            BETA0=0.012D0
+            ETA=(P(KP)**0.5D0)*AKM(KP)/AEM(KP)
+            RETA= ETA*(1.D0-(ETA/ETA0))/(1.D0+BETA0*(ETA**3.D0))
+            C1P(KP)=C1P(KP)-RETA
+         END IF
+C --------------------------------------------------------------
+C *** FIN DU CALCUL DU TERME DE PRODUCTION *********************
+
+         DO 70074 K=KDEB,KFIN
+            KP=K-KDEB+1
+            BMX=UMI(KP,1)/AL(KP)
+            BMY=UMI(KP,2)/AH(KP)
+            BM(KP)=BMX*BMX+BMY*BMY
+            BM(KP)=SQRT(BM(KP))+zxzini
+            BPGXX=UPIGX(KP,1)/AL(KP)
+            BPGXY=UPIGX(KP,2)/AH(KP)
+            BPGX(KP)=BPGXX*BPGXX+BPGXY*BPGXY
+            BPGX(KP)=SQRT(BPGX(KP))+zxzini
+            BPGYX=UPIGY(KP,1)/AL(KP)
+            BPGYY=UPIGY(KP,2)/AH(KP)
+            BPGY(KP)=BPGYX*BPGYX+BPGYY*BPGYY
+            BPGY(KP)=SQRT(BPGY(KP))+zxzini
+            BPKX=UPIK(KP,1)/AL(KP)
+            BPKY=UPIK(KP,2)/AH(KP)
+            BPK(KP)=BPKX*BPKX+BPKY*BPKY
+            BPK(KP)=SQRT(BPK(KP))+zxzini
+            BPEX=UPIE(KP,1)/AL(KP)
+            BPEY=UPIE(KP,2)/AH(KP)
+            BPE(KP)=BPEX*BPEX+BPEY*BPEY
+            BPE(KP)=SQRT(BPE(KP))+zxzini
+70074    CONTINUE
+C
+C     AVANT DECENTREMENT
+C
+C ALFA,AKSI,CCU utilisées seulement dans la boucle 7008
+         IF(IDCEN.EQ.1)THEN
+            DO 70081 K=KDEB,KFIN
+               KP=K-KDEB+1
+               GXCXT(KP)=0.D0
+               GXCYT(KP)=0.D0
+               GXCXY(KP)=0.D0
+               GYCXT(KP)=0.D0
+               GYCYT(KP)=0.D0
+               GYCXY(KP)=0.D0
+               GKCXT(KP)=0.D0
+               GKCYT(KP)=0.D0
+               GKCXY(KP)=0.D0
+               GECXT(KP)=0.D0
+               GECYT(KP)=0.D0
+               GECXY(KP)=0.D0
+70081       CONTINUE
+
+         ELSEIF(IDCEN.EQ.2)THEN
+            DO 7008 K=KDEB,KFIN
+               KP=K-KDEB+1
+               HMK=2.D0*UM(KP)/BM(KP)
+               XMB(KP)=HMK
+               ALFA=UM(KP)*HMK/COEFT(KP)/2.D0
+               AKSI=ALFA/3.D0
+               IF(ALFA.GT.3.D0)AKSI=1.D0
+               CCT=AKSI/BM(KP)
+
+               HPK=2.D0*UPGX(KP)/BPGX(KP)
+               ALFA=UPGX(KP)*HPK/COEFT(KP)/2.D0
+               AKSI=ALFA/3.D0
+               IF(ALFA.GT.3.D0)AKSI=1.D0
+               CCP=AKSI/BPGX(KP)
+               CPT=CCP-CCT
+               CC2X=0.D0
+               IF(CPT.GE.0.D0)CC2X=CPT
+
+               HPK=2.D0*UPGY(KP)/BPGY(KP)
+               ALFA=UPGY(KP)*HPK/COEFT(KP)/2.D0
+               AKSI=ALFA/3.D0
+               IF(ALFA.GT.3.D0)AKSI=1.D0
+               CCP=AKSI/BPGY(KP)
+               CPT=CCP-CCT
+               CC2Y=0.D0
+               IF(CPT.GE.0.D0)CC2Y=CPT
+
+               HPK=2.D0*UPK(KP)/BPK(KP)
+               ALFA=UPK(KP)*HPK/COEFK(KP)/2.D0
+               AKSI=ALFA/3.D0
+               IF(ALFA.GT.3.D0)AKSI=1.D0
+               CCP=AKSI/BPK(KP)
+               CPT=CCP-CCT
+               CC2K=0.D0
+               IF(CPT.GE.0.D0)CC2K=CPT
+
+               HPK=2.D0*UPE(KP)/BPE(KP)
+               ALFA=UPE(KP)*HPK/COEFE(KP)/2.D0
+               AKSI=ALFA/3.D0
+               IF(ALFA.GT.3.D0)AKSI=1.D0
+               CCP=AKSI/BPE(KP)
+               CPT=CCP-CCT
+               CC2E=0.D0
+               IF(CPT.GE.0.D0)CC2E=CPT
+
+               GXCXT(KP)=(UMI(KP,1)*UMI(KP,1)*CCT
+     $                   +UPIGX(KP,1)*UPIGX(KP,1)*CC2X)
+               GXCYT(KP)=(UMI(KP,2)*UMI(KP,2)*CCT
+     $                   +UPIGX(KP,2)*UPIGX(KP,2)*CC2X)
+               GXCXY(KP)=(UMI(KP,1)*UMI(KP,2)*CCT
+     $                   +UPIGX(KP,1)*UPIGX(KP,2)*CC2X)
+
+               GYCXT(KP)=(UMI(KP,1)*UMI(KP,1)*CCT
+     $                   +UPIGY(KP,1)*UPIGY(KP,1)*CC2Y)
+               GYCYT(KP)=(UMI(KP,2)*UMI(KP,2)*CCT
+     $                   +UPIGY(KP,2)*UPIGY(KP,2)*CC2Y)
+               GYCXY(KP)=(UMI(KP,1)*UMI(KP,2)*CCT
+     $                   +UPIGY(KP,1)*UPIGY(KP,2)*CC2Y)
+
+               GKCXT(KP)=(UMI(KP,1)*UMI(KP,1)*CCT
+     $                   +UPIK(KP,1)*UPIK(KP,1)*CC2K)
+               GKCYT(KP)=(UMI(KP,2)*UMI(KP,2)*CCT
+     $                   +UPIK(KP,2)*UPIK(KP,2)*CC2K)
+               GKCXY(KP)=(UMI(KP,1)*UMI(KP,2)*CCT
+     $                   +UPIK(KP,1)*UPIK(KP,2)*CC2K)
+
+               GECXT(KP)=(UMI(KP,1)*UMI(KP,1)*CCT
+     $                   +UPIE(KP,1)*UPIE(KP,1)*CC2E)
+               GECYT(KP)=(UMI(KP,2)*UMI(KP,2)*CCT
+     $                   +UPIE(KP,2)*UPIE(KP,2)*CC2E)
+               GECXY(KP)=(UMI(KP,1)*UMI(KP,2)*CCT
+     $                   +UPIE(KP,1)*UPIE(KP,2)*CC2E)
+
+ 7008       CONTINUE
+
+         ELSEIF(IDCEN.EQ.3)THEN
+            DO 7018 K=KDEB,KFIN
+               KP=K-KDEB+1
+               HMK=2.D0*UM(KP)/BM(KP)
+               XMB(KP)=HMK
+               ALFA=UM(KP)*HMK/COEFT(KP)/2.D0
+               AKSI=ALFA/3.D0
+               IF(ALFA.GT.3.D0)AKSI=1.D0
+               CCT=AKSI/BM(KP)
+
+               GXCXT(KP)=UMI(KP,1)*UMI(KP,1)*CCT
+               GXCYT(KP)=UMI(KP,2)*UMI(KP,2)*CCT
+               GXCXY(KP)=UMI(KP,1)*UMI(KP,2)*CCT
+
+               GYCXT(KP)=UMI(KP,1)*UMI(KP,1)*CCT
+               GYCYT(KP)=UMI(KP,2)*UMI(KP,2)*CCT
+               GYCXY(KP)=UMI(KP,1)*UMI(KP,2)*CCT
+
+               GKCXT(KP)=UMI(KP,1)*UMI(KP,1)*CCT
+               GKCYT(KP)=UMI(KP,2)*UMI(KP,2)*CCT
+               GKCXY(KP)=UMI(KP,1)*UMI(KP,2)*CCT
+
+               GECXT(KP)=UMI(KP,1)*UMI(KP,1)*CCT
+               GECYT(KP)=UMI(KP,2)*UMI(KP,2)*CCT
+               GECXY(KP)=UMI(KP,1)*UMI(KP,2)*CCT
+
+ 7018       CONTINUE
+
+         ELSEIF(IDCEN.EQ.4)THEN
+            DT19=DTM1*0.5D0
+            DO 7009 K=KDEB,KFIN
+               KP=K-KDEB+1
+               XMB(KP)=(AL(KP)+AH(KP))/2.D0
+               GXCXT(KP)=UMI(KP,1)*UMI(KP,1)*DT19
+               GXCYT(KP)=UMI(KP,2)*UMI(KP,2)*DT19
+               GXCXY(KP)=UMI(KP,1)*UMI(KP,2)*DT19
+               GYCXT(KP)=UMI(KP,1)*UMI(KP,1)*DT19
+               GYCYT(KP)=UMI(KP,2)*UMI(KP,2)*DT19
+               GYCXY(KP)=UMI(KP,1)*UMI(KP,2)*DT19
+               GKCXT(KP)=UMI(KP,1)*UMI(KP,1)*DT19
+               GKCYT(KP)=UMI(KP,2)*UMI(KP,2)*DT19
+               GKCXY(KP)=UMI(KP,1)*UMI(KP,2)*DT19
+               GECXT(KP)=UMI(KP,1)*UMI(KP,1)*DT19
+               GECYT(KP)=UMI(KP,2)*UMI(KP,2)*DT19
+               GECXY(KP)=UMI(KP,1)*UMI(KP,2)*DT19
+ 7009       CONTINUE
+
+         ENDIF
+
+C     WRITE(IOIMP,*)' Avt Calcul DT'
+C
+C     AVANT CALCUL DT
+C
+         DO 7010 K=KDEB,KFIN
+            KP=K-KDEB+1
+            DT0=DT
+            DT1X=2.D0/
+     &           (UMI(KP,1)*UMI(KP,1)/(GXCXT(KP)+COEFT(KP))
+     &           +UMI(KP,2)*UMI(KP,2)/(GXCYT(KP)+COEFT(KP)))
+
+            DT1Y=2.D0/
+     &           (UMI(KP,1)*UMI(KP,1)/(GYCXT(KP)+COEFT(KP))
+     &           +UMI(KP,2)*UMI(KP,2)/(GYCYT(KP)+COEFT(KP)))
+            DT2X=0.5D0/
+     &           ((GXCXT(KP)+COEFT(KP))*AL2(KP)
+     &           +(GXCYT(KP)+COEFT(KP))*AH2(KP))
+            DT2Y=0.5D0/
+     &           ((GYCXT(KP)+COEFT(KP))*AL2(KP)
+     &           +(GYCYT(KP)+COEFT(KP))*AH2(KP))
+            IF(DT1X.LT.DT)DT=DT1X
+            IF(DT1Y.LT.DT)DT=DT1Y
+            IF(DT2X.LT.DT)DT=DT2X
+            IF(DT2Y.LT.DT)DT=DT2Y
+C     IF(DT3.LT.DT)DT=DT3
+            IF(DT.NE.DT0) THEN
+               DTT1=MIN(DT1X,DT1Y)
+               DTT2=MIN(DT2X,DT2Y)
+C        DTT3=DT3
+               DIAEL=XMB(KP)
+               NUEL=K
+            END IF
+ 7010    CONTINUE
+
+C     WRITE(IOIMP,*)' le coeur du calcul '
+C Le coeur du calcul ...
+
+         IF(IKOMP.EQ.0)THEN
+
+            DO 7014 I=1,NP
+               DO 70141 J=1,NP
+                  DO 70142 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     ZVGGX=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*GXCXT(KP)
+     &               +    HR(K,I,1)*HR(K,J,2)*GXCXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,1)*GXCXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*GXCYT(KP)
+     &               +    (GXCXT(KP)*AL2(KP)+GXCYT(KP)*AH2(KP))
+     $                    /12.D0*VGGT(J,I)*QUA4  )
+
+                     ZVGGY=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*GYCXT(KP)
+     &               +    HR(K,I,1)*HR(K,J,2)*GYCXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,1)*GYCXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*GYCYT(KP)
+     &               +    (GYCXT(KP)*AL2(KP)+GYCYT(KP)*AH2(KP))/12
+     $                    .D0*VGGT(J,I)*QUA4  )
+
+                     ZVGK =AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*GKCXT(KP)
+     &               +    HR(K,I,1)*HR(K,J,2)*GKCXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,1)*GKCXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*GKCYT(KP)
+     &               +    (GKCXT(KP)*AL2(KP)+GKCYT(KP)*AH2(KP))/12
+     $                    .D0*VGGT(J,I)*QUA4  )
+
+                     ZVGE =AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*GECXT(KP)
+     &               +    HR(K,I,1)*HR(K,J,2)*GECXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,1)*GECXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*GECYT(KP)
+     &               +    (GECXT(KP)*AL2(KP)+GECYT(KP)*AH2(KP))/12
+     $                    .D0*VGGT(J,I)*QUA4  )
+
+                     ZVGD=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*COEFT(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*COEFT(KP)
+     &               +    (COEFT(KP)*AL2(KP)+COEFT(KP)*AH2(KP))/12
+     $                    .D0*VGGT(J,I)*QUA4  )
+
+                     ZVGDK=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*COEFK(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*COEFK(KP)
+     &               +    (COEFK(KP)*AL2(KP)+COEFK(KP)*AH2(KP))/12
+     $                    .D0*VGGT(J,I)*QUA4  )
+
+                     ZVGDE=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*COEFE(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*COEFE(KP)
+     &               +    (COEFE(KP)*AL2(KP)+COEFE(KP)*AH2(KP))/12
+     $                    .D0*VGGT(J,I)*QUA4  )
+
+Cnon  V2=(UIX(KP,I)*HR(K,J,1)+UIY(KP,I)*HR(K,J,2))*DR(KP,I)
+
+                     V2=UMI(KP,1)*DR(KP,I)*HR(K,J,1)+UMI(KP,2)*DR(KP,I)
+     $                    *HR(K,J,2)
+
+                     SAF1(KP,I)=SAF1(KP,I)+(V2+ZVGGX)*GIX(KP,J)+ZVGD
+     $                    *UIX(KP,J)
+                     SAF2(KP,I)=SAF2(KP,I)+(V2+ZVGGY)*GIY(KP,J)+ZVGD
+     $                    *UIY(KP,J)
+
+                     SAFK(KP,I)=SAFK(KP,I)+(V2+ZVGK)*AK(KP,J)+ZVGDK
+     $                    *AK(KP,J)
+                     SAFE(KP,I)=SAFE(KP,I)+(V2+ZVGE)*AE(KP,J)+ZVGDE
+     $                    *AE(KP,J)
+
+70142             CONTINUE
+70141          CONTINUE
+ 7014       CONTINUE
+
+         ELSEIF(IKOMP.EQ.1)THEN
+
+            DO 7015 I=1,NP
+               DO 70151 J=1,NP
+                  DO 70152 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     ZVGGX=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*GXCXT(KP)
+     &               +    HR(K,I,1)*HR(K,J,2)*GXCXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,1)*GXCXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*GXCYT(KP)
+     &               +    (GXCXT(KP)*AL2(KP)+GXCYT(KP)*AH2(KP))/12
+     $                    .D0*VGGT(J,I)*QUA4  )
+
+                     ZVGGY=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*GYCXT(KP)
+     &               +    HR(K,I,1)*HR(K,J,2)*GYCXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,1)*GYCXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*GYCYT(KP)
+     &               +    (GYCXT(KP)*AL2(KP)+GYCYT(KP)*AH2(KP))/12
+     $                    .D0*VGGT(J,I)*QUA4  )
+
+                     ZVGK =AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*GKCXT(KP)
+     &               +    HR(K,I,1)*HR(K,J,2)*GKCXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,1)*GKCXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*GKCYT(KP)
+     &               +    (GKCXT(KP)*AL2(KP)+GKCYT(KP)*AH2(KP))/12
+     $                    .D0*VGGT(J,I)*QUA4  )
+
+                     ZVGE =AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*GECXT(KP)
+     &               +    HR(K,I,1)*HR(K,J,2)*GECXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,1)*GECXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*GECYT(KP)
+     &               +    (GECXT(KP)*AL2(KP)+GECYT(KP)*AH2(KP))/12
+     $                    .D0*VGGT(J,I)*QUA4  )
+
+                     ZVGD=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*COEFT(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*COEFT(KP)
+     &               +    (COEFT(KP)*AL2(KP)+COEFT(KP)*AH2(KP))/12
+     $                    .D0*VGGT(J,I)*QUA4  )
+
+                     ZVGDK=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*COEFK(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*COEFK(KP)
+     &               +    (COEFK(KP)*AL2(KP)+COEFK(KP)*AH2(KP))/12
+     $                    .D0*VGGT(J,I)*QUA4  )
+
+                     ZVGDE=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*COEFE(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*COEFE(KP)
+     &               +    (COEFE(KP)*AL2(KP)+COEFE(KP)*AH2(KP))/12
+     $                    .D0*VGGT(J,I)*QUA4  )
+
+                     COEFT3=COEFT(KP)/3.D0
+                     ZVGUU=AIRE(KP)*( HR(K,I,1)*HR(K,J,1)
+     &                 +    AL2(KP)/12.D0*VGGT(J,I)*QUA4  )*COEFT3
+     $                    *UIX(KP,J)
+                     ZVGUV=AIRE(KP)*( HR(K,I,1)*HR(K,J,2))*COEFT3*UIY(KP
+     $                    ,J)
+                     ZVGVU=AIRE(KP)*( HR(K,I,2)*HR(K,J,1))*COEFT3*UIX(KP
+     $                    ,J)
+                     ZVGVV=AIRE(KP)*( HR(K,I,2)*HR(K,J,2)
+     &                +    AH2(KP)/12.D0*VGGT(J,I)*QUA4  )*COEFT3
+     $                    *UIY(KP,J)
+
+                     V2=(UIX(KP,J)*HR(K,J,1)+UIY(KP,J)*HR(K,J,2))*DR(KP
+     $                    ,I)
+
+                     SAF1(KP,I)=SAF1(KP,I)+(V2+ZVGGX)*GIX(KP,J)+ZVGD
+     $                    *UIX(KP,J)+ ZVGUU + ZVGUV
+                     SAF2(KP,I)=SAF2(KP,I)+(V2+ZVGGY)*GIY(KP,J)+ZVGD
+     $                    *UIY(KP,J)+ ZVGVU + ZVGVV
+
+                     SAFK(KP,I)=SAFK(KP,I)+(V2+ZVGK)*AK(KP,J)+ZVGDK
+     $                    *AK(KP,J)
+                     SAFE(KP,I)=SAFE(KP,I)+(V2+ZVGE)*AE(KP,J)+ZVGDE
+     $                    *AE(KP,J)
+
+70152             CONTINUE
+70151          CONTINUE
+ 7015       CONTINUE
+
+         ENDIF
+
+         IF(IAXI.NE.0) THEN
+            DO 7016 I=1,NP
+               DO 70161 J=1,NP
+                  DO 70162 K=KDEB,KFIN
+                     KP=K-KDEB+1
+C     IP=LE(I,K)
+C     XG=XCOOR((IP-1)*(IDIM+1)    +1)+zxzini
+C        R2=1.D0/XG/XG*DR(KP,I)
+
+                     R2=1.D0/RPG(K)/RPG(K)*DR(KP,I)
+                     AX=(GXCXT(KP)+GXCYT(KP))*0.5D0
+                     SAF1(KP,I)=SAF1(KP,I)+R2*(COEFT(KP)*UIX(KP,J)+AX
+     $                    *GIX(KP,J))
+
+70162             CONTINUE
+70161          CONTINUE
+ 7016       CONTINUE
+
+            IF(IKOMP.EQ.1)THEN
+
+               DO 7118 I=1,NP
+                  DO 71181 K=KDEB,KFIN
+                     KP=K-KDEB+1
+
+                     R1=1.D0/RPG(K)*DR(KP,I)
+                     SAF1(KP,I)=SAF1(KP,I)+R1*UMI(KP,1)*GIX(KP,I)
+                     SAF2(KP,I)=SAF2(KP,I)+R1*UMI(KP,1)*GIY(KP,I)
+
+71181             CONTINUE
+ 7118          CONTINUE
+
+            ENDIF
+
+         ENDIF
+C
+C --------------------------------------------------------------
+C
+C
+         DO 7017 I=1,NP
+            DO 70171 K=KDEB,KFIN
+               KP=K-KDEB+1
+               TSK       =(ANUT(KP)*(P(KP)+PG(KP))-AEM(KP))*DR(KP,I)
+               SAFK(KP,I)=SAFK(KP,I)-TSK
+
+               TSE       =(CNU*(C1P(KP)*P(KP)+C1G(KP)*PG(KP))*AKM(KP))
+     $              *DR(KP,I)
+               SAFE(KP,I)=SAFE(KP,I)-TSE
+
+               TSE1      =C2*AEM(KP)/AKM(KP)*DR(KP,I)
+               BE1(KP,I) =TSE1
+70171       CONTINUE
+ 7017    CONTINUE
+
+C
+C
+C --- ECRITURE DANS LES TABLEAUX F(1,*),F(2,*),G,GK,GE,GE1 (SCALAIRE)
+         DO 70019 I=1,NP
+            DO 60019 K=KDEB,KFIN
+               KP=K+1-KDEB
+               NF=IPADS(LE(I,K))
+               F(NF,1)=F(NF,1)-SAF1(KP,I)
+               F(NF,2)=F(NF,2)-SAF2(KP,I)
+               GK(NF) =GK(NF) -SAFK(KP,I)
+               GE1(NF)=GE1(NF)+BE1(KP,I)
+               GE(NF) =GE (NF)-SAFE(KP,I)
+60019       CONTINUE
+70019    CONTINUE
+70001 CONTINUE
+C
+C *** FIN DE LA BOUCLE SUR LES PAQUETS D'ELEMENTS ***
+C
+C     WRITE(IOIMP,*)' FIN YCVIT GK='
+C     WRITE(IOIMP,1002)(GK(i),i=1,nptd)
+
+      IPAS=1
+      RETURN
+
+C                           ********
+C                           *  3D  *
+C                           ********
+
+ 10   CONTINUE
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+C                           DIFFERENCES HEXAHEDRES / AUTRES ELEMENTS
+      CUB8=0.D0
+      IF(NP.EQ.8)CUB8=1.D0
+
+C
+C K  EST LE NUMERO DE L'ELEMENT
+C KP PERMET DE SE SITUER A L'INTERIEUR DES TABLEAUX DE LRV ELEMENTS
+C --- CALCUL DU NOMBRE DE PAQUETS DE LRV ELEMENTS ---
+      NNN=MOD(NEL,LRV)
+      IF(NNN.EQ.0) NPACK=NEL/LRV
+      IF(NNN.NE.0) NPACK=1+(NEL-NNN)/LRV
+      KPACKD=1
+      KPACKF=NPACK
+C
+C*** BOUCLE SUR LES PAQUETS D'ELEMENTS ***
+C
+      DO 80001 KPACK=KPACKD,KPACKF
+C
+C --- POUR CHAQUE PAQUET DE LRV ELEMENTS
+         KDEB=1+(KPACK-1)*LRV
+         KFIN=MIN(NEL,KDEB+LRV-1)
+C      WRITE(IOIMP,*)' KPACK=',KPACK
+C
+         DO 80002 K=KDEB,KFIN
+            KP=K-KDEB+1
+            NK=K+K0
+            K1=1+(1-IK1)*(NK-1)
+            AIRE(KP)=VOLU(NK)
+            COEF(KP)=COEFF(K1)
+            AL(KP)=COTE(NK,1)
+            AH(KP)=COTE(NK,2)
+            AP(KP)=COTE(NK,3)
+            AL2(KP)=1.D0/AL(KP)/AL(KP)
+            AH2(KP)=1.D0/AH(KP)/AH(KP)
+            AP2(KP)=1.D0/AP(KP)/AP(KP)
+            CFM(KP)=AL(KP)*AH(KP)/AP(KP)+AL(KP)*AP(KP)/AH(KP)+
+     &              AP(KP)*AH(KP)/AL(KP)
+C     CF1(KP)=AL(KP)*AH(KP)/AP(KP)
+C     CF2(KP)=AL(KP)*AP(KP)/AH(KP)
+C     CF3(KP)=AP(KP)*AH(KP)/AL(KP)
+            XMH (KP)=(AL(KP)+AH(KP)+AP(KP))/3.D0
+            XMB (KP)=XMH (KP)
+80002    CONTINUE
+C      WRITE(IOIMP,*)' Apr bcl 80002,,,,,,,,,,,,,,,,,,,,,,,, '
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Initialisation des UMI,UMIT avant accumulation
+         DO 8005 K=KDEB,KFIN
+            KP=K-KDEB+1
+            UMI(KP,1)=zxzini
+            UMI(KP,2)=zxzini
+            UMI(KP,3)=zxzini
+            GRADGX(KP,1)=zxzini
+            GRADGX(KP,2)=zxzini
+            GRADGX(KP,3)=zxzini
+            GRADGY(KP,1)=zxzini
+            GRADGY(KP,2)=zxzini
+            GRADGY(KP,3)=zxzini
+            GRADGZ(KP,1)=zxzini
+            GRADGZ(KP,2)=zxzini
+            GRADGZ(KP,3)=zxzini
+            AKM(KP)=zxzini
+            AEM(KP)=zxzini
+            UPIK(KP,1)=zxzini
+            UPIK(KP,2)=zxzini
+            UPIK(KP,3)=zxzini
+            UPIE(KP,1)=zxzini
+            UPIE(KP,2)=zxzini
+            UPIE(KP,3)=zxzini
+            GRADK(KP,1)=zxzini
+            GRADK(KP,2)=zxzini
+            GRADK(KP,3)=zxzini
+            GRADE(KP,1)=zxzini
+            GRADE(KP,2)=zxzini
+            GRADE(KP,3)=zxzini
+            DUDX(KP)=0.D0
+            DUDY(KP)=0.D0
+            DUDZ(KP)=0.D0
+            DVDX(KP)=0.D0
+            DVDY(KP)=0.D0
+            DVDZ(KP)=0.D0
+            DWDX(KP)=0.D0
+            DWDY(KP)=0.D0
+            DWDZ(KP)=0.D0
+            DTDX(KP)=0.D0
+            DTDY(KP)=0.D0
+            DTDZ(KP)=0.D0
+            C1P(KP)=C1
+            C1G(KP)=0.D0
+            PG(KP)=0.D0
+ 8005    CONTINUE
+
+         DO 8006 I=1,NP
+            DO 5006 K=KDEB,KFIN
+               KP=K-KDEB+1
+               NF=IPADI(LE(I,K))
+               NFU=IPADU(LE(I,K))
+               DR(KP,I)=DRR(I,K)
+               UMI(KP,1)=UMI(KP,1)+UN(NFU,1)*DR(KP,I)
+               UMI(KP,2)=UMI(KP,2)+UN(NFU,2)*DR(KP,I)
+               UMI(KP,3)=UMI(KP,3)+UN(NFU,3)*DR(KP,I)
+               UIX(KP,I)=UN(NFU,1)
+               UIY(KP,I)=UN(NFU,2)
+               UIZ(KP,I)=UN(NFU,3)
+               GIX(KP,I)=GN(NF,1)
+               GIY(KP,I)=GN(NF,2)
+               GIZ(KP,I)=GN(NF,3)
+               AK(KP,I)=TK(NF)
+               AE(KP,I)=TE(NF)
+               GRADGX(KP,1)=GRADGX(KP,1)+HR(K,I,1)*GIX(KP,I)
+               GRADGX(KP,2)=GRADGX(KP,2)+HR(K,I,2)*GIX(KP,I)
+               GRADGX(KP,3)=GRADGX(KP,3)+HR(K,I,3)*GIX(KP,I)
+               GRADGY(KP,1)=GRADGY(KP,1)+HR(K,I,1)*GIY(KP,I)
+               GRADGY(KP,2)=GRADGY(KP,2)+HR(K,I,2)*GIY(KP,I)
+               GRADGY(KP,3)=GRADGY(KP,3)+HR(K,I,3)*GIY(KP,I)
+               GRADGZ(KP,1)=GRADGZ(KP,1)+HR(K,I,1)*GIZ(KP,I)
+               GRADGZ(KP,2)=GRADGZ(KP,2)+HR(K,I,2)*GIZ(KP,I)
+               GRADGZ(KP,3)=GRADGZ(KP,3)+HR(K,I,3)*GIZ(KP,I)
+               AKM(KP)=AKM(KP)+TK(NF)*DR(KP,I)
+               AEM(KP)=AEM(KP)+TE(NF)*DR(KP,I)
+               GRADK(KP,1)=GRADK(KP,1)+HR(K,I,1)*AK(KP,I)
+               GRADK(KP,2)=GRADK(KP,2)+HR(K,I,2)*AK(KP,I)
+               GRADK(KP,3)=GRADK(KP,3)+HR(K,I,3)*AK(KP,I)
+               GRADE(KP,1)=GRADE(KP,1)+HR(K,I,1)*AE(KP,I)
+               GRADE(KP,2)=GRADE(KP,2)+HR(K,I,2)*AE(KP,I)
+               GRADE(KP,3)=GRADE(KP,3)+HR(K,I,3)*AE(KP,I)
+C *** CALCUL DU TERME DE PRODUCTION ****************************
+               DUDX(KP) = DUDX(KP)+HR(K,I,1)*UN(NFU,1)
+               DUDY(KP) = DUDY(KP)+HR(K,I,2)*UN(NFU,1)
+               DUDZ(KP) = DUDZ(KP)+HR(K,I,3)*UN(NFU,1)
+               DVDX(KP) = DVDX(KP)+HR(K,I,1)*UN(NFU,2)
+               DVDY(KP) = DVDY(KP)+HR(K,I,2)*UN(NFU,2)
+               DVDZ(KP) = DVDZ(KP)+HR(K,I,3)*UN(NFU,2)
+               DWDX(KP) = DWDX(KP)+HR(K,I,1)*UN(NFU,3)
+               DWDY(KP) = DWDY(KP)+HR(K,I,2)*UN(NFU,3)
+               DWDZ(KP) = DWDZ(KP)+HR(K,I,3)*UN(NFU,3)
+ 5006       CONTINUE
+ 8006    CONTINUE
+
+C     WRITE(IOIMP,*)'Initialisation SAF1,SAF2,SBF '
+C
+C Initialisation des variables d'accumulation SAF1,SAF2,SBF
+C
+         IF(IKOMP.EQ.0)THEN
+
+            DO 80060 K=KDEB,KFIN
+               KP=K-KDEB+1
+               ARO(KP)=1.D0
+80060       CONTINUE
+
+            IF(IKAS.EQ.2)THEN
+               DO 80061 I=1,NP
+                  DO 50061 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     SAF1(KP,I)=0.D0
+                     SAF2(KP,I)=0.D0
+                     SAF3(KP,I)=0.D0
+                     SAFK(KP,I)=0.D0
+                     SAFE(KP,I)=0.D0
+50061             CONTINUE
+80061          CONTINUE
+            ELSEIF(IKAS.EQ.3)THEN
+               DO 80021 K=KDEB,KFIN
+                  KP=K-KDEB+1
+                  NK=K+K0
+                  NKG=1+(1-IKG)*(NK-1)
+                  RGX(KP)=RGE(NKG,1)
+                  RGY(KP)=RGE(NKG,2)
+                  RGZ(KP)=RGE(NKG,3)
+80021          CONTINUE
+               DO 80062 I=1,NP
+                  DO 50062 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     SAF1(KP,I)=(-RGX(KP))*DR(KP,I)
+                     SAF2(KP,I)=(-RGY(KP))*DR(KP,I)
+                     SAF3(KP,I)=(-RGZ(KP))*DR(KP,I)
+                     SAFK(KP,I)=0.D0
+                     SAFE(KP,I)=0.D0
+                     NKG=1+(1-IKG)*(NK-1)
+                     DTDX(KP)=DTDX(KP)+HR(K,I,1)*RGE(NKG,1)
+                     DTDY(KP)=DTDY(KP)+HR(K,I,2)*RGE(NKG,2)
+                     DTDZ(KP)=DTDZ(KP)+HR(K,I,3)*RGE(NKG,3)
+50062             CONTINUE
+80062          CONTINUE
+            ELSEIF(IKAS.EQ.5)THEN
+               DO 80022 K=KDEB,KFIN
+                  KP=K-KDEB+1
+                  NK=K+K0
+                  NKG=1+(1-IKG)*(NK-1)
+                  RGX(KP)=RGE(NKG,1)
+                  RGY(KP)=RGE(NKG,2)
+                  RGZ(KP)=RGE(NKG,3)
+80022          CONTINUE
+               DO 80063 I=1,NP
+                  DO 50063 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     NF=1+(1-IKT)*(IPADS(LE(I,K))-1)
+                     NFR=1+(1-IKREF)*(IPADS(LE(I,K))-1)
+                     SAF1(KP,I)=(-RGX(KP)*(TREF(NFR)-TN(NF)))*DR(KP,I)
+                     SAF2(KP,I)=(-RGY(KP)*(TREF(NFR)-TN(NF)))*DR(KP,I)
+                     SAF3(KP,I)=(-RGZ(KP)*(TREF(NFR)-TN(NF)))*DR(KP,I)
+                     SAFK(KP,I)=0.D0
+                     SAFE(KP,I)=0.D0
+                     DTDX(KP)=DTDX(KP)+HR(K,I,1)*TN(NF)
+                     DTDY(KP)=DTDY(KP)+HR(K,I,2)*TN(NF)
+                     DTDZ(KP)=DTDZ(KP)+HR(K,I,3)*TN(NF)
+50063             CONTINUE
+80063          CONTINUE
+            ENDIF
+
+         ELSEIF(IKOMP.EQ.1)THEN
+
+            DO 80020 K=KDEB,KFIN
+               KP=K-KDEB+1
+               NK=K+K0
+               NKR=1+(1-IKR)*(NK-1)
+               ARO(KP)=RO(NKR)
+80020       CONTINUE
+
+            IF(IKAS.EQ.4)THEN
+               DO 80064 I=1,NP
+                  DO 50064 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     SAF1(KP,I)=0.D0
+                     SAF2(KP,I)=0.D0
+                     SAF3(KP,I)=0.D0
+                     SAFK(KP,I)=0.D0
+                     SAFE(KP,I)=0.D0
+50064             CONTINUE
+80064          CONTINUE
+            ELSEIF(IKAS.EQ.5)THEN
+               DO 80024 K=KDEB,KFIN
+                  KP=K-KDEB+1
+                  NK=K+K0
+                  NKG=1+(1-IKG)*(NK-1)
+                  RGX(KP)=RGE(NKG,1)
+                  RGY(KP)=RGE(NKG,2)
+                  RGZ(KP)=RGE(NKG,3)
+80024          CONTINUE
+               DO 80065 I=1,NP
+                  DO 50065 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     SAF1(KP,I)=-RGX(KP)*DR(KP,I)
+                     SAF2(KP,I)=-RGY(KP)*DR(KP,I)
+                     SAF3(KP,I)=-RGZ(KP)*DR(KP,I)
+                     SAFK(KP,I)=0.D0
+                     SAFE(KP,I)=0.D0
+50065             CONTINUE
+80065          CONTINUE
+            ENDIF
+         ENDIF
+
+         DO 8007 K=KDEB,KFIN
+            KP=K-KDEB+1
+            NK=K+K0
+            AKM(KP)=ABS(AKM(KP))/AIRE(KP)+zxzini
+            AEM(KP)=ABS(AEM(KP))/AIRE(KP)+zxzini
+            UMI(KP,1)=UMI(KP,1)/AIRE(KP)
+            UMI(KP,2)=UMI(KP,2)/AIRE(KP)
+            UMI(KP,3)=UMI(KP,3)/AIRE(KP)
+            UM(KP)=UMI(KP,1)*UMI(KP,1)+UMI(KP,2)*UMI(KP,2)
+     &            +UMI(KP,3)*UMI(KP,3)
+            UM(KP)=SQRT(UM(KP))
+            AX=GRADGX(KP,1)*GRADGX(KP,1)+GRADGX(KP,2)*GRADGX(KP,2)
+     &        +GRADGX(KP,3)*GRADGX(KP,3)
+            AX=SQRT(AX)+zxzini
+            GRADGX(KP,1)=GRADGX(KP,1)/AX
+            GRADGX(KP,2)=GRADGX(KP,2)/AX
+            GRADGX(KP,3)=GRADGX(KP,3)/AX
+            AY=GRADGY(KP,1)*GRADGY(KP,1)+GRADGY(KP,2)*GRADGY(KP,2)
+     &        +GRADGY(KP,3)*GRADGY(KP,3)
+            AY=SQRT(AY)+zxzini
+            GRADGY(KP,1)=GRADGY(KP,1)/AY
+            GRADGY(KP,2)=GRADGY(KP,2)/AY
+            GRADGY(KP,3)=GRADGY(KP,3)/AY
+            AZ=GRADGZ(KP,1)*GRADGZ(KP,1)+GRADGZ(KP,2)*GRADGZ(KP,2)
+     &        +GRADGZ(KP,3)*GRADGZ(KP,3)
+            AZ=SQRT(AZ)+zxzini
+            GRADGZ(KP,1)=GRADGZ(KP,1)/AZ
+            GRADGZ(KP,2)=GRADGZ(KP,2)/AZ
+            GRADGZ(KP,3)=GRADGZ(KP,3)/AZ
+
+            UPGX(KP)=GRADGX(KP,1)*UMI(KP,1)+GRADGX(KP,2)*UMI(KP,2)
+     &              +GRADGX(KP,3)*UMI(KP,3)
+            UPIGX(KP,1)=UPGX(KP)*GRADGX(KP,1)
+            UPIGX(KP,2)=UPGX(KP)*GRADGX(KP,2)
+            UPIGX(KP,3)=UPGX(KP)*GRADGX(KP,3)
+            UPGY(KP)=GRADGY(KP,1)*UMI(KP,1)+GRADGY(KP,2)*UMI(KP,2)
+     &              +GRADGY(KP,3)*UMI(KP,3)
+            UPIGY(KP,1)=UPGY(KP)*GRADGY(KP,1)
+            UPIGY(KP,2)=UPGY(KP)*GRADGY(KP,2)
+            UPIGY(KP,3)=UPGY(KP)*GRADGY(KP,3)
+            UPGZ(KP)=GRADGZ(KP,1)*UMI(KP,1)+GRADGZ(KP,2)*UMI(KP,2)
+     &              +GRADGZ(KP,3)*UMI(KP,3)
+            UPIGZ(KP,1)=UPGZ(KP)*GRADGZ(KP,1)
+            UPIGZ(KP,2)=UPGZ(KP)*GRADGZ(KP,2)
+            UPIGZ(KP,3)=UPGZ(KP)*GRADGZ(KP,3)
+
+            AX=GRADK(KP,1)*GRADK(KP,1)+GRADK(KP,2)*GRADK(KP,2)
+     &        +GRADK(KP,3)*GRADK(KP,3)
+            AX=SQRT(AX)+zxzini
+            GRADK(KP,1)=GRADK(KP,1)/AX
+            GRADK(KP,2)=GRADK(KP,2)/AX
+            GRADK(KP,3)=GRADK(KP,3)/AX
+            UPK(KP)=GRADK(KP,1)*UMI(KP,1)+GRADK(KP,2)*UMI(KP,2)
+     &             +GRADK(KP,3)*UMI(KP,3)
+            UPIK(KP,1)=UPK(KP)*GRADK(KP,1)
+            UPIK(KP,2)=UPK(KP)*GRADK(KP,2)
+            UPIK(KP,3)=UPK(KP)*GRADK(KP,3)
+
+            AX=GRADE(KP,1)*GRADE(KP,1)+GRADE(KP,2)*GRADE(KP,2)
+     &        +GRADE(KP,3)*GRADE(KP,3)
+            AX=SQRT(AX)+zxzini
+            GRADE(KP,1)=GRADE(KP,1)/AX
+            GRADE(KP,2)=GRADE(KP,2)/AX
+            GRADE(KP,3)=GRADE(KP,3)/AX
+            UPE(KP)=GRADE(KP,1)*UMI(KP,1)+GRADE(KP,2)*UMI(KP,2)
+     &             +GRADE(KP,3)*UMI(KP,3)
+            UPIE(KP,1)=UPE(KP)*GRADE(KP,1)
+            UPIE(KP,2)=UPE(KP)*GRADE(KP,2)
+            UPIE(KP,3)=UPE(KP)*GRADE(KP,3)
+
+            ANUT(KP)=CNU*AKM(KP)*AKM(KP)/AEM(KP)
+            AMUT(NK)=ARO(KP)*ANUT(KP)
+            COEFT(KP)=COEF(KP)+AMUT(NK)
+            COEFK(KP)=COEF(KP)+ANUT(KP)
+            COEFE(KP)=COEF(KP)+ANUT(KP)/SGE
+C --- 2.D0 CALCUL DU TERME DE PRODUCTION PROPREMENT DIT ----------
+            PTEMP=( (DUDY(KP)+DVDX(KP))**2 + (DUDZ(KP)+DWDX(KP))**2
+     &            + (DVDZ(KP)+DWDY(KP))**2
+     &            + 2.D0*(DUDX(KP)**2+DVDY(KP)**2+DWDZ(KP)**2) )
+            P(KP)=PTEMP
+ 8007    CONTINUE
+
+         IF(IKAS.EQ.5.AND.IKOMP.EQ.0)THEN
+            IF(IMODEL.EQ.1)THEN
+               DO 80113 K=KDEB,KFIN
+                  KP=K+1-KDEB
+                  PG(KP)=(RGX(KP)*DTDX(KP)+RGY(KP)*DTDY(KP)
+     &                   +RGZ(KP)*DTDZ(KP) )/SGT
+                  IF(PG(KP).GT.0.D0)C1G(KP)=C1
+80113          CONTINUE
+            ELSEIF(IMODEL.EQ.2)THEN
+               DO 80213 K=KDEB,KFIN
+                  KP=K+1-KDEB
+                  PG(KP)=(RGX(KP)*DTDX(KP)+RGY(KP)*DTDY(KP)
+     &                   +RGZ(KP)*DTDZ(KP) )/SGT
+                  RF    =-PG(KP)/(P(KP)+PG(KP)+zxzini)
+                  IF(PG(KP).GT.0.D0)RF=0.D0
+                  C1G(KP)=C1*(1.D0+C3*RF)
+                  C1P(KP)=C1*(1.D0+C3*RF)
+80213          CONTINUE
+            ENDIF
+         ELSEIF(IKAS.EQ.2.AND.IKOMP.EQ.0)THEN
+            IF(IMODEL.EQ.1)THEN
+               DO 80114 K=KDEB,KFIN
+                  KP=K+1-KDEB
+                  PG(KP)=(DTDX(KP)+DTDY(KP)+DTDZ(KP))/SGT
+                  IF(PG(KP).GT.0.D0)C1G(KP)=C1
+80114          CONTINUE
+            ELSEIF(IMODEL.EQ.2)THEN
+               DO 80214 K=KDEB,KFIN
+                  KP=K+1-KDEB
+                  PG(KP)=(DTDX(KP)+DTDY(KP)+DTDZ(KP))/SGT
+                  RF    =-PG(KP)/(P(KP)+PG(KP)+zxzini)
+                  IF(PG(KP).GT.0.D0)RF=0.D0
+                  C1G(KP)=C1*(1.D0+C3*RF    )
+                  C1P(KP)=C1*(1.D0+C3*RF    )
+80214          CONTINUE
+            END IF
+         END IF
+
+C --------------------------------------------------------------
+C *** FIN DU CALCUL DU TERME DE PRODUCTION *********************
+
+         DO 80074 K=KDEB,KFIN
+            KP=K-KDEB+1
+            BMX=UMI(KP,1)/AL(KP)
+            BMY=UMI(KP,2)/AH(KP)
+            BMZ=UMI(KP,3)/AP(KP)
+            BM(KP)=BMX*BMX+BMY*BMY+BMZ*BMZ
+            BM(KP)=SQRT(BM(KP))+zxzini
+
+            BPGXX=UPIGX(KP,1)/AL(KP)
+            BPGXY=UPIGX(KP,2)/AH(KP)
+            BPGXZ=UPIGX(KP,3)/AP(KP)
+            BPGX(KP)=BPGXX*BPGXX+BPGXY*BPGXY+BPGXZ*BPGXZ
+            BPGX(KP)=SQRT(BPGX(KP))+zxzini
+            BPGYX=UPIGY(KP,1)/AL(KP)
+            BPGYY=UPIGY(KP,2)/AH(KP)
+            BPGYZ=UPIGY(KP,3)/AP(KP)
+            BPGY(KP)=BPGYX*BPGYX+BPGYY*BPGYY+BPGYZ*BPGYZ
+            BPGY(KP)=SQRT(BPGY(KP))+zxzini
+            BPGZX=UPIGZ(KP,1)/AL(KP)
+            BPGZY=UPIGZ(KP,2)/AH(KP)
+            BPGZZ=UPIGZ(KP,3)/AP(KP)
+            BPGZ(KP)=BPGZX*BPGZX+BPGZY*BPGZY+BPGZZ*BPGZZ
+            BPGZ(KP)=SQRT(BPGZ(KP))+zxzini
+
+            BPKX=UPIK(KP,1)/AL(KP)
+            BPKY=UPIK(KP,2)/AH(KP)
+            BPKZ=UPIK(KP,3)/AP(KP)
+            BPK(KP)=BPKX*BPKX+BPKY*BPKY+BPKZ*BPKZ
+            BPK(KP)=SQRT(BPK(KP))+zxzini
+            BPEX=UPIE(KP,1)/AL(KP)
+            BPEY=UPIE(KP,2)/AH(KP)
+            BPEZ=UPIE(KP,3)/AP(KP)
+            BPE(KP)=BPEX*BPEX+BPEY*BPEY+BPEZ*BPEZ
+            BPE(KP)=SQRT(BPE(KP))+zxzini
+80074    CONTINUE
+C
+C     AVANT DECENTREMENT
+C
+C ALFA,AKSI,CCU utilisées seulement dans la boucle 7008
+         IF(IDCEN.EQ.1)THEN
+            DO 80081 K=KDEB,KFIN
+               KP=K-KDEB+1
+               GXCXT(KP)=0.D0
+               GXCYT(KP)=0.D0
+               GXCZT(KP)=0.D0
+               GXCXY(KP)=0.D0
+               GXCXZ(KP)=0.D0
+               GXCYZ(KP)=0.D0
+               GYCXT(KP)=0.D0
+               GYCYT(KP)=0.D0
+               GYCZT(KP)=0.D0
+               GYCXY(KP)=0.D0
+               GYCXZ(KP)=0.D0
+               GYCYZ(KP)=0.D0
+               GZCXT(KP)=0.D0
+               GZCYT(KP)=0.D0
+               GZCZT(KP)=0.D0
+               GZCXY(KP)=0.D0
+               GZCXZ(KP)=0.D0
+               GZCYZ(KP)=0.D0
+               GKCXT(KP)=0.D0
+               GKCYT(KP)=0.D0
+               GKCZT(KP)=0.D0
+               GKCXY(KP)=0.D0
+               GKCXZ(KP)=0.D0
+               GKCYZ(KP)=0.D0
+               GECXT(KP)=0.D0
+               GECYT(KP)=0.D0
+               GECZT(KP)=0.D0
+               GECXY(KP)=0.D0
+               GECXZ(KP)=0.D0
+               GECYZ(KP)=0.D0
+80081       CONTINUE
+
+         ELSEIF(IDCEN.EQ.2)THEN
+            DO 8008 K=KDEB,KFIN
+               KP=K-KDEB+1
+               HMK=2.D0*UM(KP)/BM(KP)
+               XMB(KP)=HMK
+               ALFA=UM(KP)*HMK/COEFT(KP)/2.D0
+               AKSI=ALFA/3.D0
+               IF(ALFA.GT.3.D0)AKSI=1.D0
+               CCT=AKSI/BM(KP)
+
+               HPK=2.D0*UPGX(KP)/BPGX(KP)
+               ALFA=UPGX(KP)*HPK/COEFT(KP)/2.D0
+               AKSI=ALFA/3.D0
+               IF(ALFA.GT.3.D0)AKSI=1.D0
+               CCP=AKSI/BPGX(KP)
+               CPT=CCP-CCT
+               CC2X=0.D0
+               IF(CPT.GE.0.D0)CC2X=CPT
+
+               HPK=2.D0*UPGY(KP)/BPGY(KP)
+               ALFA=UPGY(KP)*HPK/COEFT(KP)/2.D0
+               AKSI=ALFA/3.D0
+               IF(ALFA.GT.3.D0)AKSI=1.D0
+               CCP=AKSI/BPGY(KP)
+               CPT=CCP-CCT
+               CC2Y=0.D0
+               IF(CPT.GE.0.D0)CC2Y=CPT
+
+               HPK=2.D0*UPGZ(KP)/BPGZ(KP)
+               ALFA=UPGZ(KP)*HPK/COEFT(KP)/2.D0
+               AKSI=ALFA/3.D0
+               IF(ALFA.GT.3.D0)AKSI=1.D0
+               CCP=AKSI/BPGZ(KP)
+               CPT=CCP-CCT
+               CC2Z=0.D0
+               IF(CPT.GE.0.D0)CC2Z=CPT
+
+               HPK=2.D0*UPK(KP)/BPK(KP)
+               ALFA=UPK(KP)*HPK/COEFK(KP)/2.D0
+               AKSI=ALFA/3.D0
+               IF(ALFA.GT.3.D0)AKSI=1.D0
+               CCP=AKSI/BPK(KP)
+               CPT=CCP-CCT
+               CC2K=0.D0
+               IF(CPT.GE.0.D0)CC2K=CPT
+
+               HPK=2.D0*UPE(KP)/BPE(KP)
+               ALFA=UPE(KP)*HPK/COEFE(KP)/2.D0
+               AKSI=ALFA/3.D0
+               IF(ALFA.GT.3.D0)AKSI=1.D0
+               CCP=AKSI/BPE(KP)
+               CPT=CCP-CCT
+               CC2E=0.D0
+               IF(CPT.GE.0.D0)CC2E=CPT
+
+               GXCXT(KP)=(UMI(KP,1)*UMI(KP,1)*CCT+UPIGX(KP,1)*UPIGX(KP,1
+     $              )*CC2X)
+               GXCYT(KP)=(UMI(KP,2)*UMI(KP,2)*CCT+UPIGX(KP,2)*UPIGX(KP,2
+     $              )*CC2X)
+               GXCZT(KP)=(UMI(KP,3)*UMI(KP,3)*CCT+UPIGX(KP,3)*UPIGX(KP,3
+     $              )*CC2X)
+               GXCXY(KP)=(UMI(KP,1)*UMI(KP,2)*CCT+UPIGX(KP,1)*UPIGX(KP,2
+     $              )*CC2X)
+               GXCXZ(KP)=(UMI(KP,1)*UMI(KP,3)*CCT+UPIGX(KP,1)*UPIGX(KP,3
+     $              )*CC2X)
+               GXCYZ(KP)=(UMI(KP,2)*UMI(KP,3)*CCT+UPIGX(KP,2)*UPIGX(KP,3
+     $              )*CC2X)
+
+               GYCXT(KP)=(UMI(KP,1)*UMI(KP,1)*CCT+UPIGY(KP,1)*UPIGY(KP,1
+     $              )*CC2Y)
+               GYCYT(KP)=(UMI(KP,2)*UMI(KP,2)*CCT+UPIGY(KP,2)*UPIGY(KP,2
+     $              )*CC2Y)
+               GYCZT(KP)=(UMI(KP,3)*UMI(KP,3)*CCT+UPIGY(KP,3)*UPIGY(KP,3
+     $              )*CC2Y)
+               GYCXY(KP)=(UMI(KP,1)*UMI(KP,2)*CCT+UPIGY(KP,1)*UPIGY(KP,2
+     $              )*CC2Y)
+               GYCXZ(KP)=(UMI(KP,1)*UMI(KP,3)*CCT+UPIGY(KP,1)*UPIGY(KP,3
+     $              )*CC2Y)
+               GYCYZ(KP)=(UMI(KP,2)*UMI(KP,3)*CCT+UPIGY(KP,2)*UPIGY(KP,3
+     $              )*CC2Y)
+
+               GZCXT(KP)=(UMI(KP,1)*UMI(KP,1)*CCT+UPIGZ(KP,1)*UPIGZ(KP,1
+     $              )*CC2Z)
+               GZCYT(KP)=(UMI(KP,2)*UMI(KP,2)*CCT+UPIGZ(KP,2)*UPIGZ(KP,2
+     $              )*CC2Z)
+               GZCZT(KP)=(UMI(KP,3)*UMI(KP,3)*CCT+UPIGZ(KP,3)*UPIGZ(KP,3
+     $              )*CC2Z)
+               GZCXY(KP)=(UMI(KP,1)*UMI(KP,2)*CCT+UPIGZ(KP,1)*UPIGZ(KP,2
+     $              )*CC2Z)
+               GZCXZ(KP)=(UMI(KP,1)*UMI(KP,3)*CCT+UPIGZ(KP,1)*UPIGZ(KP,3
+     $              )*CC2Z)
+               GZCYZ(KP)=(UMI(KP,2)*UMI(KP,3)*CCT+UPIGZ(KP,2)*UPIGZ(KP,3
+     $              )*CC2Z)
+
+               GKCXT(KP)=(UMI(KP,1)*UMI(KP,1)*CCT+UPIK(KP,1)*UPIK(KP,1)
+     $              *CC2K)
+               GKCYT(KP)=(UMI(KP,2)*UMI(KP,2)*CCT+UPIK(KP,2)*UPIK(KP,2)
+     $              *CC2K)
+               GKCZT(KP)=(UMI(KP,3)*UMI(KP,3)*CCT+UPIK(KP,3)*UPIK(KP,3)
+     $              *CC2K)
+               GKCXY(KP)=(UMI(KP,1)*UMI(KP,2)*CCT+UPIK(KP,1)*UPIK(KP,2)
+     $              *CC2K)
+               GKCXZ(KP)=(UMI(KP,1)*UMI(KP,3)*CCT+UPIK(KP,1)*UPIK(KP,3)
+     $              *CC2K)
+               GKCYZ(KP)=(UMI(KP,2)*UMI(KP,3)*CCT+UPIK(KP,2)*UPIK(KP,3)
+     $              *CC2K)
+
+               GECXT(KP)=(UMI(KP,1)*UMI(KP,1)*CCT+UPIE(KP,1)*UPIE(KP,1)
+     $              *CC2E)
+               GECYT(KP)=(UMI(KP,2)*UMI(KP,2)*CCT+UPIE(KP,2)*UPIE(KP,2)
+     $              *CC2E)
+               GECZT(KP)=(UMI(KP,3)*UMI(KP,3)*CCT+UPIE(KP,3)*UPIE(KP,3)
+     $              *CC2E)
+               GECXY(KP)=(UMI(KP,1)*UMI(KP,2)*CCT+UPIE(KP,1)*UPIE(KP,2)
+     $              *CC2E)
+               GECXZ(KP)=(UMI(KP,1)*UMI(KP,3)*CCT+UPIE(KP,1)*UPIE(KP,3)
+     $              *CC2E)
+               GECYZ(KP)=(UMI(KP,2)*UMI(KP,3)*CCT+UPIE(KP,2)*UPIE(KP,3)
+     $              *CC2E)
+
+ 8008       CONTINUE
+
+         ELSEIF(IDCEN.EQ.3)THEN
+            DO 8018 K=KDEB,KFIN
+               KP=K-KDEB+1
+               HMK=2.D0*UM(KP)/BM(KP)
+               XMB(KP)=HMK
+               ALFA=UM(KP)*HMK/COEFT(KP)/2.D0
+               AKSI=ALFA/3.D0
+               IF(ALFA.GT.3.D0)AKSI=1.D0
+               CCT=AKSI/BM(KP)
+
+               GXCXT(KP)=UMI(KP,1)*UMI(KP,1)*CCT
+               GXCYT(KP)=UMI(KP,2)*UMI(KP,2)*CCT
+               GXCZT(KP)=UMI(KP,3)*UMI(KP,3)*CCT
+               GXCXY(KP)=UMI(KP,1)*UMI(KP,2)*CCT
+               GXCXZ(KP)=UMI(KP,1)*UMI(KP,3)*CCT
+               GXCYZ(KP)=UMI(KP,2)*UMI(KP,3)*CCT
+
+               GYCXT(KP)=UMI(KP,1)*UMI(KP,1)*CCT
+               GYCYT(KP)=UMI(KP,2)*UMI(KP,2)*CCT
+               GYCZT(KP)=UMI(KP,3)*UMI(KP,3)*CCT
+               GYCXY(KP)=UMI(KP,1)*UMI(KP,2)*CCT
+               GYCXZ(KP)=UMI(KP,1)*UMI(KP,3)*CCT
+               GYCYZ(KP)=UMI(KP,2)*UMI(KP,3)*CCT
+
+               GZCXT(KP)=UMI(KP,1)*UMI(KP,1)*CCT
+               GZCYT(KP)=UMI(KP,2)*UMI(KP,2)*CCT
+               GZCZT(KP)=UMI(KP,3)*UMI(KP,3)*CCT
+               GZCXY(KP)=UMI(KP,1)*UMI(KP,2)*CCT
+               GZCXZ(KP)=UMI(KP,1)*UMI(KP,3)*CCT
+               GZCYZ(KP)=UMI(KP,2)*UMI(KP,3)*CCT
+
+               GKCXT(KP)=UMI(KP,1)*UMI(KP,1)*CCT
+               GKCYT(KP)=UMI(KP,2)*UMI(KP,2)*CCT
+               GKCZT(KP)=UMI(KP,3)*UMI(KP,3)*CCT
+               GKCXY(KP)=UMI(KP,1)*UMI(KP,2)*CCT
+               GKCXZ(KP)=UMI(KP,1)*UMI(KP,3)*CCT
+               GKCYZ(KP)=UMI(KP,2)*UMI(KP,3)*CCT
+
+               GECXT(KP)=UMI(KP,1)*UMI(KP,1)*CCT
+               GECYT(KP)=UMI(KP,2)*UMI(KP,2)*CCT
+               GECZT(KP)=UMI(KP,3)*UMI(KP,3)*CCT
+               GECXY(KP)=UMI(KP,1)*UMI(KP,2)*CCT
+               GECXZ(KP)=UMI(KP,1)*UMI(KP,3)*CCT
+               GECYZ(KP)=UMI(KP,2)*UMI(KP,3)*CCT
+
+ 8018       CONTINUE
+
+         ELSEIF(IDCEN.EQ.4)THEN
+            DT19=DTM1*0.5D0
+            DO 8009 K=KDEB,KFIN
+               KP=K-KDEB+1
+               XMB(KP)=(AL(KP)+AH(KP))/2.D0
+
+               GXCXT(KP)=UMI(KP,1)*UMI(KP,1)*DT19
+               GXCYT(KP)=UMI(KP,2)*UMI(KP,2)*DT19
+               GXCZT(KP)=UMI(KP,3)*UMI(KP,3)*DT19
+               GXCXY(KP)=UMI(KP,1)*UMI(KP,2)*DT19
+               GXCXZ(KP)=UMI(KP,1)*UMI(KP,3)*DT19
+               GXCYZ(KP)=UMI(KP,2)*UMI(KP,3)*DT19
+
+               GYCXT(KP)=UMI(KP,1)*UMI(KP,1)*DT19
+               GYCYT(KP)=UMI(KP,2)*UMI(KP,2)*DT19
+               GYCZT(KP)=UMI(KP,3)*UMI(KP,3)*DT19
+               GYCXY(KP)=UMI(KP,1)*UMI(KP,2)*DT19
+               GYCXZ(KP)=UMI(KP,1)*UMI(KP,3)*DT19
+               GYCYZ(KP)=UMI(KP,2)*UMI(KP,3)*DT19
+
+               GZCXT(KP)=UMI(KP,1)*UMI(KP,1)*DT19
+               GZCYT(KP)=UMI(KP,2)*UMI(KP,2)*DT19
+               GZCZT(KP)=UMI(KP,3)*UMI(KP,3)*DT19
+               GZCXY(KP)=UMI(KP,1)*UMI(KP,2)*DT19
+               GZCXZ(KP)=UMI(KP,1)*UMI(KP,3)*DT19
+               GZCYZ(KP)=UMI(KP,2)*UMI(KP,3)*DT19
+
+               GKCXT(KP)=UMI(KP,1)*UMI(KP,1)*DT19
+               GKCYT(KP)=UMI(KP,2)*UMI(KP,2)*DT19
+               GKCZT(KP)=UMI(KP,3)*UMI(KP,3)*DT19
+               GKCXY(KP)=UMI(KP,1)*UMI(KP,2)*DT19
+               GKCXZ(KP)=UMI(KP,1)*UMI(KP,3)*DT19
+               GKCYZ(KP)=UMI(KP,2)*UMI(KP,3)*DT19
+
+               GECXT(KP)=UMI(KP,1)*UMI(KP,1)*DT19
+               GECYT(KP)=UMI(KP,2)*UMI(KP,2)*DT19
+               GECZT(KP)=UMI(KP,3)*UMI(KP,3)*DT19
+               GECXY(KP)=UMI(KP,1)*UMI(KP,2)*DT19
+               GECXZ(KP)=UMI(KP,1)*UMI(KP,3)*DT19
+               GECYZ(KP)=UMI(KP,2)*UMI(KP,3)*DT19
+
+ 8009       CONTINUE
+
+         ENDIF
+
+C     WRITE(IOIMP,*)' Avt Calcul DT'
+C
+C     AVANT CALCUL DT
+C
+         DO 8010 K=KDEB,KFIN
+            KP=K-KDEB+1
+            DT0=DT
+            DT1X=2.D0/
+     &           (UMI(KP,1)*UMI(KP,1)/(GXCXT(KP)+COEFT(KP))
+     &           +UMI(KP,2)*UMI(KP,2)/(GXCYT(KP)+COEFT(KP))
+     &           +UMI(KP,3)*UMI(KP,3)/(GXCZT(KP)+COEFT(KP)))
+            DT1Y=2.D0/
+     &           (UMI(KP,1)*UMI(KP,1)/(GYCXT(KP)+COEFT(KP))
+     &           +UMI(KP,2)*UMI(KP,2)/(GYCYT(KP)+COEFT(KP))
+     &           +UMI(KP,3)*UMI(KP,3)/(GYCZT(KP)+COEFT(KP)))
+            DT1Z=2.D0/
+     &           (UMI(KP,1)*UMI(KP,1)/(GZCXT(KP)+COEFT(KP))
+     &           +UMI(KP,2)*UMI(KP,2)/(GZCYT(KP)+COEFT(KP))
+     &           +UMI(KP,3)*UMI(KP,3)/(GZCZT(KP)+COEFT(KP)))
+            DT2X=0.5D0/
+     &           ((GXCXT(KP)+COEFT(KP))*AL2(KP)
+     &           +(GXCYT(KP)+COEFT(KP))*AH2(KP)
+     &           +(GXCZT(KP)+COEFT(KP))*AP2(KP))
+            DT2Y=0.5D0/
+     &           ((GYCXT(KP)+COEFT(KP))*AL2(KP)
+     &           +(GYCYT(KP)+COEFT(KP))*AH2(KP)
+     &           +(GYCZT(KP)+COEFT(KP))*AP2(KP))
+            DT2Z=0.5D0/
+     &           ((GZCXT(KP)+COEFT(KP))*AL2(KP)
+     &           +(GZCYT(KP)+COEFT(KP))*AH2(KP)
+     &           +(GZCZT(KP)+COEFT(KP))*AP2(KP))
+            IF(DT1X.LT.DT)DT=DT1X
+            IF(DT1Y.LT.DT)DT=DT1Y
+            IF(DT1Z.LT.DT)DT=DT1Z
+            IF(DT2X.LT.DT)DT=DT2X
+            IF(DT2Y.LT.DT)DT=DT2Y
+            IF(DT2Z.LT.DT)DT=DT2Z
+C     IF(DT3.LT.DT)DT=DT3
+            IF(DT.NE.DT0) THEN
+               DTT1=MIN(DT1X,DT1Y,DT1Z)
+               DTT2=MIN(DT2X,DT2Y,DT2Z)
+C        DTT3=DT3
+               DIAEL=XMB(KP)
+               NUEL=K
+            END IF
+ 8010    CONTINUE
+
+C     WRITE(IOIMP,*)' le coeur du calcul '
+C Le coeur du calcul ...
+
+         IF(IKOMP.EQ.0)THEN
+
+            DO 8014 I=1,NP
+               DO 80141 J=1,NP
+                  DO 80142 K=KDEB,KFIN
+                     KP=K-KDEB+1
+C     GEO1=(CF1(KP)*Q1(J,I)+CF2(KP)*Q2(J,I)+CF3(KP)*Q3(J,I))*CUB8
+                     GEO1=CFM(KP)*QGGT(J,I)*CUB8
+                     ZVGGX=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*GXCXT(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*GXCYT(KP)
+     &               +    HR(K,I,3)*HR(K,J,3)*GXCZT(KP)
+     &               +    HR(K,I,1)*HR(K,J,2)*GXCXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,1)*GXCXY(KP)
+     &               +    HR(K,I,1)*HR(K,J,3)*GXCXZ(KP)
+     &               +    HR(K,I,3)*HR(K,J,1)*GXCXZ(KP)
+     &               +    HR(K,I,2)*HR(K,J,3)*GXCYZ(KP)
+     &               +    HR(K,I,3)*HR(K,J,2)*GXCYZ(KP) )
+     &               +    (GXCXT(KP)+GXCYT(KP)+GXCZT(KP))/3.D0*GEO1
+C    &+    (GXCXT(KP)+GXCYT(KP)+GXCZT(KP))/3.D0*XMH(KP)*QGGT(J,I)*CUB8
+
+                     ZVGGY=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*GYCXT(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*GYCYT(KP)
+     &               +    HR(K,I,3)*HR(K,J,3)*GYCZT(KP)
+     &               +    HR(K,I,1)*HR(K,J,2)*GYCXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,1)*GYCXY(KP)
+     &               +    HR(K,I,1)*HR(K,J,3)*GYCXZ(KP)
+     &               +    HR(K,I,3)*HR(K,J,1)*GYCXZ(KP)
+     &               +    HR(K,I,2)*HR(K,J,3)*GYCYZ(KP)
+     &               +    HR(K,I,3)*HR(K,J,2)*GYCYZ(KP) )
+     &               +    (GYCXT(KP)+GYCYT(KP)+GYCZT(KP))/3.D0*GEO1
+C    &+    (GYCXT(KP)+GYCYT(KP)+GYCZT(KP))/3.D0*XMH(KP)*QGGT(J,I)*CUB8
+
+                     ZVGGZ=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*GZCXT(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*GZCYT(KP)
+     &               +    HR(K,I,3)*HR(K,J,3)*GZCZT(KP)
+     &               +    HR(K,I,1)*HR(K,J,2)*GZCXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,1)*GZCXY(KP)
+     &               +    HR(K,I,1)*HR(K,J,3)*GZCXZ(KP)
+     &               +    HR(K,I,3)*HR(K,J,1)*GZCXZ(KP)
+     &               +    HR(K,I,2)*HR(K,J,3)*GZCYZ(KP)
+     &               +    HR(K,I,3)*HR(K,J,2)*GZCYZ(KP) )
+     &               +    (GZCXT(KP)+GZCYT(KP)+GZCZT(KP))/3.D0*GEO1
+C    &+    (GZCXT(KP)+GZCYT(KP)+GZCZT(KP))/3.D0*XMH(KP)*QGGT(J,I)*CUB8
+
+                     ZVGD=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*COEFT(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*COEFT(KP)
+     &               +    HR(K,I,3)*HR(K,J,3)*COEFT(KP) )
+     &               +    COEFT(KP)*XMH(KP)*GEO1
+C    &+    COEFT(KP)*XMH(KP)*QGGT(J,I)*CUB8
+
+                     ZVGK =AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*GKCXT(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*GKCYT(KP)
+     &               +    HR(K,I,3)*HR(K,J,3)*GKCZT(KP)
+     &               +    HR(K,I,1)*HR(K,J,2)*GKCXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,1)*GKCXY(KP)
+     &               +    HR(K,I,1)*HR(K,J,3)*GKCXZ(KP)
+     &               +    HR(K,I,3)*HR(K,J,1)*GKCXZ(KP)
+     &               +    HR(K,I,2)*HR(K,J,3)*GKCYZ(KP)
+     &               +    HR(K,I,3)*HR(K,J,2)*GKCYZ(KP) )
+     &               +    (GKCXT(KP)+GKCYT(KP)+GKCZT(KP))/3.D0*GEO1
+C    &+    (GKCXT(KP)+GKCYT(KP)+GKCZT(KP))/3.D0*XMH(KP)*QGGT(J,I)*CUB8
+
+                     ZVGE =AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*GECXT(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*GECYT(KP)
+     &               +    HR(K,I,3)*HR(K,J,3)*GECZT(KP)
+     &               +    HR(K,I,1)*HR(K,J,2)*GECXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,1)*GECXY(KP)
+     &               +    HR(K,I,1)*HR(K,J,3)*GECXZ(KP)
+     &               +    HR(K,I,3)*HR(K,J,1)*GECXZ(KP)
+     &               +    HR(K,I,2)*HR(K,J,3)*GECYZ(KP)
+     &               +    HR(K,I,3)*HR(K,J,2)*GECYZ(KP) )
+     &               +    (GECXT(KP)+GECYT(KP)+GECZT(KP))/3.D0*GEO1
+C    &+    (GECXT(KP)+GECYT(KP)+GECZT(KP))/3.D0*XMH(KP)*QGGT(J,I)*CUB8
+
+                     ZVGDK=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*COEFK(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*COEFK(KP)
+     &               +    HR(K,I,3)*HR(K,J,3)*COEFK(KP) )
+     &               +    COEFK(KP)*XMH(KP)*GEO1
+C    &+    COEFK(KP)*XMH(KP)*QGGT(J,I)*CUB8
+
+                     ZVGDE=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*COEFE(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*COEFE(KP)
+     &               +    HR(K,I,3)*HR(K,J,3)*COEFE(KP) )
+     &               +    COEFE(KP)*XMH(KP)*GEO1
+C    &+    COEFE(KP)*XMH(KP)*QGGT(J,I)*CUB8
+
+Cnon  V2=(UIX(KP,I)*HR(K,J,1)+UIY(KP,I)*HR(K,J,2)+UIZ(KP,I)*HR(K,J,3))
+C    &   *DR(KP,I)
+
+                     V2=UMI(KP,1)*DR(KP,I)*HR(K,J,1)+UMI(KP,2)*DR(KP,I)
+     $                    *HR(K,J,2)+UMI(KP,3)*DR(KP,I)*HR(K,J,3)
+
+                     SAF1(KP,I)=SAF1(KP,I)+(V2+ZVGGX)*GIX(KP,J)+ZVGD
+     $                    *UIX(KP,J)
+                     SAF2(KP,I)=SAF2(KP,I)+(V2+ZVGGY)*GIY(KP,J)+ZVGD
+     $                    *UIY(KP,J)
+                     SAF3(KP,I)=SAF3(KP,I)+(V2+ZVGGZ)*GIZ(KP,J)+ZVGD
+     $                    *UIZ(KP,J)
+
+                     SAFK(KP,I)=SAFK(KP,I)+(V2+ZVGK)*AK(KP,J)+ZVGDK
+     $                    *AK(KP,J)
+                     SAFE(KP,I)=SAFE(KP,I)+(V2+ZVGE)*AE(KP,J)+ZVGDE
+     $                    *AE(KP,J)
+
+80142             CONTINUE
+80141          CONTINUE
+ 8014       CONTINUE
+
+         ELSEIF(IKOMP.EQ.1)THEN
+C->
+
+            DO 8015 I=1,NP
+               DO 80151 J=1,NP
+                  DO 80152 K=KDEB,KFIN
+                     KP=K-KDEB+1
+C     GEO1=(CF1(KP)*Q1(J,I)+CF2(KP)*Q2(J,I)+CF3(KP)*Q3(J,I))*CUB8
+                     GEO1=CFM(KP)*QGGT(J,I)*CUB8
+                     ZVGGX=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*GXCXT(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*GXCYT(KP)
+     &               +    HR(K,I,3)*HR(K,J,3)*GXCZT(KP)
+     &               +    HR(K,I,1)*HR(K,J,2)*GXCXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,1)*GXCXY(KP)
+     &               +    HR(K,I,1)*HR(K,J,3)*GXCXZ(KP)
+     &               +    HR(K,I,3)*HR(K,J,1)*GXCXZ(KP)
+     &               +    HR(K,I,2)*HR(K,J,3)*GXCYZ(KP)
+     &               +    HR(K,I,3)*HR(K,J,2)*GXCYZ(KP) )
+     &               +    (GXCXT(KP)+GXCYT(KP)+GXCZT(KP))/3.D0*GEO1
+C    &+    (GXCXT(KP)+GXCYT(KP)+GXCZT(KP))/3.D0*XMH(KP)*QGGT(J,I)*CUB8
+
+                     ZVGGY=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*GYCXT(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*GYCYT(KP)
+     &               +    HR(K,I,3)*HR(K,J,3)*GYCZT(KP)
+     &               +    HR(K,I,1)*HR(K,J,2)*GYCXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,1)*GYCXY(KP)
+     &               +    HR(K,I,1)*HR(K,J,3)*GYCXZ(KP)
+     &               +    HR(K,I,3)*HR(K,J,1)*GYCXZ(KP)
+     &               +    HR(K,I,2)*HR(K,J,3)*GYCYZ(KP)
+     &               +    HR(K,I,3)*HR(K,J,2)*GYCYZ(KP) )
+     &               +    (GYCXT(KP)+GYCYT(KP)+GYCZT(KP))/3.D0*GEO1
+C    &+    (GYCXT(KP)+GYCYT(KP)+GYCZT(KP))/3.D0*XMH(KP)*QGGT(J,I)*CUB8
+
+                     ZVGGZ=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*GZCXT(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*GZCYT(KP)
+     &               +    HR(K,I,3)*HR(K,J,3)*GZCZT(KP)
+     &               +    HR(K,I,1)*HR(K,J,2)*GZCXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,1)*GZCXY(KP)
+     &               +    HR(K,I,1)*HR(K,J,3)*GZCXZ(KP)
+     &               +    HR(K,I,3)*HR(K,J,1)*GZCXZ(KP)
+     &               +    HR(K,I,2)*HR(K,J,3)*GZCYZ(KP)
+     &               +    HR(K,I,3)*HR(K,J,2)*GZCYZ(KP) )
+     &               +    (GZCXT(KP)+GZCYT(KP)+GZCZT(KP))/3.D0*GEO1
+C    &+    (GZCXT(KP)+GZCYT(KP)+GZCZT(KP))/3.D0*XMH(KP)*QGGT(J,I)*CUB8
+
+                     ZVGD=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*COEFT(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*COEFT(KP)
+     &               +    HR(K,I,3)*HR(K,J,3)*COEFT(KP) )
+     &               +    COEFT(KP)*GEO1
+C    &+    COEFT(KP)*XMH(KP)*GEO1
+C    &+    COEFT(KP)*XMH(KP)*QGGT(J,I)*CUB8
+
+                     ZVGK =AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*GKCXT(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*GKCYT(KP)
+     &               +    HR(K,I,3)*HR(K,J,3)*GKCZT(KP)
+     &               +    HR(K,I,1)*HR(K,J,2)*GKCXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,1)*GKCXY(KP)
+     &               +    HR(K,I,1)*HR(K,J,3)*GKCXZ(KP)
+     &               +    HR(K,I,3)*HR(K,J,1)*GKCXZ(KP)
+     &               +    HR(K,I,2)*HR(K,J,3)*GKCYZ(KP)
+     &               +    HR(K,I,3)*HR(K,J,2)*GKCYZ(KP) )
+     &               +    (GKCXT(KP)+GKCYT(KP)+GKCZT(KP))/3.D0*GEO1
+C    &+    (GKCXT(KP)+GKCYT(KP)+GKCZT(KP))/3.D0*XMH(KP)*QGGT(J,I)*CUB8
+
+                     ZVGE =AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*GECXT(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*GECYT(KP)
+     &               +    HR(K,I,3)*HR(K,J,3)*GECZT(KP)
+     &               +    HR(K,I,1)*HR(K,J,2)*GECXY(KP)
+     &               +    HR(K,I,2)*HR(K,J,1)*GECXY(KP)
+     &               +    HR(K,I,1)*HR(K,J,3)*GECXZ(KP)
+     &               +    HR(K,I,3)*HR(K,J,1)*GECXZ(KP)
+     &               +    HR(K,I,2)*HR(K,J,3)*GECYZ(KP)
+     &               +    HR(K,I,3)*HR(K,J,2)*GECYZ(KP) )
+     &               +    (GECXT(KP)+GECYT(KP)+GECZT(KP))/3.D0*GEO1
+C    &+    (GECXT(KP)+GECYT(KP)+GECZT(KP))/3.D0*XMH(KP)*QGGT(J,I)*CUB8
+
+                     ZVGDK=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*COEFK(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*COEFK(KP)
+     &               +    HR(K,I,3)*HR(K,J,3)*COEFK(KP) )
+     &               +    COEFK(KP)*GEO1
+
+                     ZVGDE=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*COEFE(KP)
+     &               +    HR(K,I,2)*HR(K,J,2)*COEFE(KP)
+     &               +    HR(K,I,3)*HR(K,J,3)*COEFE(KP) )
+     &               +    COEFE(KP)*GEO1
+C    &+    COEFE(KP)*XMH(KP)*QGGT(J,I)*CUB8
+
+                     COEFT3=COEFT(KP)/3.D0
+                     ZVGUU=(AIRE(KP)*(HR(K,I,1)*HR(K,J,1))+GEO1)*COEFT3
+     $                    *UIX(KP,J)
+                     ZVGUV=AIRE(KP)*( HR(K,I,1)*HR(K,J,2))*COEFT3*UIY(KP
+     $                    ,J)
+                     ZVGUW=AIRE(KP)*( HR(K,I,1)*HR(K,J,3))*COEFT3*UIZ(KP
+     $                    ,J)
+                     ZVGVU=AIRE(KP)*( HR(K,I,2)*HR(K,J,1))*COEFT3*UIX(KP
+     $                    ,J)
+                     ZVGVV=(AIRE(KP)*(HR(K,I,2)*HR(K,J,2))+GEO1)*COEFT3
+     $                    *UIY(KP,J)
+                     ZVGVW=AIRE(KP)*( HR(K,I,2)*HR(K,J,3))*COEFT3*UIZ(KP
+     $                    ,J)
+                     ZVGWU=AIRE(KP)*( HR(K,I,3)*HR(K,J,1))*COEFT3*UIX(KP
+     $                    ,J)
+                     ZVGWV=AIRE(KP)*( HR(K,I,3)*HR(K,J,2))*COEFT3*UIY(KP
+     $                    ,J)
+                     ZVGWW=(AIRE(KP)*(HR(K,I,3)*HR(K,J,3))+GEO1)*COEFT3
+     $                    *UIZ(KP,J)
+
+                     V2=(UIX(KP,J)*HR(K,J,1)+UIY(KP,J)*HR(K,J,2)+UIZ(KP
+     $                    ,J)*HR(K,J,3))*DR(KP,I)
+
+C     V2=UMI(KP,1)*DR(KP,I)*HR(K,J,1)+UMI(KP,2)*DR(KP,I)*HR(K,J,2)
+
+                     SAF1(KP,I)=SAF1(KP,I)+(V2+ZVGGX)*GIX(KP,J)+ZVGD
+     $                    *UIX(KP,J)+ ZVGUU + ZVGUV + ZVGUW
+                     SAF2(KP,I)=SAF2(KP,I)+(V2+ZVGGY)*GIY(KP,J)+ZVGD
+     $                    *UIY(KP,J)+ ZVGVU + ZVGUV + ZVGVW
+                     SAF3(KP,I)=SAF3(KP,I)+(V2+ZVGGZ)*GIZ(KP,J)+ZVGD
+     $                    *UIZ(KP,J)+ ZVGWU + ZVGWV + ZVGWW
+
+                     SAFK(KP,I)=SAFK(KP,I)+(V2+ZVGK)*AK(KP,J)+ZVGDK
+     $                    *AK(KP,J)
+                     SAFE(KP,I)=SAFE(KP,I)+(V2+ZVGE)*AE(KP,J)+ZVGDE
+     $                    *AE(KP,J)
+
+80152             CONTINUE
+80151          CONTINUE
+ 8015       CONTINUE
+
+         ENDIF
+
+C
+C --------------------------------------------------------------
+C
+C
+         DO 8017 I=1,NP
+            DO 80171 K=KDEB,KFIN
+               KP=K-KDEB+1
+               TSK       =(ANUT(KP)*(P(KP)+PG(KP))-AEM(KP))*DR(KP,I)
+               SAFK(KP,I)=SAFK(KP,I)-TSK
+
+               TSE       =(CNU*(C1P(KP)*P(KP)+C1G(KP)*PG(KP))*AKM(KP))
+     $              *DR(KP,I)
+               SAFE(KP,I)=SAFE(KP,I)-TSE
+
+               TSE1      =C2*AEM(KP)/AKM(KP)*DR(KP,I)
+               BE1(KP,I) =TSE1
+80171       CONTINUE
+ 8017    CONTINUE
+
+C
+C
+C --- ECRITURE DANS LES TABLEAUX F(1,*),F(2,*),G,GK,GE,GE1 (SCALAIRE)
+         DO 80019 I=1,NP
+            DO 50019 K=KDEB,KFIN
+               KP=K+1-KDEB
+               NF=IPADS(LE(I,K))
+               F(NF,1)=F(NF,1)-SAF1(KP,I)
+               F(NF,2)=F(NF,2)-SAF2(KP,I)
+               F(NF,3)=F(NF,3)-SAF3(KP,I)
+               GK(NF) =GK(NF) -SAFK(KP,I)
+               GE1(NF)=GE1(NF)+BE1(KP,I)
+               GE(NF) =GE (NF)-SAFE(KP,I)
+50019       CONTINUE
+80019    CONTINUE
+80001 CONTINUE
+C
+C *** FIN DE LA BOUCLE SUR LES PAQUETS D'ELEMENTS ***
+C
+C     WRITE(IOIMP,*)' FIN YCVIT GK='
+C     WRITE(IOIMP,1002)(GK(i),i=1,nptd)
+
+      IPAS=1
+      RETURN
+
+ 1002 FORMAT(10(1X,1PE11.4))
+      END
+
+
+
+
+
+
+

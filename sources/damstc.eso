@@ -1,0 +1,240 @@
+C DAMSTC    SOURCE    CB215821  17/07/21    21:15:06     9513
+C---------------------------------------------------------------------
+C
+C
+      SUBROUTINE DAMSTC (ISTEG, ITERA,
+     .                   NCRIT, NDIME, NDIM1, NSTRE, NSTR1, NTEMP,
+     .                   AVALC, AVALT, BPCOM, BVALC, BVALT,
+     .                   DAMAC, DAMAT, DMATX, DSTRA, DSIGT, EBOU1,
+     .                   EQUIC, EQUIT,
+     .                   POISS, SGEFF, SGTOT, STRIN, TANGB,
+     .                   THREC, THRET, THRUC, THR0C, THR0T, YOUNG,
+     .                   STYPE)
+C
+C=====================================================================
+C                                                                    =
+C    THIS SUBROUTINE DETERMINES IF THE GAUSS POINT IS DAMAGED OR     =
+C    PLASTIFIED. RATE EFFECTS ARE ALSO TAKEN INTO ACCOUNT.           =
+C                                                                    =
+C       NCRIT = 1     DAMAGE MODEL (TENSION (EXPONENTIAL), DT        =
+C                                   COMPRESSION          , DC)       =
+C                                                                    =
+C       NCRIT = 2     DAMAGE MODEL (TENSION (LINEAR), DT             =
+C                                   COMPRESSION     , DC)            =
+C    VARIABLES:                                                      =
+C                                                                    =
+C       DMATX                       ELASTIC CONSTITUTIVE MATRIX      =
+C       DSTRA                       DIFFERENTIAL STRAIN              =
+C       BETAM                       ROTATION MATRIX                  =
+C       PROSI & SOXYZ               AUXILIAR MATRICES FOR ROTATION   =
+C       STRIN                       INITIAL STRESSES (TEMPERATURE)   =
+C                                                                    =
+C                                             - TENSION -            =
+C       EQUIT                       CURRENT EQUIVALENT STRAIN        =
+C       DAMAT                       DAMAGE INTERNAL VARIABLE         =
+C       THRET                       THRESHOLD FOR DAMAGE             =
+C       AVALT                       PARAMETER AT (LINEAR + EXPON.)   =
+C       BVALT                       PARAMETER BT (LINEAR)            =
+C       SGTEN                       POSITIVE STRESSES                =
+C                                                                    =
+C                                             - COMPRESSION -        =
+C       EQUIC                       CURRENT EQUIVALENT STRAIN        =
+C       DAMAC                       DAMAGE INTERNAL VARIABLE         =
+C       THREC                       THRESHOLD FOR DAMAGE             =
+C       AVALC                       PARAMETER AC                     =
+C       BVALC                           "     BC                     =
+C       SGCOM                       NEGATIVE STRESSES                =
+C                                                                    =
+C       SGEFF                       EFFECTIVE STRESS=DO:E-SOP        =
+C       SGTOT                       FINAL CAUCHY STRESSES            =
+C                                                                    =
+C   ALL STRESSES ACCORDING TO:                                       =
+C                                                                    =
+C            STRES = (SXX, SYY, SZZ, SXY, SXZ, SYZ)    NSTRE=6       =
+C            STRES = (SRR, SZZ, SRZ, S00)              NSTRE=4       =
+C            STRES = (SXX, SYY, SZZ, SXY)              NSTRE=3       =
+C                                                                    =
+C   AUTHOR: RUI FARIA                           VERSION: 96.09.14    =
+C                                               --------             =
+C=====================================================================
+C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT real*8 (a-h,o-z)
+      INTEGER   ISTEG, ITERA, NTEMP
+      INTEGER   NCRIT, NDIME, NDIM1, NSTRE, NSTR1
+      REAL*8    AVALC, AVALT, BPCOM, BVALT, BVALC, DAMAC,
+     .          DAMAT, EBOU1, EQUIC, EQUIT,
+     .          GVALC,
+     .          HVALC, POISS, STRIN, TANGB, THREC, THRET,
+     .          THRUC, THR0C, THR0T, YOUNG, DSIGT(NSTR1),
+     .          DSTRA (NSTR1), SGEFF (NSTR1), SGTOT (NSTR1),
+     .          DMATX (NSTRE,NSTRE)
+C
+      INTEGER   ISTR1, NTENS, NCOMP
+      REAL*8    EUTRI, POWER, PROV1,
+     .          REDTE, REDCO,
+     .          SGCOM (6), SGTEN (6), STRIA (6),
+     .          BETAM (3,3), PROSI (3,3), SOXYZ (3,3)
+C
+      CHARACTER*6 STYPE
+C
+C
+C=====----------------------------------------------------------------
+C  NEW TRIAL STRESS TENSOR                                           |
+C=====----------------------------------------------------------------
+C
+      CALL MATVE1 (DMATX,DSTRA,NSTR1,NSTR1,DSIGT,1)
+C
+c
+      DO ISTR1 = 1, NSTR1
+         STRIA (ISTR1) = SGEFF (ISTR1) + DSIGT (ISTR1)
+         SGEFF (ISTR1) = STRIA (ISTR1)
+      END DO
+c
+      CALL PARTIT (NDIME, NSTR1, NTENS, NCOMP,
+     .             BETAM, SGEFF, SGTEN, SGCOM)
+C=====----------------------------------------------------------------
+C                        ==  COMPRESSION  ==                         |
+C=====----------------------------------------------------------------
+C  CONTROL OF POSSIBLE NO-EXISTENCE OF DAMAGE AND PLASTICITY         |
+C=====----------------------------------------------------------------
+      IF (NCOMP .GT. 0)  THEN
+c
+          CALL EQUIST (SGCOM, TANGB, YOUNG,   -1, EQUIC)
+      ELSE
+          EQUIC = 0.0 D0
+          GO TO 2002
+      END IF
+C=====----------------------------------------------------------------
+C  CONTROL IF PLASTICITY IS DESIRED                                  |
+C=====----------------------------------------------------------------
+C
+c
+      IF (BPCOM .EQ. 0.0 D0)  GO TO 2002
+      IF (EQUIC .LE. THREC)   GO TO 2002
+C
+C=====----------------------------------------------------------------
+C  CONTROL OF POWER CONDITION                                        |
+C=====----------------------------------------------------------------
+      POWER = 0.0 D0
+      EUTRI = 0.0 D0
+      DO ISTR1 = 1, NSTR1
+         PROV1 = STRIA (ISTR1)
+         POWER = POWER + PROV1 * DSTRA (ISTR1)
+         EUTRI = EUTRI + PROV1**2
+      END DO
+C
+      EUTRI = SQRT  (EUTRI)
+C
+      IF (POWER .LE. 0.0 D0)  GO TO 2002
+C=====----------------------------------------------------------------
+C  POSSIBLE UPDATING OF EFFECTIVE STRESSES (PLASTIC EVOLUTION)       |
+C=====----------------------------------------------------------------
+      PROV1 = 1.0 D0 - BPCOM * POWER / EUTRI**2
+C
+      IF (PROV1 .LT. 0.0 D0)  THEN
+          PROV1 = 1.0 D0
+      END IF
+C
+      DO ISTR1 = 1, NSTR1
+         SGEFF (ISTR1) = STRIA (ISTR1) * PROV1
+      END DO
+C
+      CALL PARTIT (NDIME, NSTR1, NTENS, NCOMP,
+     .             BETAM, SGEFF, SGTEN, SGCOM)
+C
+      IF (NCOMP .GT. 0)  THEN
+          CALL EQUIST (SGCOM, TANGB, YOUNG,   -1, EQUIC)
+C
+          IF (EQUIC .LT. THREC)  THEN
+              DO ISTR1 = 1, NSTR1
+                 SGEFF (ISTR1) = STRIA (ISTR1)
+              END DO
+C
+              CALL PARTIT (NDIME, NSTR1, NTENS, NCOMP,
+     .                     BETAM, SGEFF, SGTEN, SGCOM)
+              CALL EQUIST (SGCOM, TANGB, YOUNG,    -1, EQUIC)
+C
+          END IF
+          GO TO 2002
+      ELSE
+          DO ISTR1 = 1, NSTR1
+             SGEFF (ISTR1) = STRIA (ISTR1)
+          END DO
+C
+          CALL PARTIT (NDIME, NSTR1, NTENS, NCOMP,
+     .                 BETAM, SGEFF, SGTEN, SGCOM)
+C
+          EQUIC = 0.0 D0
+          GO TO 2002
+      END IF
+C
+ 2002 CONTINUE
+C
+C=====----------------------------------------------------------------
+C  CHECKING FOR DAMAGE AND UPDATING OF INTERNAL VARIABLES            |
+C=====----------------------------------------------------------------
+C
+      IF (EQUIC .GE. THREC)  THREC = EQUIC
+C
+      DAMAC = 1.0 D0 - THR0C / THREC * (1.0 D0 - AVALC) -
+     .                 AVALC * EXP (BVALC*(THR0C-THREC))
+C
+      IF (DAMAC .GT. 1.0 D0)  DAMAC = 1.0 D0
+      IF (DAMAC .LT. 0.0 D0)  DAMAC = 0.0 D0
+C
+C=====----------------------------------------------------------------
+C                       ==  TENSION  ==                              |
+C=====----------------------------------------------------------------
+      IF (NTENS .GT. 0)  THEN
+          CALL EQUIST (SGTEN, TANGB, YOUNG,    +1, EQUIT)
+      ELSE
+          EQUIT = 0.0 D0
+      END IF
+C=====----------------------------------------------------------------
+C  CHECKING FOR DAMAGE AND UPDATING OF INTERNAL VARIABLES            |
+C=====----------------------------------------------------------------
+C
+      IF (EQUIT .GE. THRET)  THRET = EQUIT
+C
+      IF (NCRIT .EQ. 1)  THEN
+          PROV1 = THR0T / THRET
+          DAMAT = 1.0 D0 - PROV1 * EXP (AVALT*(1.0D0-1.0D0/PROV1))
+      END IF
+      IF (NCRIT .EQ. 2)  THEN
+          DAMAT = 1.0 D0 - AVALT / THRET + BVALT
+      END IF
+C
+      IF (DAMAT .GT. 1.0 D0)  DAMAT = 1.0 D0
+      IF (DAMAT .LT. 0.0 D0)  DAMAT = 0.0 D0
+C=====----------------------------------------------------------------
+C  ROTATION OF POSITIVE EFFECTIVE STRESS TENSOR, FROM EIGEN TO       |
+C  GLOBAL SYSTEM                                                     |
+C=====----------------------------------------------------------------
+      CALL EIGGLO (NDIME, NSTR1, NTENS,
+     .             BETAM, PROSI, SGTEN, SOXYZ)
+C=====----------------------------------------------------------------
+C  NEGATIVE EFFECTIVE STRESS TENSOR                                  |
+C=====----------------------------------------------------------------
+      DO ISTR1 = 1, NSTR1
+         SGCOM (ISTR1) = SGEFF (ISTR1) - SGTEN (ISTR1)
+      END DO
+C=====----------------------------------------------------------------
+C  COMPUTE CAUCHY STRESSES ACCORDING TO DAMAGE AND PLASTICITY        |
+C=====----------------------------------------------------------------
+      REDTE = 1.0 D0 - DAMAT
+      REDCO = 1.0 D0 - DAMAC
+C
+      eps1=0.d0
+      eps2=0.d0
+      DO ISTR1 = 1, NSTR1
+         SGTOT (ISTR1) = REDTE * SGTEN (ISTR1) + REDCO * SGCOM (ISTR1)
+         eps1=eps1+(SGTOT(ISTR1)-STRIA(ISTR1))**2
+         eps2=eps2+SGTOT(ISTR1)**2
+      END DO
+
+C
+      RETURN
+      END
+
+

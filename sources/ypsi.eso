@@ -1,0 +1,749 @@
+C YPSI      SOURCE    CHAT      05/01/13    04:20:16     5004
+      SUBROUTINE YPSI
+C
+C     VERSION VECTORISEE
+C
+C     Les éléments sont groupés en paquets de LRV éléments, LRV étant
+C     la longueur des registres vectoriels de la machine cible, i.e
+C     64 sur Cray, 128 ou 256 sur IBM 3090VF. On promène une fenêtre
+C     de longueur LRV sur la boucle générale de longueur NEL.
+C
+     & (HR,RPG,DRR,LE,NEL,K0,NPTD,IES,NP,IAXI,
+     & IPADI,IKOMP,IKAS,
+     & ALFE,IND1,UN,INDU,NPTS,IPADS,
+     & TN,QE,IKS,
+     & HRN,G,ALT,SGT,
+     & VOLU,COTE,NELZ,ZTE,
+     & DTM1,DT,DTT1,DTT2,NUEL,DIAEL)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+C********************************************************************
+C
+C  CE SP DISCRETISE UNE EQUATION GENERALE DE TRANSPORT-DIFFUSION AVEC
+C  SOURCE.
+C    EN 2D SUR LES ELEMENTS QUA4 ET TRI3      PLAN OU AXI
+C    EN 3D SUR LES ELEMENTS CUB8 ET PRI6
+C  LES OPERATEURS SONT "SOUS-INTEGRES"
+C
+C
+C                        APPELE PAR YTSCAL
+C
+C
+C********************************************************************
+
+-INC CCVQUA4
+-INC CCREEL
+-INC SMCOORD
+-INC CCOPTIO
+
+C
+C Longueur des registres vectoriels de la machine cible
+C On prend 64 pour ne pas augmenter la taille des tableaux
+C nécessaires à la vectorisation.
+C
+      PARAMETER(LRV=64)
+
+      DIMENSION UN(NPTS,IES),HRN(NPTD),TN(NPTD)
+      DIMENSION COTE(NELZ,IES),VOLU(NELZ),QE(*)
+      DIMENSION ALFE(*),ALT(*)
+
+      DIMENSION IPADI(*),LE(NP,1),IPADS(*)
+      DIMENSION HR(NEL,NP,IES),RPG(1),DRR(NP,NEL)
+
+      DIMENSION BF(9,9)
+      DIMENSION QGGT(8,8),Q1(8,8),Q2(8,8),Q3(8,8)
+
+      DIMENSION COEF(LRV),AIRE(LRV)
+      DIMENSION AL2(LRV),AH2(LRV),AP2(LRV)
+      DIMENSION AL(LRV),AH(LRV),AP(LRV)
+      DIMENSION ALFT(LRV),QT(LRV)
+      DIMENSION XMB(LRV),XMH(LRV)
+      DIMENSION CFM(LRV)
+      DIMENSION CF1(LRV),CF2(LRV),CF3(LRV)
+      DIMENSION DR(LRV,9)
+      DIMENSION UM(LRV),UP(LRV)
+      DIMENSION UIX(LRV,9),UIY(LRV,9),UIZ(LRV,9)
+      DIMENSION TETAC(LRV,9),TETAD(LRV,9)
+      DIMENSION UMI(LRV,3)
+      DIMENSION SBF(LRV,9)
+      DIMENSION GRADT(LRV,3)
+
+C?      DIMENSION ZTE(LRVH)
+      DIMENSION ZTE(NPTS)
+
+      INTEGER   U(3),D(3),SGN
+      REAL*8    G(*),ZVGG(4),x(4),y(4),KMAX
+      REAL*8    KKK(4),PhiSource(LRV),n(3,4)
+      REAL*8    PhiN3,PhiN4,Phi3NNQ,Phi4NNQ
+      REAL*8    MINI2,MINI4,MAXI2,MAXI4
+
+      SAVE      IPAS,QGGT,Q1,Q2,Q3
+
+      DATA      CD/1.D0/
+      DATA      IPAS/0/
+C*********************************************************************
+C
+C           INITIALISATIONS DIVERSES
+C
+
+      NK=K0
+C                           ********
+C                           *  2D  *
+C                           ********
+
+      IF (IES.EQ.3) GOTO 10
+
+      IAX1=0
+      IAX2=0
+      IF (IAXI.EQ.1) IAX2=1
+      IF (IAXI.EQ.2) IAX1=1
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+C                           DIFFERENCES TRIANGLE / QUADRANGLE
+      QUA4=0.D0
+      IF (NP.EQ.4) QUA4=1.D0
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+C
+C Calcul du nombre de paquets de LRV éléments
+C
+      NNN=MOD(NEL,LRV)
+      IF(NNN.EQ.0) NPACK=NEL/LRV
+      IF(NNN.NE.0) NPACK=1+(NEL-NNN)/LRV
+      KPACKD=1
+      KPACKF=NPACK
+
+******* BOUCLE SUR LES PAQUETS DE LRV ELEMENTS **********
+
+      DO 7001 KPACK=KPACKD,KPACKF
+
+C ======= A L'INTERIEUR DE CHAQUE PAQUET DE LRV ELEMENTS =======
+
+C 1. Calcul des limites du paquet courant.
+
+      KDEB=1+(KPACK-1)*LRV
+      KFIN=MIN(NEL,KDEB+LRV-1)
+      DO 7002 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NK=K+K0
+      NK1=(1-IND1)*(NK-1)+1
+      ALFT(KP)=ALFE(NK1)+XPETIT
+      AIRE(KP)=VOLU(NK)
+      AL(KP)=COTE(NK,1)
+      AH(KP)=COTE(NK,2)
+      AL2(KP)=1.D0/AL(KP)/AL(KP)
+      AH2(KP)=1.D0/AH(KP)/AH(KP)
+7002  CONTINUE
+
+      IF((IKOMP.EQ.0.AND.IKAS.EQ.5).OR.
+     &(IKOMP.EQ.1.AND.IKAS.EQ.6))THEN
+      DO 7003 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NK=K+K0
+      ALFT(KP)=ALFT(KP)+ALT(NK)/SGT
+7003  CONTINUE
+      ENDIF
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+C Initialisation des UMI avant accumulation
+      DO 7005 K=KDEB,KFIN
+      KP=K-KDEB+1
+      UMI(KP,1)=XPETIT
+      UMI(KP,2)=XPETIT
+7005  CONTINUE
+
+      DO 7006 I=1,NP
+      DO 7006 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NF=IPADI(LE(I,K))
+      NFU=IPADS(LE(I,K))
+      NFU=(1-INDU)*(NFU-1)+1
+      DR(KP,I)=DRR(I,K)
+      UMI(KP,1)=UMI(KP,1)+UN(NFU,1)*DR(KP,I)
+      UMI(KP,2)=UMI(KP,2)+UN(NFU,2)*DR(KP,I)
+
+      TETAC(KP,I)=HRN(NF)
+      TETAD(KP,I)=TN(NF)
+7006  CONTINUE
+
+*     Calcul du FLUX PhiSource du terme source.
+
+      IF (IKOMP.EQ.0) THEN
+
+         DO 70021 K=KDEB,KFIN
+         KP=K-KDEB+1
+         NK=K+K0
+         NKS=(1-IKS)*(NK-1)+1
+         QT(KP)=QE(NKS)
+70021    CONTINUE
+
+         DO 70062 K=KDEB,KFIN
+         KP=K-KDEB+1
+         PhiSource(KP)=-QT(KP)*AIRE(KP)
+70062    CONTINUE
+
+      ELSEIF (IKOMP.EQ.1) THEN
+
+         DO 70023 K=KDEB,KFIN
+         KP=K-KDEB+1
+         NK=K+K0
+         NKS=(1-IKS)*(NK-1)+1
+         QT(KP)=QE(NKS)
+70023    CONTINUE
+
+         DO 70064 K=KDEB,KFIN
+         KP=K-KDEB+1
+         PhiSource(KP)=-QT(KP)*AIRE(KP)
+70064    CONTINUE
+
+      ENDIF
+
+
+      DO 7007 K=KDEB,KFIN
+      KP=K-KDEB+1
+      UMI(KP,1)=UMI(KP,1)/AIRE(KP)
+      UMI(KP,2)=UMI(KP,2)/AIRE(KP)
+      UM(KP)=UMI(KP,1)*UMI(KP,1)+UMI(KP,2)*UMI(KP,2)
+      UM(KP)=SQRT(UM(KP)) + XPETIT
+
+7007  CONTINUE
+
+**************************************************
+
+      CALL INITD(ZTE,NPTS,XPETIT)
+
+      IF (IKOMP.EQ.0) THEN
+
+      DO 7008 K=KDEB,KFIN
+      KP=K-KDEB+1
+
+      DO 23 I=1,NP
+23    ZVGG(I) =0.D0
+
+**************************************************
+
+* NP=3 correspond à PSI sur triangles
+* NP=4 correspond à PSI sur quadrangles ,cad NNQ
+
+* Calcul des Ki:**********************************
+
+      IF (NP.EQ.3) THEN
+
+      DO 1 I=1,NP
+1     KKK(I)=AIRE(KP)*(UMI(KP,1)*HR(K,I,1)+UMI(KP,2)*HR(K,I,2))
+
+      ELSEIF (NP.EQ.4) THEN
+
+* Calcul des normales:
+
+      DO 36 I=1,NP
+
+      x(I)=XCOOR((LE(I,K)-1)*(IES+1)+1)
+36    y(I)=XCOOR((LE(I,K)-1)*(IES+1)+2)
+
+      DO 39 I=1,NP
+
+      IF (I.EQ.4) THEN
+      J1=1
+      ELSE
+      J1=I+1
+      ENDIF
+
+      n(1,I)= (y(I)-y(J1))
+      n(2,I)= (x(J1)-x(I))
+
+39    CONTINUE
+
+* Calcul des Ki :
+
+      DO 17 I=1,NP
+17    KKK(I)=0.5D0*(UMI(KP,1)*n(1,I)+UMI(KP,2)*n(2,I))
+
+      ENDIF
+
+
+****************************************************
+* Calcul du DT:
+****************************************************
+
+      KMAX=KKK(1)
+      DO 29 I=2,NP
+      IF (KKK(I).GT.KMAX) KMAX=KKK(I)
+29    CONTINUE
+
+      DO 27 J=1,NP
+      IP=IPADS(LE(J,K))
+
+      ZTE(IP) = ZTE(IP) + KMAX/(2.D0*AIRE(KP)+XPETIT)
+27    CONTINUE
+
+****************************************************
+
+
+      IF (NP.EQ.4) THEN
+
+**************************************************
+*     Schéma NNQ (Pour des Quadrangles) .
+**************************************************
+
+* Tests:
+********
+      Nd=0
+
+      rrt =KKK(2)+KKK(3)
+
+      IF (rrt.GT.0.D0) THEN
+      Nd=Nd+1
+      D(Nd)=1
+      ENDIF
+
+      rrt =KKK(3)+KKK(4)
+
+      IF (rrt.GT.0.D0) THEN
+      Nd=Nd+1
+      D(Nd)=2
+      ENDIF
+
+      rrt =KKK(1)+KKK(4)
+
+      IF (rrt.GT.0.D0) THEN
+      Nd=Nd+1
+      D(Nd)=3
+      ENDIF
+
+      rrt =KKK(1)+KKK(2)
+
+      IF (rrt.GT.0.D0) THEN
+      Nd=Nd+1
+      D(Nd)=4
+      ENDIF
+
+      IF (Nd.EQ.2) THEN
+      IF ((D(1)+1).NE.D(2)) THEN
+      jj = D(1)
+      D(1) = D(2)
+      D(2) = jj
+      ENDIF
+      ENDIF
+
+      Nu=0
+      DO 66 I=1,NP
+      IF (Nd.EQ.2) THEN
+      IF ((I.NE.D(2)).AND.(I.NE.D(1))) THEN
+      Nu=Nu+1
+      U(Nu)=I
+      ENDIF
+      ELSEIF (Nd.EQ.1) THEN
+      IF (I.NE.D(1)) THEN
+      Nu=Nu+1
+      U(Nu)=I
+      ENDIF
+      ENDIF
+66    CONTINUE
+
+      IF (Nu+Nd.NE.4) THEN
+      Print *,'Nd=,Nu=',Nd,Nu
+      ENDIF
+
+      IF (Nu.EQ.2) THEN
+      IF ((U(1)+1).NE.U(2)) THEN
+      jj=U(1)
+      U(1)=U(2)
+      U(2)=jj
+      ENDIF
+      ENDIF
+
+      N1 =U(1)
+      N2 =U(2)
+      N3 =D(1)
+      N4 =D(2)
+
+      IF (Nd.EQ.2) THEN
+
+      MINI2=0.D0
+      IF (0.D0.GE.KKK(N2))      MINI2=KKK(N2)
+
+      MINI4=0.D0
+      IF (0.D0.GE.KKK(N4))      MINI4=KKK(N4)
+
+      MAXI2=0.D0
+      IF (0.D0.LE.KKK(N2))      MAXI2=KKK(N2)
+
+      MAXI4=0.D0
+      IF (0.D0.LE.KKK(N4))      MAXI4=KKK(N4)
+
+      PhiN3 =( KKK(N1) + MINI2 + MINI4 )
+     *  *(TETAC(KP,N3)-TETAC(KP,N2))
+     *  +( MAXI4-MINI2 )*(TETAC(KP,N3)-TETAC(KP,N1))
+
+      PhiN4 =( KKK(N1) + MINI2 + MINI4 )
+     * *(TETAC(KP,N4)-TETAC(KP,N1))
+     * +( MAXI2-MINI4 )*(TETAC(KP,N4)-TETAC(KP,N2))
+
+      ZVGG(N3)=PhiN3
+      ZVGG(N4)=PhiN4
+
+      r= -ZVGG(N3) / (ZVGG(N4)+XPETIT)
+      IF (r.GT.0.D0) THEN
+      IF (r.GT.1.D0) THEN
+      ZVGG(N3)=ZVGG(N3)+ZVGG(N4)
+      ZVGG(N4)=0.D0
+      ELSE
+      ZVGG(N4)=ZVGG(N3)+ZVGG(N4)
+      ZVGG(N3)=0.D0
+      ENDIF
+      ENDIF
+
+      ELSEIF (ND.EQ.1) THEN
+
+      PhiQ =0.5D0*(UMI(KP,1)*(n(1,1)+n(1,4)) +
+     * UMI(KP,2)*(n(2,1)+n(2,4)))*(TETAC(KP,3)-TETAC(KP,1))+
+     * 0.5D0*(UMI(KP,1)*(n(1,1)+n(1,2)) +
+     * UMI(KP,2)*(n(2,1)+n(2,2)))*(TETAC(KP,4)-TETAC(KP,2))
+
+      ZVGG(N3) = PhiQ
+      ENDIF
+
+      ELSEIF (NP.EQ.3) THEN
+
+**************************************************
+*     Schéma PSI (Min-Mod) Pour des Triangles :
+**************************************************
+
+*  U Noeuds amonts
+*  D Noeuds avals .
+**********************
+
+      Nd=0
+      Nu=0
+
+      DO 13 I=1,NP
+
+      IF (KKK(I).GT.0.D0) THEN
+      Nd=Nd+1
+      D(Nd)=I
+      ELSE
+      Nu=Nu+1
+      U(Nu)=I
+      ENDIF
+
+13    CONTINUE
+
+      IF (Nd.EQ.1) THEN
+
+***************************
+* 1 Target :
+***************************
+
+      N1 = D(1)
+      N2 = U(1)
+      N3 = U(2)
+
+      ZVGG(N1) = PhiSource(KP) + KKK(1)*TETAC(KP,1)+
+     * KKK(2)*TETAC(KP,2) + KKK(3)*TETAC(KP,3)
+      ZVGG(N2) = 0.D0
+      ZVGG(N3) = 0.D0
+
+      ELSEIF (Nd.EQ.2) THEN
+
+***************************
+* 2 Targets :
+***************************
+
+      N1 = D(1)
+      N2 = D(2)
+      N3 = U(1)
+
+      ZVGG(N1) = KKK(N1)*(TETAC(KP,N1)-TETAC(KP,N3))-PhiSource(KP)*
+     * KKK(N1)/(KKK(N3)+XPETIT)
+
+      ZVGG(N2) = KKK(N2)*(TETAC(KP,N2)-TETAC(KP,N3))-PhiSource(KP)*
+     * KKK(N2)/(KKK(N3)+XPETIT)
+
+      ZVGG(N3) = 0.D0
+
+      r= -ZVGG(N1) / (ZVGG(N2)+XPETIT)
+      IF (r.GT.0.D0) THEN
+      IF (r.GT.1.D0) THEN
+      ZVGG(N1)=ZVGG(N1)+ZVGG(N2)
+      ZVGG(N2)=0.D0
+      ELSE
+      ZVGG(N2)=ZVGG(N1)+ZVGG(N2)
+      ZVGG(N1)=0.D0
+      ENDIF
+      ENDIF
+
+      ENDIF
+
+      ENDIF
+
+      DO 7 I=1,NP
+      SBF(KP,I)=ZVGG(I)
+7     CONTINUE
+
+7008  CONTINUE
+**************************************************
+
+      ELSEIF (IKOMP.EQ.1) THEN
+
+* Prog à compléter
+      RETURN
+
+      ENDIF
+
+* Pas de temps DT :
+
+      DT=100.
+
+      DO 32 K1=KDEB,KFIN
+      DO 32 J=1,NP
+      IP=IPADS(LE(J,K1))
+      DT1=1.D0 /( ZTE(IP)+XPETIT)
+
+c     IF (Abs(DT1).GE.1000) THEN
+c     Print *,'DT1 trop grand =',DT1
+c     ENDIF
+
+      IF (DT1.LE.DT) DT=DT1
+32    CONTINUE
+
+
+      DTT1=DT
+      DTT2=DT
+      DTT3=0.D0
+      DIAEL=0.D0
+      NUEL=0
+
+*      PRINT *, 'PAS DE TEMPS = ', DT
+
+
+****************************************************
+* Contribution du terme diffusif:
+
+      DO 8 I=1,NP
+      DO 8 J=1,NP
+      DO 8 K=KDEB,KFIN
+      KP=K-KDEB+1
+
+      ZVGT=AIRE(KP)*(
+     &     HR(K,I,1)*HR(K,J,1)*ALFT(KP)
+     &+    HR(K,I,2)*HR(K,J,2)*ALFT(KP)
+     &+    (ALFT(KP)*AL2(KP)+ALFT(KP)*AH2(KP))/12.D0
+     &     *VGGT(J,I)*QUA4  )
+
+
+      SBF(KP,I)=SBF(KP,I)+ TETAD(KP,J)*ZVGT
+
+8     CONTINUE
+****************************************************
+
+C     Fin de l'accumulation dans SBF.
+C     On ajoute ces incréments G.
+
+
+      DO 7017 I=1,NP
+      DO 7017 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NF=IPADS(LE(I,K))
+
+      G(NF) = G(NF)-SBF(KP,I)
+
+7017  CONTINUE
+
+
+7001  CONTINUE
+      IPAS=1
+
+      RETURN
+
+
+C                           ********
+C                           *  3D  *
+C                           ********
+
+ 10   CONTINUE
+
+      IF (IPAS.EQ.0) CALL CALHRH(QGGT,Q1,Q2,Q3,IES)
+      CUB8 = 0.D0
+      IF (NP.EQ.8) CUB8=1.D0
+
+C
+C Calcul du nombre de paquets de LRV éléments
+C
+      NNN=MOD(NEL,LRV)
+      IF(NNN.EQ.0) NPACK=NEL/LRV
+      IF(NNN.NE.0) NPACK=1+(NEL-NNN)/LRV
+      KPACKD=1
+      KPACKF=NPACK
+C
+C ******* BOUCLE SUR LES PAQUETS DE LRV ELEMENTS **********
+C
+      DO 8001 KPACK=KPACKD,KPACKF
+C
+C ======= A L'INTERIEUR DE CHAQUE PAQUET DE LRV ELEMENTS =======
+C
+C 1. Calcul des limites du paquet courant.
+      KDEB=1+(KPACK-1)*LRV
+      KFIN=MIN(NEL,KDEB+LRV-1)
+C
+      DO 8002 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NK=K+K0
+      NK1=(1-IND1)*(NK-1)+1
+      ALFT(KP)=ALFE(NK1)+XPETIT
+      AIRE(KP)=VOLU(NK)
+      AL(KP)=COTE(NK,1)
+      AH(KP)=COTE(NK,2)
+      AP(KP)=COTE(NK,3)
+
+      CFM(KP)=AL(KP)*AH(KP)/AP(KP)+AL(KP)*AP(KP)/AH(KP)+
+     &        AP(KP)*AH(KP)/AL(KP)
+C     CF1(KP)=AL(KP)*AH(KP)/AP(KP)
+C     CF2(KP)=AL(KP)*AP(KP)/AH(KP)
+C     CF3(KP)=AP(KP)*AH(KP)/AL(KP)
+      XMH(KP)=(AL(KP)+AH(KP)+AP(KP))/3.D0
+      AL2(KP)=1.D0/AL(KP)/AL(KP)
+      AH2(KP)=1.D0/AH(KP)/AH(KP)
+      AP2(KP)=1.D0/AP(KP)/AP(KP)
+
+ 8002 CONTINUE
+      IF((IKOMP.EQ.0.AND.IKAS.EQ.5).OR.
+     &(IKOMP.EQ.1.AND.IKAS.EQ.6))THEN
+      DO 8003 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NK=K+K0
+      ALFT(KP)=ALFT(KP)+ALT(NK)/SGT
+ 8003 CONTINUE
+      ENDIF
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+C Initialisation des UMI avant accumulation
+      DO 8005 K=KDEB,KFIN
+      KP=K-KDEB+1
+      UMI(KP,1)=XPETIT
+      UMI(KP,2)=XPETIT
+      UMI(KP,3)=XPETIT
+ 8005 CONTINUE
+
+      DO 8006 I=1,NP
+      DO 8006 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NF=IPADI(LE(I,K))
+      NFU=IPADS(LE(I,K))
+      NFU=(1-INDU)*(NFU-1)+1
+      DR(KP,I)=DRR(I,K)
+      UMI(KP,1)=UMI(KP,1)+UN(NFU,1)*DR(KP,I)
+      UMI(KP,2)=UMI(KP,2)+UN(NFU,2)*DR(KP,I)
+      UMI(KP,3)=UMI(KP,3)+UN(NFU,3)*DR(KP,I)
+
+      TETAC(KP,I)=HRN(NF)
+      TETAD(KP,I)=TN(NF)
+8006  CONTINUE
+
+C
+C Initialisation de la variable d'accumulation SBF au terme source
+C
+C       write(6,*)' IKomp,ikas=',IKomp,ikas
+C       write(6,*)' IKS,IND1,INDU=',IKS,IND1,INDU
+
+      IF(IKOMP.EQ.0)THEN
+
+         DO 80021 K=KDEB,KFIN
+         KP=K-KDEB+1
+         NK=K+K0
+         NKS=(1-IKS)*(NK-1)+1
+         QT(KP)=QE(NKS)
+80021    CONTINUE
+
+         DO 80062 I=1,NP
+         DO 80062 K=KDEB,KFIN
+         KP=K-KDEB+1
+         SBF(KP,I)=-QT(KP)*DR(KP,I)
+80062    CONTINUE
+
+      ELSEIF(IKOMP.EQ.1)THEN
+
+         DO 80023 K=KDEB,KFIN
+         KP=K-KDEB+1
+         NK=K+K0
+         NKS=(1-IKS)*(NK-1)+1
+         QT(KP)=QE(NKS)
+80023    CONTINUE
+
+         DO 80064 I=1,NP
+         DO 80064 K=KDEB,KFIN
+         KP=K-KDEB+1
+         SBF(KP,I)=-QT(KP)*DR(KP,I)
+80064    CONTINUE
+
+      ENDIF
+
+      DO 8007 K=KDEB,KFIN
+      KP=K-KDEB+1
+      UMI(KP,1)=UMI(KP,1)/AIRE(KP)
+      UMI(KP,2)=UMI(KP,2)/AIRE(KP)
+      UMI(KP,3)=UMI(KP,3)/AIRE(KP)
+      UM(KP)=UMI(KP,1)*UMI(KP,1)+UMI(KP,2)*UMI(KP,2)
+     &      +UMI(KP,3)*UMI(KP,3)
+      UM(KP)=SQRT(UM(KP))
+8007  CONTINUE
+
+
+********************************************************
+*          Debut de PSI:
+
+
+
+
+
+
+
+
+********************************************************
+
+
+C Le coeur du calcul ...
+
+*      IF(IKOMP.EQ.0)THEN
+
+C      DO 8014 I=1,NP
+C      DO 8014 K=KDEB,KFIN
+C      KP=K-KDEB+1
+
+*      ELSEIF(IKOMP.EQ.1)THEN
+*      RETURN
+
+*      ENDIF
+
+C
+C     Fin de l'accumulation dans SBF.
+C     On ajoute ces incréments G.
+C
+      DO 8017 I=1,NP
+      DO 8017 K=KDEB,KFIN
+
+      KP=K-KDEB+1
+      NF=IPADS(LE(I,K))
+      G(NF) = G(NF)-SBF(KP,I)
+8017  CONTINUE
+
+8001  CONTINUE
+
+
+      IPAS=1
+      RETURN
+1002  FORMAT(10(1X,1PE11.4))
+
+      END
+
+
+
+
+
+

@@ -1,0 +1,1031 @@
+C PJMODE    SOURCE    PV        17/09/29    21:15:42     9578
+      SUBROUTINE PJMODE(ipmode)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+C=======================================================================
+C OPERATEUR PJBA :
+C           PROJECTION D'UN CHPOINT, D'UN CHARGEMENT OU D'UNE RIGIDITE
+C           SUR LES ELEMENTS D'UNE BASE MODALE B.
+C           LE RESULTAT EST DU MEME TYPE.
+C
+C SYNTAXE :
+C       *   FN  =  PJBA  B   OBJET           ;   SI BASE ELEMENTAIRE
+C       *   FN  =  PJBA  B  STR1  (N)  OBJET ;   SI BASE COMPLEXE
+C
+C         OBJET    POUVANT ETRE UNE FORCE OU UN CHARGEMENT,
+C                  OU UNE RIGIDITE DANS LE PREMIER CAS.
+C=======================================================================
+***********************************************************
+*     PROJECTION D'UNE MATRICE SUR UNE BASE DE MODES      *
+* _______________________________________________________ *
+*                                                         *
+*     DATE : le 11 Avril 1995                             *
+*     AUTEUR : Nicolas BENECH                             *
+* _______________________________________________________ *
+*                                                         *
+*     MODULE(S) APPELANT(S) : PJBA                        *
+*                                                         *
+*     MODULE(S) APPELE(S) : ACCTAB, YTMX                  *
+* _______________________________________________________ *
+*                                                         *
+*    EN ENTREE :                                          *
+*        MRIGID : Matrice a projeter                      *
+*        MTAB1  : Base de modes, reels ou complexes       *
+*        'REEL' : indique que l'on utilise le produit     *
+*                 scalaire reel (pas de conjugaison)      *
+*                                                         *
+*    EN SORTIE :                                          *
+*        RI1 : Matrice projetee (partie reelle)           *
+*        RI2 : Matrice projetee (partie imaginaire)       *
+* _______________________________________________________ *
+*                                                         *
+*    REMARQUE :                                           *
+*         L'operation realisee est :                      *
+*                (MTAB1)t . MRIGID. MTAB1                 *
+*  Dans le cas complexe, la transposition est accompagnee *
+*   de la conjugaison (si REEL n'est pas mentionne).      *
+*
+* voir aussi PROJTA
+***********************************************************
+*
+-INC SMCHPOI
+-INC SMCHARG
+-INC SMLCHPO
+-INC CCOPTIO
+-INC CCGEOME
+-INC CCREEL
+-INC SMELEME
+-INC CCHAMP
+-INC SMCHAML
+-INC SMMODEL
+-INC SMRIGID
+-INC SMLMOTS
+-INC SMLENTI
+
+C
+* Declarations
+*
+      PARAMETER(ZERO=0.D0)
+      REAL*8 XVAL, RMAX
+      CHARACTER*8 LETYPE
+      CHARACTER*8  TYPMOD,cmate
+      LOGICAL MODCOM,dedans,dchpo,l3,lr2,lirl
+      INTEGER I, J, NBMOD, POS, IREEL, IVALRE, IOBRE
+      REAL*8 XVALRE
+      LOGICAL LOGRE
+      segment plcf
+       integer lpref(ldepl),ldefo(ldepl),lmade(ldepl)
+       real*8  prmas(ldepl)
+      endsegment
+      segment pmod
+        integer kdefo(nbmod)
+      endsegment
+      segment prigmat
+        integer lrigmat(nrigmat,2+9)
+      endsegment
+      segment pmapmo
+         integer lmapmo(nmapmo),defpmo(nmapmo),dimpmo(nmapmo)
+         character*4 compmo(nmapmo)
+         real*8 coepmo(nmapmo)
+      endsegment
+      segment pcompo
+         character*4 mcol
+         real*8  valmod(nipmod)
+      endsegment
+      LOGICAL L0,L1,lcf
+      PARAMETER (ncod=8)
+      CHARACTER*4 IDDL,lcod(ncod),lcof(ncod),motinc
+      CHARACTER*8 TYPRET,CHARRE
+      data xlopre/1.d-11/
+      DATA KZERO/0/
+      data lcod/'UX','UY','UZ','RX','RY','RZ','UR','UT'/
+      data lcof/'FX','FY','FZ','MX','MY','MZ','FR','FT'/
+
+      plcf = 0
+      jgn = 4
+      jgm = ncod
+      segini mlmot5
+      segini mlmot6
+       do io = 1,ncod
+        mlmot5.mots(io) = lcod(io)
+        mlmot6.mots(io) = lcof(io)
+       enddo
+
+      modcom = .false.
+      dchpo = .false.
+      iriout = 0
+      iriout1 = 0
+      iriout2 = 0
+      mmodel = ipmode
+      segact mmodel
+      n1 = kmodel(/1)
+      segini mmode1
+      jn = 0
+      do im = 1, n1
+       imodel = kmodel(im)
+       segact imodel
+       if (formod(1).eq.'MECANIQUE'.and.MATMOD(1).eq.'ELASTIQUE'
+     &.and.(MATMOD(2).eq.'MODAL'.or.MATMOD(2).eq.'STATIQUE')) then
+        jn = jn + 1
+        mmode1.kmodel(jn) = imodel
+       endif
+       segdes imodel
+      enddo
+      segdes mmodel
+      if (jn.ne.0) then
+       n1 = jn
+       segadj mmode1
+       ipmode = mmode1
+      else
+       segsup mmode1
+* cas de projection non pr�vue
+       call erreur(5)
+       return
+      endif
+
+      call lirobj('MCHAML',IPCAR1,1,iretou)
+       if (ierr.ne.0) return
+
+      ipchpo = 0
+      iprigi = 0
+      call lirobj('CHARGEME',IPCHAR,0,iretou)
+      if (iretou.eq.0) call lirobj('CHPOINT ',IPCHPO,0,iretou)
+      if (iretou.eq.0) call lirobj('RIGIDITE',IPRIGI,0,iretou)
+
+      if (iretou.eq.0) then
+* manque un op�rande
+        call erreur(5)
+        return
+      endif
+
+C     CB215821 : Faire appel directement a REDUAF plutot que faire du GIBIANE en ESOPE...
+      call reduaf ( ipcar1,ipmode,IPCARA,1,iretr,kerre)
+      if (ierr.ne.0) return
+      if( iretr.ne.1) then
+        call erreur (kerre)
+        return
+      endif
+
+       lcf = .false.
+       mmodel = ipmode
+       segact mmodel
+       mchelm = ipcara
+       segact mchelm
+      if (ipchar.ne.0) goto 100
+      if (iprigi.ne.0) goto 200
+      if (ipchpo.ne.0) then
+        n = 1
+        segini mcharg
+        ipchar = mcharg
+        segini icharg
+        kcharg(1) = icharg
+        ichpo1 = ipchpo
+        goto 100
+      endif
+
+
+ 100   continue
+          MCHAR1=IPCHAR
+          SEGINI,MCHARG=MCHAR1
+          NBCHG=KCHARG(/1)
+          DO 10 INCHA=1,NBCHG
+            ICHAR1=KCHARG(INCHA)
+            SEGINI,ICHARG=ICHAR1
+            KCHARG(INCHA)=ICHARG
+            IP1=ICHPO1
+c
+      IRET = 0
+c
+c   deplacement impose => idepi=1
+c   force imposee      => idepi=0
+c
+      IDEPI =  0
+c     idepi = -1
+      KDEPI =  0
+      MCHPOI = IP1
+      SEGACT MCHPOI
+      IF (MTYPOI.EQ.'FLX     ') IDEPI = 1
+      SEGDES MCHPOI
+c     if (idepi.lt.0) then
+c        moterr(1:8) = 'chpoint'
+c        call erreur(302)
+c        return
+c     endif
+c
+      NBNN   = 1
+      NBREF  = 0
+      NBSOUS = 0
+*
+      LDEPL = kmodel(/1)
+      if (.not.lcf) segini plcf
+c
+c
+c  **** on initialise le chpoint
+c
+      NSOUPO = 1
+      NAT=1
+      SEGINI,MCHPOI
+      IRET = MCHPOI
+      MTYPOI = '        '
+      MOCHDE=' J''AI ETE FABRIQUE PAR L''OPERATEUR PJBA'
+      IFOPOI = IFOUR
+*     champ de force nodal: nature discrete
+      JATTRI(1)=2
+      NC = 1
+      SEGINI,MSOUPO
+      IPCHP(1)  = MSOUPO
+      NOHARM(1) = NIFOUR
+      NOCOMP(1) = 'FALF'
+
+      do 101 inocomp=1,2
+
+      N = LDEPL
+      SEGINI MPOVAL
+      IPOVAL = MPOVAL
+*
+      NBNN = 1
+      NBELEM = LDEPL
+      NBSOUS = 0
+      NBREF = 0
+      SEGINI MELEME
+      IGEOC = MELEME
+      ITYPEL = 1
+
+        knum = 0
+c
+c  ****boucle sur les chpoints de depl
+c
+      DO 11 IM = 1,kmodel(/1)
+
+        imodel = kmodel(im)
+        segact imodel
+        nomid = lnomid(2)
+        segact nomid
+      if (.not.lcf) then
+        ipt1 = imamod
+        segact ipt1
+        iptr = ipt1.num(1,1)
+        lpref(im) = iptr
+
+      indc = 1
+ 34   if (imache(indc).ne.imamod.or.conche(indc).ne.conmod) then
+          indc = indc + 1
+          if (indc.gt.imache(/1)) then
+* champ de caracteristiques incomplet
+           goto 99
+          endif
+          goto 34
+        endif
+
+        mchaml = ichaml(indc)
+        segact mchaml
+        do iij = 1, nomche(/2)
+          if (nomche(iij).eq.'DEFO') then
+            melval = ielval(iij)
+            segact melval
+            ipp1 = ielche(1,1)
+           ldefo(im) = ipp1
+            segdes melval
+          endif
+          if (nomche(iij).eq.'MADE') then
+            melval = ielval(iij)
+            segact melval
+            ipp2 = ielche(1,1)
+            lmade(im) = ipp2
+            segdes melval
+          endif
+          if (nomche(iij).eq.'MASS') then
+            melval = ielval(iij)
+            segact melval
+            ymass = velche(1,1)
+            prmas(im) = ymass
+            segdes melval
+          endif
+         if(ldefo(im).gt.0.and.lmade(im).gt.0.and.
+     &prmas(im).gt.0) goto 35
+        enddo
+ 35     continue
+          segdes mchaml
+        if (ldefo(im).eq.0) goto 99
+         if (prmas(im).le.0.and.cmatee(1:5).eq.'MODAL') goto 99
+         if (lmade(im).eq.0.and.cmatee(1:8).eq.'STATIQUE') goto 99
+
+      endif
+
+         if (NOCOMP(1).ne.lesobl(1)(1:4)) goto 11
+         knum = knum + 1
+
+      iptr = lpref(im)
+      ipp1 = ldefo(im)
+         NUM(1,knum) = IPTR
+         ICOLOR(knum) = IDCOUL
+         XRET = 0.D0
+         call xty1(ipp1,ip1,mlmot5,mlmot6,xret)
+        IF (IDEPI.NE.1) THEN
+        ELSE
+* ??
+          indn = 1
+ 45      if (nomche(indn).ne.'FREQ') then
+         indn = indn + 1
+          if (indn.gt.nomche(/2)) then
+* pas la composante FREQ
+           goto 99
+          endif
+         goto 45
+         endif
+
+         melval = ielval(indn)
+         segact melval
+         x1 = velche(1,1)
+             OM = X1
+             OM = 2.D0 * XPI * OM
+             OM = OM * OM
+             XRET = -XRET / OM
+        ENDIF
+        IF (IFOUR .EQ. 1) THEN
+             IF (NIFOUR .NE. 0) THEN
+                XRET = XRET*XPI
+             ELSE
+                XRET = XRET*2.D0*XPI
+             ENDIF
+        ENDIF
+       VPOCHA(knum,1) = XRET
+*
+       if (cmatee(1:5).eq.'MODAL') then
+        ymass = prmas(im)
+       elseif (cmatee(1:8).eq.'STATIQUE') then
+        ipp2 = lmade(im)
+        call xty1(ipp1,ipp2,mlmot5,mlmot6,ymass)
+       else
+       endif
+      if (lmade(im).gt.0.and.ABS(XRET).gt.(1.d-10*ymass).and.
+     & ymass.gt.0.and.cmatee(1:5).eq.'MODAL') then
+* kich : on enleve la projection sur base modale - a creuser pour statique !
+       CALL ADCHPO(IP1,IPP2,IP2,1.d0,(XRET/ymass*(-1.d0)))
+       IP1 = IP2
+      endif
+*
+ 11   CONTINUE
+*
+      lcf = .true.
+*
+*
+      if (knum.eq.kmodel(/1)) goto 102
+      if (inocomp.eq.1) then
+        if (knum.eq.0) then
+         NOCOMP(1) = 'FBET'
+        else
+         N = knum
+         NBELEM = knum
+         segadj MPOVAL,MELEME
+         SEGDES MPOVAL,MELEME
+         NSOUPO = 2
+         segadj MCHPOI
+         SEGINI,MSOUPO
+         IPCHP(2)  = MSOUPO
+         NOCOMP(1) = 'FBET'
+        endif
+      endif
+ 101  continue
+
+ 102  continue
+      N = knum
+      NBELEM = knum
+      segadj MPOVAL,MELEME
+      SEGDES MPOVAL,MELEME
+      SEGDES MSOUPO
+
+      SEGDES MCHPOI
+            IF(IERR.NE.0) RETURN
+            ICHPO1=IRET
+            SEGDES,ICHARG
+ 10       CONTINUE
+      segsup mlmot5,mlmot6,plcf
+        if (ipchpo.gt.0) then
+          segsup icharg,mcharg
+          call ecrobj('CHPOINT ',iret)
+          goto 999
+        endif
+          SEGDES,MCHARG
+          CALL ECROBJ('CHARGEME',MCHARG)
+
+      goto 999
+ 99   segsup mpoval,msoupo,mchpoi
+            call erreur(26)
+            return
+
+
+ 200  continue
+      ipri1 = iprigi
+      call SEPA(ipri1,1)
+      ipri2 = iprigi
+      call SEPA(ipri2,2)
+*
+*
+*
+*
+      nmapmo = 100
+      kpmo = 0
+      segini pmapmo
+      do isous = 1,kmodel(/1)
+       imodel = kmodel(isous)
+       segact imodel
+       cmate = cmatee
+       meleme = imamod
+       segact meleme
+       if (itypel.ne.1) call erreur(5)
+       if (num(/1).ne.1) call erreur(5)
+       if (cmate.eq.'STATIQUE'.or.cmate.EQ.'MODAL') then
+         do ilp = 1,num(/2)
+           kpmo = kpmo + 1
+           if (kpmo.gt.nmapmo) then
+            nmapmo = nmapmo + 100
+            segadj pmapmo
+           endif
+           lmapmo(kpmo) = num(1,ilp)
+        if (cmate.eq.'STATIQUE') then
+           compmo(kpmo) = 'BETA'
+        elseif (cmate.eq.'MODAL') then
+           compmo(kpmo) = 'ALFA'
+        endif
+          do im = 1 , imache(/1)
+           if (imache(im).eq.imamod) then
+             if (conche(im).eq.conmod) then
+               mchaml = ichaml(im)
+               segact mchaml
+               do iv = 1,ielval(/1)
+                 if (nomche(iv).eq.'DEFO') then
+                   melval = ielval(iv)
+                   segact melval
+                   ibmn = min(ilp,ielche(/2))
+                   defpmo(kpmo) = ielche(1,ibmn)
+                 endif
+                 if (nomche(iv).eq.'IDEF') then
+                   melval = ielval(iv)
+                   segact melval
+                   ibmn = min(ilp,ielche(/2))
+                   dimpmo(kpmo) = ielche(1,ibmn)
+                 endif
+               enddo
+             endif
+           endif
+          enddo
+
+         enddo
+       endif
+       segdes meleme,imodel
+      enddo
+
+      nmapmo = kpmo
+      segadj pmapmo
+      nbmod = nmapmo
+*
+      N1 = NBMOD
+      nbcod = 8
+      segini pmod
+      SEGINI, MLCHP1
+      SEGINI, MLCHP2
+       jgm = 1
+       jgn = 4
+       segini mlmot4
+*
+* Constitution du maillage support et du segment descriptif
+*
+      NBNN = NBMOD
+      NBELEM = 1
+      NBSOUS = 0
+      NBREF = 0
+      SEGINI, MELEME
+        ITYPEL = 1
+*
+        NLIGRD=NBMOD
+        NLIGRP=NBMOD
+        SEGINI, DESCR
+*
+      mrigid = ipri1
+      segact mrigid
+      nrigel = coerig(/1)
+      if (nrigel.lt.1) goto 250
+      typmod = ' '
+      IREEL = -1
+C* POS ?      IF (POS.EQ.1) IREEL = 1
+*
+      LETYPE = ' '
+      DO 210  IM=1,NBMOD
+            IPT1 = 0
+*
+        imodel = kmodel(im)
+        segact imodel
+        ipt1 = imamod
+        segact ipt1
+        iptr = ipt1.num(1,1)
+*  Cas reel ou cas complexe ?
+*
+          if (dimpmo(im).gt.0) TYPMOD = 'MODE_COM'
+
+            IF (TYPMOD .EQ. 'MODE_COM') THEN
+              MODCOM=.TRUE.
+              mchpoi = defpmo(im)
+              MLCHP1.ICHPOI(IM) = MCHPOI
+              mchpoi = dimpmo(im)
+            MLCHP2.ICHPOI(IM) = MCHPOI
+            ELSE
+              MODCOM = .FALSE.
+              mchpoi = defpmo(im)
+              MLCHP1.ICHPOI(IM) = MCHPOI
+            ENDIF
+*
+            ipt1 = iptr
+*
+          MELEME.NUM(IM,1)=IPT1
+*
+         if (cmatee.eq.'MODAL') then
+            DESCR.LISINC(IM) = 'ALFA'
+            DESCR.LISDUA(IM) = 'FALF'
+         else if (cmatee.eq.'STATIQUE') then
+            DESCR.LISINC(IM) = 'BETA'
+            DESCR.LISDUA(IM) = 'FBET'
+         endif
+            DESCR.NOELEP(IM) = IM
+            DESCR.NOELED(IM) = IM
+*
+ 210       CONTINUE
+        SEGDES, DESCR
+        SEGDES, MELEME
+*
+* Constitution des segments XMATRI
+*
+        NLIGRD=NBMOD
+        NLIGRP=NBMOD
+                nelrig=1
+*
+        IF (LETYPE .EQ. 'ANNULE') THEN
+          SEGINI, XMATR1
+          IF (MODCOM) THEN
+            SEGINI, XMATR2
+            SEGDES, XMATR2
+          ENDIF
+          SEGDES, XMATR1
+          GOTO 55
+        ENDIF
+*
+* Cas reel
+*
+        SEGINI, XMATR1
+          DO 20, I=1, NBMOD
+            MCHPO1 = MLCHP1.ICHPOI(I)
+            DO 20, J=1, NBMOD
+              MCHPO2 = MLCHP1.ICHPOI(J)
+              CALL YTMX (MCHPO2, MCHPO1, MRIGID, XVAL)
+              XMATR1.RE(I,J,1)=XVAL
+ 20       CONTINUE
+        SEGDES, XMATR1
+*
+* Cas complexe : calcul de termes complementaires
+*
+        IF (MODCOM) THEN
+          SEGACT, XMATR1*mod
+            DO 30, I=1, NBMOD
+              MCHPO1 = MLCHP2.ICHPOI(I)
+              DO 30, J=1, NBMOD
+                MCHPO2 = MLCHP2.ICHPOI(J)
+                CALL YTMX (MCHPO1, MCHPO2, MRIGID, XVAL)
+                XMATR1.RE(I,J,1)=XMATR1.RE(I,J,1)-IREEL*XVAL
+ 30         CONTINUE
+          SEGDES, XMATR1
+*
+          SEGINI, XMATR2
+            DO 40, I=1, NBMOD
+              MCHPO1 = MLCHP1.ICHPOI(I)
+              DO 40, J=1, NBMOD
+                MCHPO2 = MLCHP2.ICHPOI(J)
+                CALL YTMX (MCHPO1, MCHPO2, MRIGID, XVAL)
+                XMATR2.RE(I,J,1)=XVAL
+ 40         CONTINUE
+            DO 50, I=1, NBMOD
+              MCHPO1 = MLCHP2.ICHPOI(I)
+              DO 50, J=1, NBMOD
+                MCHPO2 = MLCHP1.ICHPOI(J)
+                CALL YTMX (MCHPO1, MCHPO2, MRIGID, XVAL)
+                XMATR2.RE(I,J,1)=XMATR2.RE(I,J,1)+IREEL*XVAL
+ 50         CONTINUE
+          SEGDES, XMATR2
+        ENDIF
+      SEGDES, MLCHP1
+      SEGDES, MLCHP2
+*
+      SEGACT, MRIGID
+        LETYPE = MRIGID.MTYMAT
+      SEGDES, MRIGID
+*
+* Creation des segments IMATRI
+*
+ 55   NELRIG = 1
+*      SEGINI, IMATR1
+*        IMATR1.IMATTT(1) = XMATR1
+      SEGDES, xMATR1
+      IF (MODCOM) THEN
+*        SEGINI, IMATR2
+*          IMATR2.IMATTT(1) = XMATR2
+        SEGDES, xMATR2
+      ENDIF
+*
+* Creation des rigidites calculees
+*
+      NRIGE=7
+      NRIGEL=1
+      SEGINI, RI1
+        RI1.MTYMAT = LETYPE
+        RI1.IFORIG = IFOMOD
+        RI1.IMGEO1 = 0
+        RI1.IMGEO2 = 0
+        RI1.COERIG = 1.D0
+        RI1.IRIGEL(1,1) = MELEME
+        RI1.IRIGEL(2,1) = 0
+        RI1.IRIGEL(3,1) = DESCR
+        RI1.IRIGEL(4,1) = xMATR1
+        RI1.IRIGEL(5,1) = NIFOUR
+        RI1.IRIGEL(6,1) = 0
+        RI1.IRIGEL(7,1) = 2
+        segact xmatr1*mod
+        xmatr1.symre=2
+        segdes xmatr1
+      SEGDES, RI1
+      IF (MODCOM) THEN
+        SEGINI, RI2 = RI1
+          RI2.IRIGEL(4,1) = xMATR2
+        SEGDES, RI2
+      ELSE
+        RI2 = 0
+        SEGSUP, MLCHP2
+      ENDIF
+*
+      iriout1 = ri1
+      iriout2 = ri2
+
+ 250  continue
+      mrigid = ipri2
+      segact mrigid
+      nrigel = coerig(/1)
+      if (nrigel.lt.1) goto 290
+      typmod = ' '
+
+      nrigmat =100
+      kgmat = 0
+      segini prigmat
+
+      KRIGEL = 0
+      nrigel = irigel(/2)
+      nrige = irigel(/1)
+      segini ri1
+      ri1.mtymat = mtymat
+      nrige0 = nrigel
+
+      kige = 0
+      kige1 = 100
+      nrigel = kige1
+      segini ri2
+      ri2.mtymat = mtymat
+
+      DO ire = 1,nrige0
+        meleme = irigel (1,ire)
+        segact meleme
+        if (itypel.ne.22) then
+           call erreur(977)
+           return
+        endif
+        nbelem = num(/2)
+        nbele0 = nbelem
+        descr = irigel(3,ire)
+        segact descr
+        nligrp0 = noelep(/1)
+        nligrd0 = noeled(/1)
+        nligrp = nligrp0 + nmapmo
+        nligrd = nligrd0 + nmapmo
+
+        nbnn = num(/1)
+        nbsous = 0
+        nbref = 0
+        segini ipt2
+        ipt2.itypel = itypel
+        nbelem = 1
+        nbnn = nligrd
+        segini ipt1
+        ipt1.itypel = itypel
+        ri1.coerig(ire) = coerig(ire)
+        kele = 0
+
+        xmatr1 = irigel(4,ire)
+        segact xmatr1
+        nelrig0 = xmatr1.re(/3)
+        nelrig = nelrig0 + nmapmo
+        segini xmatr2
+        DO iele = 1,nbele0
+          ie2 = min(iele,nelrig0)
+*          xmatr1 = imatr1.imattt(ie2)
+*          segact xmatr1
+          nligrp = nligrp0 + nmapmo
+          nligrd = nligrd0 + nmapmo
+          nelrig=1
+          segini des2,xmatri
+          des2.lisinc(1) = 'LX'
+          des2.lisdua(1) = 'FLX'
+          des2.noelep(1) = 1
+          des2.noeled(1) = 1
+* le premier point correspond aux multiplicateurs
+          CALL CREPO1 (ZERO, ZERO, ZERO, IPTS)
+          ipt1.num(1,1) = ipts
+          kgrp = 1
+          kirp = 1
+          do ipmo = 1,nmapmo
+            coepmo(ipmo) = 0.d0
+          enddo
+          do igrp = 2,nligrp0
+             jno = noelep(igrp)
+             motinc = lisinc(igrp)
+             IP1 = num(jno,iele)
+* recherche association noeud physique - points support déformée
+             do ilmat = 1,kgmat
+              if(lrigmat(ilmat,1).eq.ip1) goto 315
+             enddo
+
+             kgmat = kgmat+1
+             ilmat = kgmat
+             if (kgmat.gt.nrigmat) then
+              nrigmat = nrigmat + 100
+              segadj prigmat
+             endif
+             kpb = 0
+             jg = 100
+             segini mlent3
+             lrigmat(kgmat,1) = ip1
+             do ikmo = 1, nmapmo
+               ichp1 = defpmo(ikmo)
+               call ecrcha('NOMU')
+               call ecrcha('MAIL')
+               call ecrobj('CHPOINT ',ichp1)
+               call extrai
+               call lirobj('MAILLAGE',iuu1,1,iretou)
+               call ecrobj('MAILLAGE',iuu1)
+               call ecrobj('POINT   ',IP1)
+               call DANS
+               call lirlog(l3,1,iretou)
+               if(l3) then
+                 kpb = kpb + 1
+                 if (kpb.gt.jg) then
+                  jg = jg + 100
+                  segadj mlent3
+                 endif
+                 mlent3.lect(kpb) = ikmo
+               endif
+             enddo
+             jg = kpb
+             segadj mlent3
+             if (kpb.gt.0) then
+                  lrigmat(ilmat,2) = mlent3
+             else
+                  lrigmat(ilmat,2) = 0
+                segsup mlent3
+             endif
+
+ 315  continue
+             ilr3 = lrigmat(ilmat,2)
+             if (ilr3.eq.0) goto 253
+             mlent3 = ilr3
+             segact mlent3
+* selection selon nom composante
+             mlmat = 0
+             do lmo = 1,9
+              if (motinc.eq.lcod(lmo)) mlmat = lmo+2
+             enddo
+             if (mlmat.eq.0) then
+*              WRITE(6,*) 'coefs pour cette composante non trouves'
+              goto 253
+             endif
+            if (lrigmat(ilmat,mlmat).ne.0) then
+              pcompo = lrigmat(ilmat,mlmat)
+              segact pcompo
+              nipmod = valmod(/1)
+              do ilg = 1,nipmod
+                lkmo = mlent3.lect(ilg)
+                coepmo(lkmo) = (valmod(ilg)* xmatr1.re(1,igrp,ie2))
+     &                     + coepmo(lkmo)
+              enddo
+            else
+             jg = mlent3.lect(/1)
+             nipmod = jg
+             segini pcompo
+             mcol = motinc
+             do ilg = 1,nipmod
+              lkmo = mlent3.lect(ilg)
+              ichp1 = defpmo(lkmo)
+              CALL EXTRA9(ICHP1,ip1,motinc,KERRE,XFLOT)
+              coepmo(lkmo) = (xflot * xmatr1.re(1,igrp,ie2))
+     &                       + coepmo(lkmo)
+              valmod(ilg) = xflot
+             enddo
+             lrigmat(ilmat,mlmat) = pcompo
+            endif
+
+  253    continue
+         enddo
+
+         xmaut1 = 0.d0
+         do kpmo = 1,nmapmo
+          xmaut1 = max(xmaut1,ABS(coepmo(kpmo)))
+         enddo
+
+* synthèse
+          do igrp = 2,nligrp0
+             jno = noelep(igrp)
+             motinc = lisinc(igrp)
+             IP1 = num(jno,iele)
+             lr2 = .false.
+            do jgmat = 1,kgmat
+              if(lrigmat(jgmat,1).eq.ip1) goto 325
+            enddo
+c            WRITE(6,*) 'bizarre, point dans l element non repertorie'
+            call erreur(5)
+            return
+ 325        continue
+             mlmat = 0
+             do lmo = 1,9
+              if (motinc.eq.lcod(lmo)) mlmat = lmo+2
+             enddo
+             if (mlmat.eq.0) lr2 = .true.
+             if (lrigmat(jgmat,mlmat).eq.0) lr2 = .true.
+            if(lr2) then
+             jirp = 0
+             do iirp = 1,kgrp
+               if (ipt1.num(iirp,1).eq.ip1) jirp = iirp
+             enddo
+c recopie
+             kgrp = kgrp + 1
+               if (jirp.ne.0) then
+                des2.noelep(kgrp) = des2.noelep(jirp)
+                des2.noeled(kgrp) = des2.noeled(jirp)
+               else
+                kirp = kirp + 1
+                ipt1.num(kirp,1) = ip1
+                des2.noelep(kgrp) = kirp
+                des2.noeled(kgrp) = kirp
+               endif
+              des2.lisinc(kgrp) = lisinc(igrp)
+              des2.lisdua(kgrp) = lisdua(igrp)
+              re(1,kgrp,1) = xmatr1.re(1,igrp,ie2)
+              re(kgrp,1,1) = re(1,kgrp,1)
+            endif
+*
+          enddo
+
+          do kpmo = 1,nmapmo
+            if (ABS(coepmo(kpmo)).gt.xlopre*xmaut1) then
+              kirp = kirp + 1
+              kgrp = kgrp + 1
+              ipt1.num(kirp,1) = lmapmo(kpmo)
+              des2.noelep(kgrp) = kirp
+              des2.noeled(kgrp) = kirp
+              des2.lisinc(kgrp) = compmo(kpmo)
+              if (compmo(kpmo).eq.'ALFA') des2.lisdua(kgrp) = 'FALF'
+              if (compmo(kpmo).eq.'BETA') des2.lisdua(kgrp) = 'FBET'
+              re(1,kgrp,1) = coepmo(kpmo)
+              re(kgrp,1,1) = re(1,kgrp,1)
+            endif
+          enddo
+*
+          lirl = .false.
+          if (kirp.ne.num(/1)) then
+            lirl = .true.
+          else
+            do io = 1,kirp
+              if (num(io,iele).ne.ipt1.num(io,1)) lirl=.true.
+            enddo
+          endif
+c creation d'un irigel
+          if (lirl) then
+           kige = kige + 1
+           if (kige.gt.kige1) then
+            nrigel = kige1 + 100
+            segadj ri2
+            kige1 = nrigel
+           endif
+           nbelem = 1
+           nbnn = kirp
+           segini ipt3
+           ipt3.itypel = itypel
+           do io =1,nbnn
+            ipt3.num(io,1) = ipt1.num(io,1)
+           enddo
+           nligrp = kgrp
+           nligrd = kgrp
+                   nelrig=1
+           segadj xmatri,des2
+*           segini imatr3
+*           imatr3.imattt(1) = xmatri
+           segdes ipt3,des2,xmatri
+           RI2.IRIGEL(1,kige) = IPT3
+           RI2.IRIGEL(3,kige) = DES2
+           RI2.IRIGEL(4,kige) = xmatri
+           RI2.IRIGEL(2,kige) = 0
+           RI2.IRIGEL(5,kige) = irigel(5,ire)
+           RI2.IRIGEL(6,kige) = irigel(6,ire)
+           ri2.coerig(kige) = coerig(ire)
+          else
+* relation non modifiee pour cet element
+            kele = kele + 1
+            do ig = 1,nligrp0
+             ipt2.num(ig,kele) = ipt1.num(ig,1)
+            enddo
+*             imatr2.imattt(kele) = xmatr1
+* kich : a tester
+            do ju = 1,kgrp
+              xmatr2.re(1,ju,kele) = re(1,ju,1)
+              xmatr2.re(ju,1,kele) = re(ju,1,1)
+            enddo
+             segsup xmatri,des2
+          endif
+        ENDDO
+
+        nbelem = kele
+        nelrig = kele
+        nligrd=xmatr2.re(/1)
+        nligrp=xmatr2.re(/2)
+        if (nbelem.gt.0) then
+          segadj ipt2
+          segadj xmatr2
+          krigel = krigel + 1
+          RI1.IRIGEL(1,krigel) = IPT2
+          RI1.IRIGEL(3,krigel) = irigel(3,ire)
+          RI1.IRIGEL(4,krigel) = xmatr2
+          RI1.IRIGEL(2,krigel) = 0
+          RI1.IRIGEL(5,krigel) = irigel(5,ire)
+          RI1.IRIGEL(6,krigel) = irigel(6,ire)
+          segdes ipt2,xmatr2
+        else
+          segsup ipt2
+        endif
+        segsup ipt1
+       ENDDO
+
+        iriout = 0
+        nrigel = krigel
+        segadj ri1
+        nrigel = kige
+        segadj ri2
+        segdes mrigid,ri1,ri2
+       if (kige.eq.0) segsup ri2
+       if (krigel.eq.0) segsup ri1
+       if (kige.gt.0.and.krigel.gt.0) then
+c        WRITE(6,*) 'fus', ri1,ri2,kige,krigel
+         call fusrig(ri1,ri2,iriout)
+         segsup ri1, ri2
+         return
+       endif
+       if (kige.gt.0) iriout = ri2
+       if (krigel.gt.0) iriout = ri1
+       if (iriout.eq.0) call erreur(-5)
+c       WRITE(6,*) 'iriout', iriout
+
+ 290  continue
+      if (iriout.ne.0) iriout3 = iriout
+      if (iriout1.ne.0) iriout3 = iriout1
+      if (iriout.ne.0.and.iriout1.ne.0) then
+         call fusrig(iriout, iriout1,iriout3)
+         ri1 = iriout
+         ri2 = iriout1
+         segsup ri1,ri2
+      endif
+
+      call ecrobj('RIGIDITE',iriout3)
+      if (modcom)  call ecrobj('RIGIDITE',iriout2)
+
+      goto 999
+
+ 199  continue
+      segsup  descr,meleme,mlchp1,mlchp2
+      call erreur(5)
+      return
+
+ 999  continue
+
+      do ich = 1, ichaml(/1)
+       mchaml = ichaml(ich)
+       segact mchaml
+       do iel =1,ielval(/1)
+         melval = ielval(iel)
+         segdes melval
+       enddo
+       segdes mchaml
+      enddo
+      do k1 = 1,kmodel(/1)
+        imodel = kmodel(k1)
+        segdes imodel
+      enddo
+C      segsup mmode1, mchelm
+      if (plcf.ne.0) segsup plcf
+      return
+      END
+
+
+
+

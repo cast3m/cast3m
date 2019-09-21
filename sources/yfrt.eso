@@ -1,0 +1,879 @@
+C YFRT      SOURCE    PV        17/09/29    21:16:16     9578
+      SUBROUTINE YFRT(NOMPR,MTABX,IHV,MZIN,NOMI,MATRIK,MCHPO1)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+C***********************************************************************
+C
+C  CET OPERATEUR DISCRETISE Convection Diffusion + source
+C
+C  SYNTAXE :
+C  ---------
+C
+C
+C  COEFFICIENTS :
+C  --------------
+C
+C
+C  ALF  (SCAL DOMA)  DIFFUSIVITE THERMIQUE
+C       (SCAL ELEM)
+C       (SCAL NOEU)
+C
+C  INCONNUES :
+C  -----------
+C
+C   TN                 CHAMP DE TEMPERATURE
+C   UN                 CHAMP DE VITESSE TRANSPORTANT
+C
+C   NOMPR Nom de l'opérateur appelant (NS,TSCA,KONV ou LAPN)
+C         suivant l'opérateur les coefs sont différents
+C   Schéma en temps ou l'opérateur intervient :
+C    SEMI            CNG                         TVISQ
+C    teta - schéma   Crank Nicolson généralisé   Tenseur visqueux
+C   Ces schéma nécessitent que DFDT soit en CENTREE
+C   Le Schéma BDF2 ne fait intervenir que DFDT
+C
+C E/  MTABX Table de l'opérateur -> coefficients
+C E/  IHV=0 SCALAIRE
+C     IHV=1 VITESSE
+C E/  MZIN  pointeur du CHPOINT de l'inconnue
+C E/  NOMI  nom de l'inconnue
+C************************************************************************
+
+-INC CCOPTIO
+-INC CCREEL
+-INC CCGEOME
+-INC SMCOORD
+-INC SMLENTI
+      POINTEUR MLENT4.MLENTI
+-INC SMLMOTS
+-INC SMMODEL
+-INC SMELEME
+      POINTEUR IGEOM.MELEME,MELEMS.MELEME,MELEMC.MELEME,MELEMP.MELEME
+      POINTEUR MELEM2.MELEME
+-INC SMCHPOI
+      POINTEUR MZIN.MCHPOI
+      POINTEUR MTETA1.MPOVAL,MTETA2.MPOVAL,MTETA3.MPOVAL,MTETA4.MPOVAL
+-INC SMTABLE
+      POINTEUR MTABZ.MTABLE
+-INC SIZFFB
+      POINTEUR IZF1.IZFFM,IZH2.IZHR,IZW.IZFFM,IZWH.IZHR
+      SEGMENT SAJT
+      REAL*8 AJT(IDIM,IDIM,NPG),RF1(NP,MP,IDIM),SM1(NP,IDIM)
+      REAL*8 TN1(NP,IDIM),TN2(NP,IDIM)
+      REAL*8 WT(MP,NPG), WS(MP,NPG)
+      REAL*8 WTC(IDIM*NPG,MP),WSC(IDIM*NPG,MP),HRD(IDIM*NPG,NP)
+      REAL*8 FND(NPG,NP)
+      ENDSEGMENT
+-INC SMRIGID
+C-INC SMMATRIK
+C*******************************************************************
+C
+      SEGMENT MATRIK
+      REAL*8  COEMTK(NMATRI)
+      INTEGER JRIGEL(NRIGE,NMATRI)
+      INTEGER KSYM,KMINC,KMINCP,KMINCD,KIZM
+      INTEGER KISPGT,KISPGP,KISPGD
+      INTEGER KNTTT,KNTTP,KNTTD
+      INTEGER KIDMAT(NKID)
+      INTEGER KKMMT(NKMT)
+      ENDSEGMENT
+
+      SEGMENT JMATRI
+      CHARACTER*8 LISPRI(NBMF),LJSDUA(NBMF)
+      INTEGER LIZAFM(NBSOUS,NBMF)
+      INTEGER KSPGP,KSPGD
+      ENDSEGMENT
+      POINTEUR JMATRS.JMATRI,JMATR1.JMATRI,JMATR2.JMATRI,JMATR3.JMATRI
+
+C Stokage matrices elementaires non assemblees (valeurs)
+      SEGMENT IZAFM
+      REAL*8  AM(NBEL,NP,MP)
+      ENDSEGMENT
+      POINTEUR IPM1.IZAFM,IPM2.IZAFM,IPM3.IZAFM,IPM4.IZAFM
+
+C*******************************************************************
+      POINTEUR IPM.IZAFM
+-INC SMCHAML
+
+      LOGICAL TDFDT,TCONV,TSOUR,TSOURB,TMATRI
+      LOGICAL ICAL,XPG,XRIG
+      LOGICAL XDIAG,XTV,XTG,XBDF,XCONS
+      CHARACTER*8 CHHH,TYPE,NOM,NOM0,CHAI,SCHT,NOMPER,NOMPR,MPRE
+      CHARACTER*4 INCOD
+      CHARACTER*4 NOMI(3),NOMA(3),NOMP(3),NOMD(3),NMACO
+      DIMENSION ICOEF(4),SU(3),XPOI(3)
+C*****************************************************************************
+CTCLSF
+      NOMPER=NOMPR
+      write(6,*)' DEBUT YFRT appele par ',NOMPER
+
+C- Table de l'opérateur (pointeur MTABX)
+
+C- Récupération de la table RV (pointeur MTAB1)
+      CALL LEKTAB(MTABX,'EQEX',MTAB1)
+C- Récupération de la table des options de l'opérateur (pointeur KOPTI)
+      CALL LEKTAB(MTABX,'KOPT',KOPTI)
+C- Récupération de la table DOMAINE de la zone (pointeur MTABZ)
+      CALL LEKTAB(MTABX,'DOMZ',MTABZ)
+C- Récupération de la table INCO (pointeur KINC)
+      CALL LEKTAB(MTAB1,'INCO',KINC)
+      IF(IERR.NE.0) RETURN
+
+C*****************************************************************************
+C Traitement des options
+C KIMPL = 0 -> EXPL     1 -> IMPL     2 -> CN
+C                                   AIMPL=0 explicite
+C KKALE=1  Indice indiquant que l'on est en ALE
+C sinon KKALE=0
+C KFORM = 0 -> SI       1 -> EF       2 -> VF    3 -> EFMC
+C IDCEN  : entier indiquant le type de décentrement souhaité
+C IDCEN 1-> CENTREE  2-> SUPGDC  3-> SUPG  4-> TVISQUEU  5-> CNG
+C E/  CMD    : Coefficient multiplicateur du décentrement
+C Si IDCEN=4 ou =5 CMD=DT
+
+      CALL ACME(KOPTI,'KFORM',KFORM)
+      CALL ACME(KOPTI,'KIMPL',KIMPL)
+      CALL ACMF(KOPTI,'AIMPL',AIMPL)
+      IKOMP=0
+*?    CALL ACME(KOPTI,'IKOMP',IKOMP)
+      CALL ACME(KOPTI,'KMACO',KMACO)
+      KKMACO=KMACO
+      CALL ACME(KOPTI,'IDCEN',IDCEN)
+      CALL ACMF(KOPTI,'CMD',CMD)
+*?    CALL ACME(KOPTI,'ALE',KKALE)
+
+C Restrictions des options
+      IF(NOMPER.NE.'NS')KKALE=0
+      IF(NOMPER.EQ.'LAPN')IDCEN=1
+
+      IF(KIMPL.EQ.0)AIMPL=0.D0
+      IF(KIMPL.EQ.1)AIMPL=1.D0
+
+c       write(6,*)' YFRT KMACO=',KMACO,'IDCEN=',IDCEN
+       IF(KMACO.EQ.1.AND.IDCEN.NE.5)THEN
+         CALL ACMM(KOPTI,'NMACO',NMACO)
+         TYPE=' '
+         CALL ACMO(MTAB1,NMACO,TYPE,MATRIK)
+        IF(TYPE.EQ.'MATRIK')THEN
+          KKMACO=2
+        ELSE
+          KKMACO=1
+        ENDIF
+       ENDIF
+      IF(IDCEN.EQ.5)KKMACO=0
+c      write(6,*)' YFRT KMACO=',kmaco,' KKMACO=',KKMACO,'IKOMP=',ikomp
+
+C*****************************************************************************
+
+      KPOIND=0
+      NBMF=1
+      XRIG=.FALSE.
+      TMATRI=.TRUE.
+      XPG=.FALSE.
+      IF(IDCEN.GT.1)XPG=.TRUE.
+      IF(IDCEN.EQ.4)AIMPL=0.D0
+      IF(IDCEN.EQ.5)THEN
+       AIMPL=1.D0
+      ENDIF
+
+       AIEX=AIMPL
+      IF(AIMPL.EQ.0.D0.AND.KKMACO.NE.0)THEN
+       TMATRI=.TRUE.
+       AIEX=1.D0
+      ENDIF
+
+      IF(AIMPL.EQ.0.D0.AND.KKMACO.EQ.0)THEN
+       TMATRI=.FALSE.
+      ENDIF
+
+      IAXI=0
+      IF(IFOMOD.EQ.0)IAXI=2
+      DEUPI=1.D0
+      IF(IAXI.NE.0)DEUPI=2.D0*XPI
+
+        IF(XRIG)THEN
+         IF(IHV.EQ.0)THEN
+          NOMP(1)='T   '
+          NOMD(1)='Q   '
+         ELSEIF(IHV.EQ.1)THEN
+          NOMP(1)='UX  '
+          NOMP(2)='UY  '
+          NOMP(3)='UZ  '
+          NOMD(1)='FX  '
+          NOMD(2)='FY  '
+          NOMD(3)='FZ  '
+         ENDIF
+        ELSE
+         IF(IHV.EQ.0)THEN
+          NOMP(1)=NOMI(1)
+          NOMD(1)=NOMI(1)
+         ELSEIF(IHV.EQ.1)THEN
+          WRITE(NOMP(1),FMT='(I1,A3)')1,NOMI(1)(1:3)
+          WRITE(NOMD(1),FMT='(I1,A3)')1,NOMI(1)(1:3)
+          WRITE(NOMP(2),FMT='(I1,A3)')2,NOMI(1)(1:3)
+          WRITE(NOMD(2),FMT='(I1,A3)')2,NOMI(1)(1:3)
+          WRITE(NOMP(3),FMT='(I1,A3)')3,NOMI(1)(1:3)
+          WRITE(NOMD(3),FMT='(I1,A3)')3,NOMI(1)(1:3)
+         ENDIF
+        ENDIF
+c       write(6,*)' NOMP=',nomp
+c       write(6,*)' NOMD=',nomd
+
+      CALL LEKTAB(MTABZ,'SOMMET',MELEMS)
+      CALL LEKTAB(MTABZ,'MAILLAGE',MELEME)
+      MELEM2=MELEME
+
+C  On cree un second membre non vide
+            SEGACT MELEMS
+            N=MELEMS.NUM(/2)
+            IF(IHV.EQ.0)NC=1
+            IF(IHV.EQ.1)NC=IDIM
+            SEGDES MELEMS
+            NSOUPO=1
+            NAT=2
+            SEGINI MCHPO1,MSOUP1,MPOVA1
+            MCHPO1.JATTRI(1)=2
+            MCHPO1.IFOPOI=IFOMOD
+            MCHPO1.MTYPOI='    '
+            MCHPO1.MOCHDE='                                            '
+            MCHPO1.IPCHP(1)=MSOUP1
+            MSOUP1.IGEOC=MELEMS
+            MSOUP1.IPOVAL=MPOVA1
+             IF(IHV.EQ.0)THEN
+              MSOUP1.NOCOMP(1)=NOMD(1)
+             ELSE
+              DO 91 N=1,NC
+              MSOUP1.NOCOMP(N)=NOMD(N)
+ 91           CONTINUE
+             ENDIF
+            SEGDES MSOUP1,MCHPO1
+
+C*************************************************************************
+C Lecture des Inco(s) aux temps precedents si Transitoire
+c       write(6,*)'Lecture des INCO MZIN=',MZIN
+
+        CALL LRCHT(MZIN,MTETA1,TYPE,IGEOM)
+        CALL KRIPAD(IGEOM,MLENT1)
+        CALL VERPAD(MLENT1,MELEMS,IRET)
+         IF(IRET.NE.0)THEN
+C%    Indice %m1:8 : L'objet %m9:16 n'a pas le bon support géométrique
+          MOTERR(1: 8) = 'TETA1'
+          MOTERR(9:16) = 'CHPOINT '
+          WRITE(IOIMP,*)'Opérateur : ',NOMPER
+          CALL ERREUR(788)
+          RETURN
+         ENDIF
+
+        NC=MTETA1.VPOCHA(/2)
+
+        IF((IHV.EQ.0.AND.NC.NE.1).OR.
+     &     (IHV.EQ.1.AND.NC.NE.IDIM))THEN
+C% Indice %m1:8 : L'objet %m9:16 n'a pas le bon nombre de composantes
+         MOTERR( 1: 8) = 'Inconnue'
+         MOTERR( 9:16) = 'CHPOINT'
+         WRITE(IOIMP,*)'Operateur : ',NOMPER
+         CALL ERREUR(784)
+         RETURN
+        ENDIF
+
+        SEGDES IGEOM,MELEMS
+
+C*****************************************************************************
+C Lecture du coefficient
+c       write(6,*)'Lecture des COEF '
+
+      CALL ACME(MTABX,'IARG',IARG)
+c      write(6,*)' YFRT IARG=',IARG,' KKALE=',KKALE
+
+C--------- CAS FROT  Formulation non conservative ----------------------------
+       IF(NOMPER.EQ.'FROT')THEN
+
+C Coef K={Kx Ky Kz}
+       NUCOEF=1
+c      write(6,*)' Coef 1 ',NUCOEF,' MTABZ=',MTABZ
+       CALL LEKMOF(MTABZ,NUCOEF,MTABX,KINC,1,MCHEL1,KPOIND,0,MCHELG)
+       IF (IERR.NE.0) RETURN
+
+C Coef Beta={Betax Betay Betaz}
+       NUCOEF=NUCOEF+1
+c      write(6,*)' Coef 2 ',NUCOEF,' MTABZ=',MTABZ
+       CALL LEKMOF(MTABZ,NUCOEF,MTABX,KINC,1,MCHEL2,KPOIND,0,MCHELG)
+       IF (IERR.NE.0) RETURN
+
+C Un
+       NUCOEF=NUCOEF+1
+c      write(6,*)' Coef 3 ',NUCOEF
+       CALL LEKMOF(MTABZ,NUCOEF,MTABX,KINC,1,MCHEL3,KPOIND,0,MCHELG)
+       IF (IERR.NE.0) RETURN
+
+
+c       write(6,*)'FIN CAS FROT  Formulation non conservative'
+C----- FIN CAS FROT  Formulation non conservative ----------------------------
+
+
+       ENDIF
+c      write(6,*)' Fin lect COEF '
+C*************************************************************************
+C******* CALCUL **********************************************************
+C*************************************************************************
+
+       SEGACT MTETA1
+
+      CALL KRIPAD(MELEMS,MLENTI)
+      SEGDES MELEMS
+
+      SEGACT MELEME,MELEM2
+      NBSOUS=LISOUS(/1)
+      IF(NBSOUS.EQ.0)NBSOUS=1
+
+C MATRIK . MATRIK . MATRIK . MATRIK . MATRIK . MATRIK  MATRIK . MATRIK .
+      IF(KKMACO.NE.2)THEN
+C ... Création / Ajustement des matrices élémentaires
+      IF(TMATRI)THEN
+C Cas RIGIDITE
+       IF(XRIG)THEN
+
+         NRIGE=8
+         NRIGEL=0
+         SEGINI MRIGID
+
+         NRIGE=8
+         NRI=IRIGEL(/2)
+         NRIGEL=NBSOUS+NRI
+         SEGADJ MRIGID
+c     write(6,*)' NRIGE,NRIGEL,MRIGID=',NRIGE,NRIGEL,MRIGID
+
+       ELSE
+C Cas MATRIK
+
+         NRIGE=7
+         NKID =9
+         NKMT =7
+         NMATRI=0
+         SEGINI MATRIK
+c        write(6,*)' YFRT creation MATRIK =',matrik
+
+         NRIGE=7
+         NKID =9
+         NKMT =7
+         NMATR0=JRIGEL(/2)
+
+         NBME=1
+         IF(IHV.EQ.1)NBME=IDIM
+         NMATRI=NBME
+         SEGADJ MATRIK
+
+         DO 41 M=1,NBME
+         JRIGEL(1,M)=MELEME
+         JRIGEL(2,M)=MELEM2
+         JRIGEL(7,M)=0
+c?       IF(TCONV)JRIGEL(7,M)=2
+         SEGINI JMATRI
+         JRIGEL(4,M)=JMATRI
+         KSPGP=MELEMS
+         KSPGD=MELEMS
+         LISPRI(1)=NOMP(M)//'    '
+         LJSDUA(1)=NOMD(M)//'    '
+ 41      CONTINUE
+       ENDIF
+      ENDIF
+C ... Fin Création / Ajustement des matrices élémentaires
+
+
+      ELSE
+C Activation RIGIDITE
+       IF(XRIG)THEN
+         SEGACT MRIGID
+       ELSE
+C Activation MATRIK
+         SEGACT MATRIK
+       ENDIF
+
+C ... Activation des matrices élémentaires
+      IF(TMATRI)THEN
+C Cas RIGIDITE
+       IF(XRIG)THEN
+         NRIGE=8
+         NRI=IRIGEL(/2)
+         NRIGEL=NBSOUS+NRI
+         SEGAct MRIGID
+c     write(6,*)' NRIGE,NRIGEL,MRIGID=',NRIGE,NRIGEL,MRIGID
+
+       ELSE
+C Cas MATRIK Pleine
+         NMATRI=JRIGEL(/2)
+         NBME=NMATRI
+
+         DO 42  M=1,NBME
+         JMATRI=JRIGEL(4,M)
+         SEGACT JMATRI*MOD
+         LISPRI(1)=NOMP(M)//'    '
+         LJSDUA(1)=NOMD(M)//'    '
+ 42      CONTINUE
+
+       ENDIF
+      ENDIF
+C ... Fin Activation des matrices élémentaires
+
+      ENDIF
+C FIN MATRIK . FIN MATRIK . FIN MATRIK . FIN MATRIK . FIN MATRIK . FIN M
+C ......................................................................
+
+      SEGACT MCHEL1
+      SEGACT MCHEL2
+      SEGACT MCHEL3
+
+       IF(MAX(1,MELEM2.LISOUS(/1)).NE.MAX(1,LISOUS(/1)))THEN
+        WRITE(6,*)' Geometries incompatibles dans ',nomper
+C% Données incompatibles
+        CALL ERREUR(22)
+        RETURN
+        ENDIF
+
+      NKD=0
+      DO 101 L=1,MAX(1,LISOUS(/1))
+      IPT1=MELEME
+      IPT2=MELEM2
+      IF(LISOUS(/1).NE.0)IPT1=LISOUS(L)
+      IF(MELEM2.LISOUS(/1).NE.0)THEN
+      IPT2=MELEM2.LISOUS(L)
+      NKD=0
+      ENDIF
+      SEGACT IPT1,IPT2
+
+      NOM0 = NOMS(IPT1.ITYPEL)//'    '
+      CALL KALPBG(NOM0,'FONFORM ',IZFFM)
+      IF(IZFFM.EQ.0)RETURN
+      SEGACT IZFFM*MOD
+      IZHR=KZHR(1)
+      SEGACT IZHR*MOD
+      IZF1 = KTP(1)
+      IZH2 = KZHR(2)
+      IZW  = IZFFM
+      IZWH = IZHR
+
+      NES=GR(/1)
+      NPG=GR(/3)
+
+      NP = IPT1.NUM(/1)
+      MP = IPT2.NUM(/1)
+C?    MP = IZW.FN(/1) ceci doit etre identique
+
+      NBEL=IPT1.NUM(/2)
+
+      SEGINI SAJT
+
+c.......................................................................
+C MATRIK . MATRIK . MATRIK . MATRIK . MATRIK . MATRIK  MATRIK . MATRIK .
+c     write(6,*)' KKMACO=',KKMACO,'TMATRI=',TMATRI
+      IF(KKMACO.NE.2)THEN
+       IF(TMATRI)THEN
+C Cas RIGIDITE
+        IF(XRIG)THEN
+        IRIGEL(1,NRI+L)=MELEME
+        COERIG(L)=1.D0
+
+        IRIGEL(7,NRI+L)=0
+c?      IF(TCONV)IRIGEL(7,NRI+L)=2
+
+        NBME=1
+        IF(IHV.EQ.1)NBME=IDIM
+        NLIGRP=NP
+        NLIGRD=MP
+        SEGINI DESCR
+        IRIGEL(3,NRI+L)=DESCR
+         IF(NBME.EQ.1)THEN
+           DO 102 I=1,NLIGRP
+            LISINC(I)=NOMP(1)//'    '
+            NOELEP(I)=I
+ 102       CONTINUE
+           DO 103 I=1,NLIGRD
+            LISDUA(I)=NOMD(1)//'    '
+            NOELED(I)=I
+ 103       CONTINUE
+         ELSE
+         ENDIF
+        SEGDES DESCR
+
+        NELRIG=NBEL
+        SEGINI xMATRI
+        IRIGEL(4,NRI+L)=xMATRI
+        xmatri.symre=irigel(7,nri+l)
+c       write(6,*)'NELRIG,IMATRI=',NELRIG,IMATRI
+
+*        DO 104 K=1,NELRIG
+*        SEGINI XMATRI
+c       write(6,*)'NLIGRD,NLIGRP,XMATRI=',NLIGRD,NLIGRP,XMATRI
+*        IMATTT(K)=XMATRI
+* 104    CONTINUE
+
+        ELSE
+C Cas MATRIK
+        SEGINI IPM1
+c       mtail=(IPM1.AM(/1))*(ipm1.am(/2))*(ipm1.am(/3))
+        JMATR1=JRIGEL(4,NMATR0+1)
+        JMATR1.LIZAFM(L,1)=IPM1
+        IPM2=IPM1
+        IPM3=IPM1
+         IF(NBME.GE.2)THEN
+          JMATR2=JRIGEL(4,NMATR0+2)
+           SEGINI IPM2
+c       mtail=(IPM2.AM(/1))*(ipm2.am(/2))*(ipm2.am(/3))
+           JMATR2.LIZAFM(L,1)=IPM2
+           ICAL=.TRUE.
+         ENDIF
+         IF(NBME.GE.3)THEN
+          JMATR3=JRIGEL(4,NMATR0+3)
+           SEGINI IPM3
+           JMATR3.LIZAFM(L,1)=IPM3
+           ICAL=.TRUE.
+         ENDIF
+       ENDIF
+      ENDIF
+c       write(6,*)' YFRT appelé par ',NOMPER,' Taille matrice=',mtail
+
+      ELSE
+
+C Cas RIGIDITE
+       IF(XRIG)THEN
+
+       ELSE
+C Cas MATRIK
+        JMATR1=JRIGEL(4,1)
+        SEGACT JMATR1
+        IPM1=JMATR1.LIZAFM(L,1)
+        IPM2=IPM1
+        IPM3=IPM1
+        SEGACT IPM1
+         IF(NBME.GE.2)THEN
+          JMATR2=JRIGEL(4,2)
+          SEGACT JMATR2
+          IPM2=JMATR2.LIZAFM(L,1)
+          SEGACT IPM2
+         ENDIF
+         IF(NBME.GE.3)THEN
+          JMATR3=JRIGEL(4,3)
+          IPM3=JMATR3.LIZAFM(L,1)
+          SEGACT IPM3
+         ENDIF
+       ENDIF
+      ENDIF
+C FIN MATRIK . FIN MATRIK . FIN MATRIK . FIN MATRIK . FIN MATRIK . FIN M
+C ......................................................................
+
+
+C----K
+      IK1=1
+      MCHAM1=MCHEL1.ICHAML(L)
+      SEGACT MCHAM1
+
+      MELVA1=MCHAM1.IELVAL(1)
+      SEGACT MELVA1
+      N1PTEL=MELVA1.VELCHE(/1)
+      N1EL=MELVA1.VELCHE(/2)
+        IF(N1EL.EQ.1)THEN
+        IK1=1
+        ELSEIF(N1EL.EQ.NBEL)THEN
+        IK1=0
+        ENDIF
+
+C----Beta
+      IK2=1
+      MCHAM2=MCHEL2.ICHAML(L)
+      SEGACT MCHAM2
+
+      MELVA2=MCHAM2.IELVAL(1)
+      SEGACT MELVA2
+      N1PTEL=MELVA2.VELCHE(/1)
+      N1EL=MELVA2.VELCHE(/2)
+        IF(N1EL.EQ.1)THEN
+        IK2=1
+        ELSEIF(N1EL.EQ.NBEL)THEN
+        IK2=0
+        ENDIF
+
+C----U
+      IK3=1
+      MCHAM3=MCHEL3.ICHAML(L)
+      SEGACT MCHAM3
+
+      MELVA3=MCHAM3.IELVAL(1)
+      SEGACT MELVA3
+      N1PTEL=MELVA3.VELCHE(/1)
+      N1EL=MELVA3.VELCHE(/2)
+        IF(N1EL.EQ.1)THEN
+        IK3=1
+        ELSEIF(N1EL.EQ.NBEL)THEN
+        IK3=0
+        ENDIF
+
+
+c      write(6,*)' AVANT 108 NC=',NC,' NBEL=',NBEL,MP,NP,NC
+C===============================================
+        AI1=AIMPL-1.D0
+        IF(AIMPL.EQ.0.D0)THEN
+          AI2=-1.D0
+        ELSE
+          AI2=AI1/AIMPL
+        ENDIF
+
+        DO 108 KE=1,NBEL
+
+        NK1=KE + IK1*(1 - KE)
+        NK2=KE + IK2*(1 - KE)
+        NK3=KE + IK3*(1 - KE)
+
+        DO 109 I=1,NP
+        J=IPT1.NUM(I,KE)
+        DO 109 N=1,IDIM
+        XYZ(N,I)=XCOOR((J-1)*(IDIM+1)+N)
+ 109    CONTINUE
+
+        DO 107 I=1,NP
+         I1=MLENT1.LECT(IPT1.NUM(I,KE))
+        DO 107 N=1,NC
+         TN1(I,N)=MTETA1.VPOCHA(I1,N)
+ 107    CONTINUE
+
+        CALL CALJBR(FN,GR,PG,XYZ,HR,PGSQ,RPG,NES,
+     *  IDIM,NP,NPG,IAXI,AIRE,AJ,SGN)
+
+        IF (IDCEN.EQ.0.OR.IDCEN.EQ.1) THEN
+        CALL RSETD(WT,FN,(NP*NPG))
+        CALL RSETD(WS,FN,(NP*NPG))
+        ELSE
+        CALL CALDEC(WT,WS,XYZ,GR,HR,FN,NES,IDIM,NP,NPG,AJT,
+     &  IDCEN,CMD,MELVA1.VELCHE(1,NK1),MELVA2.VELCHE(1,NK2),
+     &  MELVA3.VELCHE(1,NK3),TN1,NC,IKOMP,XREF,Aire,KE)
+        ENDIF
+
+        CALL INITD(SM1,(MP*IDIM),0.D0)
+
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+        IF(KKMACO.EQ.2)THEN
+
+C ...... Chargement Rigidite ou Matrik
+C Cas RIGIDITE
+          IF(XRIG)THEN
+*           XMATRI=IMATTT(KE)
+           DO 911 I=1,MP
+           DO 911 J=1,NP
+           RE(I,J,ke)=RF1(J,I,1)
+ 911       CONTINUE
+*           SEGDES XMATRI
+          ELSE
+C Cas MATRIK
+           DO 912 N=1,NBME
+           JMATR1=JRIGEL(4,N)
+           IPM4=JMATR1.LIZAFM(L,1)
+           DO 912 I=1,MP
+           DO 912 J=1,NP
+           RF1(J,I,N)=IPM4.AM(KE,J,I)
+ 912       CONTINUE
+          ENDIF
+C...... Multiplication Matrice Vecteur
+
+        DO 710 I=1,MP
+        DO 711 J=1,NP
+
+        DO 716 N=1,NC
+          SM1(I,N)   = SM1(I,N) + AI2*RF1(J,I,N)*TN1(J,N)
+ 716    CONTINUE
+
+ 711    CONTINUE
+ 710    CONTINUE
+
+        ELSEIF(KKMACO.NE.2)THEN
+C..............................................................
+C...... Frot .... Formulation non conservative
+C préparation
+
+        DO 416 N=1,NC
+        DO 410 I=1,MP
+c       DO 411 J=1,NP
+          U3=0.D0
+        DO 412 LG=1,NPG
+          PDR=PGSQ(LG)*DEUPI*RPG(LG)
+          C1=MELVA1.VELCHE((N-1)*NPG+LG,NK1)*PDR
+          C2=MELVA2.VELCHE((N-1)*NPG+LG,NK2)
+          C3=ABS ( MELVA3.VELCHE((N-1)*NPG+LG,NK3) ) + 1.e-30
+          CK=C1*(C3**(C2-1.D0))
+          U3=U3+CK * FN(I,LG)
+ 412      CONTINUE
+
+          SM1(I,N)   = SM1(I,N) + AI1*U3*TN1(I,N)
+          RF1(I,I,N) = AIEX*U3
+c?        SM1(I,N)   = SM1(I,N) + AI1*U3*TN1(J,N)
+c?        RF1(J,I,N) = AIEX*U3
+
+ 411    CONTINUE
+ 410    CONTINUE
+ 416    CONTINUE
+
+
+C..............................................................
+
+
+        ENDIF
+
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C=======================================================================
+
+C>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+      IF(TMATRI.AND.KKMACO.NE.2)THEN
+C ...... Chargement Rigidite ou Matrik
+C Cas RIGIDITE
+          IF(XRIG)THEN
+*           XMATRI=IMATTT(KE)
+           DO 901 I=1,NP
+           DO 901 J=1,NP
+           RE(I,J,ke)=RF1(J,I,1)
+ 901       CONTINUE
+*           SEGDES XMATRI
+          ELSE
+C Cas MATRIK
+           NBMM=1
+           IF(ICAL)NBMM=NBME
+           DO 902 N=1,NBMM
+           JMATR1=JRIGEL(4,NMATR0+N)
+           IPM4=JMATR1.LIZAFM(L,1)
+           DO 902 I=1,NP
+           DO 902 J=1,NP
+           IPM4.AM(KE,J,I)=RF1(J,I,N)
+ 902       CONTINUE
+c         write(6,*)' RF1 '
+c         write(6,1002)(((RF1(J,I,N),j=1,np),i=1,np),n=1,nbmm)
+          ENDIF
+      ENDIF
+
+C ...... Chargement Second membre
+        DO 910 I=1,NP
+         I1=LECT(IPT1.NUM(I,KE))
+        DO 910 N=1,NC
+         MPOVA1.VPOCHA(I1,N)=MPOVA1.VPOCHA(I1,N)+SM1(I,N)
+ 910    CONTINUE
+C<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+ 108    CONTINUE
+
+         SEGSUP MCHAM1,MELVA1
+         SEGSUP MCHAM2,MELVA2
+         SEGSUP MCHAM3,MELVA3
+
+
+
+      SEGDES IPT1,IPT2
+
+      IF(TMATRI)THEN
+C Cas RIGIDITE
+       IF(XRIG)THEN
+        SEGDES xMATRI
+       ELSE
+C Cas MATRIK
+        SEGDES IPM1
+        IF(NBME.GE.2)SEGDES IPM2
+        IF(NBME.GE.3)SEGDES IPM3
+       ENDIF
+      ENDIF
+
+      SEGSUP IZFFM,IZHR,IZF1,IZH2
+      SEGSUP SAJT
+
+ 101  CONTINUE
+
+      IF(TMATRI)THEN
+       IF(.NOT.XRIG)THEN
+        NBMM=JRIGEL(/2)
+        IF(NBMM.NE.0)THEN
+        DO 141 M=1,NBMM
+        JMATRI=JRIGEL(4,M)
+        SEGDES JMATRI
+ 141    CONTINUE
+        ENDIF
+       ENDIF
+      ENDIF
+
+C"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+C"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+C"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+
+         SEGSUP MCHEL1
+         SEGSUP MCHEL2
+         SEGSUP MCHEL3
+
+      SEGDES MCHPO1,MPOVA1
+      SEGDES MELEME,MELEM2
+
+      SEGSUP MLENTI
+c     IF(TLINCO)THEN
+      SEGSUP MLENT1
+       SEGDES MTETA1
+c     ENDIF
+
+      IF(TMATRI)THEN
+C Cas RIGIDITE
+       IF(XRIG)THEN
+        SEGDES MRIGID
+       ELSE
+C Cas MATRIK
+        SEGDES MATRIK
+       ENDIF
+      ENDIF
+
+
+c     segact MCHPO1
+c     MSOUP1=MCHPO1.IPCHP(1)
+c     segact MSOUP1
+c     write(6,*)MCHPO1.IPCHP(/1),MSOUP1.NOCOMP(/2)
+c     write(6,*)(MSOUP1.NOCOMP(i),i=1,MSOUP1.NOCOMP(/2))
+c     if(ihv.eq.1)call ecmo(mtabz,'TOTO','CHPOINT',MCHPO1)
+
+C*************************************************************************
+
+      IF(KKMACO.EQ.1)THEN
+        TYPE='MATRIK'
+        CALL ECMO(MTAB1,NMACO,TYPE,MATRIK)
+      ENDIF
+
+      IF(AIMPL.EQ.0.D0)THEN
+        NRIGE=7
+        NKID =9
+        NKMT =7
+        NMATRI=0
+        SEGINI MATRIK
+      ENDIF
+
+c     write(6,*)' FIN YFRT'
+      RETURN
+ 1001 FORMAT(20(1X,I5))
+ 1002 FORMAT(10(1X,1PE11.4))
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

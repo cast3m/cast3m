@@ -1,0 +1,326 @@
+C RAYT1     SOURCE    CHAT      11/03/16    21:30:26     6902
+C RAYE3     SOURCE    CHAT      05/01/13    02:45:13     5004
+        SUBROUTINE RAYT1(MATR, EMIS, TEMP, ERRJ , TRAD, KABS, TABS)
+
+C ************************************************************
+C ****  SUBROUTINE DE CALCUL DE LA TEMPERATURE TRAD       ****
+C ****  INTERVENANT EN RAYONNEMENT THERMIQUE              ****
+C ****                                                    ****
+C ****  En entree : MATR matrice des facteurs de forme    ****
+C ****              EMIS valeur de l'emissivite en chaque ****
+C ****                   element de surface               ****
+C ****              TEMP temperature moyenne par element  ****
+C ****              ERRJ erreur relative sur le calcul    ****
+C ****      milieu absorbant (02/2011)                    ****
+C ****              KABS si =1 il existe un milieu absorbant**
+C ****              TABS temperaure du milieu absorbant   ****
+C ****                                                    ****
+C ****  En sortie : TRAD temperature moyenne par element  ****
+C ****                   résultant des transferts radiatifs***
+C ****                                                    ****
+C ****                                                    ****
+C ************************************************************
+
+      IMPLICIT INTEGER(I-N)
+        IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCREEL
+-INC CCOPTIO
+
+C **********************************************************
+C ****  Declaration de la structure des facteurs        ****
+C ****  de forme                                        ****
+C **********************************************************
+
+        SEGMENT IFACFO
+           INTEGER LFACT(NBEL1)
+        ENDSEGMENT
+        SEGMENT LFAC
+           REAL *8 FACT(NBEL2)
+        ENDSEGMENT
+
+C **********************************************************
+C ****  Declaration des variables du probleme           ****
+C **********************************************************
+
+        POINTEUR MATR.IFACFO
+        POINTEUR LMATR.LFAC
+        POINTEUR EMIS.LFAC, TEMP.LFAC, TRAD.LFAC
+        POINTEUR EMIT.LFAC, JRAD.LFAC, JRAD1.LFAC, DIFF.LFAC
+C!!
+        POINTEUR EGAZ.LFAC, AF.LFAC
+
+C       constante de Stefan
+        SIG = 5.67D-8
+C       nombre d'iterations max pour le calcul de la radiosité
+        NK = 50
+
+
+C **********************************************************
+C ****  Activation de la matrice des facteurs de forme  ****
+C ****  par l'intermediaire de son pointeur. Sa         ****
+C ****  dimension est Nbel. Le dernier pointeur pointe  ****
+C ****  sur les elements de surface                     ****
+C **********************************************************
+
+        IF (IIMPI.GE.4) THEN
+                WRITE(6,*) 'DEBUT DE RAYT1.ESO'
+        ENDIF
+
+        SEGACT MATR
+        NEL = MATR.LFACT(/1) - 1
+
+        NBEL2 = NEL
+        SEGACT, EMIS, TEMP
+        SEGINI EMIT, JRAD, JRAD1, TRAD, DIFF
+C!!
+        SEGINI EGAZ, AF
+
+        CALL UTINIV(DIFF.FACT,NEL)
+
+C       write(6,*) ' NEL SIG ', NEL, SIG
+
+C **********************************************************
+C ****  calcul des flux emis par les parois             ****
+C **********************************************************
+
+        DO I = 1, NEL
+        EMIT.FACT(I) = EMIS.FACT(I) * SIG * (TEMP.FACT(I)**4)
+        JRAD1.FACT(I) = EMIT.FACT(I)
+        ENDDO
+
+         IF(IIMPI.EQ.(-1)) THEN
+         write(6,*) ' flux emis'
+         CALL UTPRIM(EMIT.FACT,NEL)
+         ENDIF
+
+         IF (KABS.EQ.1) THEN
+C
+C **********************************************************
+C ****  calcul du flux emis par le milieu absorbant     ****
+C **********************************************************
+
+C       ------------------------------------------------------
+C       calcul des sommes sur j des Fij : tableau AF      ****
+C       ------------------------------------------------------
+        DO I = 1, NEL
+
+          LMATR = MATR.LFACT(I)
+          SEGACT LMATR
+
+          AF.FACT(I) = 0.D0
+
+            DO J = 1, NEL
+            AF.FACT(I) = AF.FACT(I) + LMATR.FACT(J)
+            ENDDO
+
+          SEGDES LMATR
+
+         ENDDO
+
+C        CALL UTPRIM(AF.FACT,NEL)
+C       ------------------------------------------------------
+
+        SIGTG4 = SIG * (TABS**4)
+C       write(6,*) ' SIGTG4: ', SIGTG4
+
+        DO I = 1, NEL
+        EGAZ.FACT(I) = (1.D0 - AF.FACT(I))
+        EGAZ.FACT(I) = EGAZ.FACT(I)*SIGTG4
+        ENDDO
+
+
+         IF(IIMPI.EQ.(-1)) THEN
+         write(6,*) ' flux emis par le gaz'
+         CALL UTPRIM(EGAZ.FACT,NEL)
+         ENDIF
+
+         ENDIF
+
+C **********************************************************
+C ****  calcul iteratif de la radiosité                 ****
+C ****  methode de Gauss-Seidel                         ****
+C **********************************************************
+
+
+       DO 1 K=1,NK
+
+C       ------------------------------------------------------
+        DO I = 1, NEL
+
+          LMATR = MATR.LFACT(I)
+          SEGACT LMATR
+
+
+          IF (KABS.EQ.1) THEN
+
+          JRAD.FACT(I) = EMIT.FACT(I)
+     $                         + (1.D0-EMIS.FACT(I))*EGAZ.FACT(I)
+
+          ELSE
+          JRAD.FACT(I) = EMIT.FACT(I)
+
+          ENDIF
+
+
+          RO = 1.D0 - EMIS.FACT(I)
+
+C cas des surfaces noires: on saute les boucles
+
+          IF (RO.GT.1D-3) THEN
+
+
+C  methode de Jacobi pour mémoire
+
+C         DO J = 1, NEL
+C
+C            JRAD.FACT(I) = JRAD.FACT(I)
+C    $                  + RO * LMATR.FACT(J) * JRAD1.FACT(J)
+C         ENDDO
+
+C...      elements tels que J<I
+C         -------------------------------------------------
+          IF (I.GT.1) THEN
+              DO J = 1, (I-1)
+
+              JRAD.FACT(I) = JRAD.FACT(I)
+     $                  + RO * LMATR.FACT(J) * JRAD.FACT(J)
+
+              ENDDO
+          ENDIF
+C         -------------------------------------------------
+
+C...      elements tels que J>=I
+
+C         -------------------------------------------------
+             DO J = I, NEL
+
+             JRAD.FACT(I) = JRAD.FACT(I)
+     $                  + RO * LMATR.FACT(J) * JRAD1.FACT(J)
+             ENDDO
+C         -------------------------------------------------
+C         ENDIF
+
+          ENDIF
+
+C         JRAD.FACT(I) = EMIT.FACT(I) + JRAD.FACT(I)
+
+C         COEF = 1.D0 - ( RO * LMATR.FACT(I))
+C         JRAD.FACT(I) = JRAD.FACT(I) / COEF
+
+          SEGDES LMATR
+
+        ENDDO
+C       ------------------------------------------------------
+
+C Test de convergence sur la radiosite
+
+        DO I = 1, NEL
+          IF (JRAD1.FACT(I).GE.1D-2) THEN
+          DIFF.FACT(I) = 1.D0 - (JRAD.FACT(I)/JRAD1.FACT(I))
+          ENDIF
+        ENDDO
+
+        CALL UTMXV(DIFF.FACT,NEL,VAL)
+         IF (IIMPI.EQ.(-1))  write(6,*) ' K VAL ',K,VAL
+
+        IF (VAL.LE.ERRJ) THEN
+          GOTO 2
+        ENDIF
+
+         DO I = 1, NEL
+         JRAD1.FACT(I) = JRAD.FACT(I)
+         ENDDO
+
+         IF(IIMPI.EQ.(-1)) THEN
+         write(6,*) ' JRAD      '
+         CALL UTPRIM(JRAD.FACT,NEL)
+         write(6,*) ' JRAD1     '
+         CALL UTPRIM(JRAD1.FACT,NEL)
+         ENDIF
+
+         IF(IIMPI.EQ.(-1)) THEN
+         write(6,*) ' radiosite '
+         CALL UTPRIM(JRAD.FACT,NEL)
+         ENDIF
+
+ 1     CONTINUE
+ 2     CONTINUE
+
+         IF (IIMPI.EQ.1) THEN
+          write (6,*) ' K VAL ',K,VAL
+         ENDIF
+
+
+C **********************************************************
+C ****  calcul des eclairements                         ****
+C **********************************************************
+
+        DO I = 1, NEL
+
+          LMATR = MATR.LFACT(I)
+          SEGACT LMATR
+
+C!       CALL UTPRIM(LMATR.FACT,NEL)
+
+          JRAD.FACT(I) = 0.D0
+
+          DO J =1, NEL
+
+C!        write(6,*) ' i j ', I,J
+C!        write(6,*) 'Fij Jj ', LMATR.FACT(J), JRAD1.FACT(J)
+
+          JRAD.FACT(I) = JRAD.FACT(I) + LMATR.FACT(J) * JRAD1.FACT(J)
+          ENDDO
+
+
+
+          IF (KABS.EQ.1) THEN
+
+C         on ajoute le terme du au milieu absorbant
+C
+          JRAD.FACT(I) = JRAD.FACT(I) + EGAZ.FACT(I)
+
+C!        write(6,*) ' Ei ',JRAD.FACT(I)
+
+          ENDIF
+
+          SEGDES LMATR
+        ENDDO
+
+         IF(IIMPI.EQ.(-1)) THEN
+         write(6,*) ' eclairement'
+         CALL UTPRIM(JRAD.FACT,NEL)
+         ENDIF
+
+C **********************************************************
+C ****  calcul de la temperature TRAD résultat          ****
+C **********************************************************
+C
+C étape inchangée si milieu absorbant
+
+        DO I = 1, NEL
+        TRAD.FACT(I) = ((1./SIG) * JRAD.FACT(I))**(0.25)
+        ENDDO
+
+         IF(IIMPI.EQ.(-1)) THEN
+          write(6,*) ' Trad'
+          CALL UTPRIM(TRAD.FACT,NEL)
+         ENDIF
+
+        SEGDES EMIS, TEMP, TRAD
+        SEGDES MATR
+
+        SEGSUP EMIT, JRAD, JRAD1, DIFF
+C!!
+        SEGSUP EGAZ, AF
+
+        RETURN
+        END
+
+
+
+
+
+
+

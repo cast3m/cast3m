@@ -1,0 +1,259 @@
+C WAC0      SOURCE    SERRE     16/12/13    21:15:14     9254
+      SUBROUTINE WAC0(MTAB1)
+C
+C--------------------------------------------------------------------
+C Modélisation d'un condenseur à tubes
+C--------------------------------------------------------------------
+C
+C---------------------------
+C Phrase d'appel (GIBIANE) :
+C---------------------------
+C
+C DCD PCDS PCDW HTOT HINT HEXT DTLOG TWS TTIN TTEX TCOND
+C           = 'VARI' 'TOCOND' TAB1 WMSTIN XTGAS1 XPT1 XCORE1 ;
+C
+C-------------------------
+C Opérandes et résultats :
+C-------------------------
+C
+C--- Variables d'entrée
+C
+C  TAB1   : TABLE 'CONDENSR' contenant l'ensemble des données d'un condenseur
+C  WMSTIN : Masse de vapeur disponible / pas de temps (kg/s)
+C  XTGAS1 : Température du bulk (K)
+C  XPT1   : Pression du bulk (Pa)
+C  XCORE1 : Coefficient de pénalisation dû à la présence d'incondensables
+C
+C--- Variables de sortie
+C
+C  DCD    : Débit de condensation (kg/s)
+C  PCDS   : Puissance extraite de la vapeur (W)
+C  PCDW   : Puissance transmise au condensat (W)
+C  HTOT   : Coefficient d'échange global entre le gaz et le circuit de
+C           refroidissement (W/m2/K)
+C  DTLOG  : Différence de température logarithmique entre l'enrtrée et
+C           la sortie du condenseur (K)
+C
+C--- Variables internes pour post-traitement
+C
+C  HINT   : Coefficient d'échange entre le tube et le circuit de
+C           refroidissement (W/m2/K)
+C  HEXT   : Coefficient d'échange entre le tube et le gaz (W/m2/K)
+C  TWS    : Température de sortie du circuit de refroidissement (K)
+C  TTIN   : Température du tube en peau interne (K)
+C  TTEX   : Température du tube en peau externe (K)
+C  TCOND  : Température du condensat (K)
+C--------------------------------------------------------------------
+C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+      REAL*8 LBDALIQ0,MULIQ0,MUW,MUCOND,KTTUB,KTW,KTCOND
+C IERR et XPI
+-INC CCOPTIO
+-INC CCREEL
+C
+C-------------------------------
+C- Lecture des données du modèle
+C-------------------------------
+C
+C WMSTIN : Masse de vapeur disponible / pas de temps (kg/s)
+C TGIN   : Température du bulk (K)
+C PG     : Pression du bulk (Pa)
+C DCD    : Débit de condensation (kg/s)
+C PCDS   : Puissance retirée au gaz (W)
+C PCDW   : Puissance transmise au puisard (W)
+C
+      call lirree(WMSTIN,1,IRETOU)
+      if (IERR.NE.0) RETURN
+      call lirree(TGIN,1,IRETOU)
+      if (IERR.NE.0) RETURN
+      call lirree(PG,1,IRETOU)
+      if (IERR.NE.0) RETURN
+      call lirree(CORED,1,IRETOU)
+      if (IERR.NE.0) RETURN
+C
+C ZNTUB  : Nombre de tubes (-)
+C ZLTUB  : Longueur d'un tube (m)
+C DINTUB : Diamètre interne des tubes (m)
+C DEXTUB : Diamètre externe des tubes (m)
+C KTTUB  : Conductivité thermique des tubes (W/m/k)
+C TWIN   : Température à l'entrée du circuite de refroidissement (K)
+C WWIN   : Débit massique du circuit de refroidissement (kg/s)
+C PWIN   : Pression du circuit de refroidissement (Pa)
+C
+      call acme(MTAB1,'NTUBE',ntub)
+      if (IERR.NE.0) RETURN
+      call acmf(MTAB1,'LTUBE',zltub)
+      if (IERR.NE.0) RETURN
+      call acmf(MTAB1,'DIAMINT',dintub)
+      if (IERR.NE.0) RETURN
+      call acmf(MTAB1,'DIAMEXT',dextub)
+      if (IERR.NE.0) RETURN
+      call acmf(MTAB1,'LBDW',kttub)
+      if (IERR.NE.0) RETURN
+      call acmf(MTAB1,'TWIN',twin)
+      if (IERR.NE.0) RETURN
+      call acmf(MTAB1,'QWIN',wwin)
+      if (IERR.NE.0) RETURN
+      call acmf(MTAB1,'PWIN',pwin)
+      if (IERR.NE.0) RETURN
+      call acmf(MTAB1,'HPENALTY',hpenalty)
+      if (IERR.NE.0) RETURN
+      call acmf(MTAB1,'HTOT',htot)
+      if (IERR.NE.0) RETURN
+C
+C Dans le cas où la température gaz est plus froide que la
+C température du circuit de refroidissement on ne fait rien
+C et on laisse HTOT à sa valeur initiale...
+C
+      IF (TGIN .LE. TWIN) THEN
+         DCD   = 0.D0
+         PCDS  = 0.D0
+         PCDW  = 0.D0
+         HINT  = 0.D0
+         HEXT  = 0.D0
+         DTLOG = 0.D0
+         TWS   = TWIN
+         TTIN  = TWIN
+         TTEX  = TWIN
+         TCOND = TTEX + 0.25D0*(TGIN-TTEX)
+      ELSE
+C
+C ... sinon calcul de HTOT, TWS et PEVAC et des quantités dérivées
+C   HTOT  : Coefficient d'échange global gaz/circuit de refroidissement
+C   TWS   : Température de l'eau à la sortie du condenseur
+C   PEVAC : Puissance thermique évacuée par le condenseur
+C
+         ZNTUB   = float(NTUB)
+         STUBINT = XPI * DINTUB * ZNTUB * ZLTUB
+         STUBEXT = XPI * DEXTUB * ZNTUB * ZLTUB
+         REXTUB  = DEXTUB / 2.D0
+C
+         PSAT = PSATT0(TGIN)
+         VST  = 1.D0 / ROVAP0(PSAT,TGIN)
+         HW1  = HLS0(PG,TGIN)
+         HST  = HVS0(PSAT,TGIN)
+C
+         TEBU = TSATP0(PWIN)
+         HW2  = HLS0(PWIN,TWIN)
+         CPW  = CPLIQ0(PWIN,HW2)
+C
+C Point fixe 1 sur HTOT (englobant un point fixe sur TWS et PEVAC)
+C (HTOT initialisé à la valeur du précédant passage)
+         IFIX1 = 0
+  5      CONTINUE
+         HTOTOLD = HTOT
+C
+C Point fixe 2, sur TWS (et PEVAC) pour HTOT connu
+C (initialisation TWS=TWIN et PEVAC correspondant à TWS=TGIN)
+C
+         TWS   = TWIN
+         PEVAC = ((TGIN - TWIN)/20.D0) * (WWIN * CPW)
+         PEVAMAX = (TGIN - TWIN) * (WWIN * CPW)
+         IFIX2 = 1
+ 10      CONTINUE
+            TWSOLD = TWS
+            TWS   = TWIN + PEVAC / (WWIN * CPW)
+            TWS   = MIN(TWS,TEBU,TGIN)
+            IF (ABS(TWS-TWSOLD) .LE. 0.1D0) GOTO 20
+            DTLOG = TGIN - (TWS+TWIN)/2.D0
+            PEVAC = HTOT * STUBINT * DTLOG
+            pevac = min(pevac,pevamax)
+            DCD   = PEVAC / (HST - HW1)
+            DCD   = MIN(DCD,WMSTIN)
+C
+            PCDS  = DCD * HST
+            PCDW  = DCD * HW1
+            PEVAC = PCDS - PCDW
+C
+            IFIX2 = IFIX2 + 1
+            if (ifix2 .gt. 1000) then
+               call erreur(460)
+               RETURN
+            endif
+         GOTO 10
+ 20      CONTINUE
+c         write(6,*)'-----------------------------------------'
+c         WRITE(6,*) 'Nbre de pas IFIX2 ', IFIX2
+c         write(6,*)'HTOT PEVAC TWS ',htot,pevac,tws
+c         write(6,*)'-----------------------------------------'
+C
+C Calcul de HTOT correspondant à PEVAC et TWS
+C
+C 1/ Intérieur des tubes (corrélation de Dittus Boelter)
+         TWMOY = (TWIN + TWS) / 2.D0
+         MUW   = MULIQ0(TWMOY)
+         KTW   = LBDALIQ0(PWIN,TWMOY)
+         HLW   = HLS0(PWIN,TWMOY)
+         CPW   = CPLIQ0(PWIN,HLW)
+         ROUW  = WWIN / (XPI * DINTUB**2.D0 * NTUB / 4.D0)
+         REYW  = ROUW * DINTUB / MUW
+         PRW   = MUW * CPW / KTW
+         HINT  = KTW * 0.023D0 * REYW**0.8D0 * PRW**0.4D0 / DINTUB
+C
+C 2/ Températures de peau à partir des flux
+         TTIN = TWMOY + PEVAC / (HINT * STUBINT)
+         TTEX = TTIN + PEVAC * LOG(DEXTUB/DINTUB) * REXTUB
+     1        / (KTTUB * STUBEXT)
+C
+C 3/ Condensat (Nusselt theory for laminar flow regime and Kutateladze
+C    et Butterworth correlations for wavy and turbulent flow regime)
+         TCOND    = TTEX + 0.25D0*(TGIN-TTEX)
+         MUCOND   = MULIQ0(TCOND)
+         KTCOND   = LBDALIQ0(PG,TCOND)
+         HLCOND   = HLS0(PG,TCOND)
+         CPCOND   = CPLIQ0(PG,HLCOND)
+         RHOCOND  = ROLIQ0(PG,HLCOND)
+         ROUCOND  = DCD / (XPI * DEXTUB**2.D0 * NTUB / 4.D0)
+         REYCOND  = ROUCOND * DEXTUB / MUCOND
+         PRCOND   = MUCOND * CPCOND / KTCOND
+         RHOVAP   = 1.D0 / VST
+C
+         C1 = KTCOND * (RHOCOND*(RHOCOND-RHOVAP)*9.81D0 / MUCOND**2.D0)
+     1        **(1.D0/3.D0)
+         IF (REYCOND .LT. 30.D0) then
+            HEXT = 1.47D0 * REYCOND**(-1.D0/3.D0) * C1
+         ELSE IF (REYCOND .LT. 1600.D0) THEN
+            HEXT = REYCOND / (1.08D0 * REYCOND**1.22D0 - 5.2D0) * C1
+         ELSE
+            HEXT = REYCOND / (8750.D0 + 58.D0*PRCOND**(-0.5D0) *
+     1             (REYCOND**0.75D0 - 253.D0)) * C1
+         ENDIF
+C
+C 4/ Coefficient d'échange global pénalisé de 20% avec prise en compte
+C    de la présence des incondensables par pénalisation via CORED pour Hext
+         HTOT = hpenalty / (1.D0/HINT + DINTUB/(DEXTUB*HEXT*CORED)
+     1        + ((DINTUB/(2.D0*KTTUB))*LOG(DEXTUB/DINTUB)) )
+C
+         IFIX1 = IFIX1 + 1
+C         write(6,*) '-------------------------------------------'
+C         write(6,*) 'htot htotold ',ifix1,htot,htotold
+         if (ifix1 .gt. 1000) then
+            call erreur(460)
+            RETURN
+         endif
+         IF (ABS(HTOT-HTOTOLD) .GE. 0.1D0) GOTO 5
+C         WRITE(6,*) 'Nbre de pas IFIX1 ', IFIX1
+C         write(6,*)'HTOT PEVAC TWS ',htot,pevac,tws
+C         write(6,*)'-----------------------------------------'
+      ENDIF
+C
+C------------------------------------------------
+C- Ecriture du résultat et des variables internes
+C------------------------------------------------
+C
+      call ecrree(tcond)
+      call ecrree(ttex)
+      call ecrree(ttin)
+      call ecrree(tws)
+      call ecrree(dtlog)
+      call ecrree(hext)
+      call ecrree(hint)
+      call ecrree(htot)
+      call ecrree(pcdw)
+      call ecrree(pcds)
+      call ecrree(dcd)
+C
+      return
+      end
+

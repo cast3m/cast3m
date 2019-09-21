@@ -1,0 +1,619 @@
+C KONF21    SOURCE    CB215821  16/04/21    21:17:32     8920
+      SUBROUTINE KONF21(INDMET,
+     &                  IALPF,IUVF,IULF,IPF,
+     &                  ITVF,ITLF,IRVF,IRLF,
+     &                  ICHPSU,ICHPDI,
+     &                  MELEMC,MELEMF,MELEFE,
+     &                  ICHFLU,DT,
+     &                  LOGNC,LOGAN,MESERR)
+C************************************************************************
+C
+C PROJET            :  CASTEM 2000
+C
+C NOM               :  KONFL8
+C
+C DESCRIPTION       :  Voir KONV2F
+C
+C                      2D two fluid flow
+C
+C LANGAGE           :  FORTRAN 77 + ESOPE 2000 (avec estensions CISI)
+C
+C AUTEUR            :  A. BECCANTINI, DRN/DMT/SEMT/TTMF
+C                      Modified for two phase flow by
+C                      José R.
+C
+C************************************************************************
+C
+C
+C APPELES (Outils
+C          CASTEM)  :  KRIPAD, LICHT
+C
+C APPELES (Calcul)  :  FLURIE, FLUXVL, FLUVLH, FLHUS1, FLHUS2
+C
+C
+C************************************************************************
+C
+C ENTREES
+C
+C
+C  1) PARAMETRES
+C
+C     INDMET  :     6        AUSM+
+C
+C
+C  2) Pointeurs des MCHAMLs
+C
+C     IALPF   : MCHAML sur "FACEL" containing void fraction
+C
+C     IUVF    : MCHAML sur "FACEL" containing vapour velocity
+C
+C     IULF    : MCHAML sur "FACEL" containing liquid velocity
+C
+C     IPF     : MCHAML sur "FACEL" containing pressure
+C
+C     ITVF    : MCHAML sur "FACEL" containing vapour temperature
+C
+C     ITLF    : MCHAML sur "FACEL" containing liquid temperature
+C
+C     IRVF    : MCHAML sur "FACEL" containing vapour density
+C
+C     IRLF    : MCHAML sur "FACEL" containing liquid density
+C
+C
+C  3) Pointeurs de CHPOINTs de la table DOMAINE
+C
+C     ICHPSU  : CHPOINT "FACE" contenant la surface des faces
+C
+C     ICHPDI  : CHPOINT "CENTRE" contenant le diametre minimum
+C               de chaque element
+C
+C
+C  4) Pointeurs de MELEME de la table DOMAINE
+C
+C     MELEMC  : MELEME 'CENTRE' du SPG des CENTRES
+C
+C     MELEMF  : MELEME 'FACE' du SPG des FACES
+C
+C     MELEFE  : MELEME 'FACEL' du connectivité FACES -> ELEM
+C
+C SORTIES
+C
+C     ICHFLU     : pointeurs de CHPOINTs "FACE" des flux aux interfaces:
+C
+C     DT      : pas de temps pour le respect de la CFL-like condition
+C               DT < DIAMMIN /2 /max(Lambda_i)
+C               En maillage regulier cette condition garantie la
+C               non-interaction des ondes
+C
+C
+C     LOGNC   : (LOGICAL): si .TRUE. la methode de Newton-Rapson, utilisée
+C               dans pour la solution du probleme Riemann exacte ou dans
+C               l'algorithm HUS, n'a pas bien marchéee; MESERR = 'Goudunov'
+C               ou 'HUS'.
+C
+C     LOGAN   : (LOGICAL): si .TRUE. une anomalie à été detectée
+C
+C     MESERR  : pour l'ecriture des messages d'erreurs
+C
+C************************************************************************
+C
+C HISTORIQUE (Anomalies et modifications éventuelles)
+C
+C HISTORIQUE :
+C
+C************************************************************************
+C
+C
+C N.B.: On suppose qu'on a déjà controllé RO, P > 0
+C                                         GAMMA \in (1,3)
+C                                         Y \in (0,1)
+C       Si non il faut le faire!!!
+C
+C************************************************************************
+C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+
+      INTEGER I1
+     &       ,INDMET
+     &       ,IALPF,IUVF,IULF,IPF,ITVF,ITLF,IRVF,IRLF
+     &       ,ICHPSU,ICHPDI,MELEMC,MELEMF,MELEFE
+     &       ,IGEOMC,IGEOMF
+     &       ,ICHFLU
+     &       ,NESP, NFAC
+     &       ,NLCF, NGCEG,  NGCED, NLCEG, NLCED
+     &       ,NGCF, NLCF1, SPG1, SPG2
+      REAL*8 DT, UNSDT
+     &     , ALPG,UVNG, UVTG, ULNG, ULTG, PG, TVG, TLG
+     &     , RVG, RLG
+     &     , ALPD, UVND, UVTD, ULND, ULTD, PD, TVD, TLD
+     &     , RVD, RLD
+     &     , SURF,CNX, CNY, CTX , CTY
+     &     , CELL, DIAMG, DIAMD, DIAM
+     &     , AVSON, LAMDAV, ALSON, LAMDAL
+      LOGICAL LOGNC, LOGAN
+      CHARACTER*(40) MESERR
+      CHARACTER*(8) TYPE
+C
+C**** LES INCLUDES
+C
+-INC CCOPTIO
+-INC SMCHAML
+      POINTEUR MELALP.MELVAL, MELP.MELVAL,
+     &         MELTV.MELVAL, MELTL.MELVAL,
+     &         MELRV.MELVAL, MELRL.MELVAL
+      POINTEUR MELUVN.MELVAL, MELUVT.MELVAL,
+     &         MELULN.MELVAL, MELULT.MELVAL,
+     &         MELVNX.MELVAL, MELVNY.MELVAL, MELVTX.MELVAL,
+     &         MELVTY.MELVAL, MELLNX.MELVAL, MELLNY.MELVAL,
+     &         MELLTX.MELVAL, MELLTY.MELVAL
+-INC SMCHPOI
+      POINTEUR MPOVSU.MPOVAL, MPOVDI.MPOVAL
+     &        , MPOFLU.MPOVAL
+      POINTEUR MCHAMY.MCHAML
+-INC SMELEME
+-INC SMLMOTS
+-INC SMLENTI
+C
+C**** Flux at each interface and each reference framework
+C
+      SEGMENT IFLUX
+         REAL*8 FLUX(8)
+      ENDSEGMENT
+      POINTEUR IFLU1.IFLUX
+C
+C**** Initialisation des MCHAMLs
+C
+C**** Void fraction
+C
+      MCHEL1 = IALPF
+      SEGACT MCHEL1
+      MCHAM1 = MCHEL1.ICHAML(1)
+      SEGACT MCHAM1
+      MELALP = MCHAM1.IELVAL(1)
+      SEGDES MCHEL1
+      SEGDES MCHAM1
+C
+C**** Vapour velocity and director cosines (cosenos directores vamos??)
+C
+      MCHEL1 = IUVF
+      SEGACT MCHEL1
+C
+C**** La vitesse a comme SPG MELEFE
+C     Le cosinus directeurs ont comme SPG MELEMF
+C
+C     MCHAM1 -> Cosinus directeurs
+C     MCHAM2 -> Vitesse
+C
+      SPG1 = MCHEL1.IMACHE(1)
+      SPG2 = MCHEL1.IMACHE(2)
+      IF((SPG1 .EQ. MELEMF)  .AND. (SPG2 .EQ. MELEFE))THEN
+         MCHAM1 = MCHEL1.ICHAML(1)
+         MCHAM2 = MCHEL1.ICHAML(2)
+      ELSEIF((SPG1 .EQ. MELEFE)  .AND. (SPG2 .EQ. MELEMF))THEN
+         MCHAM1 = MCHEL1.ICHAML(2)
+         MCHAM2 = MCHEL1.ICHAML(1)
+      ELSE
+         LOGAN = .TRUE.
+         GOTO 9999
+      ENDIF
+      SEGACT MCHAM1
+      MELVNX = MCHAM1.IELVAL(1)
+      MELVNY = MCHAM1.IELVAL(2)
+      MELVTX = MCHAM1.IELVAL(3)
+      MELVTY = MCHAM1.IELVAL(4)
+      SEGDES MCHAM1
+      SEGACT MCHAM2
+      MELUVN = MCHAM2.IELVAL(1)
+      MELUVT = MCHAM2.IELVAL(2)
+      SEGDES MCHAM2
+      SEGDES MCHEL1
+C
+C**** Liquid velocity and director cosines (cosenos directores vamos??)
+C     Claramente tengo que eliminar los cosenos directores de la
+C     velocidad del liquido!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+C
+      MCHEL1 = IULF
+      SEGACT MCHEL1
+C
+C**** La vitesse a comme SPG MELEFE
+C     Le cosinus directeurs ont comme SPG MELEMF
+C
+C     MCHAM1 -> Cosinus directeurs
+C     MCHAM2 -> Vitesse
+C
+      SPG1 = MCHEL1.IMACHE(1)
+      SPG2 = MCHEL1.IMACHE(2)
+      IF((SPG1 .EQ. MELEMF)  .AND. (SPG2 .EQ. MELEFE))THEN
+         MCHAM1 = MCHEL1.ICHAML(1)
+         MCHAM2 = MCHEL1.ICHAML(2)
+      ELSEIF((SPG1 .EQ. MELEFE)  .AND. (SPG2 .EQ. MELEMF))THEN
+         MCHAM1 = MCHEL1.ICHAML(2)
+         MCHAM2 = MCHEL1.ICHAML(1)
+      ELSE
+         LOGAN = .TRUE.
+         GOTO 9999
+      ENDIF
+      SEGACT MCHAM1
+      MELLNX = MCHAM1.IELVAL(1)
+      MELLNY = MCHAM1.IELVAL(2)
+      MELLTX = MCHAM1.IELVAL(3)
+      MELLTY = MCHAM1.IELVAL(4)
+      SEGDES MCHAM1
+      SEGACT MCHAM2
+      MELULN = MCHAM2.IELVAL(1)
+      MELULT = MCHAM2.IELVAL(2)
+      SEGDES MCHAM2
+      SEGDES MCHEL1
+C
+C**** Pressure
+C
+      MCHEL1 = IPF
+      SEGACT MCHEL1
+      MCHAM1 = MCHEL1.ICHAML(1)
+      SEGACT MCHAM1
+      MELP = MCHAM1.IELVAL(1)
+      SEGDES MCHEL1
+      SEGDES MCHAM1
+C
+C**** Vapour temperature
+C
+      MCHEL1 = ITVF
+      SEGACT MCHEL1
+      MCHAM1 = MCHEL1.ICHAML(1)
+      SEGACT MCHAM1
+      MELTV = MCHAM1.IELVAL(1)
+      SEGDES MCHEL1
+      SEGDES MCHAM1
+C
+C**** Liquid temperature
+C
+      MCHEL1 = ITLF
+      SEGACT MCHEL1
+      MCHAM1 = MCHEL1.ICHAML(1)
+      SEGACT MCHAM1
+      MELTL = MCHAM1.IELVAL(1)
+      SEGDES MCHEL1
+      SEGDES MCHAM1
+C
+C**** Vapour density
+C
+      MCHEL1 = IRVF
+      SEGACT MCHEL1
+      MCHAM1 = MCHEL1.ICHAML(1)
+      SEGACT MCHAM1
+      MELRV = MCHAM1.IELVAL(1)
+      SEGDES MCHEL1
+      SEGDES MCHAM1
+C
+C**** Liquid density
+C
+      MCHEL1 = IRLF
+      SEGACT MCHEL1
+      MCHAM1 = MCHEL1.ICHAML(1)
+      SEGACT MCHAM1
+      MELRL = MCHAM1.IELVAL(1)
+      SEGDES MCHEL1
+      SEGDES MCHAM1
+C
+C**** Initialisation des MELEMEs
+C
+C     'CENTRE', 'FACEL'
+C
+      IPT2 = MELEFE
+      SEGACT IPT2
+      NFAC = IPT2.NUM(/2)
+C
+C**** KRIPAD pour la correspondance global/local de centre
+C
+      CALL KRIPAD(MELEMC,MLENT1)
+C
+C**** MLENTI1 a MCORD.XCOORD(/1)/(IDIM+1) elements
+C
+C     Si i est le numero global d'un noeud de ICEN,
+C     MLENT1.LECT(i) contient sa position, i.e.
+C
+C     I              = numero global du noeud centre
+C     MLENT1.LECT(i) = numero local du noeud centre
+C
+C     MLENT1 déjà activé, i.e.
+C
+C     SEGACT MLENT1
+C
+C
+C**** KRIPAD pour la correspondance global/local de 'FACE'
+C
+      CALL KRIPAD(MELEMF,MLENT2)
+C     SEGACT MELNT2
+C
+C**** Initialisation de flux
+C
+      SEGINI IFLU1
+C
+C**** CHPOINTs de la table DOMAINE
+C
+      CALL LICHT(ICHPSU,MPOVSU,TYPE,IGEOMF)
+      CALL LICHT(ICHPDI,MPOVDI,TYPE,IGEOMC)
+C
+C**** LICHT active les MPOVALs en *MOD
+C
+C     i.e.
+C
+C     SEGACT MPOVSU*MOD
+C     SEGACT MPOVDI*MOD
+C
+      IF(IGEOMF .NE. MELEMF)THEN
+         MESERR = 'Il ne faut pas jouer avec la console.   '
+         LOGAN = .TRUE.
+         GOTO 9999
+      ENDIF
+      IF(IGEOMC .NE. MELEMC)THEN
+         MESERR = 'Il ne faut pas jouer avec la console.   '
+         LOGAN = .TRUE.
+         GOTO 9999
+      ENDIF
+C
+C**** Les FLUX aux face
+C
+C     La densité
+C
+      CALL LICHT(ICHFLU,MPOFLU,TYPE,IGEOMF)
+C
+C     SEGACT MPOFLU*MOD
+C
+      IF(IGEOMC .NE. MELEMC)THEN
+         MESERR = 'Il ne faut pas jouer avec la console.   '
+         LOGAN = .TRUE.
+         GOTO 9999
+      ENDIF
+C
+C**** Activation des MCHAMLs
+C
+      SEGACT MELALP
+      SEGACT MELP
+      SEGACT MELTV
+      SEGACT MELTL
+      SEGACT MELRV
+      SEGACT MELRL
+      SEGACT MELUVN
+      SEGACT MELUVT
+      SEGACT MELULN
+      SEGACT MELULT
+      SEGACT MELVNX
+      SEGACT MELVNY
+      SEGACT MELVTX
+      SEGACT MELVTY
+      SEGACT MELLNX
+      SEGACT MELLNY
+      SEGACT MELLTX
+      SEGACT MELLTY
+C
+C**** Initialisation de 1/DT
+C
+      UNSDT = 0.0D0
+C
+C**** BOUCLE SUR FACEL pour le calcul du FLUX
+C
+      DO NLCF = 1, NFAC
+C
+C******* NLCF  = numero local du centre de facel
+C        NGCF  = numero global du centre de facel
+C        NLCF1 = numero local du centre de face
+C        NGCEG = numero global du centre ELT "gauche"
+C        NLCEG = numero local du centre ELT "gauche"
+C        NGCED = numero global du centre ELT "droite"
+C        NLCED = numero local du centre ELT "droite"
+C
+         NGCEG = IPT2.NUM(1,NLCF)
+         NGCED = IPT2.NUM(3,NLCF)
+         NGCF  = IPT2.NUM(2,NLCF)
+         NLCF1 = MLENT2.LECT(NGCF)
+         NLCEG = MLENT1.LECT(NGCEG)
+         NLCED = MLENT1.LECT(NGCED)
+C
+C******* NLCF != NLCF1 -> l'auteur (MOI) n'a rien compris.
+C
+         IF(NLCF .NE. NLCF1)THEN
+            MESERR = 'Il ne faut pas jouer avec la console.   '
+            LOGAN = .TRUE.
+            GOTO 9999
+         ENDIF
+C
+C******* Recuperation des Etats "gauche" et "droite"
+C
+         ALPG = MELALP.VELCHE(1,NLCF)
+         UVNG = MELUVN.VELCHE(1,NLCF)
+         UVTG = MELUVT.VELCHE(1,NLCF)
+         ULNG = MELULN.VELCHE(1,NLCF)
+         ULTG = MELULT.VELCHE(1,NLCF)
+         PG   = MELP.VELCHE(1,NLCF)
+         TVG  = MELTV.VELCHE(1,NLCF)
+         TLG  = MELTL.VELCHE(1,NLCF)
+         RVG  = MELRV.VELCHE(1,NLCF)
+         RLG  = MELRL.VELCHE(1,NLCF)
+C
+         ALPD = MELALP.VELCHE(3,NLCF)
+         UVND = MELUVN.VELCHE(3,NLCF)
+         UVTD = MELUVT.VELCHE(3,NLCF)
+         ULND = MELULN.VELCHE(3,NLCF)
+         ULTD = MELULT.VELCHE(3,NLCF)
+         PD   = MELP.VELCHE(3,NLCF)
+         TVD  = MELTV.VELCHE(3,NLCF)
+         TLD  = MELTL.VELCHE(3,NLCF)
+         RVD  = MELRV.VELCHE(3,NLCF)
+         RLD  = MELRL.VELCHE(3,NLCF)
+C
+
+         CNX = MELVNX.VELCHE(1,NLCF)
+         CNY = MELVNY.VELCHE(1,NLCF)
+         CTX = MELVTX.VELCHE(1,NLCF)
+         CTY = MELVTY.VELCHE(1,NLCF)
+C
+C******* Calcul du flux aux interfaces
+C
+C AUSM+ (1) and "preconditioned" AUSM+ (2)
+         IF((INDMET .EQ. 1) .OR. (INDMET .EQ. 2))THEN
+            CALL fAP22F(INDMET,
+     &                  ALPG, UVNG, UVTG, ULNG, ULTG, PG, TVG, TLG,
+     &                  RVG, RLG,
+     &                  ALPD, UVND, UVTD, ULND, ULTD, PD, TVD, TLD,
+     &                  RVD, RLD,
+     &                  IFLU1.FLUX)
+C AUSMDV (3) and "preconditioned" AUSMDV (3)
+         ELSE IF((INDMET .EQ. 3) .OR. (INDMET .EQ. 4))THEN
+            CALL fDV22F(INDMET,
+     &                  ALPG, UVNG, UVTG, ULNG, ULTG, PG, TVG, TLG,
+     &                  RVG, RLG,
+     &                  ALPD, UVND, UVTD, ULND, ULTD, PD, TVD, TLD,
+     &                  RVD, RLD,
+     &                  IFLU1.FLUX)
+         ELSE
+C
+C******** Message d'erreur standard
+C         251 2
+C         Tentative d'utilisation d'une option non implémentée
+C
+            CALL ERREUR(251)
+         ENDIF
+         IF(LOGAN) GOTO 9999
+         IF(LOGNC) GOTO 9999
+C
+C******* Ecriture des flux
+C
+C        FLUX(1) = alpha rv uvn
+C        FLUX(2) = (1-alpha) rl uln
+C        FLUX(3) = alpha rv uvx uvn + alpha p
+C        FLUX(4) = alpha rv uvy uvn + alpha p
+C        FLUX(5) = (1-alpha) rl ulx uln + (1-alpha) p
+C        FLUX(6) = (1-alpha) rl uly uln + (1-alpha) p
+C        FLUX(7) = alpha rv Hv uvn
+C        FLUX(8) = (1-alpha) rl Hl uln
+C
+         SURF   = MPOVSU.VPOCHA(NLCF,1)
+
+         MPOFLU.VPOCHA(NLCF,1) = (IFLU1.FLUX(1) * SURF)
+
+         MPOFLU.VPOCHA(NLCF,2) = (IFLU1.FLUX(2) * SURF)
+
+         MPOFLU.VPOCHA(NLCF,3) = ((IFLU1.FLUX(3)*CNX+IFLU1.FLUX(5)*CTX)
+     &                             * SURF)
+
+         MPOFLU.VPOCHA(NLCF,4) = ((IFLU1.FLUX(3)*CNY+IFLU1.FLUX(5)*CTY)
+     &                             * SURF)
+
+         MPOFLU.VPOCHA(NLCF,5) = ((IFLU1.FLUX(4)*CNX+IFLU1.FLUX(6)*CTX)
+     &                             * SURF)
+
+         MPOFLU.VPOCHA(NLCF,6) = ((IFLU1.FLUX(4)*CNY+IFLU1.FLUX(6)*CTY)
+     &                             * SURF)
+
+         MPOFLU.VPOCHA(NLCF,7) = (IFLU1.FLUX(7) * SURF)
+
+         MPOFLU.VPOCHA(NLCF,8) = (IFLU1.FLUX(8) * SURF)
+C
+C******* CALCUL DU PAS DU TEMPS (CFL)
+C
+C******  A) ETAT A L'ITNERFACE
+C
+         DIAMG = MPOVDI.VPOCHA(NLCEG,1)
+         DIAMD = MPOVDI.VPOCHA(NLCED,1)
+         DIAM  = MIN(DIAMG,DIAMD)
+C         CELL  = 1.0D0/DIAM/CELLT
+C         IF(CELL .GT. UNSDT)THEN
+C            UNSDT  =  CELL
+C         ENDIF
+C
+C******  B) ETAT GAUCHE
+C       gammav = 1.4D0
+C       Cpv    = 1008.D0   J/(kg·K)
+C       gammal = 2.8D0
+C       Cpl    = 4186.D0   J/(kg·K)
+C       pil    = 8.5D8      Pa
+
+         AVSON  = SQRT(1008.d0*(1.4d0 - 1.d0)*TVG)
+         LAMDAV = ABS(UVNG) + AVSON
+         ALSON  = SQRT(4186.D0*(2.8d0 - 1.d0)*TLG)
+         LAMDAL = ABS(ULNG) + ALSON
+         CELL   = 1.D0/(((1.d0 - ALPG)/LAMDAL + ALPG/LAMDAV)* DIAM)
+         IF(CELL .GT. UNSDT)THEN
+            UNSDT  =  CELL
+         ENDIF
+C
+C******  C) ETAT DROITE
+C
+         AVSON  = SQRT(1008.d0*(1.4d0 - 1.d0)*TVD)
+         LAMDAV = ABS(UVND) + AVSON
+         ALSON  = SQRT(4186.D0*(2.8d0 - 1.d0)*TLD)
+         LAMDAL = ABS(ULND) + ALSON
+         CELL   = 1.D0/(((1.d0 - ALPD)/LAMDAL + ALPD/LAMDAV)* DIAM)
+         IF(CELL .GT. UNSDT)THEN
+            UNSDT  =  CELL
+         ENDIF
+C
+C
+C**** FIN BOUCLE SUR FACEL
+C
+      ENDDO
+C
+C**** PAS DU TEMPS (CONDITION DE NON INTERACTION EN 1D)
+C
+      DT = 1.D0 / UNSDT
+C
+C**** DESACTIVATION DES SEGMENTS ET
+C     ON DETRUIT LES MCHAMLS
+C
+C
+C**** SEGSUP FRAMAG
+C     SEGSUP FRAMAD
+C
+C     MEME SI LOGME = .FALSE.
+C
+C
+      SEGSUP MLENT1
+      SEGSUP MLENT2
+      SEGDES IPT2
+C
+      SEGSUP IFLU1
+C
+      SEGDES MPOVSU
+      SEGDES MPOVDI
+C
+      SEGDES MPOFLU
+C
+
+      SEGDES MELALP
+      SEGDES MELP
+      SEGDES MELTV
+      SEGDES MELTL
+      SEGDES MELRV
+      SEGDES MELRL
+      SEGDES MELUVN
+      SEGDES MELUVT
+      SEGDES MELULN
+      SEGDES MELULT
+      SEGDES MELVNX
+      SEGDES MELVNY
+      SEGDES MELVTX
+      SEGDES MELVTY
+      SEGDES MELLNX
+      SEGDES MELLNY
+      SEGDES MELLTX
+      SEGDES MELLTY
+CC
+ 9999 CONTINUE
+C
+      RETURN
+      END
+C
+
+
+
+
+
+
+
+
+
+
+
+

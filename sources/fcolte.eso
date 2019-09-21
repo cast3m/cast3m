@@ -1,0 +1,375 @@
+C FCOLTE    SOURCE    CHAT      05/01/12    23:57:26     5004
+      SUBROUTINE FCOLTE(NESP,NSCA,NORDP1,
+     &                  XST,
+     &                  GAMG,RTOTG,ACVTOG,ROG,PG,TG,UNG,UTG,ETHERG,
+     &                  GAMD,RTOTD,ACVTOD,ROD,PD,TD,UND,UTD,ETHERD,
+     &                  YG,YD,SCAG,SCAD,
+     &                  FLU,CELLT,
+     &                  LOGNC,MESERR,LOGAN)
+C************************************************************************
+C
+C PROJET            :  CASTEM 2000
+C
+C NOM               :  FCOLTE
+C
+C DESCRIPTION       :  Formulation Volumes Finis  pour les Equations
+C                      d'Euler Multi-Especes relatives à un melange
+C                      de gaz parfaits.
+C
+C                      Calcul du flux aux interfaces avec la methode
+C                      de Colella-Glaz, avec les chocs qui remplacent
+C                      les ondes de rarefaction + entropy fix.
+C
+C                      (voir:
+C                       1)  BECCANTINI, Thèse de doctorat)
+C
+C LANGUAGE          :  FORTRAN 77
+C
+C AUTEUR            :  A. BECCANTINI DRN/DMT/SEMT/LTMF
+C
+C************************************************************************
+C
+C APPELES           :  RACCOL
+C
+C************************************************************************
+C
+C**** Entrées:
+C
+C     NESP            =  nombre d'especes considérées dans les Equations
+C                        d'Euler
+C
+C     NSCA            =  nombre de scalaires passifs a transporter
+C
+C     NORDP1          =  (ordre des polynoms cv(T)) + 1
+C
+C     XST             =  droite characteristique ou je cherche la solution
+C
+C     GAMG, GAMD      =  les "gamma" du gaz (gauche et droite)
+C
+C     RTOTG, RTOTD    =  les constantes des gaz
+C
+C     ACVTOG, ACVTOD  =  les sommes des coefficients des cv,i
+C                        ACVTOT(j) = \sum_{i=1,nesp} Y_i*ACV_{i,j}
+C                        j = 1 , NORDP1
+C
+C     ROG, ROD        =  les densités
+C
+C     PG, PD          =  les pressions
+C
+C     TG, TD          =  les temperatures
+C
+C     UNG, UND        =  vitesses normales
+C
+C     UTG, UTD        =  vitesses tangentielles
+C
+C     ETHERG, ETHERD  =  les energies
+C
+C     YG, YD          =  tables des fractiones massiques
+C
+C     SCAG, SCAD      =  tables des scalaires passifs
+C
+C**** Sorties:
+C
+C     FLU             =  table du flux a l'interface dans le repaire
+C                        (n,t), i.e.
+C                        (rho*un, rho*un*un + p, rho*un*ut, rho*un*ht,
+C                         rho*un*y1, ...)
+C
+C     CELLT           =  condition de stabilité, i.e.
+C
+C                        dT/diamax < cellt
+C
+C     LOGNC           =  si TRUE, la methode de newton pour le calcul
+C                        des etats intermediares ne converges pas
+C
+C     MESERR          =  message d'erreuer
+C
+C     LOGAN           =  si TRUE, une anomalie a été detectée
+C
+C************************************************************************
+C
+C HISTORIQUE (Anomalies et modifications éventuelles)
+C
+C HISTORIQUE :  Créé le 08.02.00
+C
+C               21.02.00 transport de scalaires passifs
+C
+C************************************************************************
+C
+C N.B.: Toutes les variables sont DECLAREES
+C
+C
+      IMPLICIT INTEGER(I-N)
+      INTEGER NESP, NORDP1, I1, NSCA
+      REAL*8  GAMG,RTOTG,ACVTOG(*),ROG,PG,TG,UNG,UTG,ETHERG
+     &       ,GAMD,RTOTD,ACVTOD(*),ROD,PD,TD,UND,UTD,ETHERD
+     &       ,YG(*),YD(*),SCAG(*),SCAD(*)
+     &       ,FLU(*),CELLT
+     &       ,PSROG,PSROD,ASONG,ASOND,PVAL,UVAL
+     &       ,HTHEG,HTHED
+     &       ,ROGS,PGS,TGS,ETHEGS,UGS,GAMGS
+     &       ,RODS,PDS,TDS,ETHEDS,UDS,GAMDS
+     &       ,XST,UNGXST,UNDXST,UGSXST,UDSXST,DGSXST,DDSXST,DGS,DDS
+     &       ,ROU,ECFLUX,XLIMG,XLIMD,ULIMG,ULIMD
+     &       ,UNGMCG,UNDPCD,PFLUX,ROFLUX,UNFLUX,UTFLUX,HTFLUX
+     &       ,FC1,FC2,FPOIS1,FPOIS2,FPOIS3,FPOIS4,SIG12,SIG45,SIG3
+     &       ,FPOISG,FPOISD,EPSU
+     &       ,UGMCGS,UDPCDS,VITG,VITGS,VITD,VITDS,SIGCHO,SIG123,SIG456
+     &       ,SIG56
+     &       ,FUNT, TFLUX, RTOTFL, ETHFLU
+      CHARACTER*(40) MESERR
+      LOGICAL LOGAN, LOGNC
+C
+C**** YG, YD, FLU
+C
+C     Dans le cas Euler monoespece, on doit
+C     avoir  :
+C     YG(1) = YD(1) = 0.0D0
+C
+      PSROG = PG / ROG
+      PSROD = PD / ROD
+      ASONG = SQRT(GAMG * PSROG)
+      ASOND = SQRT(GAMD * PSROD)
+C
+C**** Valeurs de référence
+C
+      PVAL = MAX(PG,PD)
+      UVAL = MAX(ASONG,ASOND)
+      EPSU = UVAL*1.0D-6
+C
+C**** États intermédiaires
+C
+      HTHEG = ETHERG + PSROG
+      HTHED = ETHERD + PSROD
+      XLIMG = PSROG / (2.0D0 * HTHEG - PSROG)
+      XLIMD = PSROD / (2.0D0 * HTHED - PSROD)
+      ULIMG = UNG + SQRT( 2.0D0 * HTHEG *
+     &       (1.0D0 - XLIMG) / (1.0D0 + XLIMG))
+      ULIMD = UND - SQRT( 2.0D0 * HTHED *
+     &       (1.0D0 - XLIMD) / (1.0D0 + XLIMD))
+      UNGMCG = UNG - ASONG
+      UNDPCD = UND + ASOND
+      IF(ULIMD .GE. ULIMG)THEN
+C
+C******* Vide
+C
+C        N.B.: la surface de contact n'existe pas: on mit le vide
+C
+         IF((ULIMG .LE. 0.0D0) .AND. (ULIMD .GE. 0.0D0))THEN
+            FLU(1) = 0.0D0
+            FLU(2) = 0.0D0
+            FLU(3) = 0.0D0
+            FLU(4) = 0.0D0
+            DO I1 = 1, NESP, 1
+               FLU(I1+4) = 0.0D0
+            ENDDO
+            DO I1 = 1, NSCA, 1
+               FLU(I1+4+NESP) = 0.0D0
+            ENDDO
+C
+         ELSE
+            ROGS = XLIMG * ROG
+            RODS = XLIMD * ROD
+C
+C********** Les functions pois
+C
+            FC1 = (ULIMG - XST)/(ULIMG - UNGMCG)
+            SIG12 = 0.5D0 * (SIGN(1.0D0,FC1)+1.0D0)
+            FC2 = 0.5D0*(FC1+1.0D0-ABS(FC1-1.0D0))
+            FPOIS1 = SIG12*FC2
+C
+            FC1 = (XST - ULIMD)/(UNDPCD - ULIMD)
+            SIG45 = 0.5D0 * (SIGN(1.0D0,FC1)+1.0D0)
+            FC2 = 0.5D0*(FC1+1.0D0-ABS(FC1-1.0D0))
+            FPOIS4 = SIG45*FC2
+C
+            SIG3 = 1.0D0 - (SIG12+SIG45)
+            FC1 = (ULIMD - XST)/(ULIMD - ULIMG + EPSU)
+            FC1 = 0.5D0*(FC1+1.0D0-ABS(FC1-1.0D0))
+            FC2 = 1.0D0 - FC1
+            FPOIS2 = SIG12 * (1.0D0 - FPOIS1) + SIG3 * FC1
+            FPOIS3 = SIG45 * (1.0D0 - FPOIS4) + SIG3 * FC2
+C
+C********** La solution pour le calcul du flux
+C
+            ROFLUX = ROG * FPOIS1 + ROGS * FPOIS2
+     &           + RODS * FPOIS3 + ROD * FPOIS4
+            TFLUX =  TG * FPOIS1 + TD * FPOIS4
+            UNFLUX = UNG * FPOIS1 + ULIMG * FPOIS2
+     &           + ULIMD * FPOIS3 + UND * FPOIS4
+C
+            FPOISG = FPOIS1 + FPOIS2
+            FPOISD = FPOIS3 + FPOIS4
+            RTOTFL = RTOTG * FPOISG + RTOTD * FPOISD
+            PFLUX  = ROFLUX * RTOTFL * TFLUX
+            UTFLUX =  UTG * FPOISG + UTD * FPOISD
+            ECFLUX = 0.5D0 * (UNFLUX * UNFLUX + UTFLUX * UTFLUX)
+C
+            FUNT = 1.0D0
+            ETHFLU = 0.0D0
+            DO I1 = 1, NORDP1, 1
+               FUNT = FUNT * TFLUX
+               ETHFLU = ETHFLU + (FPOISG * ACVTOG(I1) * FUNT / I1) +
+     &              (FPOISD * ACVTOD(I1) * FUNT / I1)
+            ENDDO
+            HTFLUX = ETHFLU + PFLUX / ROFLUX
+C
+            ROU = ROFLUX * UNFLUX
+            FLU(1) = ROU
+            FLU(2) = ROU * UNFLUX + PFLUX
+            FLU(3) = ROU * UTFLUX
+            FLU(4) = ROU * (HTFLUX + ECFLUX)
+            DO I1 = 1, NESP, 1
+               FLU(I1+4) = ROU *
+     &              (FPOISG * YG(I1) + FPOISD * YD(I1))
+            ENDDO
+            DO I1 = 1, NSCA, 1
+               FLU(I1+4+NESP) = ROU *
+     &              (FPOISG * SCAG(I1) + FPOISD * SCAD(I1))
+            ENDDO
+         ENDIF
+         CELLT = MAX(ABS(UNGMCG),ABS(UNDPCD))
+C
+C
+C******* Test EF
+C
+C         write(4,'(5D14.6)') XST, FPOIS1, FPOIS2, FPOIS3, FPOIS4
+C
+      ELSE
+         UNGXST=UNG-XST
+         UNDXST=UND-XST
+         CALL RACCOL(PVAL,UVAL,NORDP1,
+     &        RTOTG,ACVTOG,RTOTD,ACVTOD,
+     &        ROG,TG,ETHERG,UNGXST,PSROG,GAMG,ASONG,
+     &        ROD,TD,ETHERD,UNDXST,PSROD,GAMD,ASOND,
+     &        ROGS,PGS,TGS,ETHEGS,UGSXST,DGSXST,GAMGS,
+     &        RODS,PDS,TDS,ETHEDS,UDSXST,DDSXST,GAMDS,
+     &        LOGNC)
+C
+         IF(LOGNC)THEN
+            MESERR = 'Subroutine RACCOL.ESO, Newton-Raphson.'
+C
+C******* Message de warning; mais on s'arrete pas
+C
+         ELSEIF((DGSXST .GT. UGSXST) .OR. (UDSXST .GT. DDSXST))THEN
+            LOGAN = .TRUE.
+            MESERR = 'Subroutine RACCOL.ESO'
+            GOTO 9999
+         ENDIF
+         UGS=UGSXST+XST
+         UDS=UDSXST+XST
+         DGS=DGSXST+XST
+         DDS=DDSXST+XST
+         UGMCGS=UGS-SQRT(GAMGS*PGS/ROGS)
+         UDPCDS=UDS+SQRT(GAMDS*PDS/RODS)
+
+C
+C******* Tests
+C
+C         write(*,*) ROGS,PGS,TGS,ETHEGS,UGS,GAMGS
+C         write(*,*) RODS,PDS,TDS,ETHEDS,UDS,GAMDS
+C
+C
+C******* Les functions pois
+C
+C        Les vitesses characteristiques des ondes
+C
+         VITG  = 0.5D0*(DGS+UNGMCG-ABS(DGS-UNGMCG))
+         VITGS = 0.5D0*(DGS+UGMCGS+ABS(DGS-UGMCGS))
+         VITD  = 0.5D0*(DDS+UNDPCD+ABS(DDS-UNDPCD))
+         VITDS = 0.5D0*(DDS+UDPCDS-ABS(DDS-UDPCDS))
+C
+C******* ZONES 1,2,3
+C
+         FC1 = (VITGS-XST)/(ABS(VITGS - VITG)+EPSU)
+         SIG12 = 0.5D0*(SIGN(1.0D0,FC1)+1.0D0)
+         FC2 = 0.5D0*(FC1 + 1.0D0 - ABS(FC1 - 1.0D0))
+         SIGCHO = 0.5D0 *(SIGN(1.0D0,(VITG -VITGS+EPSU))+1.0D0)
+         SIG123 = 0.5D0 *(SIGN(1.0D0,((0.5D0*(UGS+UDS))-XST))+1.0D0)
+C
+         FPOIS2 = (1.0D0 - SIGCHO)*(1.0D0 - FC2*SIG12)*SIG123 +
+     &        SIGCHO * (SIG123 - SIG12)
+         FPOIS1 = (1.0D0 -FPOIS2)*SIG123
+C
+C******** ZONES 4,5,6
+C
+         SIG456 = 1.0D0 - SIG123
+         FC1 = (XST - VITDS)/(ABS(VITD-VITDS)+EPSU)
+         SIG56 = 0.5D0*(SIGN(1.0D0,FC1)+1.0D0)
+         FC2 = 0.5D0 * (FC1 + 1.0D0 - ABS(FC1 - 1.0D0))
+         SIGCHO=0.5D0*(SIGN(1.0D0,VITDS-VITD+EPSU)+1.0D0)
+C
+         FPOIS3= (1.0D0 - SIGCHO)*(1.0D0 - FC2*SIG56)*SIG456 +
+     &         SIGCHO * (SIG456 - SIG56)
+         FPOIS4 = (1.0D0 - FPOIS3) * SIG456
+C
+C******* La solution pour le calcul du flux
+C        (ro, T, w lineaire sur les  detantes
+C         p = ro R T
+C         h = sum_i ACVTO(i)/i T^i
+C
+C
+         ROFLUX = ROG * FPOIS1 + ROGS * FPOIS2
+     &          + RODS * FPOIS3 + ROD * FPOIS4
+         TFLUX =  TG * FPOIS1 + TGS * FPOIS2
+     &          + TDS * FPOIS3 + TD * FPOIS4
+         UNFLUX = UNG * FPOIS1 + UGS * FPOIS2
+     &          + UDS * FPOIS3 + UND * FPOIS4
+C
+         FPOISG = FPOIS1 + FPOIS2
+         FPOISD = FPOIS3 + FPOIS4
+         RTOTFL = RTOTG * FPOISG + RTOTD * FPOISD
+         PFLUX  = ROFLUX * RTOTFL * TFLUX
+         UTFLUX =  UTG * FPOISG + UTD * FPOISD
+         ECFLUX = 0.5D0 * (UNFLUX * UNFLUX + UTFLUX * UTFLUX)
+C
+         FUNT = 1.0D0
+         ETHFLU = 0.0D0
+         DO I1 = 1, NORDP1, 1
+            FUNT = FUNT * TFLUX
+            ETHFLU = ETHFLU + (FPOISG * ACVTOG(I1) * FUNT / I1) +
+     &         (FPOISD * ACVTOD(I1) * FUNT / I1)
+         ENDDO
+         HTFLUX = ETHFLU + PFLUX / ROFLUX
+C
+         ROU = ROFLUX * UNFLUX
+         FLU(1) = ROU
+         FLU(2) = ROU * UNFLUX + PFLUX
+         FLU(3) = ROU * UTFLUX
+         FLU(4) = ROU * (HTFLUX + ECFLUX)
+         DO I1 = 1, NESP, 1
+            FLU(I1+4) = ROU *
+     &           (FPOISG * YG(I1) + FPOISD * YD(I1))
+         ENDDO
+         DO I1 = 1, NSCA, 1
+            FLU(I1+4+NESP) = ROU *
+     &           (FPOISG * SCAG(I1) + FPOISD * SCAD(I1))
+         ENDDO
+C
+         CELLT = MAX(ABS(VITG),ABS(VITD))
+C
+C******* Tests: les vitesses
+C
+C         write(3,'(A8,D16.8)') 'VITG   =', VITG
+C         write(3,'(A8,D16.8)') 'VITGS  =', VITGS
+C         write(3,'(A8,2D16.8)') 'VITS   =', UGS, UDS
+C         write(3,'(A8,D16.8)') 'VITDS  =', VITDS
+C         write(3,'(A8,D16.8)') 'VITD   =', VITD
+C
+C
+C******* Test EF
+C
+C         write(4,'(5D14.6)') XST, FPOIS1, FPOIS2, FPOIS3, FPOIS4
+C
+      ENDIF
+C
+ 9999 CONTINUE
+      RETURN
+      END
+
+
+
+
+
+
+

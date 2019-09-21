@@ -1,0 +1,247 @@
+C PART5     SOURCE    PV        18/11/19    21:15:20     9995
+C  partitionne un MELEME dans ITAB en fonction de NBZON
+C
+      SUBROUTINE PART5(MELEME,ITAB,NBZON,KESCL)
+C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+
+-INC SMELEME
+-INC CCOPTIO
+-INC SMTABLE
+-INC CCASSIS
+
+
+        SEGMENT SSREF
+C         ISREF   : Tableau indiquant si la sous-zone contient ou non des elements
+C         IMELE   : Tableau avec les references des MELEME COMPLEXES de chaque ZONE
+C         NBELE   : Tableau avec le nombre d'elements du type en cours par ZONE
+C         JSOUS   : Tableau avec le nombre de Sous Ref par ZONE
+          INTEGER ISREF(NBZON,NBSM)
+          INTEGER IMELE(NBZON)
+          INTEGER NBELE(NBZON)
+          INTEGER JSOUS(NBZON)
+        ENDSEGMENT
+
+
+C     Declaration du COMMON pour le travail en parallele
+      COMMON/part5c/NBTHR,SSREF,JA,IPT2,NBNN,NBELEM,ISOUS,NBZONE
+
+      EXTERNAL part5i
+      LOGICAL  BTHRD
+
+C     Decompte du nombre d'elements dans le MELEME
+      SEGACT MELEME
+
+      inn=0
+      NBS = lisous(/1)
+      NBSM=MAX(1,NBS)
+      if(NBS.eq.0) then
+C       MELEME SIMPLE
+        inn = num(/2)
+
+      else
+C       MELEME COMPLEXE
+        do ia=1,NBS
+          IPT2=lisous(ia)
+          SEGACT,IPT2
+          inn=inn + IPT2.num(/2)
+        enddo
+      endif
+
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C SI moins d'elements que de ZONES
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+      if(inn .LT. nbzon) NBZON=INN
+
+      NBZONE=NBZON
+      M=NBZON
+      IF (KESCL.GT.0) M=M+2
+      SEGINI,MTABLE
+      ITAB=MTABLE
+      IF (KESCL.GT.0) THEN
+         CALL ECCTAB(ITAB,'MOT',0,0.D0,'SOUSTYPE',.TRUE.,0
+     &                   ,'MOT',0,0.D0,'ESCLAVE' ,.TRUE.,0)
+         CALL ECCTAB(ITAB,'MOT',0,0.D0,'CREATEUR',.TRUE.,0,
+     &                    'MOT',0,0.D0,'PART'    ,.TRUE.,0)
+
+      ENDIF
+
+      SEGINI,SSREF
+C Initialisations et Dimensionnement des MELEME
+      DO 10 IZ=1,MAX(1,NBZON)
+C       Creation des MELEME COMPLEXE
+        nbnn=0
+        nbelem=0
+        nbref=0
+        nbsous=NBSM
+        SEGINI,IPT4
+
+        IPT2=MELEME
+        JA=0
+        JSOUS(IZ) = 0
+        DO 20 isous=1,NBSM
+          if (NBS .NE. 0) THEN
+            IPT2=lisous(isous)
+          endif
+
+C         Dimentionnement des MELEME SIMPLES a 1 element pres
+          nbelem =(IPT2.num(/2) / nbzon) + 1
+          nbnn   = IPT2.num(/1)
+          nbsous =0
+          nbref  =0
+          SEGINI,IPT5
+          IPT5.ITYPEL = IPT2.ITYPEL
+
+C          jf=0
+          JA = JA + IPT2.num(/2)
+
+C         Sauvegarde des Tableaux pour la suite
+          JSOUS(IZ) = JSOUS(IZ) + 1
+          IPT4.LISOUS(ISOUS)=IPT5
+          IMELE(IZ) = IPT4
+          ISREF(IZ,isous) = 1
+ 20     CONTINUE
+ 10   CONTINUE
+
+C Le MELEME en entree est parcouru et ses elements sont repartis dans les
+C bonnes ZONES
+      IPT2=MELEME
+      JA=0
+      DO 30 isous=1,NBSM
+        if (NBS .NE. 0) THEN
+          IPT2=lisous(isous)
+        endif
+
+C       Remise a zero du nombre d'elements pour cette Sous Ref
+        DO IZ=1,MAX(1,NBZON)
+          NBELE(IZ) = 0
+        ENDDO
+
+C       On remplit ici le COMMON pour le travail en parallele
+        NBNN   = IPT2.num(/1)
+        NBELEM = IPT2.num(/2)
+        NBTHR = MIN(NBELEM,NBTHRS)
+
+        ITH = 0
+        IF (NBESC .NE. 0) ith=oothrd
+
+        IF ((NBTHR .LE. 1) .OR. (NBTHRS .EQ. 1) .OR. (ITH .GT. 0)) THEN
+          ITH   = 1
+          BTHRD = .FALSE.
+        ELSE
+          BTHRD = .TRUE.
+          CALL THREADII
+        ENDIF
+
+        IF (BTHRD) THEN
+          DO ith=2,NBTHR
+            CALL THREADID(ith,part5i)
+          ENDDO
+          CALL part5i(1)
+
+C         Attente de la fin de tous les threads en cours de travail
+          DO ith=2,NBTHR
+            CALL THREADIF(ith)
+          ENDDO
+
+C         On libère les Threads
+          CALL THREADIS
+
+        ELSE
+          CALL part5i(1)
+        ENDIF
+
+        JA = JA + IPT2.num(/2)
+
+C       Ajustement des MELEME SIMPLE pour toutes les ZONES si besoin
+        DO IZ=1,MAX(1,NBZON)
+          IPT4 = IMELE(IZ)
+          IPT5 = IPT4.LISOUS(ISOUS)
+
+          IF(NBELE(IZ) .EQ. 0) THEN
+            ISREF(IZ,ISOUS) = 0
+            JSOUS(IZ)       = JSOUS(IZ) - 1
+            SEGSUP,IPT5
+
+          ELSEIF(NBELE(IZ) .EQ. (IPT5.NUM(/2) - 1) )THEN
+            nbnn   = IPT5.NUM(/1)
+            nbelem = NBELE(IZ)
+            nbref  = 0
+            nbsous = 0
+            SEGADJ,IPT5
+            SEGDES,IPT5
+
+          ELSE
+            SEGDES,IPT5
+
+          ENDIF
+
+        ENDDO
+
+ 30   CONTINUE
+
+
+C     Boucle Finale pour remplir la TABLE resultat
+      DO 70 IZ=1,MAX(1,NBZON)
+C       Recuperation du MELEME COMPLEXE
+        IPT4 = IMELE(IZ)
+
+C       Retassement du MELEME COMPLEXE IPT4 et Ajustement si necessaire
+        ISACT = 0
+        nbsous = JSOUS(IZ)
+        IF (nbsous .NE. NBSM) THEN
+          DO ISOUS=1,NBSM
+            IF( ISREF(IZ,ISOUS) .EQ. 1 )THEN
+              ISACT = ISACT + 1
+              IPT4.LISOUS(ISACT)=IPT4.LISOUS(ISOUS)
+            ENDIF
+          ENDDO
+
+          nbref  = 0
+          nbnn   = 0
+          nbelem = 0
+          SEGADJ,IPT4
+        ENDIF
+
+C       Reclassement en MELEME SIMPLE si une seule Sous-Zone
+        if (nbsous .eq. 1) then
+          IPT5=IPT4.LISOUS(1)
+          SEGSUP,IPT4
+          IPT4=IPT5
+
+        else
+          SEGDES,IPT4
+
+        endif
+
+        CALL ECCTAB(ITAB,'ENTIER',IZ        ,0.D0  ,' ',.TRUE.,
+     &                    0      ,'MAILLAGE',0,0.D0,' ',.TRUE.,IPT4)
+
+ 70   CONTINUE
+
+      IF(NBS .GT. 0) THEN
+C       MELEME COMPLEXE
+        DO ia = 1,NBS
+          IPT2=lisous(ia)
+          SEGDES,IPT2
+        ENDDO
+      ENDIF
+
+      SEGDES,MELEME,MTABLE
+      SEGSUP,SSREF
+      RETURN
+
+      END
+
+
+
+
+
+
+
+
+
+

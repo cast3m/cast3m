@@ -1,0 +1,426 @@
+$$$$ CON_CALC
+* CON_CALC  PROCEDUR  FD218221  17/10/18    21:15:03     9590
+*=======================================================
+*
+* CON_CALC
+* ANALyse : calcul de la REPONSE_BALOURD NONlineaire par CONTINUATION
+* calcule le Résidu R, la raideur K=dR/dU, les dérivées dR/dt et dK/dt
+* creation : BP 28/01/2014
+*
+*=======================================================
+*
+************************************************************************
+*
+* CREATION : BP208322 28/01/2014
+*
+* OBJET    : Procedure de calcul de :
+*            1. du Residu = F^ext - F^int
+*            2. de la Raideur K = dResidu / du
+*            3. de dt * la dérivée du Residu par rapport a t
+*            4. de dt * la dérivée de la Raideur par rapport a t
+*
+* ENTREE   :
+* TAB1 = TABLE
+*   . 'MODELE'
+*   . 'CARACTERISTIQUES'
+*   . 'RIGIDITE_CONSTANTE'
+*   . 'BLOCAGES_MECANIQUES'
+*   . 'CHARGEMENT'
+*   . 'TEMPS_CALCULES'        = plage indicative des temps a calculer et
+*                               de la finesse des pas
+*   . 'GRANDS_DEPLACEMENTS'
+*   . 'K_SIGMA'
+*   . 'MAXITERATION'
+*   . 'PROCEDURE_CHARMECA'    = vrai si chargement dependant de la confi
+*                               -guration (pressions suiveuses par ex.)
+*   . 'WTABLE'                = table avec infos de calcul interne
+*       . 'CONTRAINTES'       = contraintes de Cauchy a t_n+1
+* LMOT1 = LISTMOTS de mots-clés définissant les actions a effectuer
+*         a choisir parmi { RESI(DU), RIGI, DRES(IDU), DRIG(I), ...}
+*
+* SORTIE   :
+* TAB1 . 'WTABLE'
+*   . 'RESIDU'          = Residu = F^ext - F^int
+*   . 'RAIDEUR'         = K = dResidu/du
+*   . 'DERIVEE_RESIDU'  = dResidu/dt  * dt
+*   . 'DERIVEE_RAIDEUR' = dK/dt * dt
+*
+* REM :
+* on suppose etre sur la config finale n+1
+*
+************************************************************************
+
+DEBPROC CON_CALC  TAB1*'TABLE'    LMOT1*'LISTMOTS'
+                  time*'FLOTTANT' dtime*'FLOTTANT';
+
+
+************************************************************************
+*                                                                      *
+*         VERIFICATION ou simple recup DES DONNEES D'ENTREE            *
+*                                                                      *
+************************************************************************
+* fldebug = (vale debug) >eg 1;
+fldebug = faux;
+
+SI (EXIS TAB1 'WTABLE');
+  WTAB = TAB1 . 'WTABLE';
+SINON;
+  MESS 'IL MANQUE LA WTABLE'; ERRE 21;
+FINSI;
+
+FLCHAR1 = exis TAB1 'CHARGEMENT';
+si (FLCHAR1);
+  CHAR1 = TAB1 . 'CHARGEMENT';
+finsi;
+
+FLMOD1  = exis TAB1  'MODELE';
+si (FLMOD1);
+  MOD1  = TAB1 . 'MODELE';
+  MAT1  = TAB1 . 'CARACTERISTIQUES';
+  SIG1  = WTAB . 'CONTRAINTES' ;
+finsi;
+DEP1  = WTAB . 'DEPLACEMENTS';
+
+* prendre les matrices constantes ou HBM ?
+FLHBM = WTAB . 'HBM';
+* Alternating Frequency / Time ?
+IAFT =  WTAB . 'AFT';
+* si AFT, Jacobienne calculee par TFR(Knl*gamma+Cnl*w*gamma°)
+* ou par differentiation numerique ?
+IDIFF = WTAB . 'DIFFERENTIATION';
+* dans le cas dynamique frequentiel, on a besoin de la frequence w
+* est-elle une inconnue ou fixee ?
+IFREQ = WTAB . 'FREQ_INCONNUE';
+si IFREQ;  w = EXTR DEP1 'FREQ'  WTAB . 'PT_FREQ';
+           WTAB . 'FREQ' = w;
+sinon;     w = IPOL TAB1 . 'FREQUENCE' time;
+finsi;
+
+* initialisations
+TNL1  = mot 'NONDEFINI';
+Fext1 = mot 'NONDEFINI';
+TVARI1 = mot 'NONDEFINI';
+
+SI FLHBM;
+  morigi = mot 'RIGIDITE_HBM';
+  momass = mot 'MASSE_HBM';
+  moamor = mot 'AMORTISSEMENT_HBM';
+  mocori = mot 'CORIOLIS_HBM';
+  mokcen = mot 'CENTRIFUGE_HBM';
+  mobloc = mot 'BLOCAGES_HBM';
+SINON;
+  morigi = mot 'RIGIDITE_CONSTANTE';
+  momass = mot 'MASSE_CONSTANTE';
+  moamor = mot 'AMORTISSEMENT_CONSTANT';
+  mobloc = mot 'BLOCAGES_MECANIQUES';
+FINSI;
+
+KBLO1 = TAB1 . mobloc;
+
+
+************************************************************************
+*                                                                      *
+*                     CALCUL DU RESIDU                                 *
+*                                                                      *
+************************************************************************
+
+*** calcul des efforts Fext + Fnl ***
+
+SI ((EXIS LMOT1 'RESI') ou (EXIS LMOT1 'DRES') ou IFREQ);
+
+* Forces exterieure dues au chargement
+  si (FLCHAR1); Fext1 = TIRE CHAR1 time;
+  sinon;        Fext1 = VIDE 'CHPOINT'/'DISCRET';
+  finsi;
+*   mess '_Fext1='; list resum Fext1;
+
+* Autres forces (types suiveuses par ex ou F^NL perso)
+  SI (TAB1 . 'PROCEDURE_CHARMECA');
+    SI (EGA IAFT 0); TNL1 = CHARMECA TAB1 time;  FINSI;
+    SI (EGA IAFT 1); TNL1 = DFT TAB1 time;       FINSI;
+    SI (EGA IAFT 2); TNL1 = AFT TAB1 time LMOT1; FINSI;
+    FNL1 = TNL1 . 'ADDI_SECOND';
+*     mess 'concalc -> AFT 'time'=> FNL1='; list resum FNL1;
+    Fext1 = Fext1 + FNL1;
+  FINSI;
+
+* Forces non-lineaires des structures variables BRASERO
+  SI (EXIS TAB1 'STRUCT_VARIABLE');
+*   attention a l'unite de w  !
+    TVARI1 = BRASE403 TAB1 DEP1 w LMOT1;
+    FVARI1 = TVARI1 . 'ADDI_SECOND';
+    Fext1 = Fext1 + FVARI1;
+  FINSI;
+
+FINSI;
+
+*** calcul des effort internes ***
+
+SI ((EXIS LMOT1 'RESI') ou (EXIS LMOT1 'DRES'));
+
+* Forces internes
+* ! on suppose deja etre sur la config deformee !
+  SI (FLMOD1);  Fint1 = BSIG SIG1 MOD1 MAT1;
+  SINON;        Fint1 = VIDE 'CHPOINT'/'DISCRET';
+  FINSI;
+*   mess '_Fint1='; list resum Fint1;
+
+* rappel : en frequentiel, K^dyn = K + t*C + t^2*M
+  FLdyn1 = faux;
+  SI (EXIS TAB1 morigi);
+    Kdyn1 = TAB1 . morigi;
+*     mess '_on prend K^Harm';
+    FLdyn1 = vrai;
+  SINON;
+    Kdyn1 = VIDE 'RIGIDITE';
+  FINSI;
+  SI (EXIS TAB1 moamor);
+*   attention a l'unite de w  !
+    Kdyn1 = Kdyn1 et (w * TAB1 . moamor);
+*     mess '_on prend t * C^Harm';
+    FLdyn1 = vrai;
+  FINSI;
+  SI (EXIS TAB1 momass);
+*   attention a l'unite de w  !
+    Kdyn1 = Kdyn1 et ((w**2) * TAB1 . momass);
+*     mess '_on prend t^2 * M^Harm';
+    FLdyn1 = vrai;
+  FINSI;
+  SI (FLdyn1);
+*     Fdyn1 = Kdyn1 * (DEP1 enle 'LX');
+    Fdyn1 = Kdyn1 * DEP1;
+*     mess '_Fdyn1='; list resum Fdyn1;
+    Fint1 = Fint1 + Fdyn1;
+  FINSI;
+*dl + prise en compte des reactions
+  Freac1 = REAC KBLO1 DEP1;
+  WTAB . 'REACTION' = Freac1;
+  Fint1 = Fint1 - Freac1;
+*dl + :fin de l'ajout
+
+* calcul et stockage effectif du Residu
+*bp-test   SI (EXIS LMOT1 'RESI');
+    Res1 = Fext1 - Fint1;
+*   on enleve les deplacements imposés deja vérifiés
+    Res1 = Res1 - ((KBLO1*DEP1) EXCO 'FLX' 'NOID' 'FLX');
+*   mess '_Res1='; list resum Res1;
+    WTAB . 'RESIDU' = Res1;
+*bp-test   FINSI;
+
+* on va calculer ici une norme pour tester la convergence
+*     si (ega NF2 'NONDEFINI');
+*    xden1 = maxi ((PSCA Res1 Res1 motCf motCf)**0.5);
+*    xden2 = maxi ((PSCA Fext1 Fext1 motCf motCf)**0.5);
+*    xden3 = maxi ((PSCA Fint1 Fint1 motCf motCf)**0.5);
+*    mess 'xdeno = ' xden1 xden2 xden3;
+* *   si (NF2 < 1.E-30); mess 'def de NF2 a revoir'; erre 21; finsi;
+* *   WTAB . 'XDENO' = NF2;
+*     finsi;
+
+FINSI;
+
+
+************************************************************************
+*                                                                      *
+*                     CALCUL DE LA RAIDEUR  (= - dResidu/dU)           *
+*                                                                      *
+************************************************************************
+SI (EXIS LMOT1 'RIGI');
+
+* Raideur elastique du modele
+* ! on suppose deja etre sur la config deformee !
+  SI (FLMOD1); Ktot1 = RIGI MOD1 MAT1;
+  SINON;       Ktot1 = VIDE 'RIGIDITE';
+  FINSI;
+* relations et blocages
+  Ktot1 = Ktot1 et KBLO1;
+
+* Ksigma
+  SI (TAB1 . 'K_SIGMA');
+    Ksig1 = KSIG SIG1 MOD1 MAT1;
+    Ktot1 = Ktot1 et Ksig1;
+  FINSI;
+
+* Autres raideurs (dues au forces suiveuses ou autre K^NL perso)
+  SI (TAB1 . 'PROCEDURE_CHARMECA');
+    si (neg (type TNL1) 'TABLE');
+      SI (EGA IAFT 0); TNL1 = CHARMECA TAB1 time;  FINSI;
+      SI (EGA IAFT 1); TNL1 = DFT TAB1 time;       FINSI;
+      SI (EGA IAFT 2); TNL1 = AFT TAB1 time LMOT1; FINSI;
+    finsi;
+    KNL1 = TNL1 . 'ADDI_MATRICE';
+    Ktot1 = Ktot1 et KNL1;
+  SINON;
+    KNL1 = VIDE 'RIGIDITE';
+  FINSI;
+
+* raideurs non-lineaires des structures variables BRASERO
+  SI (EXIS TAB1 'STRUCT_VARIABLE');
+    si (neg (type TVARI1) 'TABLE');
+*   attention a l'unite de w  !
+      TVARI1 = BRASE403 TAB1 DEP1 w LMOT1;
+    finsi;
+    KVARI1 = TVARI1 . 'ADDI_MATRICE';
+    Ktot1 = Ktot1 et KVARI1;
+    WTAB . 'RAIDEUR_NL' = KVARI1;
+  FINSI;
+
+* rappel : en frequentiel, K^dyn = K + w*C + w^2*M
+  SI (EXIS TAB1 morigi);
+    Ktot1 = Ktot1 et TAB1 . morigi;
+  FINSI;
+  SI (EXIS TAB1 moamor);
+*   attention a l'unite de w  !
+    Ktot1 = Ktot1 et (w * TAB1 . moamor);
+  FINSI;
+  SI (EXIS TAB1 momass);
+*   attention a l'unite de w  !
+    Ktot1 = Ktot1 et ((w**2) * TAB1 . momass);
+  FINSI;
+
+* cas ou w est une inconnue indpte : il faut ajouter -dR/dw  a -dR/dU
+  SI IFREQ;
+    SI (TAB1 . 'PROCEDURE_CHARMECA');
+*     on perturbe de 1.E-6
+      dw1c = 1.E-6;
+      w1c = w + dw1c;
+      WTAB . 'FREQ' = w1c;
+*     Fext est considéré indpt de w, mais pas FNL
+        SI (EGA IAFT 0); TNL1c = CHARMECA TAB1 time;  FINSI;
+*       SI (EGA IAFT 1); TNL1c = DFT TAB1 time; FINSI;
+        SI (EGA IAFT 2); TNL1c = AFT TAB1 time; FINSI;
+        FNL1c = TNL1c . 'ADDI_SECOND';
+*    -dR/dw = ...
+      dRdw = (-1./dw1c) * (FNL1c - FNL1) ;
+      dRdw = MANU 'RIGI' dRdw 'COLO' 'QUEL' WTAB . 'PT_FREQ' 'FREQ';
+      Ktot1 = Ktot1 et dRdw;
+*     on remet en l'etat initial
+      WTAB . 'FREQ' = w;
+    FINSI;
+*   sans oublier la partie constante
+    FLdyn1 = faux;
+    SI (EXIS TAB1 moamor);
+      dKdyn1 = TAB1 . moamor;
+      FLdyn1 = vrai;
+    SINON;
+      dKdyn1 = VIDE 'RIGIDITE';
+    FINSI;
+    SI (EXIS TAB1 momass);
+      dKdyn1 = dKdyn1 et ((2. * w) * TAB1 . momass);
+      FLdyn1 = vrai;
+    FINSI;
+    SI FLdyn1;
+      dZUdw = dKdyn1 * DEP1;
+      dZUdw = MANU 'RIGI' dZUdw 'COLO' 'QUEL' WTAB . 'PT_FREQ' 'FREQ';
+      Ktot1 = Ktot1 et dZUdw;
+    FINSI;
+  FINSI;
+
+* stockage effectif de la raideur
+  WTAB . 'RAIDEUR'     = Ktot1;
+
+FINSI;
+
+
+************************************************************************
+*                                                                      *
+*                 CALCUL DE LA DERIVEE DU RESIDU avec t                *
+*                                                                      *
+************************************************************************
+SI (EXIS LMOT1 'DRES');
+
+* REM : quand on ne sait pas faire autrement, on calcule F(t+dt1b)-F(t)
+*  dt1b = 0.5*dtime;
+*  dt1b = 0.01*dtime;
+  si(dtime > time); dt1b = 1.E-2 * dtime;
+  sinon ;           dt1b = 1.E-6 * time;
+  finsi;
+  time1b = time + dt1b;
+  si IFREQ;
+*   cas ou w est une inconnue indpte: w ne varie pas explictement avec t
+    w1b = w;
+  sinon;
+    w1b = IPOL TAB1 . 'FREQUENCE' time1b;
+    si (neg dt1b 0.); dw1b = (w1b - w) / dt1b;
+    sinon;            dw1b = 0.;
+    finsi;
+  finsi;
+
+* Variation des Forces exterieures dues au chargement
+  si (FLCHAR1);   Fext1b = TIRE CHAR1 time1b;
+  sinon;          Fext1b = VIDE 'CHPOINT'/'DISCRET';
+  finsi;
+
+* Variation des Autres forces (types suiveuses par ex ou F^NL perso)
+* dependent-elles explicitement de time?
+  SI (TAB1 . 'PROCEDURE_CHARMECA');
+    SI (EGA IAFT 0); TNL1b = CHARMECA TAB1 time1b;   FINSI;
+*     SI (EGA IAFT 1); TNL1b = DFT TAB1 time1b;        FINSI;
+    LMOT1b = MOTS 'DRES';
+    SI (EGA IAFT 2); TNL1b = AFT TAB1 time1b LMOT1b; FINSI;
+    FNL1b = TNL1b . 'ADDI_SECOND';
+*     mess 'concalc -> AFT 'time1b'=> FNL1b='; list resum FNL1b;
+    Fext1b = Fext1b + FNL1b;
+  FINSI;
+
+* Variation des forces non-lineaires des structures variables BRASERO
+* rem : calcul explicite pour l instant
+*       on pourrait avoir directement les matrices ..? todo + tard
+  SI (EXIS TAB1 'STRUCT_VARIABLE');
+*  si w=0, avec structure variable amortissante, on n'a pas de
+*  "raideur" -> system irresoluble si second membre non nul
+   si (neg w 0.);
+    TVARI1b = BRASE403 TAB1 DEP1 w1b (mots 'RESI');
+    FVARI1b = TVARI1b . 'ADDI_SECOND';
+    Fext1b = Fext1b + FVARI1b;
+   finsi;
+  FINSI;
+
+* on calcule la variation des efforts en maintenant les u^imp a t
+*   DFext1 = ((dtime / dt1b) * ((Fext1b - Fext1) ENLE 'FLX'))
+*          + (EXCO Fext1 'FLX' 'NOID' 'FLX' 'NATURE' 'DISCRET');
+* on calcule la variation des efforts et des u^imp
+  si (ega dtime 0.);
+    DFext1 = 0.*(Fext1b - Fext1);
+  sino;
+    DFext1 = (dtime / dt1b) * (Fext1b - Fext1);
+  finsi;
+
+* Variation des Forces internes :
+* on les suppose ne dependre que de u et pas de t -->  DFint1 = 0
+  DFint1 = VIDE 'CHPOINT'/'DISCRET';
+
+* rappel : en frequentiel, dK^dyn/dt = dw/dt * [C + 2*w*M]
+* et donc dF = dtime * [dK^dyn/dt]*(u enle LX)
+  SI (NON IFREQ);
+    FLdyn1 = faux;
+    SI (EXIS TAB1 moamor);
+      dKdyn1 = TAB1 . moamor;
+      FLdyn1 = vrai;
+    SINON;
+      dKdyn1 = VIDE 'RIGIDITE';
+    FINSI;
+    SI (EXIS TAB1 momass);
+      dKdyn1 = dKdyn1 et ((2. * w) * TAB1 . momass);
+      FLdyn1 = vrai;
+    FINSI;
+    SI ((neg dtime 0.) et (neg dw1b 0.) et FLdyn1);
+      DFdyn1 = dtime * dw1b * (dKdyn1 * DEP1);
+      DFint1 = DFint1 + DFdyn1;
+    FINSI;
+  FINSI;
+
+
+* calcul et stockage effectif de dResidu/dt*dt
+  DRes1 = DFext1 - DFint1;
+  WTAB . 'DERIVEE_RESIDU' = DRes1;
+
+FINSI;
+
+
+
+
+FINPROC ;
+
+
+

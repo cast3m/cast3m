@@ -1,0 +1,488 @@
+C HYBP      SOURCE    CHAT      11/03/16    21:25:04     6902
+      SUBROUTINE HYBP
+C-----------------------------------------------------------------------
+C Cet operateur permet de calculer la charge en fonction des traces de
+C charge dans le cadre d'une formulation variationnelle mixte hybride
+C pour les equations de DARCY.
+C
+C        (n)               (n-1)         -1 t    -1
+C       H  = (1 - BETA) * H   + (DIV * M1  * DIV)  * BETA *
+C                      -1             (n)              (n-1)
+C            ( DIV * M1  * (THETA * TH + (1-THETA) * TH  - M * F) + SOUR  )
+C
+C---------------------------
+C Phrase d'appel (GIBIANE) :
+C---------------------------
+C
+C  CHPO1 = HYBP MMODEL MRIGI1 CHPO2 (TABLE2) (CHPO3) (MRIGI2 CHPO4);
+C
+C------------------------
+C Operandes et resultat :
+C------------------------
+C
+C  CHPO1   : CHPO centre de nom de composante H.
+C  MRIGI1  : RIGIDITE masses hybrides élémentaires de sous-type DARCY.
+C  MRIGI2    : Matrices masses hybrides elementaires de sous-type MASSE.
+C  MMODEL  : MODELE spécifiant la formulation.
+C  CHPO2   : CHPO face de nom de composante TH.
+C  TABLE2  : TABLE DARCY_TRANSITOIRE a inclure en transitoire; contient
+C            Theta, le pas de temps, Ck|K|, TH(n-1) et H(n-1).
+C  CHPO3   : CHPO centre de nom de composante SOUR.
+C  CHPO4    : CHPO centre de composante FX,FY(,FZ),
+C                                  densite de force moyenne par élément.
+C
+C-----------------------------------------------------------------------
+C
+C Langage : ESOPE + FORTRAN77
+C
+C Auteurs : 09/93 F.DABBENE - Cas permanent
+C           09/94 X.NOUVELLON - Extension au cas transitoire
+C           02/96 L.V.BENET - Prise en compte de forces de volume
+C
+C-----------------------------------------------------------------------
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+*
+-INC CCOPTIO
+-INC SMCHAML
+-INC SMCHPOI
+-INC SMELEME
+-INC SMMODEL
+-INC SMRIGID
+-INC SMTABLE
+*
+      SEGMENT IPMAHY
+         INTEGER MAHYBR(NSOUS)
+      ENDSEGMENT
+*
+      LOGICAL LOGRE,LOGIN
+      CHARACTER*4 NOMTOT(1)
+      CHARACTER*4 NOMTO3(3)
+      CHARACTER*6 CHAR6
+      CHARACTER*8 TAPIND,TYPOBJ,CHARIN,CHARRE,LETYPE
+*
+* Initialisations
+*
+      IVALIN = 0
+      XVALIN = 0.D0
+      LOGIN  = .TRUE.
+      IOBIN  = 0
+      TAPIND = 'MOT     '
+*
+* Lecture du MMODEL et test de la formulation
+*
+      CALL LIROBJ('MMODEL',IPMODE,1,IRET)
+      IF (IERR.NE.0) RETURN
+      MMODEL = IPMODE
+*
+* Lecture de la TABLE domaine
+*
+      IPTABL = 0
+C     CALL LIRTAB('DOMAINE',IPTABL,1,IRET)
+      CALL LEKMOD(MMODEL,IPTABL,IRET)
+      IF (IERR.NE.0) RETURN
+      CHARIN = 'MAILLAGE'
+      CALL LEKTAB(IPTABL,CHARIN,IOBRE)
+      IF (IERR.NE.0) RETURN
+      IPGEOM = IOBRE
+      CHARIN = 'ELTFA'
+      CALL LEKTAB(IPTABL,CHARIN,IOBRE)
+      IF (IERR.NE.0) RETURN
+      IELTFA = IOBRE
+      CHARIN = 'CENTRE'
+      CALL LEKTAB(IPTABL,CHARIN,IOBRE)
+      IF (IERR.NE.0) RETURN
+      ICENTR = IOBRE
+      CHARIN = 'FACE'
+      CALL LEKTAB(IPTABL,CHARIN,IOBRE)
+      IF (IERR.NE.0) RETURN
+      IPFACE = IOBRE
+*
+* récup. MCHAML orientation normale
+*
+      CALL LEKTAB(IPTABL,'XXNORMAE',IORIE)
+      IF (IERR.NE.0) RETURN
+*
+* récup. CHPO orientation normale
+*
+      CALL LEKTAB(IPTABL,'XXNORMAF',INORM)
+      IF (IERR.NE.0) RETURN
+*
+* récup. CHPO surface des faces
+*
+      CALL LEKTAB(IPTABL,'XXSURFAC',ISURF)
+      IF (IERR.NE.0) RETURN
+*
+* Lecture de RIGIDITE obligatoire
+*
+      CALL LIROBJ('RIGIDITE',IPRIGI,1,IRET)
+      IF (IERR.NE.0) RETURN
+      RI1 = IPRIGI
+*
+* Lecture du CHAMPOINT obligatoire
+*
+      CALL LIROBJ('CHPOINT',ITPN,1,IRET)
+      IF (IERR.NE.0) RETURN
+*
+* Lecture eventuelle du 1er CHAMPOINT optionnel
+*
+      ICHP1 = 0
+      CALL LIROBJ('CHPOINT',ICHP1,0,IRET1)
+      IF (IERR.NE.0) RETURN
+*
+* Lecture eventuelle du 2me CHAMPOINT optionnel
+*
+      ICHP2 = 0
+      CALL LIROBJ('CHPOINT',ICHP2,0,IRET2)
+      IF (IERR.NE.0) RETURN
+*
+* Lecture de la RIGIDITE complementaire
+*
+       IPRIGI = 0
+       CALL LIROBJ('RIGIDITE',IPRIGI,0,IRETR)
+      IF (IERR.NE.0) RETURN
+       RI2 = IPRIGI
+*
+* Lecture éventuelle de la TABLE Darcy_transitoire
+*
+      IPTABL = 0
+      CALL LIRTAB('DARCY_TRANSITOIRE',IPTABL,0,IRET)
+      IF (IERR.NE.0) RETURN
+      IF (IRET.EQ.1) THEN
+         TYPOBJ = 'FLOTTANT'
+         CALL ACCTAB(IPTABL,TAPIND,IVALIN,XVALIN,'THETA',LOGIN,IOBIN,
+     S                      TYPOBJ,IVALRE,XVALRE,CHARRE,LOGRE,IOBRE)
+         IF (IERR.NE.0) RETURN
+         THETA  = XVALRE
+         THEMIN = -1.D-12
+         THEMAX = 1.D0 - THEMIN
+         IF ((THETA.LT.THEMIN).OR.(THETA.GT.THEMAX)) THEN
+            REAERR(1)   = REAL(THETA)
+            REAERR(2)   = REAL(0.D0)
+            REAERR(3)   = REAL(1.D0)
+            MOTERR(1:8) = '  THETA '
+            CALL ERREUR(42)
+            RETURN
+         ENDIF
+         IF (THETA.LT.0.D0) THETA=0.D0
+         IF (THETA.GT.1.D0) THETA=1.D0
+         CALL ACCTAB(IPTABL,TAPIND,IVALIN,XVALIN,'PAS',LOGIN,IOBIN,
+     S                      TYPOBJ,IVALRE,XVALRE,CHARRE,LOGRE,IOBRE)
+         IF (IERR.NE.0) RETURN
+         DELTAT = XVALRE
+         IF (DELTAT.LT.0.D0) THEN
+            REAERR(1)   = REAL(DELTAT)
+            REAERR(2)   = REAL(0.D0)
+            MOTERR(1:8) = ' DELTAT '
+            CALL ERREUR(41)
+            RETURN
+         ENDIF
+         TYPOBJ = 'MCHAML  '
+         CALL ACCTAB(IPTABL,TAPIND,IVALIN,XVALIN,'SURF',LOGIN,IOBIN,
+     S                      TYPOBJ,IVALRE,XVALRE,CHARRE,LOGRE,IOBRE)
+         IF (IERR.NE.0) RETURN
+         IPCK = IOBRE
+         TYPOBJ = 'CHPOINT '
+         CALL ACCTAB(IPTABL,TAPIND,IVALIN,XVALIN,'TRACE',LOGIN,IOBIN,
+     S                      TYPOBJ,IVALRE,XVALRE,CHARRE,LOGRE,IOBRE)
+         IF (IERR.NE.0) RETURN
+         ITP = IOBRE
+         CALL ACCTAB(IPTABL,TAPIND,IVALIN,XVALIN,'CHARGE',LOGIN,IOBIN,
+     S                      TYPOBJ,IVALRE,XVALRE,CHARRE,LOGRE,IOBRE)
+         IF (IERR.NE.0) RETURN
+         IH = IOBRE
+      ELSE
+         THETA  = 0.D0
+         DELTAT = 0.D0
+         IPCK   = 0
+         ITP    = 0
+         IH     = 0
+      ENDIF
+*
+* Test CHAMPOINT centre H
+*
+      IF (IH.NE.0) THEN
+         NBCOMP    = 1
+         INDIC     = 1
+         NOMTOT(1) = 'H'
+         CALL QUEPOI(IH,ICENTR,INDIC,NBCOMP,NOMTOT)
+         IF (IERR.NE.0) RETURN
+      ENDIF
+*                          (n-1)
+* Test du CHAMPOINT face TH
+*
+      IF (ITP.NE.0) THEN
+         NBCOMP    = 1
+         INDIC     = 1
+         NOMTOT(1) = 'TH'
+         CALL QUEPOI(ITP,IPFACE,INDIC,NBCOMP,NOMTOT)
+         IF (IERR.NE.0) RETURN
+      ENDIF
+*
+* Test de la formulation contenu dans MMODEL
+*
+      SEGACT MMODEL
+      NSOUS  = KMODEL(/1)
+      SEGINI IPMAHY
+      IDARCY = 0
+      IPT1=IPGEOM
+      IPT2=IPGEOM
+      DO 10 ISOUS=1,NSOUS
+         IF(NSOUS.GT.1)THEN
+              SEGACT IPT2
+              IPT1= IPT2.LISOUS(ISOUS)
+              SEGDES IPT2
+         ENDIF
+         IMODEL = KMODEL(ISOUS)
+         SEGACT IMODEL
+         LETYPE = FORMOD(1)
+         IF (LETYPE.EQ.'DARCY') THEN
+            IDARCY = IDARCY + 1
+            MAHYBR(ISOUS) = IPT1
+         ENDIF
+         SEGDES IMODEL
+ 10   CONTINUE
+      SEGDES MMODEL
+      IF (IDARCY.EQ.0) THEN
+         MOTERR = LETYPE
+         CALL ERREUR(193)
+         GOTO 100
+      ENDIF
+*
+* Tri et test des CHAMPOINTs ARGUMENTS
+*
+      ISOUR=0
+      IFORC=0
+      IF(IRET1.EQ.1)THEN
+          NBCOMP    = 0
+          INDIC     = 1
+          NOMTO3(1) = ' '
+          NOMTO3(2) = ' '
+          NOMTO3(3) = ' '
+          CALL QUEPOI(ICHP1,ICENTR,INDIC,NBCOMP,NOMTO3)
+          IF (IERR.NE.0) RETURN
+          IF(NOMTO3(1).EQ.'SOUR')THEN
+             ISOUR=ICHP1
+          ELSE IF(NOMTO3(1).EQ.'FX')THEN
+             IFORC=ICHP1
+          ENDIF
+          IF(IRET2.EQ.1)THEN
+             NBCOMP    = 0
+             INDIC     = 1
+             NOMTO3(1) = ' '
+             NOMTO3(2) = ' '
+             NOMTO3(3) = ' '
+             CALL QUEPOI(ICHP2,ICENTR,INDIC,NBCOMP,NOMTO3)
+             IF (IERR.NE.0) RETURN
+             IF(NOMTO3(1).EQ.'SOUR')THEN
+                ISOUR=ICHP2
+             ELSE IF(NOMTO3(1).EQ.'FX')THEN
+                IFORC=ICHP2
+             ENDIF
+          ENDIF
+      ENDIF
+*
+* Récuperation des pointeurs ELTFA pour les zones ou DARCY est defini
+*
+      MELEME = IELTFA
+      SEGACT MELEME
+      LZONES = LISOUS(/1)
+      IF (LZONES.EQ.0) LZONES = 1
+      IPT4   = IPGEOM
+      SEGACT IPT4
+      DO 30 ISOUS=1,NSOUS
+         IMAMEL = MAHYBR(ISOUS)
+         IF (IMAMEL.NE.0) THEN
+            DO 20 ISZ=1,LZONES
+               IF (LZONES.EQ.1) THEN
+                  IPT2 = IPT4
+                  IPT3 = MELEME
+               ELSE
+                  IPT2 = IPT4.LISOUS(ISZ)
+                  IPT3 = LISOUS(ISZ)
+               ENDIF
+               IF (IPT2.EQ.IMAMEL) THEN
+                  MAHYBR(ISOUS) = IPT3
+                  GOTO 30
+               ENDIF
+ 20         CONTINUE
+            IF (IMAMEL.EQ.MAHYBR(ISOUS)) THEN
+               MOTERR(1:8)  = ' MODELE '
+               MOTERR(9:16) = ' ELTFA  '
+               INTERR(1)    = ISOUS
+               CALL ERREUR(698)
+               SEGDES IPT4
+               SEGDES MELEME
+               GOTO 100
+            ENDIF
+         ENDIF
+ 30   CONTINUE
+      SEGDES IPT4
+      SEGDES MELEME
+*
+* Test et tri du sous-type des matrices de rigiditée récupérées
+*
+      IPFORC=0
+      IPDARC=0
+      SEGACT RI1
+      LETYPE =  RI1.MTYMAT
+      IF(LETYPE.EQ.'DARCY')THEN
+        IPDARC=RI1
+      ELSE IF(LETYPE.EQ.'MASSE')THEN
+        IPFORC=RI1
+      ENDIF
+      IF(RI2.NE.0)THEN
+        SEGACT RI2
+        LETYPE =  RI2.MTYMAT
+        IF(LETYPE.EQ.'MASSE')THEN
+           IPFORC=RI2
+        ELSE IF(LETYPE.EQ.'DARCY')THEN
+           IPDARC=RI2
+        ENDIF
+        IF(IPFORC.EQ.0)THEN
+          MOTERR(1:8)  = 'RIGIDITE'
+          MOTERR(9:16) = 'MASSE'
+          CALL ERREUR(79)
+          SEGDES RI1
+          SEGDES RI2
+          GOTO 100
+        ELSE IF(IFORC.EQ.0)THEN
+              MOTERR(1:8)  = 'CHPOINT'
+              MOTERR(9:16) = 'FORCE'
+              CALL ERREUR(79)
+              SEGDES RI1
+              SEGDES RI2
+              GOTO 100
+        ENDIF
+      ENDIF
+      IF(IPDARC.EQ.0)THEN
+        MOTERR(1:8)  = 'RIGIDITE'
+        MOTERR(9:16) = 'DARCY'
+        CALL ERREUR(79)
+        SEGDES RI1
+        IF(IPFORC.NE.0)SEGDES RI2
+        GOTO 100
+      ENDIF
+*
+* Controle des pointeurs de MELEME de la rigidité
+*
+      DO 40 ISOUS=1,NSOUS
+         IMAMEL = MAHYBR(ISOUS)
+         IF (IMAMEL.NE.0) THEN
+            RI1=IPDARC
+            IPTEST = RI1.IRIGEL(1,ISOUS)
+            CALL CMPMAI(IMAMEL,IPTEST,LOGRE)
+            IF (.NOT. LOGRE) THEN
+               MOTERR(1:8)  = 'DARCY'
+               MOTERR(9:16) = ' ELTFA  '
+               INTERR(1)    = ISOUS
+               CALL ERREUR(698)
+               SEGDES RI1
+               GOTO 100
+            ENDIF
+            IF(IPFORC.NE.0)THEN
+              RI2=IPFORC
+              IPTEST = RI2.IRIGEL(1,ISOUS)
+               CALL CMPMAI(IMAMEL,IPTEST,LOGRE)
+               IF (.NOT. LOGRE) THEN
+                 MOTERR(1:8)  = 'MASSE'
+                 MOTERR(9:16) = ' ELTFA  '
+                 INTERR(1)    = ISOUS
+                 CALL ERREUR(698)
+                 SEGDES RI1
+                 SEGDES RI2
+                 GOTO 100
+               ENDIF
+            ENDIF
+         ENDIF
+ 40   CONTINUE
+      SEGDES RI1
+      IF(IPFORC.NE.0)SEGDES RI2
+*
+* Vérification du support du MCHAML Ck|K| % au MMODEL
+* Controle du nombre de composantes reelles
+*
+      IF (IPCK.NE.0) THEN
+         IF(IPFORC.NE.0)CALL ERREUR(34)
+         ISUP  = 2
+         ICOND = 1
+         CALL QUESUP(IPMODE,IPCK,ISUP,ICOND,IRET,IRET2)
+         IF (IRET.GT.1) GOTO 100
+         MCHELM = IPCK
+         SEGACT MCHELM
+         DO 50 ISOUS=1,NSOUS
+            IF (MAHYBR(ISOUS).NE.0) THEN
+               MCHAML = ICHAML(ISOUS)
+               SEGACT MCHAML
+               N2     = TYPCHE(/2)
+               IF (N2.GT.1) THEN
+                  CALL ERREUR(320)
+                  SEGDES MCHELM
+                  SEGDES MCHAML
+                  GOTO 100
+               ENDIF
+               CHAR6  = TYPCHE(1)(1:6)
+               IF (CHAR6.NE.'REAL*8') THEN
+                  MOTERR(1:8) = NOMCHE(1)
+                  CALL ERREUR(679)
+                  SEGDES MCHELM
+                  SEGDES MCHAML
+                  GOTO 100
+               ENDIF
+               SEGDES MCHAML
+            ENDIF
+ 50      CONTINUE
+         SEGDES MCHELM
+      ENDIF
+*                          (n)
+* Test du CHAMPOINT face TH
+* On ne teste que la présence d'une composante de nom TH
+*
+      MCHPO1 = ITPN
+      SEGACT MCHPO1
+      NSOUP1 = MCHPO1.IPCHP(/1)
+      DO 70 ISOUS=1,NSOUP1
+         MSOUPO = MCHPO1.IPCHP(ISOUS)
+         SEGACT MSOUPO
+         NC = NOCOMP(/2)
+         DO 60 J=1,NC
+            IF (NOCOMP(J).EQ.'TH  ') GOTO 80
+ 60      CONTINUE
+         SEGDES MSOUPO
+ 70   CONTINUE
+      SEGDES MCHPO1
+      MOTERR(1:4) = ' TH '
+      CALL ERREUR(181)
+      GOTO 100
+ 80   CONTINUE
+      SEGDES MSOUPO
+      SEGDES MCHPO1
+*
+* Construction du CHPO des charges
+*
+      SEGDES IPMAHY
+      CALL HYBP1(IPMAHY,ICENTR,IPFACE,IPDARC,ITPN,INORM,IORIE,
+     S  ISURF,THETA,DELTAT,IPCK,ITP,IH,ISOUR,IPFORC,IFORC,ICHP1)
+      IF (ICHP1.NE.0) CALL ECROBJ('CHPOINT',ICHP1)
+*
+* Ménage
+*
+ 100  CONTINUE
+      SEGSUP IPMAHY
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

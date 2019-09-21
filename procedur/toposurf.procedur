@@ -1,0 +1,470 @@
+$$$$ TOPOSURF
+* TOPOSURF  PROCEDUR  CB215821  18/03/22    21:15:06     9786
+
+************************************************************************
+** Extraction procedure of a smoothed surface from a topology
+**
+** Author:
+** Guenhael Le Quilliec (LaMe - Polytech Tours)
+**
+** Version:
+** 3.0 2018/01/29 Updated to make it independant of TOPOPTIM version,
+**                fix some issues with PYR5 and PRI6 elements,
+**                compatibility with quadratic elements,
+**                the model is no longer an input argument,
+**                all input arguments are now provided in a table
+** 2.0 2018/01/26 Updated to make it compatible with TOPOPTIM V2.1
+** 1.0 2016/12/13 Original version compatible with TOPOPTIM V1.0
+************************************************************************
+
+DEBP TOPOSURF tab0*'TABLE' ;
+
+**********************************************************************
+*                               INPUT                                *
+**********************************************************************
+
+* Topology
+Topo0 = tab0.'TOPOLOGIE' ;
+
+* Model
+Mod0 = tab0.'MODELE' ;
+
+* Filter rate
+SI (NON (EXIS tab0 'TAUX_FILTRAGE')) ;
+    tab0.'TAUX_FILTRAGE' = 1 ;
+FINS ;
+Filter0 = tab0.'TAUX_FILTRAGE' ;
+
+* Isovalue
+SI (NON (EXIS tab0 'ISOVALEUR')) ;
+    tab0.'ISOVALEUR' = 0.5 ;
+FINS ;
+Iso0 = tab0.'ISOVALEUR' ;
+
+* Default minimum size of the output surface elements
+SI (NON (EXIS tab0 'ELIMINATION')) ;
+    tab0.'ELIMINATION' = 1.0e-6 ;
+FINS ;
+Elim0 = tab0.'ELIMINATION' ;
+
+* Orientation of the output surface will be applied by default
+SI (NON (EXIS tab0 'ORIENTATION')) ;
+    tab0.'ORIENTATION' = VRAI ;
+FINS ;
+Orie0 = tab0.'ORIENTATION' ;
+
+* Default value of the extra thickness
+* This value should be very low compared to the element size
+* when the domain is not convex.
+* If not, Enve1 might be wrong and GRAD won't work
+SI (NON (EXIS tab0 'SUREPAISSEUR')) ;
+    tab0.'SUREPAISSEUR' = 1.0e-3 ;
+FINS ;
+Shift0 = tab0.'SUREPAISSEUR' ;
+
+* Default value of the thickness of the output mesh when the input
+* model is 2D
+SI (NON (EXIS tab0 'EPAISSEUR')) ;
+    tab0.'EPAISSEUR' = 1.0 ;
+FINS ;
+Thick0 = tab0.'EPAISSEUR' ;
+
+**********************************************************************
+*                           PREPROCESSING                            *
+**********************************************************************
+
+* Mesh
+Msh0 = EXTR Mod0 'MAIL' ;
+
+* Types of elements
+Type0 = Msh0 ELEM 'TYPE' ;
+
+* Create a random material
+Mat0 = MATE Mod0 'YOUN' 1.0 'NU' 0.3 ;
+
+* Unitary field
+un1 = MANU 'CHML' Mod0 'SCAL' 1.0 'TYPE' 'SCALAIRE' 'GRAVITE' ;
+* Volume of each element
+volEl1 = INTG 'ELEM' un1 Mod0 Mat0 ;
+
+* Make sure that the topology field is not composed of zones where
+* the values are constant so that to avoid problems with the function
+* POIN 'SUPE'
+Topo0 = (INTG 'ELEM' Topo0 Mod0 Mat0) / volEl1 ;
+
+* If the mesh is quadratic
+SI (EXIS Type0 (MOTS 'TRI6' 'QUA8' 'CU20' 'TE10' 'PR15' 'PY13') 'OU');
+*   Change it to linear
+    Msh0 = CHAN 'LINE' Msh0 ;
+*   Update types of elements
+    Type0 = Msh0 ELEM 'TYPE' ;
+*   Create a random model
+    Mod0 = MODE Msh0 'MECANIQUE' 'ELASTIQUE' 'ISOTROPE' ;
+*   Update the random material
+    Mat0 = MATE Mod0 'YOUN' 1.0 'NU' 0.3 ;
+*   Update the unitary field
+    un1 = MANU 'CHML' Mod0 'SCAL' 1.0 'TYPE' 'SCALAIRE' 'GRAVITE' ;
+*   Update the volume of each element
+    volEl1 = INTG 'ELEM' un1 Mod0 Mat0 ;
+*   Express the input topology element field at the barycenters of the
+*   elements of the model Mod0
+    Topo0 = TOPOCHAN Topo0 Mod0 (volEl1 POIN 'SUPE' -1.0) ;
+    Topo0 = CHAN 'TYPE' Topo0 'SCALAIRE' ;
+FINS ;
+
+* Filtering the topology field
+SI (Filter0 > 0) ;
+    REPE Loop1 Filter0 ;
+        Topo0 = CHAN 'CHAM' (CHAN 'CHPO' Mod0 Topo0 'MOYE')
+                  Mod0 'GRAVITE' ;
+    FIN Loop1 ;
+FINS ;
+
+* Node topology field
+Ch0 = CHAN 'CHPO' Topo0 Mod0 'MOYE' ;
+Ch0 = Ch0 * (1.0 / (MAXI Ch0)) ;
+
+* Save the options 'DIME', 'MODE', 'ELEM'
+Dime0 = VALE 'DIME' ;
+Mode0 = VALE 'MODE' ;
+ElemOpt0 = VALE 'ELEM' ;
+
+* 2D Topology
+SI (EXIS Type0 (MOTS 'TRI3' 'QUA4') 'OU') ;
+*   TODO Make it compatible with 3D in case of shell elements
+*   Switch to 2D
+    OPTI 'DIME' 2 'MODE' 'PLAN' 'CONT' ;
+*   If the reasult has to stay in 2D
+    SI ((ABS Thick0) < 1.0e-9) ;
+        Type3D = FAUX ;
+*       Change option 'ELEM' to TRI3
+        OPTI 'ELEM' TRI3 ;
+*       Change the element type of the mesh
+        Msh0 = CHAN 'TRI3' Msh0 ;
+*       Domain boundary
+        Cont0 = CONT Msh0 ;
+*       Shifted boundary
+        Norm0 = PRES 'MASS' Mod0 (-1.0 * Shift0) Cont0 ;
+        Norm0 = CHAN 'COMP' (MOTS 'FX' 'FY') (MOTS 'UX' 'UY')
+                     Norm0 ;
+        Cont1 = Cont0 PLUS Norm0 ;
+*       External layer of elements
+        Layer0 = Cont0 REGL 1 Cont1 ;
+*       Add a field for the shifted boundary
+        Ch0 = Ch0 ET
+          (MANU 'CHPO' Cont1 1 'SCAL' -1.0e3 'NATURE' 'DIFFUS') ;
+*       New model
+        Mod1 = MODE (Msh0 ET Layer0) 'MECANIQUE' 'ELASTIQUE' ;
+*       Element field
+        MCh0 = CHAN 'CHAM' Ch0 Mod1 'NOEUD' ;
+*       Extract the iso surface
+        Surf0 = (ISOV MCh0 Iso0) ELEM SEG2 ;
+*       Fuse the nodes
+        ELIM Surf0 Elim0 ;
+*       If the surface has to be oriented
+        SI Orie0 ;
+*           Fuse any superposed element
+            Surf1 = TABL ;
+            REPE Loop1 (NBEL Surf0) ;
+*               Considered element
+                Elem0 = Surf0 ELEM &Loop1 ;
+                P0 = CHAN POI1 Elem0 ;
+                SI (EGA (NBEL P0) 2) ;
+                    N1 = NOEU (P0 POIN 1) ;
+                    N2 = NOEU (P0 POIN 2) ;
+                    SI (N1 > N2) ;
+                        N0 = N2 ;
+                        N2 = N1 ;
+                        N1 = N0 ;
+                    FINS ;
+                    Surf1.(CHAI N1 '-' N2) = Elem0 ;
+                FINS ;
+            FIN Loop1 ;
+            Ind0 = INDE Surf1 ;
+            Surf0 = Surf1.(Ind0.(DIME Ind0)) ;
+            REPE Loop1 ((DIME Ind0) - 1) ;
+                Surf0 = Surf0 ET Surf1.(Ind0.&Loop1) ;
+            FIN Loop1 ;
+*           Create the gradient field giving the orientation
+            Ch0 = (REDU Ch0 Msh0) ET (MANU 'CHPO' Cont1 1 'SCAL'
+                                       -1.0 'NATURE' 'DIFFUS') ;
+            Mod1 = MODE (Msh0 ET Layer0) 'THERMIQUE' ;
+            Grad0 = -1.0 * (GRAD Mod1 (CHAN 'COMP' 'T' Ch0)) ;
+            Grad0 = CHAN 'NOEUD' Mod1 Grad0 ;
+*           Centers of mass
+            REPE Loop1 (NBEL Surf0) ;
+                Elem0 = Surf0 ELEM &Loop1 ;
+                SI (&Loop1 NEG 1) ;
+                    Pts0 = Pts0 ET (BARY Elem0) ;
+                SINO ;
+                    Pts0 = BARY Elem0 ;
+                FINS ;
+            FIN Loop1 ;
+*           Projection of the gradient on the centers of mass
+            Grad0 = PROI Pts0 Grad0 ;
+*           Initialization of the loop on each elements
+            Inv0 = (0.0 0.0) ET (0.0 0.0) ;
+*           Loop on each element of the surface
+            REPE Loop1 (NBEL Surf0) ;
+*               Considered element
+                Elem0 = Surf0 ELEM &Loop1 ;
+*               Compute the normal direction of the element
+                P0 = CHAN POI1 Elem0 ;
+                P1 = P0 POIN 1 ;
+                P2 = P0 POIN 2 ;
+                N0 = (P2 MOIN P1) TOUR 90.0 (0.0 0.0) ;
+*               Center of mass
+                Bary0 = Pts0 POIN &Loop1 ;
+*               Desired orientation
+                G1 = EXTR Grad0 'T,X' Bary0 ;
+                G2 = EXTR Grad0 'T,Y' Bary0 ;
+                G0 = (G1 G2) ;
+*               Add the element to inverse
+                SI ((N0 PSCA G0) < 0.0) ;
+                    Inv0 = Inv0 ET Elem0 ;
+                FINS ;
+            FIN Loop1 ;
+*           If there are some elements to invert
+            SI ((NBEL Inv0) > 2) ;
+                Inv0 = Inv0 ELEM SEG2 ;
+                Surf0 = (DIFF Surf0 Inv0) ET (INVE Inv0) ;
+            FINS ;
+        FINS ;
+*       Give information about the output mesh quality
+        VERM Surf0 ;
+    SINO ;
+        Type3D = VRAI ;
+*       Force the option 'DIME' to 3D
+        Dime0 = 3 ;
+*       Switch to 3D
+        OPTI 'DIME' 3 ;
+*       Change option 'ELEM' to CUB8
+        OPTI 'ELEM' CUB8 ;
+*       Create the second side of the 3D mesh from the 2D mesh
+        Recto0 ChR0 = Msh0 Ch0 PLUS (0.0 0.0 Thick0) ;
+*       Create the 3D mesh
+        Msh0 = Msh0 VOLU 1 Recto0 ;
+*       Create the 3D topology field
+        Ch0 = Ch0 ET ChR0 ;
+*       Create the 3D model
+        Mod0 = MODE Msh0 'MECANIQUE' 'ELASTIQUE' 'ISOTROPE' ;
+    FINS ;
+SINO ;
+   Type3D = VRAI ;
+FINS ;
+
+* 3D Topology
+SI Type3D ;
+*   Change option 'ELEM' to CUB8
+    OPTI 'ELEM' CUB8 ;
+*   Domain boundary
+    Enve0 = ENVE Msh0 ;
+*   Normal direction on the domain boundary
+    Norm0 = PRES 'MASS' Mod0 (-1.0 * Shift0) Enve0 ;
+    Norm0 = CHAN 'COMP' (MOTS 'FX' 'FY' 'FZ')
+                        (MOTS 'UX' 'UY' 'UZ') Norm0 ;
+*   Partitionate the surfaces
+    NbPart0 = 32 ;
+    SI (NbPart0 > (NBEL Enve0)) ;
+        NbPart0 = 16 ;
+    FINS ;
+    SI (NbPart0 > (NBEL Enve0)) ;
+        NbPart0 = 8 ;
+    FINS ;
+    PEnve0 = PART 'OPTI' NbPart0 Enve0 ;
+*   Since PART does not always respect NbPart0, we redefine it
+    NbPart0 = DIME PEnve0 ;
+    REPE Loop1 NbPart0 ;
+        SI (EXIS PEnve0 NbPart0) ;
+            QUIT Loop1 ;
+        FINS ;
+        NbPart0 = NbPart0 - 1 ;
+    FIN Loop1 ;
+*   External layer of elements
+    Layer0 = TABL 'ESCLAVE' ;
+*   Loop on each entry of PEnve0
+    REPE Loop1 NbPart0 ;
+        PEnve1 = PEnve0.&Loop1 PLUS (REDU Norm0 PEnve0.&Loop1) ;
+        Layer0.&Loop1 = PEnve0.&Loop1 VOLU 1 PEnve1 ;
+        SI (&Loop1 > 1) ;
+            Enve1 = Enve1 ET PEnve1 ;
+            ELIM Enve1 PEnve1 Elim0 ;
+        SINO ;
+            Enve1 = PEnve1 ;
+        FINS ;
+    FIN Loop1 ;
+    Layer0 = ET Layer0 ;
+*   Add a field for the shifted boundary
+    Ch0 = Ch0 ET
+          (MANU 'CHPO' Enve1 1 'SCAL' -1.0e3 'NATURE' 'DIFFUS') ;
+*   Create a mesh that will be compatible with ISOV
+    IsoMsh0 = Msh0 ET Layer0 ;
+    Type0 = IsoMsh0 ELEM 'TYPE' ;
+    IsoMail1 = TABL 'ESCLAVE' ;
+    REPE Loop1 (DIME Type0) ;
+        Type1 = EXTR Type0 &Loop1 ;
+        SI ((EGA Type1 'TET4') OU (EGA Type1 'CUB8')) ;
+            IsoMail1.&Loop1 = IsoMsh0 ELEM Type1 ;
+        SINO ;
+*           Using CHAN 'TET4' is not a good option as the edges
+*           of the new elements won't necessary share the edges
+*           of the neigbor elements and this may create holes
+*           after using ISOV.
+*            IsoMail1.&Loop1 = CHAN TET4 (IsoMsh0 ELEM Type1) ;
+*           We change incompatible elements with ISOV by CUB8
+*           ****
+            Volu0 = IsoMsh0 ELEM Type1 ;
+            Volu1 = VIDE 'MAILLAGE'/'CUB8' ;
+            SI (EGA Type1 PRI6) ;
+*               Loop on each element
+                REPE Loop2 (NBEL Volu0) ;
+*                   Considered element
+                    Elem0 = Volu0 ELEM &Loop2 ;
+*                   Nodes of the element
+                    P0 = CHAN POI1 Elem0 ;
+                    P1 = P0 POIN 1 ;
+                    P2 = P0 POIN 2 ;
+                    P3 = P0 POIN 3 ;
+                    P4 = P0 POIN 4 ;
+                    P5 = P0 POIN 5 ;
+                    P6 = P0 POIN 6 ;
+*                   Manualy change this PRI6 by a CUB8
+                    Volu1 = Volu1 ET
+                            (MANU CUB8 P1 P2 P3 P3 P4 P5 P6 P6) ;
+                FIN Loop2 ;
+            FINS ;
+            SI (EGA Type1 PYR5) ;
+*               Loop on each element
+                REPE Loop2 (NBEL Volu0) ;
+*                   Considered element
+                    Elem0 = Volu0 ELEM &Loop2 ;
+*                   Nodes of the element
+                    P0 = CHAN POI1 Elem0 ;
+                    P1 = P0 POIN 1 ;
+                    P2 = P0 POIN 2 ;
+                    P3 = P0 POIN 3 ;
+                    P4 = P0 POIN 4 ;
+                    P5 = P0 POIN 5 ;
+*                   Manualy change this PYR5 by a CUB8
+                    Volu1 = Volu1 ET
+                            (MANU CUB8 P1 P2 P3 P4 P5 P5 P5 P5) ;
+                FIN Loop2 ;
+            FINS ;
+            IsoMail1.&Loop1 = Volu1 ;
+*           ****
+        FINS ;
+    FIN Loop1 ;
+    IsoMsh0 = ET IsoMail1 ;
+*   New model
+    Mod1 = MODE IsoMsh0 'MECANIQUE' 'ELASTIQUE' ;
+*   Element field
+    MCh0 = CHAN 'CHAM' Ch0 Mod1 'NOEUD' ;
+*   Extract the iso surface
+    Surf0 = ISOV MCh0 Iso0 ;
+*   Change the surface to TRI3
+    Type0 = Surf0 ELEM 'TYPE' ;
+    Surf1 = TABL 'ESCLAVE' ;
+    REPE Loop1 (DIME Type0) ;
+        Type1 = EXTR Type0 &Loop1 ;
+        SI (EGA Type1 'TRI3') ;
+            Surf1.&Loop1 = Surf0 ELEM Type1 ;
+        SINO ;
+            SI (NEG Type1 'POI1') ;
+                Surf1.&Loop1 = CHAN 'TRI3' (Surf0 ELEM Type1) ;
+            FINS ;
+        FINS ;
+    FIN Loop1 ;
+    Surf0 = ET Surf1 ;
+*   Fuse the nodes
+    ELIM Surf0 Elim0 ;
+*   Remove any elements with fused nodes
+    Elem1 = LECT ;
+    REPE Loop1 (NBEL Surf0) ;
+        SI (NEG (NBNO (Surf0 ELEM &Loop1)) 3) ;
+            Elem1 = Elem1 ET (LECT &Loop1) ;
+        FINS ;
+    FIN Loop1 ;
+    Elem0 = LECT 1 'PAS' 1 (NBEL Surf0) ;
+    SI ((DIME Elem1) > 0) ;
+        Surf0 = Surf0 ELEM (ENLE Elem0 Elem1) ;
+    FINS ;
+*   If the surface has to be oriented
+    SI Orie0 ;
+*       Fuse any superposed element
+        Surf1 = TABL ;
+        REPE Loop1 (NBEL Surf0) ;
+*           Considered element
+            Elem0 = Surf0 ELEM &Loop1 ;
+            P0 = CHAN POI1 Elem0 ;
+            SI (EGA (NBEL P0) 3) ;
+                N1 = NOEU (P0 POIN 1) ;
+                N2 = NOEU (P0 POIN 2) ;
+                N3 = NOEU (P0 POIN 3) ;
+                N0 = ORDO (LECT N1 N2 N3) 'CROI' ;
+                Surf1.(CHAI (EXTR N0 1) '-' (EXTR N0 2)
+                                        '-' (EXTR N0 3)) = Elem0 ;
+            FINS ;
+        FIN Loop1 ;
+        Ind0 = INDE Surf1 ;
+        Surf0 = Surf1.(Ind0.(DIME Ind0)) ;
+        REPE Loop1 ((DIME Ind0) - 1) ;
+            Surf0 = Surf0 ET Surf1.(Ind0.&Loop1) ;
+        FIN Loop1 ;
+*       Create the gradient field giving the orientation
+        Ch0 = (REDU Ch0 Msh0) ET
+          (MANU 'CHPO' Enve1 1 'SCAL' -1.0 'NATURE' 'DIFFUS') ;
+        Mod1 = MODE (Msh0 ET Layer0) 'THERMIQUE' ;
+        Grad0 = -1.0 * (GRAD Mod1 (CHAN 'COMP' 'T' Ch0)) ;
+        Grad0 = CHAN 'NOEUD' Mod1 Grad0 ;
+*       Centers of mass
+        REPE Loop1 (NBEL Surf0) ;
+            Elem0 = Surf0 ELEM &Loop1 ;
+            SI (&Loop1 NEG 1) ;
+                Pts0 = Pts0 ET (BARY Elem0) ;
+            SINO ;
+                Pts0 = BARY Elem0 ;
+            FINS ;
+        FIN Loop1 ;
+*       Projection of the gradient on the centers of mass
+        Grad0 = PROI Pts0 Grad0 ;
+*       Initialization of the loop on each elements
+        Inv0 = (0.0 0.0 0.0) ET (0.0 0.0 0.0) ;
+*       Loop on each element of the surface
+        REPE Loop1 (NBEL Surf0) ;
+*           Considered element
+            Elem0 = Surf0 ELEM &Loop1 ;
+*           Compute the normal direction of the element
+            P0 = CHAN POI1 Elem0 ;
+            P1 = P0 POIN 1 ;
+            P2 = P0 POIN 2 ;
+            P3 = P0 POIN 3 ;
+            N0 = (P2 MOIN P1) PVEC (P3 MOIN P2) ;
+*           Center of mass
+            Bary0 = Pts0 POIN &Loop1 ;
+*           Desired orientation
+            G1 = EXTR Grad0 'T,X' Bary0 ;
+            G2 = EXTR Grad0 'T,Y' Bary0 ;
+            G3 = EXTR Grad0 'T,Z' Bary0 ;
+            G0 = (G1 G2 G3) ;
+*           Add the element to inverse
+            SI ((N0 PSCA G0) < 0.0) ;
+                Inv0 = Inv0 ET Elem0 ;
+            FINS ;
+        FIN Loop1 ;
+*       If there are some elements to invert
+        SI ((NBEL Inv0) > 2) ;
+            Inv0 = Inv0 ELEM TRI3 ;
+            Surf0 = (DIFF Surf0 Inv0) ET (INVE Inv0) ;
+        FINS ;
+    FINS ;
+*   Give information about the output mesh quality
+    VERM Surf0 ;
+FINS ;
+
+* Restore the initial options
+OPTI 'DIME' Dime0 'MODE' Mode0 'ELEM' ElemOpt0 ;
+
+FINP Surf0 ;
+
+$$$$
+

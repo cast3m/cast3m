@@ -1,0 +1,879 @@
+C KPRES     SOURCE    PV        17/09/29    21:15:18     9578
+      SUBROUTINE KPRES(IPMODL,IPCHPO,ICHA,ICONV,IFLAM,IASYM,IPRIG,IRET)
+C_______________________________________________________________________
+C
+C
+C                                         99
+C     Entrees:
+C     ________
+C
+C       IPMODL  Pointeur sur un MMODEL
+C       IPCHPO  Pointeur sur un MCHAML ou CHPOINT de PRESSION
+C
+C       ICHA   Flag : =1 IPCHPO est un pointeur sur un MCHAML
+C                     =0 IPCHPO est un pointeur sur un CHPOINT
+C
+C       ICONV   Flag de conversion
+C       IFLAM   Flag de flambage
+C
+C     Sorties:
+C     ________
+C
+C       IPRIG  Pointeur sur un objet RIGIDITE
+C       IRET    Flag de retour
+C
+C       CODE COMBESCURE JANV 87
+C
+C       Passage aux nouveaux CHAMELEMs par P.DOWLATYARI le 5/04/91
+C
+C
+C_______________________________________________________________________
+C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*
+-INC CCHAMP
+-INC CCOPTIO
+-INC SMRIGID
+-INC SMCHAML
+-INC SMELEME
+-INC SMCOORD
+-INC SMINTE
+-INC SMMODEL
+-INC SMCHPOI
+C
+      SEGMENT WRK1
+       REAL*8 REL(LRE,LRE) ,XE(3,NBBB)
+      ENDSEGMENT
+*
+      SEGMENT WRK2
+       REAL*8 SHPWRK(6,NBNO)
+      ENDSEGMENT
+*
+      SEGMENT WRK3
+       REAL*8 WORK(LW)
+      ENDSEGMENT
+*
+      SEGMENT WRK4
+       REAL*8 BPSS(3,3) ,XEL(3,NBBB)
+      ENDSEGMENT
+      segment wrk7
+         real*8 propel(2),d(1),work1(1),out(1)
+      endsegment
+      segment icpr (xcoor(/1)/(idim+1))
+*
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS)    ,NSOF(NS)
+        INTEGER      IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+*
+      PARAMETER ( NINF=3 )
+      INTEGER INFOS(NINF)
+      LOGICAL lsupfo,lsupdp
+*
+      SEGMENT LIMODL(0)
+*
+      IRET=1
+      IVAPR=0
+*
+*     CHPOINT DE PRESSION ---> CHAMELEM AUX NOEUDS
+*
+      IF(ICHA.EQ.0)THEN
+         CALL CHAME1(0,IPMODL,IPCHPO,' ',IPCHE0,1)
+         IF (IERR.NE.0) RETURN
+         CALL REDUAF(IPCHE0,IPMODL,IPCHE1,0,IR,KER)
+         IF(IR   .NE. 1) CALL ERREUR(KER)
+         IF(IERR .NE. 0) RETURN
+      ELSE
+         IPCHE1=IPCHPO
+      ENDIF
+      MCHEL1=IPCHE1
+      SEGACT,MCHEL1
+      NBMAIC=MCHEL1.IMACHE(/1)
+      IF (NBMAIC.EQ.0) THEN
+        SEGDES,MCHEL1
+        IRET=0
+        CALL ERREUR(472)
+        RETURN
+      ENDIF
+C_______________________________________________________________________
+C
+C     ACTIVATION DU MODELE
+C_______________________________________________________________________
+C
+      MMODEL=IPMODL
+      SEGACT MMODEL
+      NSOUS=KMODEL(/1)
+C
+C     RECUPERATION DES MODELES
+C
+      SEGINI,LIMODL
+      DO 100 ISOUS=1,NSOUS
+        IMODEL=KMODEL(ISOUS)
+        SEGACT, IMODEL
+        IF(FORMOD(1).EQ.'MECANIQUE'.OR.(FORMOD(1).EQ.'CHARGEMENT'.AND.
+     &     MATMOD(1).EQ.'PRESSION')) THEN
+          LIMODL(**)=IMODEL
+        ELSE
+          SEGDES,IMODEL
+        ENDIF
+ 100  CONTINUE
+C
+      NSOUS = LIMODL(/1)
+      IF (NSOUS.LE.0) THEN
+        SEGDES, MMODEL
+        SEGSUP, LIMODL
+        IF (ICHA.EQ.0) THEN
+          CALL DTCHAM(MCHEL1)
+        ELSE
+          SEGDES,MCHEL1
+        ENDIF
+        CALL ERREUR(610)
+        RETURN
+      ENDIF
+*
+* verif si element shb8 d'avoir recu un chpoint de pression
+*
+      if(icha.eq.1) then
+        nsous=kmodel(/1)
+        do io=1,nsous
+         imodel=kmodel(io)
+         segact imodel
+          if(nefmod.eq.260) then
+           call erreur(1007)
+           return
+          endif
+        enddo
+      endif
+C
+C
+C     INITIALISATION DU CHAPEAU DE L OBJET RIGIDITE
+C
+      NRIGE=7
+      NRIGEL=NSOUS
+      SEGINI MRIGID
+      IPRIG=MRIGID
+      ICHOLE=0
+      IMGEO1=0
+      IMGEO2=0
+      IFORIG=IFOMOD
+      IF (IFLAM.NE.0) THEN
+       MTYMAT='MASSE'
+      ELSE
+       MTYMAT='RIGIDITE'
+      ENDIF
+C
+      DO 140 ISOUS=1,NSOUS
+        IRIGEL(4,ISOUS)=0
+        COERIG(ISOUS)=1.D0
+  140 CONTINUE
+C_______________________________________________________________________
+C
+C      BOUCLE SUR LES SOUS ZONES DU MAILLAGE
+C_______________________________________________________________________
+C
+      DO 500 ISOUS=1,NSOUS
+C
+C       TRAITEMENT DU MODELE
+C
+        IMODEL=LIMODL(ISOUS)
+        MELE=NEFMOD
+        IPMAIL=IMAMOD
+C_______________________________________________________________________
+C
+C  INFOS. ELEMENT FINI
+C_______________________________________________________________________
+C
+*         CALL ELQUOI(MELE,0,3,IPINF,IMODEL)
+         IF ( IERR.NE.0 ) THEN
+           SEGDES IMODEL,MMODEL
+           SEGDES MCHEL1
+           IF(ICHA.EQ.0)CALL DTCHAM(IPCHE1)
+           SEGSUP MRIGID
+           IRET=0
+           RETURN
+         ENDIF
+*         INFO=IPINF
+        LHOOK = INFELE(10)
+        LHOO2 = LHOOK*LHOOK
+        NSTRS = INFELE(16)
+        MFR   = INFELE(13)
+        LW    = INFELE(7)
+        IF(MELE.EQ.28)LW=600
+        NDDL  = INFELE(15)
+        LRE   = INFELE(9)
+        IPORE = INFELE(8)
+        LVAL  = (LRE*(LRE+1))/2
+        NHRM   = NIFOUR
+C
+C       CREATION DU TABLEAU INFOS
+C
+        INFOS(1)=0
+        INFOS(2)=0
+        INFOS(3)=NIFOUR
+C_______________________________________________________________________
+C
+C  INFOS. MAILLAGE
+C_______________________________________________________________________
+C
+        MELEME=IPMAIL
+        SEGACT MELEME
+        NBNN=NUM(/1)
+        NBELEM=NUM(/2)
+C_______________________________________________________________________
+C
+C  SEGMENTS D'INTEGRATION
+C_______________________________________________________________________
+C
+* Minte : 1er  segment d'integration, il existe pour tous les e.f.
+* Minte1: 2eme segment d'integration, uniquement pour certains e.f.
+*         en particulier pour Coq6 et Coq8
+* nbpg:nb de points de gauss = nbpgau du segment minte
+* iele:no d'element geometrique associe a l'e.f. mele
+* nbff:nb de fonctions de forme = nbno du segment minte
+*
+        NBPGAU= INFELE(  6)
+        IELE  = INFELE( 14)
+        ICARA = INFELE(  5)
+*        MINTE = INFELE(11)
+        MINTE=INFMOD(5)
+        MINTE1= INFMOD(8)
+        if(mele.ne.260)SEGACT MINTE
+C_______________________________________________________________________
+C
+C INITIALISATION DU SEGMENT DESCR, SEGMENT DESCRIPTEUR DES
+C DES INCONNUES RELATIVES A LA MATRICE DE RIGIDITE
+C_______________________________________________________________________
+C
+        NLIGRP = INFELE(9)
+        NLIGRD = INFELE(9)
+        SEGINI DESCR
+        IPDESC=DESCR
+        if(lnomid(1).ne.0) then
+          nomid=lnomid(1)
+          segact nomid
+          modepl=nomid
+          ndepl=lesobl(/2)
+          ndum=lesfac(/2)
+          lsupdp=.false.
+        else
+          lsupdp=.true.
+          CALL IDPRIM(IMODEL,MFR,MODEPL,NDEPL,NDUM)
+        endif
+         if(lnomid(2).ne.0) then
+           nomid=lnomid(2)
+          segact nomid
+          moforc=nomid
+          nforc=lesobl(/2)
+          lsupfo=.false.
+        else
+         lsupfo=.true.
+         CALL IDDUAL(IMODEL,MFR,MOFORC,NFORC,NDUM)
+        endif
+*
+        IF (NDEPL.EQ.0.OR.NFORC.EQ.0.OR.NDEPL.NE.NFORC) THEN
+          CALL ERREUR(5)
+          SEGSUP DESCR,MRIGID
+          SEGDES MCHEL1
+          IF(ICHA.EQ.0)CALL DTCHAM(IPCHE1)
+          SEGDES MMODEL,MELEME,MINTE
+          SEGDES IMODEL
+          IRET=0
+          RETURN
+        ENDIF
+*
+*       REMPLISSAGE DU SEGMENT DESCRIPTEUR
+*
+        IDDL=1
+        NCOMP=NDEPL
+        NBNNS=NBNN
+        NOMID=MODEPL
+        SEGACT NOMID
+        NOMID=MOFORC
+        SEGACT NOMID
+        IF (MFR.EQ.33) NCOMP=NDEPL-1
+        IF (MFR.EQ.19.OR.MFR.EQ.21) NBNNS=NBNN/2
+        DO 1004 INOEUD=1,NBNNS
+          DO 1005 ICOMP=1,NCOMP
+            NOMID=MODEPL
+            LISINC(IDDL)=LESOBL(ICOMP)
+            NOMID=MOFORC
+            LISDUA(IDDL)=LESOBL(ICOMP)
+            NOELEP(IDDL)=INOEUD
+            NOELED(IDDL)=INOEUD
+            IDDL=IDDL+1
+ 1005     CONTINUE
+ 1004   CONTINUE
+        NOMID=MODEPL
+        if(lsupdp)SEGSUP NOMID
+        NOMID=MOFORC
+        if(lsupfo)SEGSUP NOMID
+*
+*          CAS DES MILIEUX POREUX
+*
+*          IF (MFR.EQ.33) THEN
+*            DO 1104 INOEUD=1,NBSOM(IELE)
+*              NOMID=MODEPL
+*              LISINC(IDDL)=LESOBL(NDEPL)
+*              NOMID=MOFORC
+*              LISDUA(IDDL)=LESOBL(NDEPL)
+*              NOELEP(IDDL)=IBSOM(NSPOS(IELE)+INOEUD-1)
+*              NOELED(IDDL)=IBSOM(NSPOS(IELE)+INOEUD-1)
+*              IDDL=IDDL+1
+*1104        CONTINUE
+*          ENDIF
+*
+*          CAS DES ELEMENT RACCORD
+*
+        IF (MFR.EQ.19.OR.MFR.EQ.21) THEN
+          CALL IDPRIM(IMODEL,MFR+1000,MODEPL,NDEPL,NDUM)
+          CALL IDDUAL(IMODEL,MFR+1000,MOFORC,NFORC,NDUM)
+          DO 1106 INOEUD=NBNNS+1,NBNN
+            DO 1107 ICOMP=1,NDEPL
+              NOMID=MODEPL
+              LISINC(IDDL)=LESOBL(ICOMP)
+              NOMID=MOFORC
+              LISDUA(IDDL)=LESOBL(ICOMP)
+              NOELEP(IDDL)=INOEUD
+              NOELED(IDDL)=INOEUD
+              IDDL=IDDL+1
+1107        CONTINUE
+1106      CONTINUE
+          NOMID=MODEPL
+          SEGSUP NOMID
+          NOMID=MOFORC
+          SEGSUP NOMID
+        ENDIF
+
+        SEGDES DESCR
+C_______________________________________________________________________
+C
+C INITIALISATION DU SEGMENT IMATRI,
+C CONTENANT LES MATRICES DE RIGIDITE ELEMENTAIRES
+C_______________________________________________________________________
+C
+* NBELEM: NB D'ELEMENTS DANS LA SOUS ZONE
+        NELRIG = NBELEM
+        SEGINI xMATRI
+C_______________________________________________________________________
+C
+C  TRAITEMENT DU CHAPEAU DES RIGIDITES, SEGMENT MRIGID
+C_______________________________________________________________________
+C
+        IRIGEL(1,ISOUS)=IPMAIL
+        IRIGEL(2,ISOUS)=0
+        IRIGEL(3,ISOUS)=IPDESC
+        IRIGEL(4,ISOUS)=xMATRI
+        IRIGEL(5,ISOUS)=NIFOUR
+        IF (IASYM .EQ. 0) THEN
+          IRIGEL(7, ISOUS) = 0
+          xmatri.symre=0
+        ELSE
+          IRIGEL(7, ISOUS) = 2
+          xmatri.symre=2
+        ENDIF
+C_______________________________________________________________________
+C
+C VALEURS DE PRESSION
+C_______________________________________________________________________
+C
+        CALL PLACE2(MCHEL1.IMACHE,NBMAIC,IM,IPMAIL)
+        MCHAM1=MCHEL1.ICHAML(IM)
+        SEGACT MCHAM1
+        IVAPR=MCHAM1.IELVAL(1)
+        SEGDES MCHAM1
+        MELVAL=IVAPR
+        IF(IVAPR.NE.0)SEGACT MELVAL
+*
+C=======================================================================
+C     NUMERO DES ETIQUETTES      :
+C     ETIQUETTES DE 1 A 98 POUR TRAITEMENT SPECIFIQUE A L ELEMENT
+C     DANS LA ZONE SPECIFIQUE A CHAQUE ELEMENT COMMENCANT PAR :
+C     5  CONTINUE
+C     ELEMENT 5   ETIQUETTES 1005 2005 3005 4005   ...
+C     44 CONTINUE
+C     ELEMENT 44  ETIQUETTES 1044 2044 3044 4044   ...
+C=======================================================================
+
+      GOTO (99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,
+     1      99,99,99,99,99,99,27,28,99,99,99,99,99,99,99,99,99,99,99,99,
+     2      41,99,99,44,99,99,99,99,49,99,99,99,99,99,99,56,99,99,99,99,
+     3      99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,
+     4      99,99,99,99,99,99,99,99,99,99,99,99,28,99,99,99,99),MELE
+C
+
+      if(mele.eq.260) go to 1260
+      GOTO 99
+  27  CONTINUE
+C_______________________________________________________________________
+C
+C                   ELEMENT COQ3
+C_______________________________________________________________________
+C
+      NBBB=NBNN
+      SEGINI WRK1,WRK3,WRK4
+      DO 3027  IB=1,NBELEM
+C
+C     ON CHERCHE LES COORDONNEES DES NOEUDS DE L ELEMENT IB
+C
+      CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+      CALL ZERO(REL,LRE,LRE)
+C
+C     ON CHERCHE LES PRESSIONS
+C
+      PRESS=0.D0
+      IF(MELVAL.NE.0)THEN
+        IBMN=MIN(IB  ,VELCHE(/2))
+        DO 4027 IGAU=1,NBNN
+          IGMN=MIN(IGAU,VELCHE(/1))
+          PRESS=PRESS+VELCHE(IGMN,IBMN)
+ 4027   CONTINUE
+        PRESS=PRESS/NBNN
+      ENDIF
+C
+C         ON CALCULE K(P)
+C
+*      SEGINI XMATRI
+      CALL KPCOQ3(XE,PRESS,RE(1,1,ib),IASYM)
+*      SEGINI XMATRI
+*      IMATTT(IB)=XMATRI
+C
+C     REMPLISSAGE DE XMATRI
+C
+*      CALL REMPMC(REL,LRE,RE(1,1,ib))
+*      SEGDES XMATRI
+ 3027 CONTINUE
+      SEGDES xMATRI
+      SEGSUP WRK1,WRK3,WRK4
+      GOTO 510
+C_______________________________________________________________________
+C
+C     ELEMENT DKT    POUR L INSTANT = COQ3
+C_______________________________________________________________________
+C
+  28  CONTINUE
+      NBBB=NBNN
+      SEGINI WRK1,WRK3,WRK4
+      DO 3028  IB=1,NBELEM
+C
+C     ON CHERCHE LES COORDONNEES DES NOEUDS DE L ELEMENT IB
+C
+      CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+C
+      CALL ZERO(REL,LRE,LRE)
+C
+C     ON CHERCHE LES PRESSIONS
+C
+      PRESS=0.D0
+      IF(MELVAL.NE.0)THEN
+        IBMN=MIN(IB  ,VELCHE(/2))
+        DO 4028 IGAU=1,NBNN
+          IGMN=MIN(IGAU,VELCHE(/1))
+          PRESS=PRESS+VELCHE(IGMN,IBMN)
+ 4028   CONTINUE
+        PRESS=PRESS/NBNN
+      ENDIF
+C
+C         ON CALCULE K(P)
+C
+*      SEGINI XMATRI
+      CALL KPCOQ3(XE,PRESS,RE(1,1,ib),IASYM)
+*      SEGINI XMATRI
+*      IMATTT(IB)=XMATRI
+C
+C     REMPLISSAGE DE XMATRI
+C
+*      CALL REMPMC(REL,LRE,RE)
+*      SEGDES XMATRI
+ 3028 CONTINUE
+      SEGDES xMATRI
+      SEGSUP WRK1,WRK3,WRK4
+      GOTO 510
+C_______________________________________________________________________
+C
+C  ELEMENT COQ8  NON ENCORE BRANCHE
+C  LES INSTRUCTIONS SUIVANTES SONT EN COMMENTAIRE
+C_______________________________________________________________________
+C
+ 41   CONTINUE
+      NBBB=NBNN
+      SEGINI WRK1,WRK3
+      DO 3041 IB=1,NBELEM
+C
+C  ON CHERCHE LES COORDONNEES DES NOEUDS DE L ELEMENTIB
+C
+      CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+C
+      CALL ZERO(REL,LRE,LRE)
+C
+C  ON CHERCHE LES PRESSION    - ON LES MET DANS WORK
+C
+      PRESS=0.D0
+      IF(MELVAL.NE.0)THEN
+        IBMN=MIN(IB  ,VELCHE(/2))
+        DO 4041 IGAU=1,NBNN
+          IGMN=MIN(IGAU,VELCHE(/1))
+          PRESS=PRESS+VELCHE(IGMN,IBMN)
+ 4041   CONTINUE
+        PRESS=PRESS/NBNN
+      ENDIF
+*      IE=0
+*       DO 7041 IGAU=1,NBNN
+*         IE=IE+1
+*         IF (MELVAL.NE.0) THEN
+*           IGMN=MIN(IGAU,VELCHE(/1))
+*           IBMN=MIN(IB  ,VELCHE(/2))
+*           WORK(IE)=VELCHE(IGMN,IBMN)
+*         ELSE
+*           WORK(IE)=0.D0
+*         ENDIF
+* 7041  CONTINUE
+C
+C  ON CALCULE LA RIGIDITE GEOMETRIQUE
+C
+*      SEGINI XMATRI
+      CALL KPCOQ8(XE,PRESS,RE(1,1,ib),IASYM)
+C
+C  REMPLISSAGE DE XMATRI
+C
+*      SEGINI XMATRI
+*      IMATTT(IB)=XMATRI
+*      CALL REMPMC(REL,LRE,RE)
+*      SEGDES XMATRI
+ 3041 CONTINUE
+      SEGDES xMATRI
+      SEGSUP WRK1,WRK3
+      GO TO 510
+C_______________________________________________________________________
+C
+C     ELEMENT COQ2
+C_______________________________________________________________________
+C
+   44 CONTINUE
+*
+*  AM 01/09/94  PETIT TEST SUR IFOUR CAR NE FONCTIONNE
+*  QU'EN SERIE DE FOURIER
+*
+      IF(IFOUR.NE.1) GO TO 99
+
+*  BP 17/02/2014 on teste aussi qu'on demande la partie symetrique seule
+      IF(IASYM.NE.0) THEN
+        write(ioimp,*) 'L option de calcul ASYMetrique ',
+     &  'n est pas disponible avec les coq2 !'
+        call ERREUR(19)
+        goto 9990
+      ENDIF
+
+      NBBB=NBNN
+      SEGINI WRK1,WRK3,WRK4
+      DO 3044 IB=1,NBELEM
+C
+C     ON CHERCHE LES COORDONNEES DES NOEUDS DE  L ELEMENT IB
+C
+      CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+      CALL ZERO(REL,LRE,LRE)
+C
+C     ON CHERCHE LES PRESSIONS   ON LES MET DANS WORK...
+C
+      WORK(1)=0.D0
+
+      IF(MELVAL.NE.0)THEN
+        IBMN=MIN(IB  ,VELCHE(/2))
+        DO 1344 IGAU=1,NBNN
+          IGMN=MIN(IGAU,VELCHE(/1))
+          WORK(1)=WORK(1)+VELCHE(IGMN,IBMN)
+ 1344   CONTINUE
+        WORK(1)=WORK(1)/NBNN
+      ENDIF
+C
+C     APPEL A COQUE2 KP
+C
+      AN=NHRM
+      CALL CQ2KP(XE,WORK(1),AN,WORK(2),WORK(7),WORK(12),
+     1 WORK(19),WORK(26),REL,POIGAU,QSIGAU,NBPGAU,WORK(29),WORK(93),
+     2 WORK(157),WORK(221),WORK(285))
+C
+C     REMPLISSAGE DE XMATRI
+C
+*      SEGINI XMATRI
+*      IMATTT(IB)=XMATRI
+      CALL REMPMT(REL,LRE,RE(1,1,ib))
+*      SEGDES XMATRI
+ 3044 CONTINUE
+      SEGDES xMATRI
+      SEGSUP WRK1,WRK3,WRK4
+      GOTO 510
+C_______________________________________________________________________
+C
+C     ELEMENT COQ4   NON ENCORE BRANCHE
+C  LES INSTRUCTIONS SUIVANTES SONT EN COMMENTAIRE
+C_______________________________________________________________________
+C
+   49 CONTINUE
+      NBBB=NBNN
+      SEGINI WRK1,WRK3,WRK4
+      DO 3049 IB=1,NBELEM
+C
+C     ON CHERCHE LES COORDONNEES DES NOEUDS DE  L ELEMENT IB
+C
+      CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+C
+      CALL ZERO(REL,LRE,LRE)
+C
+C     ON CHERCHE LES PRESSIONS   ON LES MET DANS WORK...
+C
+      PRESS=0.D0
+      IF(MELVAL.NE.0)THEN
+        IBMN=MIN(IB  ,VELCHE(/2))
+        DO 4049 IGAU=1,NBNN
+          IGMN=MIN(IGAU,VELCHE(/1))
+          PRESS=PRESS+VELCHE(IGMN,IBMN)
+ 4049   CONTINUE
+        PRESS=PRESS/NBNN
+      ENDIF
+*       IE=0
+*       DO 5049 IGAU=1,NBNN
+*         IE=IE+1
+*         IF (MELVAL.NE.0) THEN
+*           IGMN=MIN(IGAU,VELCHE(/1))
+*           IBMN=MIN(IB  ,VELCHE(/2))
+*           WORK(IE)=VELCHE(IGMN,IBMN)
+*         ELSE
+*           WORK(IE)=0.D0
+*         ENDIF
+* 5049  CONTINUE
+C
+C     APPEL A COQUE4 KSIGMA...
+C
+      AN=NHRM
+*      SEGINI XMATRI
+*      CALL KPCOQ4(XE,PRESS,REL,IASYM)
+      CALL KPCOQ4(XE,PRESS,RE(1,1,ib),IASYM)
+C
+C     REMPLISSAGE DE XMATRI
+C
+*      SEGINI XMATRI
+*      IMATTT(IB)=XMATRI
+*      CALL REMPMC(REL,LRE,RE)
+*      SEGDES XMATRI
+ 3049 CONTINUE
+      SEGDES xMATRI
+      SEGSUP WRK1,WRK3,WRK4
+      GOTO 510
+C_______________________________________________________________________
+C
+C    element SHB8
+C_______________________________________________________________________
+C
+ 1260 continue
+*
+      NBBB=NBNN
+      SEGINI WRK1,wrk7
+*  reperage du chpoint de pression
+      segini icpr
+      mchpoi=ipchpO
+      segact mchpoi
+      ino=0
+      if(ipchp(/1).ne.1) then
+        call erreur(19)
+        return
+      endif
+      msoupo=ipchp(1)
+      segact msoupo
+      if(noharm(/1).ne.1)then
+         call erreur(180)
+         return
+      endif
+      meleme=igeoc
+      segact meleme
+      do ia=1,num(/2)
+        ib=num(1,ia)
+        if(icpr(ib).eq.0) then
+          ino=ino+1
+          icpr(ib)=ino
+        endif
+      enddo
+      segdes meleme
+      mpoval=ipoval
+      segact mpoval
+* on cherche si surf interne ou externe
+      meleme=ipmail
+      if(lisref(/1).ne.2) then
+         call erreur (1004)
+         return
+      endif
+      isur=0
+      do icas=1,2
+        ipt3=lisref(icas)
+        segact ipt3
+        do ia=1,ipt3.num(/2)
+          do ic=1,4
+            ib=ipt3.num(ic,ia)
+            if(icpr(ib).eq.0) go to 2260
+          enddo
+        enddo
+        isur=icas
+        go to 3260
+ 2260  continue
+       segdes ipt3
+      enddo
+      call erreur(286)
+      return
+3260  continue
+      propel(2)=isur
+
+      DO 4260 IB=1,NBELEM
+C
+C     ON CHERCHE LES COORDONNEES DES NOEUDS DE  L ELEMENT IB
+C
+      CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+      CALL ZERO(REL,LRE,LRE)
+C
+C     ON CHERCHE LES PRESSIONS   ON LES MET DANS WORK...
+C
+      pre=0.d0
+      do ia=1,4
+       ibb=ipt3.num(ia,ib)
+       pre=pre+vpocha(icpr(ibb),1)/4
+      enddo
+      propel(1)=pre
+
+C
+C     APPEL A shb8 KP
+C
+      call shb8(10,xe,D,propel,work1,rel,out)
+C
+C     REMPLISSAGE DE XMATRI
+C
+*      SEGINI XMATRI
+*      IMATTT(IB)=XMATRI
+      CALL REMPMT(REL,LRE,RE(1,1,ib))
+*      SEGDES XMATRI
+ 4260 CONTINUE
+      SEGDES xMATRI
+      SEGSUP WRK1,WRK7
+      segsup icpr
+      segdes mpoval
+      GOTO 510
+C_______________________________________________________________________
+C
+C  ELEMENT COQ6  NON ENCORE BRANCHE
+C  LES INSTRUCTIONS SUIVANTES SONT EN COMMENTAIRE
+C_______________________________________________________________________
+C
+ 56   CONTINUE
+      NBBB=NBNN
+      SEGINI WRK1,WRK3
+      DO 3056 IB=1,NBELEM
+C
+C  ON CHERCHE LES COORDONNEES DES NOEUDS DE L ELEMENTIB
+C
+      CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+C
+      CALL ZERO(REL,LRE,LRE)
+C
+C  ON CHERCHE LES PRESSION    - ON LES MET DANS WORK
+C
+      PRESS=0.D0
+      IF(MELVAL.NE.0)THEN
+        IBMN=MIN(IB  ,VELCHE(/2))
+        DO 4056 IGAU=1,NBNN
+          IGMN=MIN(IGAU,VELCHE(/1))
+          PRESS=PRESS+VELCHE(IGMN,IBMN)
+ 4056   CONTINUE
+        PRESS=PRESS/NBNN
+      ENDIF
+*      IE= 0
+*       DO 7056 IGAU=1,NBNN
+*         IE=IE+1
+*         IF (MELVAL.NE.0) THEN
+*           IGMN=MIN(IGAU,VELCHE(/1))
+*           IBMN=MIN(IB  ,VELCHE(/2))
+*           WORK(IE)=VELCHE(IGMN,IBMN)
+*         ELSE
+*           WORK(IE)=0.D0
+*         ENDIF
+* 7056  CONTINUE
+C
+C  ON CALCULE LA RIGIDITE GEOMETRIQUE
+C
+*      SEGINI XMATRI
+      CALL KPCOQ6(XE,PRESS,RE(1,1,ib),IASYM)
+C
+C  REMPLISSAGE DE XMATRI
+C
+*      SEGINI XMATRI
+*      IMATTT(IB)=XMATRI
+*      CALL REMPMC(REL,LRE,RE)
+*      SEGDES XMATRI
+ 3056 CONTINUE
+      SEGDES xMATRI
+      SEGSUP WRK1,WRK3
+      GO TO 510
+C_______________________________________________________________________
+C
+C     DESACTIVATION DES SEGMENTS PROPRES A LA ZONE GEOMETRIQUE IA
+C_______________________________________________________________________
+C
+  510 CONTINUE
+      SEGDES MELEME
+      SEGDES IMODEL
+      IF (IVAPR.NE.0) SEGDES MELVAL
+C
+      if(mele.ne.260)SEGDES MINTE
+C      SEGSUP INFO
+C_______________________________________________________________________
+C
+C      FIN DE BOUCLE SUR LES MODELES ELEMENTAIRES
+C_______________________________________________________________________
+C
+  500 CONTINUE
+C
+      SEGDES MRIGID
+      SEGDES MMODEL
+      SEGDES MCHEL1
+      SEGSUP,LIMODL
+      IF(ICHA.EQ.0) CALL DTCHAM(IPCHE1)
+      RETURN
+C
+C_______________________________________________________________________
+C
+C     ERREUR DANS UNE SOUS ZONE, DESACTIVATION ET RETOUR
+C_______________________________________________________________________
+C
+C     ELEMENT NON IMPLEMENTE
+C
+   99 CONTINUE
+      MOTERR(1:4)=NOMTP(MELE)
+      MOTERR(5:12)='KPRES   '
+      CALL ERREUR(86)
+C
+ 9990 CONTINUE
+      IRET=0
+
+      IF(IVAPR.NE.0)SEGDES MELVAL
+C
+      SEGSUP,LIMODL
+      SEGDES MELEME
+      SEGDES IMODEL
+      SEGSUP DESCR
+      SEGSUP xMATRI
+C
+      SEGDES MMODEL
+      SEGDES MCHEL1
+      IF(ICHA.EQ.0) CALL DTCHAM(IPCHE1)
+      SEGDES MINTE
+C      SEGSUP INFO
+      SEGSUP MRIGID
+      RETURN
+      END
+
+
+
+
+
+
+
+
+

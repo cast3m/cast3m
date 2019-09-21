@@ -1,0 +1,569 @@
+C FIMTR1    SOURCE    KK2000    14/04/10    21:15:06     8032
+      SUBROUTINE FIMTR1
+C************************************************************************
+C
+C PROJET            :  CASTEM 2000
+C
+C NOM               :  FIMTR1
+C
+C DESCRIPTION       :  Subroutine appellée par FIMPVF
+C
+C                      Modelisation 2D/3D de term source
+C                      pour les equations multiespeces NS:
+C                      Gravité + k-\eps turbulence model
+C
+C                      Calcul du flux/residu
+C
+C LANGAGE           :  FORTRAN 77 + ESOPE 2000 (avec estensions CISI)
+C
+C AUTEUR            :  S. Kudriakov, DEN/DM2S/SFME/LTMF
+C
+C************************************************************************
+C
+C*** SYNTAXE
+C
+C  Discrétisation en VF "cell-centered" des équations de NS pour
+C  un gaz parfait polytropique (term source)
+C  Inconnues: densités, quantité de mouvement, énergie totale par
+C  unité de volumes, énergie cinetic turbulente (\rho k),
+C  rate of dissipated turb. energy (\rho \eps) (var. conservatives)
+C  Gravité
+C
+C  RESU = 'FIMP' 'VF' 'GRAVKEPS' MOT1 TABGAS
+C          LMOTC CHPRN CHPGN CHGRA CHRKA CHREPS GRADR GRADV ;
+C--------------------------------------------------------------------
+C
+C  MOT1    : MOT: 'RESI'
+C
+C  TABGAS  : table with the gas properties;
+C            here we need:
+C                        a) turbulent constant \sigma_t (see gravity
+C                           term in k-\eps equations)
+C                           name: TABGAS . 'SIGT'
+C                        b) turbulent constant C_{\eps 1} (see
+C                                      \eps-equation)
+C                           name: TABGAS . 'CEPS1'
+C                        c) turbulent constant C_{\eps 2} (see
+C                                      \eps-equation)
+C                           name: TABGAS . 'CEPS2'
+C                        d) rate of productions for the species
+C                           (source term); type 'CHPOINT'
+C                           (SPG = 'CENTRE', the number of components
+C                            is equal to the number of species in
+C                            TABGAS . 'ESPEULE')
+C                        e) TABGAS . 'ESPEULE' - the names of the
+C                           species which are explicitely in the equations
+C                        f) TABGAS . 'MUTURB' - turbulent viscosity
+C                           (SPG = 'CENTRE'; number of compon. = 1)
+C                        g) the formation enthalpies of the species
+C                             at T_0 = 0 K
+C
+C  LMOTC   : LISTMOTS, noms des variables conservatives
+C
+C  CHPRN   : densité  (SPG = 'CENTRE', une seule
+C           composante, 'SCAL')
+C
+C  CHPGN   : qdm (SPG = meme que CHPRN,
+C           composantes: 'UX', 'UY', ('UZ'))
+C
+C  CHPGRA  : gravité (SPG = meme que CHPRN,
+C           composantes: 'UX', 'UY', ('UZ'))
+C
+C  CHRKA   : turbulent kinetic energy per unit volume
+C            (SPG = 'CENTRE', une seule composante, name is the
+C             name of the corresponding conservative variable)
+C
+C  CHREPS  : rate of dissipated turb. energy per unit volume
+C            (SPG = 'CENTRE', une seule composante, name is the
+C             name of the corresponding conservative variable)
+C
+C  GRADR   : gradient of the density
+C            (SPG = 'CENTRE', composantes: 'P1DX','P1DY', ('P1DZ'))
+C
+C  GRADV   : gradient of the velocity vector
+C            (SPG = 'CENTRE', composantes: 'P1DX','P1DY', ('P1DZ')
+C                                          'P2DX','P2DY', ('P2DZ')
+C                                         ('P3DX','P3DY', ('P3DZ')))
+C
+C SORTIES
+C
+C  RESU  : residu
+C
+C
+C************************************************************************
+C
+C HISTORIQUE (Anomalies et modifications éventuelles)
+C
+C HISTORIQUE :
+C
+C************************************************************************
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+
+-INC CCOPTIO
+-INC SMLMOTS
+-INC SMCHPOI
+-INC SMTABLE
+C
+C**** Variables pour ACCTAB
+C
+      INTEGER IVALI, IRETI,IVALR, IRETR, IESP
+      REAL*8 XVALI, XVALR
+      LOGICAL LOGII, LOGIR
+      CHARACTER*(8) MTYPI, MTYPR, CHARR, MOTNEU
+C
+C**** Segment des caractéristiques du gaz
+C
+      SEGMENT SORGAS
+         REAL*8 H0K(NESP+1)
+         POINTEUR SOUR(NESP+1).MCHPOI
+      ENDSEGMENT
+C-----------------------------------------------------
+C
+      INTEGER NBOPT, IMET, IRET, IRKA, ICEN, INDIC, NBCOMP
+     &   , IRO,IROVIT,JGN, JGM, IGRAV, ILIINC, IRES
+     &     ,NESP,IPGAS, IRETOU, ICOND, IREPS, IGRADR, IGRADV
+     &    , IMUT, ISOUR, I1
+C------Constants of the k-eps model
+      REAL*8 TSIGT, TCEPS1, TCEPS2
+C
+      PARAMETER (NBOPT=1)
+      CHARACTER*8 LOPT(NBOPT)
+      CHARACTER*4 MOT(1), MOTKA, MOTEPS, MOT1(10)
+C
+      DATA LOPT/'RESI    '/
+C
+C**** IMET = 1 -> residuu
+C
+      CALL LIRMOT(LOPT,NBOPT,IMET,1)
+      IF(IERR.NE.0)GOTO 9999
+C-------------------------------------------------
+C*** Reading the table PGAS  *********************
+C-------------------------------------------------
+      ICOND = 1
+      CALL QUETYP(MTYPR,ICOND,IRETOU)
+      IF(IERR .NE. 0)GOTO 9999
+      IF(MTYPR .NE. 'TABLE   ')THEN
+C---------------------------------------
+C Message d'erreur standard
+C 37 2
+C On ne trouve pas d'objet de type %m1:8
+C---------------------------------------
+         MOTERR(1:8) = 'TABLE   '
+         CALL ERREUR(37)
+         GOTO 9999
+      ELSE
+         ICOND = 1
+         CALL LIROBJ(MTYPR,IPGAS,ICOND,IRETOU)
+         IF(IERR .NE. 0)GOTO 9999
+      ENDIF
+C!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+C-------------------------------------------
+C  Reading the constants of the Source term
+C-------------------------------------------
+C--------- \sigma_t
+      CALL ACMF(IPGAS,'SIGT',XVALR)
+      TSIGT = XVALR
+C-------- C_\eps 1
+      CALL ACMF(IPGAS,'CEPS1',XVALR)
+      TCEPS1 = XVALR
+C-------- C_\eps 2
+      CALL ACMF(IPGAS,'CEPS2',XVALR)
+      TCEPS2 = XVALR
+C-------------------------------------------
+C********  Reading the Source Terms ********
+C-------------------------------------------
+      MTYPR = '        '
+      CALL ACMO(IPGAS,'SOUR',MTYPR,ISOUR)
+      IF(MTYPR .NE. 'TABLE   ')THEN
+C--------------------------------
+C Message d'erreur standard
+C -301 0 %m1:40
+C--------------------------------
+         MOTERR(1:40) = 'TAB1 . SOUR = ???                     '
+         WRITE(IOIMP,*) MOTERR(1:40)
+C---------------------------------
+C Message d'erreur standard
+C 21 2
+C Données incompatibles
+C--------------------------------
+         CALL ERREUR(21)
+         GOTO 9999
+      ENDIF
+C!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+C---------------------------------------------------------
+C Reading Les especes qui sont dans les Equations d'Euler
+C---------------------------------------------------------
+      MTYPR = '        '
+      CALL ACMO(IPGAS,'ESPEULE',MTYPR,MLMOT1)
+      IF(MTYPR .NE. 'LISTMOTS')THEN
+C---------------------------
+C Message d'erreur standard
+C -301 0 %m1:40
+C---------------------------
+         MOTERR(1:40) = 'TAB1 . ESPEULE = ???                '
+         WRITE(IOIMP,*) MOTERR(1:40)
+C---------------------------
+C Message d'erreur standard
+C 21 2
+C Données incompatibles
+C--------------------------
+         CALL ERREUR(21)
+         GOTO 9999
+      ENDIF
+C---------------------------------------------------------
+C Reading L'espece qui n'est pas dans les Equations d'Euler
+C---------------------------------------------------------
+      MTYPR = '        '
+      CALL ACMM(IPGAS,'ESPNEULE',MOTNEU)
+c*c*c*c*c*c***********************************
+      SEGACT MLMOT1
+      NESP = MLMOT1.MOTS(/2)
+C!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+      SEGINI SORGAS
+      DO I1 = 1, NESP
+C-------------------------------
+C N.B. MOT1 est un CHARACTER*(4)
+C-------------------------------
+         MOT1(1) = MLMOT1.MOTS(I1)
+         MTYPI = 'MOT     '
+         MTYPR = '        '
+         CALL ACCTAB(ISOUR,MTYPI,IVALI,XVALI,MOT1(1), LOGII,IRETI,
+     &               MTYPR,IVALR,XVALR,CHARR,LOGIR,IRETR)
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'CHPOINT ')) THEN
+C------------------------------
+C Message d'erreur standard
+C -301 0 %m1:40
+C------------------------------
+            MOTERR = 'TAB1 . SOUR, TAB1 . ESPEULE = ???      '
+            WRITE(IOIMP,*) MOTERR(1:40)
+C------------------------------
+C Message d'erreur standard
+C 21 2
+C Données incompatibles
+C------------------------------
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+         SORGAS.SOUR(I1) = IRETR
+      ENDDO
+C!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+C-------------------------------------------------
+c  Reading the enthalpies of formation at 0 K
+c-------------------------------------------------
+      DO I1 = 1, NESP
+         MOT1(1) = MLMOT1.MOTS(I1)
+C
+C******* CALL ACMF(...)  ne marche pas parce que on a
+C        des espaces dans nos noms de composantes
+C
+         MTYPI = 'MOT     '
+         MTYPR = '        '
+         CALL ACCTAB(IPGAS,MTYPI,IVALI,XVALI,MOT1(1), LOGII,IRETI,
+     &        MTYPR,IVALR,XVALR,CHARR,LOGIR,IESP)
+C
+C******* En IESP il y a la table IPGAZ.MOT1
+C
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'TABLE   ')) THEN
+
+C
+C********** Message d'erreur standard
+C           -301 0 %m1:40
+C
+            MOTERR = '                                        '
+            MOTERR(1:7) = 'ARG1 . '
+            MOTERR(8:11) = MOT1(1)
+            MOTERR(13:17) = '= ???'
+            WRITE(IOIMP,*) MOTERR
+C
+C********** Message d'erreur standard
+C           21 2
+C           Données incompatibles
+C
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+C
+C******* H0K
+C
+         MTYPI = 'MOT     '
+         MTYPR = '        '
+         CALL ACCTAB(IESP,MTYPI,IVALI,XVALI, 'H0K' , LOGII,IRETI,
+     &        MTYPR,IVALR, XVALR ,CHARR,LOGIR,IRETR)
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'FLOTTANT')) THEN
+
+C
+C********** Message d'erreur standard
+C           -301 0 %m1:40
+C
+            MOTERR = '                                        '
+            MOTERR(1:7) = 'ARG1 . '
+            MOTERR(8:11) = MOT1(1)
+            MOTERR(13:25) = ' . H0K = ??? '
+            WRITE(IOIMP,*) MOTERR
+C
+C********** Message d'erreur standard
+C           21 2
+C           Données incompatibles
+C
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+         SORGAS.H0K(I1)=XVALR
+      ENDDO
+CCCCC--------------------------------------------------------
+C
+C******* CALL ACMF(...)  ne marche pas parce que on a
+C        des espaces dans nos noms de composantes
+C
+         MTYPI = 'MOT     '
+         MTYPR = '        '
+         CALL ACCTAB(IPGAS,MTYPI,IVALI,XVALI,MOTNEU, LOGII,IRETI,
+     &        MTYPR,IVALR,XVALR,CHARR,LOGIR,IESP)
+C
+C******* En IESP il y a la table IPGAZ.MOT1
+C
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'TABLE   ')) THEN
+
+C
+C********** Message d'erreur standard
+C           -301 0 %m1:40
+C
+            MOTERR = '                                        '
+            MOTERR(1:7) = 'ARG1 . '
+            MOTERR(8:11) = MOT1(1)
+            MOTERR(13:17) = '= ???'
+            WRITE(IOIMP,*) MOTERR
+C
+C********** Message d'erreur standard
+C           21 2
+C           Données incompatibles
+C
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+C
+C******* H0K of the species which are not in the N-S equations
+C
+         MTYPI = 'MOT     '
+         MTYPR = '        '
+         CALL ACCTAB(IESP,MTYPI,IVALI,XVALI, 'H0K' , LOGII,IRETI,
+     &        MTYPR,IVALR, XVALR ,CHARR,LOGIR,IRETR)
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'FLOTTANT')) THEN
+
+C
+C********** Message d'erreur standard
+C           -301 0 %m1:40
+C
+            MOTERR = '                                        '
+            MOTERR(1:7) = 'ARG1 . '
+            MOTERR(8:11) = MOT1(1)
+            MOTERR(13:25) = ' . H0K = ??? '
+            WRITE(IOIMP,*) MOTERR
+C
+C********** Message d'erreur standard
+C           21 2
+C           Données incompatibles
+C
+            CALL ERREUR(21)
+            GOTO 9999
+          ENDIF
+          SORGAS.H0K(NESP+1)=XVALR
+CC------------------------------------------------
+      SEGDES SORGAS
+      SEGDES MLMOT1
+C-------------------------------------------------
+C     Reading the turbulent viscosity
+C-------------------------------------------------
+      MTYPI = 'MOT     '
+      MTYPR = '        '
+      CALL ACCTAB(IPGAS,MTYPI,IVALI,XVALI,'MUTURB',LOGII,IRETI,
+     &               MTYPR,IVALR,XVALR,CHARR,LOGIR,IRETR)
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'CHPOINT ')) THEN
+C------------------------------
+C Message d'erreur standard
+C -301 0 %m1:40
+C------------------------------
+            MOTERR = 'TAB1 . MUTURB = ???      '
+            WRITE(IOIMP,*) MOTERR(1:40)
+C------------------------------
+C Message d'erreur standard
+C 21 2
+C Données incompatibles
+C------------------------------
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+      IMUT = IRETR
+C-------------------------------------------------
+C**** Noms de variables conservatives
+C-------------------------------------------------
+      CALL LIROBJ('LISTMOTS',ILIINC,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+      MLMOTS = ILIINC
+      SEGACT MLMOTS
+      NBCOMP = MLMOTS.MOTS(/2)
+      MOTKA = MLMOTS.MOTS(IDIM+NESP+3)
+      MOTEPS = MLMOTS.MOTS(IDIM+NESP+4)
+      SEGDES MLMOTS
+      IF(NBCOMP .NE. (IDIM+NESP+4))THEN
+         MOTERR(1:40) = 'LISTINCO = ???'
+         WRITE(IOIMP,*) MOTERR
+C
+C******* Message d'erreur standard
+C        21 2
+C        Données incompatibles
+C
+         CALL ERREUR(21)
+         GOTO 9999
+      ENDIF
+C---------------------------------------------------
+C**** Densité
+C---------------------------------------------------
+      CALL LIROBJ('CHPOINT',IRO,1,IRET)
+      IF (IERR.NE.0) GOTO 9999
+C
+C**** On cherche le pointeur de son maillage et on l'impose sur les
+C     autres CHPOINT
+C
+      MCHPOI = IRO
+      SEGACT MCHPOI
+      MSOUPO = MCHPOI.IPCHP(1)
+      SEGACT MSOUPO
+      ICEN = MSOUPO.IGEOC
+      SEGDES MSOUPO
+      SEGDES MCHPOI
+C
+C**** Control du CHPOINT: QUEPOI
+C
+      INDIC = 1
+      NBCOMP = 1
+      MOT(1) = 'SCAL'
+      CALL QUEPOI(IRO, ICEN, INDIC, NBCOMP, MOT)
+      IF(IERR .NE. 0) GOTO 9999
+C-------------------------------------------------
+C**** Lecture du CHPOINT DEBIT.
+C-------------------------------------------------
+      CALL LIROBJ('CHPOINT',IROVIT,1,IRET)
+      IF (IERR.NE.0) GOTO 9999
+C
+C**** Control du CHPOINT
+C
+      JGN = 4
+      JGM = IDIM
+      SEGINI MLMOTS
+      MLMOTS.MOTS(1) = 'UX  '
+      MLMOTS.MOTS(2) = 'UY  '
+      IF(IDIM .EQ. 3) MLMOTS.MOTS(3) = 'UZ  '
+      CALL QUEPO1(IROVIT, ICEN, MLMOTS)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C-------------------------------------------------
+C**** Lecture du CHPOINT GRAVITE.
+C-------------------------------------------------
+      CALL LIROBJ('CHPOINT',IGRAV,1,IRET)
+      IF (IERR.NE.0) GOTO 9999
+C
+C**** Control du CHPOINT
+C
+      CALL QUEPO1(IGRAV, ICEN, MLMOTS)
+      IF(IERR .NE. 0) GOTO 9999
+      SEGSUP MLMOTS
+C---------------------------------------------------------
+C**** Turbulent kinetic energy
+C---------------------------------------------------------
+      CALL LIROBJ('CHPOINT',IRKA,1,IRET)
+      IF (IERR.NE.0) GOTO 9999
+C
+C**** Control du CHPOINT: QUEPOI
+C
+      INDIC = 1
+      NBCOMP = 1
+      MOT(1) = MOTKA
+      CALL QUEPOI(IRKA, ICEN, INDIC, NBCOMP, MOT)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Turbulent energy dissipation
+C
+      CALL LIROBJ('CHPOINT',IREPS,1,IRET)
+      IF (IERR.NE.0) GOTO 9999
+C
+C**** Control du CHPOINT
+C
+      INDIC = 1
+      NBCOMP = 1
+      MOT(1) = MOTEPS
+      CALL QUEPOI(IREPS, ICEN, INDIC, NBCOMP, MOT)
+      IF(IERR .NE. 0) GOTO 9999
+*------------------------------------------------------
+* Gradient of density given at the centre
+*------------------------------------------------------
+      CALL LIROBJ('CHPOINT',IGRADR,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+*------------------------------
+      JGN = 4
+      JGM = IDIM
+      SEGINI MLMOTS
+      IF(IDIM .EQ. 2) THEN
+        MLMOTS.MOTS(1) = 'P1DX'
+        MLMOTS.MOTS(2) = 'P1DY'
+      ELSE
+        MLMOTS.MOTS(1) = 'P1DX'
+        MLMOTS.MOTS(2) = 'P1DY'
+        MLMOTS.MOTS(3) = 'P1DZ'
+      ENDIF
+      CALL QUEPO1(IGRADR, ICEN, MLMOTS)
+      IF(IERR .NE. 0) GOTO 9999
+      SEGDES MLMOTS
+*------------------------------------------------------
+*  Gradient of velocity given at the centre
+*------------------------------------------------------
+      CALL LIROBJ('CHPOINT',IGRADV,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+*------------------------------
+      JGN = 4
+      JGM = IDIM*IDIM
+      SEGINI MLMOTS
+      IF(IDIM .EQ. 2) THEN
+        MLMOTS.MOTS(1) = 'P1DX'
+        MLMOTS.MOTS(2) = 'P1DY'
+        MLMOTS.MOTS(3) = 'P2DX'
+        MLMOTS.MOTS(4) = 'P2DY'
+      ELSE
+        MLMOTS.MOTS(1) = 'P1DX'
+        MLMOTS.MOTS(2) = 'P1DY'
+        MLMOTS.MOTS(3) = 'P1DZ'
+        MLMOTS.MOTS(4) = 'P2DX'
+        MLMOTS.MOTS(5) = 'P2DY'
+        MLMOTS.MOTS(6) = 'P2DZ'
+        MLMOTS.MOTS(7) = 'P3DX'
+        MLMOTS.MOTS(8) = 'P3DY'
+        MLMOTS.MOTS(9) = 'P3DZ'
+      ENDIF
+      CALL QUEPO1(IGRADV, ICEN, MLMOTS)
+      IF(IERR .NE. 0) GOTO 9999
+      SEGDES MLMOTS
+C------------------------------------------------------
+C**** Results
+C------------------------------------------------------
+      IF(IMET.EQ.1)THEN
+C
+C******* On calcule le residu
+C
+         CALL FIMTR2(SORGAS,ILIINC,ICEN,IRO,IROVIT,IGRAV,IRKA,IREPS
+     &              ,IGRADR,IGRADV,IMUT,TSIGT,TCEPS1,TCEPS2,IRES)
+      ENDIF
+C
+      IF(IRES .NE. 0) CALL ECROBJ('CHPOINT ',IRES)
+C
+ 9999 CONTINUE
+      RETURN
+      END
+
+
+
+
+
+
+
+

@@ -1,0 +1,826 @@
+C INTGCA    SOURCE    CB215821  18/09/10    21:15:57     9912
+
+C=======================================================================
+C=                            I N T G C A                              =
+C=                            -----------                              =
+C=                                                                     =
+C=  Fonction :                                                         =
+C=  ----------                                                         =
+C=   Integration d'un champ scalaire sur un maillage ou par element.   =
+C=   Sous-programme appele par INTGRA (intgra.eso).                    =
+C=                                                                     =
+C=  Parametres :  (E)=Entree   (S)=Sortie                              =
+C=  ------------                                                       =
+C=   IPMODL   (E)   Pointeur sur le segment MMODEL                     =
+C=   IPCHE1   (E)   Pointeur sur segment MCHELM a une seule composante =
+C=   IPCHE2   (E)   Pointeur sur le segment MCHELM de CARACTERISTIQUES =
+C=   KOPELE   (E)   =0 si on ne veut pas un MCHAML resultat            =
+C=   IPINT    (S)   Pointeur sur le segment MCHELM resultat            =
+C=   XRET     (S)   Flottant resultant de l'integration si demande     =
+C=   IRET     (S)   Entier valant 1 en cas de succes, 0 sinon (et un   =
+C=                  message d'erreur est imprime dans ce cas)          =
+C=                                                                     =
+C=  Remarque : Autrefois, le champ resultat avait le meme support que  =
+C=  ---------- le champ IPCHE1,soit IPINT/MCHEL1.INFCHE(iSou,6)).      =
+C=             Maintenant, le champ resultat IPINT est donne au centre =
+C=             de gravite quelque soit le support du champ integre,    =
+C=             soit IPINT.INFCHE(iSou,6)=2 .                           =
+C=======================================================================
+
+      SUBROUTINE INTGCA (IPMODL,IPCHE1,IPCHE2,KOPELE,IRET,XRET,IPINT)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCREEL
+-INC CCOPTIO
+-INC CCHAMP
+-INC SMMODEL
+-INC SMCHAML
+-INC SMELEME
+-INC SMCOORD
+-INC SMINTE
+
+      SEGMENT MWRK1
+        REAL*8 SHP(6,NBNO),XEL(3,NBBB),BPSS(3,3),XE(3,NBBB)
+      ENDSEGMENT
+
+      SEGMENT MWRK2
+        REAL*8 TXR(3,3,NBBB),XJ(3,3)
+      ENDSEGMENT
+
+      SEGMENT MWRK3
+        REAL*8 WORK(LW)
+      ENDSEGMENT
+
+      SEGMENT INFO
+        INTEGER INFELL(JG)
+      ENDSEGMENT
+
+      SEGMENT NOTYPE
+        CHARACTER*16 TYPE(NBTYPE)
+      ENDSEGMENT
+
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS),NSOF(NS),IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+
+      PARAMETER (NINF=3)
+      INTEGER INFOS(NINF)
+      CHARACTER*(NCONCH) CONM
+      CHARACTER*8 CHARIN
+      LOGICAL LOGCOQ
+
+C= Quelques constantes (2.Pi et 4.Pi)
+      PARAMETER (X2Pi=6.283185307179586476925286766559D0)
+      PARAMETER (X4Pi=12.566370614359172953850573533118D0)
+
+      IRET=0
+
+C  1 - VERIFICATIONS DES DONNEES DE L'OPERATEUR
+C      Verification du lieu support du MCHAML a integrer
+C =======================================================
+      MMODEL=IPMODL
+      SEGACT,MMODEL
+      NSOUS=KMODEL(/1)
+
+*     Cas du MMODEL VIDE...
+      IF (NSOUS .EQ. 0) THEN
+        IRET = 1
+        XRET =REAL(0.D0)
+        IPINT=0
+        IF (KOPELE .NE. 0) THEN
+          L1=8
+          N1=0
+          N3=6
+          SEGINI,MCHELM
+          TITCHE='SCALAIRE'
+          IFOCHE=IFOUR
+          IPINT=MCHELM
+          SEGDES,MCHELM
+        ENDIF
+        SEGDES,MMODEL
+        RETURN
+      ENDIF
+
+*     Autre Cas
+      IMODEL=KMODEL(1)
+      SEGACT,IMODEL
+      ITHER = 0
+      CALL PLACE(FORMOD,FORMOD(/2),ITHER,'THERMIQUE')
+      IDIFF = 0
+      CALL PLACE(FORMOD,FORMOD(/2),IDIFF,'DIFFUSION')
+      IF (ITHER.EQ.0.AND.IDIFF.EQ.0) THEN
+**      IS=3
+* On determine le support du champ d'entree
+        IS=0
+        ISup1=0
+        iOK=0
+        CALL QUESUP(IPMODL,IPCHE1,IS,0,ISup1,iOK)
+        IF (iOK.EQ.9999) call erreur(609)
+        if (ierr.ne.0) return
+        IS=iOK
+* Dans le cas d'un champ constant, au centre de gravite ou aux noeuds,
+* on utilise les points de la rigidite.
+        IF (IS.EQ.1 .OR. IS.EQ.2) IS=3
+      ELSE
+        IS=6
+      ENDIF
+      SEGDES,IMODEL,MMODEL
+      ISup1=0
+      iOK=0
+      CALL QUESUP(IPMODL,IPCHE1,IS,0,ISup1,iOK)
+      IF (ISup1.GT.1) call erreur(609)
+      if (ierr.ne.0) return
+
+C  2 - QUELQUES INITIALISATIONS
+C ==============================
+C  2.1 - Activation du MMODEL
+C =====
+      MMODEL=IPMODL
+      SEGACT,MMODEL
+C =====
+C  2.2 - Initialisation du MCHELM resultat si demande
+C =====
+      XRET =REAL(0.D0)
+      IPINT=0
+      IF (KOPELE .NE. 0) THEN
+        L1=8
+        N1=NSOUS
+        N3=6
+        SEGINI,MCHELM
+        TITCHE='SCALAIRE'
+        IFOCHE=IFOUR
+        IPINT=MCHELM
+      ENDIF
+C =====
+C  2.3 - Recuperation du nom de la composante de IPCHE1
+C        Traitement effectue ici car identique sur tout le modele
+C =====
+      MCHEL1=IPCHE1
+      SEGACT,MCHEL1
+
+C CB215821 : A la recherche des MCHELM VIDES issus de REDUAF
+      NZ=MCHEL1.ICHAML(/1)
+      IF (NZ .EQ. 0) THEN
+        IF(KOPELE .NE. 0) THEN
+          N2    =1
+          N1PTEL=1
+          N1EL  =1
+          N2PTEL=0
+          N2EL  =0
+          DO iSou=1,NSOUS
+            IMODEL=KMODEL(iSou)
+            SEGACT,IMODEL
+            SEGINI,MCHAML
+            ICHAML(iSou)=MCHAML
+            IMACHE(iSou)=IMAMOD
+            CONCHE(iSou)=CONMOD
+            TYPCHE(iSou)='REAL*8'
+            NOMCHE(iSou)='SCAL'
+            INFCHE(iSou,1)=0
+            INFCHE(iSou,2)=0
+            INFCHE(iSou,3)=NIFOUR
+            INFCHE(iSou,4)=MCHEL1.INFCHE(iSou,4)
+            INFCHE(iSou,5)=0
+            INFCHE(iSou,6)=2
+            SEGINI,MELVAL
+            IELVAL(1   )=MELVAL
+            SEGDES,MELVAL,MCHAML,IMODEL
+          ENDDO
+        ENDIF
+        SEGDES,MCHEL1,MMODEL
+        RETURN
+      ENDIF
+
+      MCHAML=MCHEL1.ICHAML(1)
+      SEGACT,MCHAML
+      NBROBL=1
+      NBRFAC=0
+      SEGINI,NOMID
+      LESOBL(1)=NOMCHE(1)
+      SEGDES,MCHAML,MCHEL1
+      NBTYPE=1
+      SEGINI,NOTYPE
+      TYPE(1)='REAL*8'
+      MOCOMP=NOMID
+      MOTYCO=NOTYPE
+
+C  3 - BOUCLE SUR LES ZONES ELEMENTAIRES DU MODELE (iSou)
+C ========================================================
+      isouss=0
+      DO 2000 iSou=1,NSOUS
+C =====
+C  3.1 - Quelques initialisations
+C =====
+        IVACOM=0
+        MOCARA=0
+        IVACAR=0
+        MCHAML=0
+        IPMEL1=0
+        IPMEL2=0
+        MWRK3 =0
+C =====
+C  3.2 - Activation du sous-modele (iSou)
+C =====
+        IMODEL=KMODEL(iSou)
+        SEGACT,IMODEL
+        CONM=CONMOD
+        MELE=NEFMOD
+        if( (mele.eq.22).or.(mele.eq.259)) then
+          segdes imodel
+          go to 2000
+        endif
+        isouss=isouss+1
+C =====
+C  3.3 - Recuperation du maillage associe au sous-modele (iSou)
+C        Traitement particulier dans le cas d'une formulation DARCY
+C =====
+        IPMAIL=IMAMOD
+        CALL PLACE(FORMOD,FORMOD(/2),IDARC,'DARCY')
+        IF (IDARC.NE.0) THEN
+          CALL LEKMOD(MMODEL,IPTABL,INEFMD)
+          CHARIN='MAILLAGE'
+          CALL LEKTAB(IPTABL,CHARIN,IOBRE)
+          IF (IERR.NE.0) GOTO 250
+          IF (NSOUS.GT.1)THEN
+            IPT1=IOBRE
+            SEGACT,IPT1
+            IPMAIL=IPT1.LISOUS(iSou)
+            SEGDES,IPT1
+          ELSE
+            IPMAIL=IOBRE
+          ENDIF
+        ENDIF
+C =====
+C  3.4 - Determination ...
+C =====
+        CALL IDENT(IPMAIL,CONM,IPCHE1,IPCHE2,INFOS,iOK)
+        IF (iOK.EQ.0) GOTO 250
+        iOK=0
+C =====
+C  3.5 - Recuperation d'informations sur l'element fini du sous-modele
+C        ERREUR si la formulation n'est pas disponible
+C   ???? ERREUR si l'element est une element JOINT (non implante)
+C =====
+        LOGCOQ=.FALSE.
+        IF (ITHER.EQ.0 .AND. IDIFF.EQ.0) THEN
+           if(infmod(/1).lt.4) then
+          CALL ELQUOI(MELE,0,2,IPINF,IMODEL)
+           IF (IERR.NE.0) GOTO 240
+           INFO=IPINF
+            mincdg=INFELL(11)
+            SEGSUP,INFO
+          else
+           mincdg=infmod(4)
+          endif
+C*        if(infmod(/1).lt.5) then
+C*         CALL ELQUOI(MELE,0,3,IPINF,IMODEL)
+          if(infmod(/1).lt.IS+2) then
+           CALL ELQUOI(MELE,0,IS,IPINF,IMODEL)
+           IF (IERR.NE.0) GOTO 240
+           INFO=IPINF
+           IPMINT=INFELL(11)
+           MINTE1=INFELL(12)
+           MFR=INFELL(13)
+           LW=INFELL(7)
+           NLG=INFELL(14)
+           SEGSUP,INFO
+          else
+C*          IPMINT=infmod(5)
+            IPMINT=infmod(IS+2)
+            MINTE1=INFMOD(8)
+            MFR=INFELE(13)
+            LW=INFELE(7)
+            IPORE=INFELE(8)
+            NLG=INFELE(14)
+          endif
+          IF (MFR.EQ.5) LOGCOQ=.TRUE.
+        ELSE
+          mincdg=0
+          LW=100
+          CALL TSHAPE(MELE,'GAUSS',IPMINT)
+          IF (MELE.EQ.41.OR.MELE.EQ.56.OR.MELE.EQ.49) THEN
+            LOGCOQ=.TRUE.
+            CALL TSHAPE(MELE,'NOEUD',IPMIN1)
+            MINTE1=IPMIN1
+          ENDIF
+          MFR=NUMMFR(MELE)
+          NLG=NUMGEO(MELE)
+        ENDIF
+*        write(6,*) 'MFR,IDIM=',MFR,IDIM
+        IF (MFR.NE. 1.AND.MFR.NE. 3.AND.MFR.NE. 7.AND.MFR.NE.9.AND.
+     .      MFR.NE.11.AND.MFR.NE.13.AND.MFR.NE.33.AND.MFR.NE.5.AND.
+     .      MFR.NE.31.AND.MFR.NE.35.AND.MFR.NE.63.AND.MFR.NE.71.AND.
+     &      MFR.NE.73.AND.MFR.NE.57.AND.MFR.NE.59.AND.MFR.NE.77.AND.
+     &      MFR.NE.72..AND.MFR.NE.74.AND.MFR.NE.27) THEN
+          MOTERR(1:8)=NOMFR(MFR)
+          CALL ERREUR(193)
+          GOTO 240
+        ENDIF
+        IF (MFR.EQ.35.AND.IDIM.NE.2) THEN
+          IF (MELE.NE.87.AND.MELE.NE.88) THEN
+            MOTERR(1:4)=NOMTP(MELE)
+            MOTERR(5:12)='INTG'
+            CALL ERREUR(86)
+            GOTO 240
+          ENDIF
+        ENDIF
+        CALL QUEDIM(NLG,JDIM)
+        MINTE=IPMINT
+        SEGACT,MINTE
+C =====
+C  3.6 - Recuperation de la composante a integrer
+C        Verification de sa presence dans le MCHAML (IPCHE1)
+C        Appel a KOMCHA : NINFO=0 pour le moment...
+C        Recuperation du MELVAL associe a ce MCHAML sur IPMAIL
+C =====
+        NINFO=0
+        CALL KOMCHA(IPCHE1,IPMAIL,CONM,MOCOMP,MOTYCO,1,
+     .              INFOS,NINFO,IVACOM)
+        IF (IERR.NE.0) GOTO 230
+        MPTVAL=IVACOM
+        MELVA1=IVAL(1)
+        SEGACT,MELVA1
+        NBPTEL=MELVA1.VELCHE(/1)
+        IPMEL1=MELVA1
+        IF (ISup1.EQ.1) THEN
+          CALL VALMEL(IPMEL1,IPMINT,IPMEL2)
+C*OF ?    SEGSUP,MELVA1
+          MELVA1=IPMEL2
+        ENDIF
+        IPMEL1=MELVA1
+C =====
+C  3.7 - Recuperation des noms des caracteristiques geometriques
+C =====
+        CHARIN='        '
+        CALL CARAMK(MFR,IFOUR,MELE,CHARIN,IVECT,MOCARA,NBROBL,NBRFAC,
+     .              NBRTOT,MOTYPE,NBTYPE)
+        NOMID=MOCARA
+        NOTYPE=MOTYPE
+        IF (NBRTOT.NE.0.AND.IPCHE2.NE.0) THEN
+          CALL KOMCHA(IPCHE2,IPMAIL,CONM,MOCARA,MOTYPE,1,INFOS,3,
+     .                IVACAR)
+          SEGSUP,NOTYPE
+          IF (IERR.NE.0) GOTO 210
+          IF (IVECT.EQ.1) THEN
+            MPTVAL=IVACAR
+            IF (IVAL(NBRTOT).EQ.0) THEN
+              IVECT=2
+              NOMID=MOCARA
+              SEGACT,NOMID
+              NBRFAC=NBRFAC+2
+              SEGADJ,NOMID
+              MOCARA=NOMID
+              LESFAC(NBRFAC-2)='VX  '
+              LESFAC(NBRFAC-1)='VY  '
+              LESFAC(NBRFAC)  ='VZ  '
+              NBTYPE=1
+              SEGINI,NOTYPE
+              MOTYPE=NOTYPE
+              TYPE(1)='REAL*8'
+              CALL KOMCHA(IPCHE2,IPMAIL,CONM,MOCARA,MOTYPE,1,INFOS,3,
+     .                    IVACAR)
+              SEGSUP,NOTYPE
+              IF (IERR.NE.0) GOTO 210
+            ENDIF
+          ENDIF
+        ENDIF
+        NCARA=NBROBL
+        NCARF=NBRFAC
+        NCARR=NCARA+NCARF
+        IF (IVACAR.NE.0) THEN
+          MPTVAL=IVACAR
+          DO i=1,IVAL(/1)
+            IPMELV=IVAL(i)
+            CALL QUELCH(IPMELV,ICONS)
+            IF (ICONS.NE.0) THEN
+              CALL ERREUR(566)
+              GOTO 210
+            ENDIF
+          ENDDO
+        ENDIF
+C =====
+C  3.8 - Activation du maillage elementaire MELEME
+C =====
+        MELEME=IPMAIL
+        SEGACT,MELEME
+        NBNN=NUM(/1)
+        NBELEM=NUM(/2)
+C =====
+C  3.9 - Initialisation du MCHAML resultat (MCHAML) associe au modele
+C        elementaire iSou (de maillage IPMAIL) SI demande
+C        Remplissage des donnees associees a MCHAML dans MCHELM (global)
+C =====
+        MCHEL1=IPCHE1
+        SEGACT,MCHEL1
+        IF (KOPELE.NE.0) THEN
+C= 3.9.1 - Initialisation de MCHAML
+          N2=1
+          SEGINI,MCHAML
+          NOMCHE(N2)='SCAL'
+          TYPCHE(N2)='REAL*8'
+C= 3.9.2 - Remplissage de MCHEML(iSou)
+          CONCHE(iSouss)=CONM
+          IMACHE(iSouss)=IPMAIL
+          ICHAML(iSouss)=MCHAML
+          INFCHE(iSouss,1)=0
+          INFCHE(iSouss,2)=0
+          INFCHE(iSouss,3)=NIFOUR
+          INFCHE(iSouss,4)=MCHEL1.INFCHE(iSouss,4)
+          IF (mincdg.NE.0) INFCHE(iSouss,4)=mincdg
+          INFCHE(iSouss,5)=0
+          INFCHE(iSouss,6)=2
+C= 3.9.3 - Initialisation du MELVAL associe a ce MCHAML
+          N1PTEL=1
+          N1EL=NBELEM
+          N2PTEL=0
+          N2EL=0
+          SEGINI,MELVA2
+          IELVAL(N2)=MELVA2
+          IPMEL2=MELVA2
+        ENDIF
+C ======
+C  3.10 - Recuperation des donnees d'integration
+C         Traitement particulier dans le cas du COQ4 (si le nombre de
+C         points de Gauss vaut 5, seuls les 4 premiers sont traites, le
+C         5e servant uniquement au cisaillement)
+C ======
+C*      MINTE=IPMINT
+C*      SEGACT,MINTE  <- Deja ACTIF
+        NBPGAU=POIGAU(/1)
+        NBBB=NBNN
+        NBNO=NBNN
+        IF ((MELE.GE.108.AND.MELE.LE.110).OR.
+     &      (MELE.GE.185.AND.MELE.LE.190)) NBNO=IPORE
+        IF (MELE.EQ.49) THEN
+          IF (NBPGAU.EQ.5) NBPGAU=4
+          IF (NBPTEL.EQ.5) NBPTEL=4
+        ENDIF
+C ======
+C  3.11 - Initialisation de quelques segments de travail
+C ======
+        SEGINI,MWRK1
+        IF (LOGCOQ) THEN
+          SEGINI,MWRK2
+          SEGACT,MINTE1
+          SEGINI,MWRK3
+        ELSE IF (IPCHE2.NE.0) THEN
+          SEGINI,MWRK3
+        ENDIF
+C ======
+C  3.12 - Boucle sur les elements du sous-modele elementaire
+C ======
+        DO IB=1,NBELEM
+C= 3.12.1 - Recuperation des coordonnees des noeuds de l element IB
+          CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XEL)
+C= 3.12.2 - Determination des axes locaux aux noeuds (elements COQUES)
+          IF (LOGCOQ) THEN
+            CALL CQ8LOC(XEL,NBNN,MINTE1.SHPTOT,TXR,IRR)
+            IF (IRR.EQ.0) THEN
+              CALL ERREUR(515)
+              GOTO 200
+            ENDIF
+            IF (IVACAR.NE.0) THEN
+              MPTVAL=IVACAR
+              DO iGau=1,NBPGAU
+                MELVAL=IVAL(1)
+                IGMN=MIN(iGau,VELCHE(/1))
+                IBMN=MIN(IB,VELCHE(/2))
+                WORK(iGau)=VELCHE(IGMN,IBMN)
+                IF (IVAL(2).NE.0) THEN
+                  MELVAL=IVAL(2)
+                  IGMN=MIN(iGau,VELCHE(/1))
+                  IBMN=MIN(IB,VELCHE(/2))
+                  WORK(20+iGau)=VELCHE(IGMN,IBMN)
+                ELSE
+                  WORK(20+iGau)=0.
+                ENDIF
+              ENDDO
+            ELSE
+C* Si pas de caracteristiques, on met les epaisseurs a 1 (et non a 0)
+              DO iGau=1,NBPGAU
+                WORK(iGau)=1.
+              ENDDO
+            ENDIF
+          ENDIF
+C= 3.12.3 - Boucle sur les points d'integration
+          ESTEL=XZero
+          DO iGau=1,NBPGAU
+            IBMN=MIN(IB,MELVA1.VELCHE(/2))
+            IGMN=MIN(iGau,MELVA1.VELCHE(/1))
+            FACSCA=MELVA1.VELCHE(IGMN,IBMN)
+C= 3.12.3.1 - Elements COQUES
+            IF (LOGCOQ) THEN
+              E3=DZEGAU(iGau)
+              CALL CQ8JCE(iGau,NBNN,E3,XEL,WORK(1),WORK(21),
+     .                    TXR,SHPTOT,XJ,DJAC,IRR)
+              IF (IRR.LT.0) THEN
+                INTERR(1)=IB
+                CALL ERREUR(405)
+                GOTO 200
+              ENDIF
+              DJAC=ABS(DJAC)*POIGAU(iGau)
+              ESTEL=ESTEL+FACSCA*DJAC
+C= 3.12.3.2 - Elements JOINTS 2D
+            ELSE IF (MFR.EQ.35.AND.IDIM.EQ.2) THEN
+              DO i=1,NBNO
+                SHP(1,i)=SHPTOT(1,i,iGau)
+                SHP(2,i)=SHPTOT(2,i,iGau)
+              ENDDO
+              DXDKSI=0.
+              DYDKSI=0.
+              DO i=1,NBNO/2
+                DXDKSI=DXDKSI+SHP(2,i)*XEL(1,i)
+                DYDKSI=DYDKSI+SHP(2,i)*XEL(2,i)
+              ENDDO
+              DJAC=SQRT(DXDKSI*DXDKSI+DYDKSI*DYDKSI)*POIGAU(iGau)
+              ESTEL=ESTEL+FACSCA*DJAC
+C= 3.12.3.3 - Elements JOINTS 3D (JOT3 et JOI4)
+            ELSE IF (MFR.EQ.35.AND.IDIM.EQ.3) THEN
+              DO i=1,NBNO
+                SHP(1,i)=SHPTOT(1,i,iGau)
+                SHP(2,i)=SHPTOT(2,i,iGau)
+                SHP(3,i)=SHPTOT(3,i,iGau)
+              ENDDO
+              IF (MELE.EQ.87) THEN
+                CALL JT3LOC(XEL,SHPTOT,NBNO,XE,BPSS,NOQUAL)
+                IF (NOQUAL.EQ.1) THEN
+                  INTERR(1)=IB
+                  MOTERR(1:4)='JOT3'
+                  CALL ERREUR(765)
+                  GOTO 200
+                ELSE IF (NOQUAL.EQ.2) THEN
+                  INTERR(1)=IB
+                  MOTERR(1:4)='JOT3'
+                  CALL ERREUR(766)
+                  GOTO 200
+                ENDIF
+              ELSE IF (MELE.EQ.88) THEN
+                CALL JO4LOC(XEL,SHPTOT,NBNO,XE,BPSS,NOQUAL)
+                IF (NOQUAL.EQ.1) THEN
+                  INTERR(1)=IB
+                  MOTERR(1:4)='JOI4'
+                  CALL ERREUR(765)
+                  GOTO 200
+                ELSE IF (NOQUAL.EQ.2) THEN
+                  INTERR(1)=IB
+                  MOTERR(1:4)='JOI4'
+                  CALL ERREUR(766)
+                  GOTO 200
+                ENDIF
+              ENDIF
+              NBNONN=NBNO/2
+              CALL DEVOLU(XE,SHP,MFR,NBNONN,IFOUR,NIFOUR,2,1.D0,RR,DJAC)
+              IRRT=0
+              IF (DJAC.LT.0.) THEN
+                IRRT=1
+              ELSE IF (DJAC.EQ.0.) THEN
+                IRRT=2
+              ENDIF
+              IF (IRRT.NE.0) THEN
+                CALL ERREUR(764)
+                GOTO 200
+              ENDIF
+              ESTEL=ESTEL+FACSCA*DJAC*POIGAU(iGau)
+C
+C  JOINTS POREUX
+            ELSE IF ((MELE.GE.108.AND.MELE.LE.110).OR.
+     &               (MELE.GE.185.AND.MELE.LE.190)) THEN
+
+              DO LAD=1,IDIM
+                DO i=1,NBNO
+                  SHP(LAD,i)=SHPTOT(LAD,i,iGau)
+                ENDDO
+              ENDDO
+              CALL JOPLOC(XEL,SHPTOT,NBBB,NBNO,IFOUR,XE,BPSS)
+              CALL DEVOLJ(XEL,XE,SHP,NBBB,NBNO,IFOUR,DJAC)
+              ESTEL=ESTEL+FACSCA*DJAC*POIGAU(iGau)
+
+C= 3.12.3.4 - Elements zone cohesive ZCO2
+            ELSE IF (MFR.EQ.77.AND.IDIM.EQ.2) THEN
+              DO i=1,NBNO
+                SHP(1,i)=SHPTOT(1,i,iGau)
+                SHP(2,i)=SHPTOT(2,i,iGau)
+              ENDDO
+              DXDKSI=0.
+              DYDKSI=0.
+              DO i=1,NBNO
+                DXDKSI=DXDKSI+SHP(2,i)*XEL(1,i)
+                DYDKSI=DYDKSI+SHP(2,i)*XEL(2,i)
+              ENDDO
+              DJAC=SQRT(DXDKSI*DXDKSI+DYDKSI*DYDKSI)*POIGAU(iGau)
+              ESTEL=ESTEL+FACSCA*DJAC
+C= 3.12.3.3 - Elements zone cohesive ZCO3ou4
+            ELSE IF (MFR.EQ.77.AND.IDIM.EQ.3) THEN
+              DO i=1,NBNO
+                SHP(1,i)=SHPTOT(1,i,iGau)
+                SHP(2,i)=SHPTOT(2,i,iGau)
+                SHP(3,i)=SHPTOT(3,i,iGau)
+              ENDDO
+              dXdQsi=REAL(0.D0)
+              dYdQsi=REAL(0.D0)
+              dZdQsi=REAL(0.D0)
+              dXdEta=REAL(0.D0)
+              dYdEta=REAL(0.D0)
+              dZdEta=REAL(0.D0)
+              DO i=1,NBNO
+                 dXdQsi=dXdQsi+SHP(2,i)*XEL(1,i)
+                 dXdEta=dXdEta+SHP(3,i)*XEL(1,i)
+                 dYdQsi=dYdQsi+SHP(2,i)*XEL(2,i)
+                 dYdEta=dYdEta+SHP(3,i)*XEL(2,i)
+                 dZdQsi=dZdQsi+SHP(2,i)*XEL(3,i)
+                 dZdEta=dZdEta+SHP(3,i)*XEL(3,i)
+              ENDDO
+              z = (dXdQsi*dYdEta-dXdEta*dYdQsi)
+              x = (dYdQsi*dZdEta-dYdEta*dZdQsi)
+              y = (dZdQsi*dXdEta-dZdEta*dXdQsi)
+              DJAC = sqrt(x*x+y*y+z*z)
+              IRRT=0
+              IF (DJAC.LT.0.) THEN
+                IRRT=1
+              ELSE IF (DJAC.EQ.0.) THEN
+                IRRT=2
+              ENDIF
+              IF (IRRT.NE.0) THEN
+                CALL ERREUR(764)
+                GOTO 200
+              ENDIF
+              ESTEL=ESTEL+FACSCA*DJAC*POIGAU(iGau)
+C= 3.12.3.4 - Autres elements
+            ELSE
+              IF (IFOMOD.EQ.2) THEN
+                IDK=4
+              ELSE IF (IFOMOD.GE.-1.AND.IFOMOD.LE.1) THEN
+                IDK=3
+              ELSE IF (IFOMOD.GE.3.AND.IFOMOD.LE.5) THEN
+                IDK=2
+              ENDIF
+              DO j=1,NBNO
+                DO i=1,IDK
+                  SHP(i,j)=SHPTOT(i,j,iGau)
+                ENDDO
+              ENDDO
+              CALL GTEMRD(XEL,SHP,JDIM,NBNO,DJAC)
+              IF (IFOMOD.EQ.0.OR.IFOMOD.EQ.1.OR.
+     .            IFOMOD.EQ.4.OR.IFOMOD.EQ.5) THEN
+                CALL DISTRR(XEL,SHP,NBNO,RR)
+                IF (IFOMOD.EQ.5) THEN
+                  DJAC=X4Pi*RR*RR*DJAC
+                ELSE IF (IFOMOD.EQ.1.AND.NIFOUR.NE.0) THEN
+                  DJAC=XPi*RR*DJAC
+                ELSE
+                  DJAC=X2Pi*RR*DJAC
+                ENDIF
+              ENDIF
+C= 3.12.3.5 - Recuperation des caracteristiques selon l'element
+C=            En dimension 1 (1D), pas de caracteristiques actuellement
+              DIM3=1.
+              FACAR=1.
+              IF (IVACAR.EQ.0) GOTO 80
+              MPTVAL=IVACAR
+c                   1  2  3   4  5  6  7  8  9 10 11 12 13 14 15 16
+              GOTO (99,99,99, 4,99, 4,99, 4,99, 4,99,99,99, 4, 4, 4,
+c                   17       20       23 24 25 26 27 28 29 30       33
+     .               4,99,99,99,99,99, 4, 4, 4, 4,27,27,29,99,99,99,99
+c                      34 35             40 41 42 43 44 45 46 47 48 49
+     .                ,99, 4, 4, 4, 4, 4, 4,27,29,99,27,99,27,99,99,27
+c                      50                56 57                     65
+     .                ,99,99,99,99,99,99,27, 4, 4, 4, 4,4, 4, 4, 4, 4,
+     .               4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,4, 4,
+     .               4,29,99,99,99,99,99,99,99,99,27,99,99,99,99,99,99
+     .                ,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99
+     .                ,99,99,99,99,99,99,99,99,27,27),MELE
+ 99           MOTERR(1:4)=NOMTP(MELE)
+              MOTERR(5:12)='INTGCA'
+              CALL ERREUR(86)
+              GOTO 200
+C= 3.12.3.6 - Caracteristiques pour les elements MASSIFS
+ 4            MELVAL=IVAL(1)
+              IF (MELVAL.NE.0) THEN
+                IGMN=MIN(iGau,VELCHE(/1))
+                IBMN=MIN(IB,VELCHE(/2))
+                FACAR=VELCHE(IGMN,IBMN)
+              ENDIF
+              GOTO 80
+C= 3.12.3.7 - Caracteristiques pour les elements COQUES et BARRES
+ 27           MELVAL=IVAL(1)
+              IGMN=MIN(iGau,VELCHE(/1))
+              IBMN=MIN(IB,  VELCHE(/2))
+              FACAR=VELCHE(IGMN,IBMN)
+              IF (MFR.EQ.3.AND.IFOUR.EQ.-2) THEN
+                MELVAL=IVAL(3)
+                IF (MELVAL.NE.0) DIM3=VELCHE(IGMN,IBMN)
+              ENDIF
+              GOTO 80
+C= 3.12.3.8 - Caracteristiques pour les elements POUTRES et TUYAUX
+C=            Traitement particulier pour les TUYAUX
+ 29           DO i=1,NCARR
+                IF (IVAL(i).NE.0) THEN
+                  MELVAL=IVAL(i)
+                  IGMN=MIN(iGau,VELCHE(/1))
+                  IBMN=MIN(IB,VELCHE(/2))
+                  WORK(i)=VELCHE(IGMN,IBMN)
+                ENDIF
+              ENDDO
+              IF (IVECT.EQ.1) THEN
+                IF (IVAL(NCARR).NE.0) THEN
+                  MELVAL=IVAL(NCARR)
+                  IBMN=MIN(IB,IELCHE(/2))
+                  IREF=(IELCHE(1,IBMN)-1)*(IDIM+1)
+                  DO i=1,IDIM
+                    WORK(NCARR+i-1)=XCOOR(IREF+i)
+                  ENDDO
+                ELSE
+                  DO i=0,IDIM-1
+                    WORK(NCARR+i)=0.
+                  ENDDO
+                ENDIF
+              ENDIF
+              IF (MELE.EQ.42) THEN
+                CISA=WORK(4)
+                VX=WORK(5)
+                VY=WORK(6)
+                VZ=WORK(7)
+                CALL TUYCAR(WORK,CISA,VX,VY,VZ,KERRE,2)
+              ENDIF
+              FACAR=WORK(4)
+              GOTO 80
+C= 3.12.3.9 - Calcul de la composante integree en ce point de Gauss
+ 80           DJAC=ABS(DJAC)*POIGAU(iGau)*FACAR*DIM3
+              ESTEL=ESTEL+FACSCA*DJAC
+            ENDIF
+          ENDDO
+C= 3.12.4 - Ajout de la contribution de cet element au resultat
+C=          et le cas echeant au MCHAML au centre de gravite
+          XRET=XRET+ESTEL
+          IF (KOPELE.NE.0) THEN
+            IBMN=MIN(IB,MELVA2.VELCHE(/2))
+            MELVA2.VELCHE(1,IBMN)=ESTEL
+          ENDIF
+        ENDDO
+C ======
+C  3.13 - Desactivation/suppression de segments associes a iSou
+C         Sortie prematuree en cas d'ERREUR (iOK=0)
+C ======
+        iOK=1
+ 200    SEGSUP,MWRK1
+        IF (LOGCOQ) THEN
+          SEGSUP,MWRK2
+          SEGDES,MINTE1
+          SEGSUP,MWRK3
+        ELSE IF (IPCHE2.NE.0) THEN
+          SEGSUP,MWRK3
+        ENDIF
+C       SEGDES,MELEME
+ 210    CALL DTMVAL(IVACAR,1)
+ 220    NOMID=MOCARA
+        IF (MOCARA.NE.0) SEGSUP,NOMID
+        IF (IPMEL1.NE.0) THEN
+          IF (ISup1.EQ.1) THEN
+            SEGSUP,MELVA1
+          ELSE
+            SEGDES,MELVA1
+          ENDIF
+        ENDIF
+ 230    CALL DTMVAL(IVACOM,1)
+        SEGDES,MINTE
+ 240    CONTINUE
+ 250    SEGDES,IMODEL
+        IF (iOK.EQ.0) THEN
+          IF (KOPELE.NE.0) THEN
+            IF (IPMEL2.NE.0) SEGSUP,MELVA2
+            IF (MCHAML.NE.0) SEGSUP,MCHAML
+            SEGSUP,MCHELM
+          ENDIF
+          GOTO 300
+        ENDIF
+        IF (KOPELE.NE.0) SEGDES,MELVA2,MCHAML
+ 2000 continue
+
+
+C  4 - MENAGE : DESACTIVATION/DESTRUCTION DE SEGMENTS
+C ====================================================
+      IRET=1
+      IF (KOPELE.NE.0)then
+         if( n1.ne.isouss) then
+           n1=isouss
+           segadj mchelm
+         endif
+         SEGDES,MCHELM
+      ENDIF
+ 300  NOMID=MOCOMP
+      NOTYPE=MOTYCO
+      SEGSUP,NOTYPE,NOMID
+      SEGDES,MMODEL,MCHEL1
+
+      RETURN
+      END
+
+
+
+
+
+
+

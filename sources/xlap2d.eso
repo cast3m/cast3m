@@ -1,0 +1,677 @@
+C XLAP2D    SOURCE    PV        16/11/17    22:01:55     9180
+      SUBROUTINE XLAP2D(ICOGRV,MPGRVF,MPROC,MPVITC,
+     $     MPVOLU,MPNORM,MPSURF,MELEFL,
+     $     KRFACE,KRCENT,
+     $     LCLIMV,KRVIMP,
+     $     LCLITO,KRTOIM,MPTOIM,
+     $     NOMINC,
+     $     MPMUC,
+     $     IJACO,
+     $     IMPR,IRET)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+C***********************************************************************
+C NOM         : XLAP2D
+C DESCRIPTION : Calcul de la matrice jacobienne du résidu du laplacien
+C               VF 3D.
+C               Ici, on ne calcule que des contributions 'compliquées' à
+C               la matrice jacobienne faisant intervenir les
+C               coefficients pour le calcul des gradients de vitesse
+C               (ICOGRV)
+C               (contributions à (d Res_{\rho e_t} / d var)
+C               var prenant successivement les valeurs :
+C               \rho,   \rho u,    \rho v,   \rho w,  \rho e_t )
+C               Les contributions sont plus "compliquées" à calculer que
+C               les simples (cf. xlap2c) car on a à dériver des produits
+C               de fonctions de la vitesse.
+C               xlap2e calcule aussi une partie des contributions
+C               'compliquées'.
+C
+C NOTE PERSO  : On pourrait programmer ça plus lisiblement en stockant
+C               les contributions dans un tableau de pointeurs (2
+C               indices, c'est possible ?) et en effectuant des produits
+C               matriciels (coeff. x matrices de dérivées).
+C               On n'y coupera pas si on veut regrouper 2D et 3D...
+C               On ne va pas le faire.
+C
+C
+C LANGAGE     : ESOPE
+C AUTEUR      : Stéphane GOUNAND (CEA/DEN/DM2S/SFME/LTMF)
+C               mél : gounand@semt2.smts.cea.fr
+C***********************************************************************
+C APPELES (UTIL)   : AJMTK : ajoute un objet de type MATSIM (non
+C                            standard) à un objet de type MATRIK.
+C APPELE PAR       : XLAP2A : Calcul de la matrice jacobienne du
+C                    résidu du laplacien VF 3D.
+C***********************************************************************
+C ENTREES            : ICOGRV (type MCHELM) : coefficients pour le
+C                        calcul du gradient de la vitesse aux
+C                        interfaces.
+C                      MPGRVF (type MPOVAL) : gradient de la vitesse
+C                        aux interfaces.
+C                      MPROC (type MPOVAL) : masse volumique par
+C                                            élément.
+C                      MPVITC (type MPOVAL) : vitesse par élément.
+C                      MPVOLU (type MPOVAL) : volume des éléments.
+C                      MPNORM (type MPOVAL) : normale aux faces.
+C                      MPSURF (type MPOVAL) : surface des faces.
+C                      MELEFL (type MELEME) : connectivités face-(centre
+C                                             gauche, centre droit).
+C                      KRFACE (type MLENTI) : tableau de repérage dans
+C                        le maillage des faces des éléments.
+C                      KRCENT (type MLENTI) : tableau de repérage dans
+C                        le maillage des centres des éléments.
+C                      LCLIMV (type logique) : .TRUE. => CL de Dirichlet
+C                        sur la vitesse.
+C                      KRVIMP (type MLENTI) : tableau de repérage dans
+C                        maillage des CL de Dirichlet sur la
+C                        vitesse.
+C                      LCLITO (type logique) : .TRUE. => CL de Dirichlet
+C                        sur le tenseur des contraintes.
+C                      KRTOIM (type MLENTI) : tableau de repérage dans
+C                        maillage des CL de Dirichlet sur le tenseur des
+C                        contraintes
+C                      MPTOIM (type MPOVAL) : valeurs des CL de
+C                        Dirichlet sur le tenseur des contraintes.
+C                      NOMINC (type MLMOTS) : noms des inconnues.
+C                      MPMUC (type MPOVAL) : viscosité dynamique (SI).
+C ENTREES/SORTIES    : IJACO (type MATRIK) : matrice jacobienne du
+C                        résidu du laplacien VF 3D.
+C SORTIES            : -
+C CODE RETOUR (IRET) : = 0 si tout s'est bien passé
+C***********************************************************************
+C VERSION    : v1, 08/03/2002, version initiale
+C HISTORIQUE : v1, 08/03/2002, création
+C HISTORIQUE :
+C HISTORIQUE :
+C***********************************************************************
+C Prière de PRENDRE LE TEMPS de compléter les commentaires
+C en cas de modification de ce sous-programme afin de faciliter
+C la maintenance !
+C***********************************************************************
+-INC CCOPTIO
+-INC SMCOORD
+-INC SMCHPOI
+      POINTEUR MPGRVF.MPOVAL
+      POINTEUR MPMUC.MPOVAL
+      POINTEUR MPROC.MPOVAL ,MPVITC.MPOVAL
+      POINTEUR MPSURF.MPOVAL,MPNORM.MPOVAL,MPVOLU.MPOVAL
+      POINTEUR MPTOIM.MPOVAL
+-INC SMCHAML
+      POINTEUR ICOGRV.MCHELM,JCOGRV.MCHAML
+      POINTEUR KDUNDX.MELVAL,KDUNDY.MELVAL,KDUNDZ.MELVAL
+-INC SMELEME
+      POINTEUR MELEFL.MELEME
+      POINTEUR MCOGRV.MELEME
+-INC SMLENTI
+      POINTEUR KRVIMP.MLENTI,KRTOIM.MLENTI
+      POINTEUR KRCENT.MLENTI,KRFACE.MLENTI
+-INC SMLMOTS
+      POINTEUR NOMINC.MLMOTS
+-INC SMMATRIK
+      POINTEUR IJACO.MATRIK
+*
+* Objet matrice élémentaire simplifié
+*
+      SEGMENT GMATSI
+      INTEGER POIPR1(NPP1,NEL1)
+      INTEGER POIDU1(1,NEL1)
+      INTEGER POIPR2(NPP2,NEL2)
+      INTEGER POIDU2(2,NEL2)
+      POINTEUR LMATSI(0).MATSIM
+      ENDSEGMENT
+*  Contributions compliquées 2 de la part du gradient de
+*  vitesse (CCGRV2)
+      POINTEUR CCGRV2.GMATSI
+      SEGMENT MATSIM
+      CHARACTER*8 NOMPRI,NOMDUA
+      REAL*8 VALMA1(1,NPP1,NEL1)
+      REAL*8 VALMA2(2,NPP2,NEL2)
+      ENDSEGMENT
+      POINTEUR RETRHO.MATSIM
+      POINTEUR RETROU.MATSIM
+      POINTEUR RETROV.MATSIM
+      POINTEUR RETROW.MATSIM
+*
+      REAL*8 MU
+*
+      INTEGER IMPR,IRET
+*
+      LOGICAL LCLIMV,LCLITO
+      LOGICAL LMUR
+      LOGICAL LCTR2A,LCTR2B
+*
+      INTEGER IELEM,IPD,IPP,ISOUCH,IEL1,IEL2
+      INTEGER NELEM,NPD,NPP,NSOUCH,NEL1,NEL2,NPP1,NPP2
+      INTEGER NGCDRO,NGCGAU,NGFACE,NPPRIM,NPDUAL
+      INTEGER NLCENP,NLCEND,NLFACE,NLCLV,NLFTOI
+      INTEGER NPTEL
+      INTEGER ICOORX,NLCGAU,NLCDRO
+*
+      REAL*8 ALPHA,UMALPH
+      REAL*8 DRD,DRG
+      REAL*8 DUXXF,DUXYF,DUXZF
+      REAL*8 DUYXF,DUYYF,DUYZF
+      REAL*8 DUZXF,DUZYF,DUZZF
+      REAL*8 XD,XF,XG,XFMXD,XFMXG
+      REAL*8 YD,YF,YG,YFMYD,YFMYG
+      REAL*8 ZD,ZF,ZG,ZFMZD,ZFMZG
+      REAL*8 ALPHAX,ALPHAY,ALPHAZ
+      REAL*8 CNX,CNY,CNZ
+      REAL*8 SIGNOR,SURFFA,VOLUEL
+      REAL*8 RHOP,UP,VP,WP
+      REAL*8 FACTOR,FACTDU,FACTDV,FACTDW
+      REAL*8 DUDRHO,DUDROU
+      REAL*8 DVDRHO,DVDROV
+      REAL*8 DWDRHO,DWDROW
+      REAL*8 DSTDU
+      REAL*8 TAUXX,TAUYY,TAUZZ
+      REAL*8 TAUXY,TAUXZ,TAUYZ
+      REAL*8 EPSIXX,EPSIXY,EPSIXZ
+      REAL*8 EPSIYX,EPSIYY,EPSIYZ
+      REAL*8 EPSIZX,EPSIZY,EPSIZZ
+      REAL*8 GAMMXD,GAMMXG
+      REAL*8 GAMMYD,GAMMYG
+      REAL*8 GAMMZD,GAMMZG
+*
+* Executable statements
+*
+      IF (IMPR.GT.2) WRITE(IOIMP,*) 'Entrée dans xlap2d.eso'
+*   On calcule les contributions à (d Res_{\rho e_t} / d var) ; var
+*   prenant successivement les valeurs :
+*      \rho,   \rho u,    \rho v,  \rho w,   \rho e_t
+*   On dérive les termes :  (\tens{\tau(\grad{u})} \prod \vect{u})
+*                            \pscal \vect{n}
+*   ce qui donne deux contributions.
+*   Contribution 1 :
+*     ( (d \tens{\tau} / d var) \prod \vect{u}) \pscal \vect{n}
+*   Contribution 2 :
+*     ( \tens{\tau}  \prod (d \vect{u} / d var)) \pscal \vect{n}
+*   Note :
+*     pas de contribution à (d Res_{\rho e_t} / d \rho e_t).
+*   Les noms de matrices élémentaires (type MATSIM) associées sont :
+*   RETRHO, RETROU, RETROV, RETROW
+      IF (LCLIMV) THEN
+         SEGACT KRVIMP
+      ENDIF
+      IF (LCLITO) THEN
+         SEGACT KRTOIM
+         SEGACT MPTOIM
+      ENDIF
+      SEGACT NOMINC
+      SEGACT KRCENT
+      SEGACT KRFACE
+      SEGACT MELEFL
+      SEGACT MPSURF
+      SEGACT MPNORM
+      SEGACT MPVOLU
+      SEGACT MPMUC
+      SEGACT MPROC
+      SEGACT MPVITC
+      SEGACT MPGRVF
+      SEGACT ICOGRV
+      NSOUCH=ICOGRV.IMACHE(/1)
+      DO 1 ISOUCH=1,NSOUCH
+         MCOGRV=ICOGRV.IMACHE(ISOUCH)
+         JCOGRV=ICOGRV.ICHAML(ISOUCH)
+         SEGACT JCOGRV
+         KDUNDX=JCOGRV.IELVAL(1)
+         KDUNDY=JCOGRV.IELVAL(2)
+         KDUNDZ=JCOGRV.IELVAL(3)
+         SEGDES JCOGRV
+         SEGACT KDUNDX
+         SEGACT KDUNDY
+         SEGACT KDUNDZ
+         SEGACT MCOGRV
+         NELEM=MCOGRV.NUM(/2)
+         NPTEL=MCOGRV.NUM(/1)
+         NPP1=NPTEL
+         NPP2=NPTEL+1
+         NEL1=NELEM
+         NEL2=NELEM
+         IEL1=1
+         IEL2=1
+         SEGINI RETRHO
+         SEGINI RETROU
+         SEGINI RETROV
+         SEGINI RETROW
+         SEGINI CCGRV2
+         RETRHO.NOMPRI(1:4)=NOMINC.MOTS(1)
+         RETRHO.NOMPRI(5:8)='    '
+         RETRHO.NOMDUA(1:4)=NOMINC.MOTS(5)
+         RETRHO.NOMDUA(5:8)='    '
+         RETROU.NOMPRI(1:4)=NOMINC.MOTS(2)
+         RETROU.NOMPRI(5:8)='    '
+         RETROU.NOMDUA(1:4)=NOMINC.MOTS(5)
+         RETROU.NOMDUA(5:8)='    '
+         RETROV.NOMPRI(1:4)=NOMINC.MOTS(3)
+         RETROV.NOMPRI(5:8)='    '
+         RETROV.NOMDUA(1:4)=NOMINC.MOTS(5)
+         RETROV.NOMDUA(5:8)='    '
+         RETROW.NOMPRI(1:4)=NOMINC.MOTS(4)
+         RETROW.NOMPRI(5:8)='    '
+         RETROW.NOMDUA(1:4)=NOMINC.MOTS(5)
+         RETROW.NOMDUA(5:8)='    '
+         DO 12 IELEM=1,NELEM
+*     Le premier point du support de ICOGRV est un point FACE
+            NGFACE=MCOGRV.NUM(1,IELEM)
+            NLFACE=KRFACE.LECT(NGFACE)
+            IF (NLFACE.EQ.0) THEN
+               WRITE(IOIMP,*) 'Erreur de programmation n°1'
+               GOTO 9999
+            ENDIF
+*     On calcule la contribution 2 à la matrice jacobienne IJACO de la
+*     face NGFACE
+*           (points duaux     : centres à gauche et à droite de la face)
+*           (points primaux   : une partie (bicoz conditions aux limites)
+*            de ceux du stencil pour le calcul du gradient
+*            à la face, ils doivent être des points centres
+*            ET les centres à gauche et à droite qui servent pour le
+*            calcul de la vitesse sur la face)
+*       Si la vitesse sur la face est imposée par les
+*       conditions aux limites, la contribution 2 de la face à IJACO est
+*       nulle.
+            LCTR2A=.TRUE.
+            IF (LCLIMV) THEN
+               NLCLV=KRVIMP.LECT(NGFACE)
+               IF (NLCLV.NE.0) THEN
+                  LCTR2A=.FALSE.
+               ENDIF
+            ENDIF
+            IF (LCTR2A) THEN
+               NGCGAU=MELEFL.NUM(1,NLFACE)
+               NGCDRO=MELEFL.NUM(3,NLFACE)
+               NLCGAU=KRCENT.LECT(NGCGAU)
+               NLCDRO=KRCENT.LECT(NGCDRO)
+               LMUR=(NGCGAU.EQ.NGCDRO)
+*     On calcule ensuite les valeurs des coefficients qui servent pour
+*     interpoler la vitesse sur la face NGFACE à partir des vitesses
+*     gauche (et droite si non mur) et des dérivées de la vitesse sur la
+*     face NGFACE (de la même manière que dans xlap12.eso)
+               IF (LMUR) THEN
+*       Parametres geometriques
+                  ICOORX=((IDIM+1)*(NGFACE-1))+1
+                  XF=MCOORD.XCOOR(ICOORX)
+                  YF=MCOORD.XCOOR(ICOORX+1)
+                  ZF=MCOORD.XCOOR(ICOORX+2)
+                  ICOORX=((IDIM+1)*(NGCGAU-1))+1
+                  XG=MCOORD.XCOOR(ICOORX)
+                  YG=MCOORD.XCOOR(ICOORX+1)
+                  ZG=MCOORD.XCOOR(ICOORX+2)
+                  XFMXG=XF-XG
+                  YFMYG=YF-YG
+                  ZFMZG=ZF-ZG
+                  ALPHA=0.0D0
+                  UMALPH=1.0D0
+*     coeffs pour calculer la vitesse
+                  GAMMXG=1.D0
+                  EPSIXX=XFMXG
+                  EPSIXY=YFMYG
+                  EPSIXZ=ZFMZG
+                  GAMMYG=1.D0
+                  EPSIYX=XFMXG
+                  EPSIYY=YFMYG
+                  EPSIYZ=ZFMZG
+                  GAMMZG=1.D0
+                  EPSIZX=XFMXG
+                  EPSIZY=YFMYG
+                  EPSIZZ=ZFMZG
+               ELSEIF (.NOT.LMUR) THEN
+                  ICOORX=((IDIM+1)*(NGFACE-1))+1
+                  XF=MCOORD.XCOOR(ICOORX)
+                  YF=MCOORD.XCOOR(ICOORX+1)
+                  ZF=MCOORD.XCOOR(ICOORX+2)
+                  ICOORX=((IDIM+1)*(NGCGAU-1))+1
+                  XG=MCOORD.XCOOR(ICOORX)
+                  YG=MCOORD.XCOOR(ICOORX+1)
+                  ZG=MCOORD.XCOOR(ICOORX+2)
+                  XFMXG=XF-XG
+                  YFMYG=YF-YG
+                  ZFMZG=ZF-ZG
+                  DRG=SQRT((XFMXG*XFMXG)+(YFMYG*YFMYG)+(ZFMZG*ZFMZG))
+                  ICOORX=((IDIM+1)*(NGCDRO-1))+1
+                  XD=MCOORD.XCOOR(ICOORX)
+                  YD=MCOORD.XCOOR(ICOORX+1)
+                  ZD=MCOORD.XCOOR(ICOORX+2)
+                  XFMXD=XF-XD
+                  YFMYD=YF-YD
+                  ZFMZD=ZF-ZD
+                  DRD=SQRT((XFMXD*XFMXD)+(YFMYD*YFMYD)+(ZFMZD*ZFMZD))
+                  ALPHA=DRG/(DRG+DRD)
+                  UMALPH=1.0D0-ALPHA
+                  GAMMXG=UMALPH
+                  GAMMXD=ALPHA
+                  EPSIXX=(XFMXG*UMALPH)+(XFMXD*ALPHA)
+                  EPSIXY=(YFMYG*UMALPH)+(YFMYD*ALPHA)
+                  EPSIXZ=(ZFMZG*UMALPH)+(ZFMZD*ALPHA)
+                  GAMMYG=UMALPH
+                  GAMMYD=ALPHA
+                  EPSIYX=(XFMXG*UMALPH)+(XFMXD*ALPHA)
+                  EPSIYY=(YFMYG*UMALPH)+(YFMYD*ALPHA)
+                  EPSIYZ=(ZFMZG*UMALPH)+(ZFMZD*ALPHA)
+                  GAMMZG=UMALPH
+                  GAMMZD=ALPHA
+                  EPSIZX=(XFMXG*UMALPH)+(XFMXD*ALPHA)
+                  EPSIZY=(YFMYG*UMALPH)+(YFMYD*ALPHA)
+                  EPSIZZ=(ZFMZG*UMALPH)+(ZFMZD*ALPHA)
+               ELSE
+                  WRITE(IOIMP,*) 'Erreur de programmation n°2'
+                  GOTO 9999
+               ENDIF
+*     On distingue le cas où la face est un bord du maillage (mur)
+*                  du cas où la face est interne au maillage
+               IF (.NOT.LMUR) THEN
+                  NPD=2
+                  NPP=NPTEL+1
+               ELSE
+                  NPD=1
+                  NPP=NPTEL
+               ENDIF
+               MU=UMALPH*MPMUC.VPOCHA(NLCGAU,1) +
+     &              ALPHA*MPMUC.VPOCHA(NLCDRO,1)
+*     On calcule tout d'abord les valeurs du tenseur des contraintes sur
+*     la face NGFACE de la même manière que dans xlap12.eso
+               IF (LCLITO) THEN
+                  NLFTOI=KRTOIM.LECT(NGFACE)
+               ELSE
+                  NLFTOI=0
+               ENDIF
+               IF (NLFTOI.NE.0) THEN
+                  TAUXX=MPTOIM.VPOCHA(NLFTOI,1)
+                  TAUYY=MPTOIM.VPOCHA(NLFTOI,2)
+                  TAUZZ=MPTOIM.VPOCHA(NLFTOI,3)
+                  TAUXY=MPTOIM.VPOCHA(NLFTOI,4)
+                  TAUXZ=MPTOIM.VPOCHA(NLFTOI,5)
+                  TAUYZ=MPTOIM.VPOCHA(NLFTOI,6)
+               ELSE
+                  DUXXF=MPGRVF.VPOCHA(NLFACE,1)
+                  DUXYF=MPGRVF.VPOCHA(NLFACE,2)
+                  DUXZF=MPGRVF.VPOCHA(NLFACE,3)
+                  DUYXF=MPGRVF.VPOCHA(NLFACE,4)
+                  DUYYF=MPGRVF.VPOCHA(NLFACE,5)
+                  DUYZF=MPGRVF.VPOCHA(NLFACE,6)
+                  DUZXF=MPGRVF.VPOCHA(NLFACE,7)
+                  DUZYF=MPGRVF.VPOCHA(NLFACE,8)
+                  DUZZF=MPGRVF.VPOCHA(NLFACE,9)
+                  DSTDU=2.0D0/3.0D0*(DUXXF+DUYYF+DUZZF)
+                  TAUXX=MU*(2.0D0*DUXXF-DSTDU)
+                  TAUYY=MU*(2.0D0*DUYYF-DSTDU)
+                  TAUZZ=MU*(2.0D0*DUZZF-DSTDU)
+                  TAUXY=MU*(DUXYF+DUYXF)
+                  TAUXZ=MU*(DUXZF+DUZXF)
+                  TAUYZ=MU*(DUZYF+DUYZF)
+               ENDIF
+*     IPD=1 : point à gauche du point NGFACE
+*     IPD=2 : point à droite du point NGFACE
+               DO 122 IPD=1,NPD
+                  NPDUAL=MELEFL.NUM((2*IPD)-1,NLFACE)
+                  IF (.NOT.LMUR) THEN
+                     CCGRV2.POIDU2(IPD,IEL2)=NPDUAL
+                  ELSE
+                     CCGRV2.POIDU1(IPD,IEL1)=NPDUAL
+                  ENDIF
+                  NLCEND=KRCENT.LECT(NPDUAL)
+                  IF (NLCEND.EQ.0) THEN
+                     WRITE(IOIMP,*) 'Erreur grave n°1'
+                     GOTO 9999
+                  ENDIF
+                  DO 124 IPP=1,NPP
+                     IF (IPP.EQ.NPTEL) THEN
+                        NPPRIM=NGCGAU
+                     ELSEIF (IPP.EQ.NPTEL+1) THEN
+                        NPPRIM=NGCDRO
+                     ELSEIF (IPP.GE.1.AND.IPP.LT.NPTEL) THEN
+                        NPPRIM=MCOGRV.NUM(IPP+1,IELEM)
+                     ELSE
+                        WRITE(IOIMP,*) 'Erreur grave n°2'
+                        GOTO 9999
+                     ENDIF
+                     LCTR2B=.TRUE.
+                     IF (LCLIMV) THEN
+                        NLCLV=KRVIMP.LECT(NPPRIM)
+                        IF (NLCLV.NE.0) THEN
+                           LCTR2B=.FALSE.
+                        ENDIF
+                     ENDIF
+                     IF (.NOT.LCTR2B) THEN
+*     Lorsque une contribution est nulle, on fixe artificiellement le
+*     point primal égal au point dual.
+                        IF (.NOT.LMUR) THEN
+                           CCGRV2.POIPR2(IPP,IEL2)=NPDUAL
+                           RETRHO.VALMA2(IPD,IPP,IEL2)=0.D0
+                           RETROU.VALMA2(IPD,IPP,IEL2)=0.D0
+                           RETROV.VALMA2(IPD,IPP,IEL2)=0.D0
+                           RETROW.VALMA2(IPD,IPP,IEL2)=0.D0
+                        ELSE
+                           CCGRV2.POIPR1(IPP,IEL1)=NPDUAL
+                           RETRHO.VALMA1(IPD,IPP,IEL1)=0.D0
+                           RETROU.VALMA1(IPD,IPP,IEL1)=0.D0
+                           RETROV.VALMA1(IPD,IPP,IEL1)=0.D0
+                           RETROW.VALMA1(IPD,IPP,IEL1)=0.D0
+                        ENDIF
+                     ELSE
+*     Les contributions 2 valent :
+*     (d Res_{\rho e_t})_d / (d var)_p =
+*     +/-1 (normale sortante, rentrante)  (1/V_d) * (S_f)
+*     * [ [ [  ((n_x * \tau_xx) + (n_y * \tau_yx) + (n_z * \tau_zx))
+*            * ((\epsilon_xx * \alpha_x) + (\epsilon_xy * \alpha_y)
+*                                        + (\epsilon_xz * \alpha_z))
+*           ]
+*         * ((du)_p / (d var)_p)
+*         ]
+*       + [ [  ((n_x * \tau_xy) + (n_y * \tau_yy)  + (n_z * \tau_zy))
+*            * ((\epsilon_yx * \alpha_x) + (\epsilon_yy * \alpha_y)
+*                                        + (\epsilon_yz * \alpha_z))
+*           ]
+*         * ((dv)_p / (d var)_p)
+*         ]
+*       + [ [  ((n_x * \tau_xz) + (n_y * \tau_yz)  + (n_z * \tau_zz))
+*            * ((\epsilon_zx * \alpha_x) + (\epsilon_zy * \alpha_y)
+*                                        + (\epsilon_zz * \alpha_z))
+*           ]
+*         * ((dw)_p / (d var)_p)
+*         ]
+*       ]
+*     et (m étant le centre de gauche dans le cas mur
+*         et les centre gauche, puis droite dans le cas normal)
+*     (d Res_{\rho e_t})_d / (d var)_m =
+*     +/-1 (normale sortante, rentrante)  (1/V_d) * (S_f)
+*     * [ [ [  ((n_x * \tau_xx) + (n_y * \tau_yx) + (n_z * \tau_zx))
+*            * (\gamma_x)
+*           ]
+*         * ((du)_p / (d var)_p)
+*         ]
+*       + [ [  ((n_x * \tau_xy) + (n_y * \tau_yy) + (n_z * \tau_zy))
+*            * (\gamma_y)
+*           ]
+*         * ((dv)_p / (d var)_p)
+*         ]
+*       + [ [  ((n_x * \tau_xz) + (n_y * \tau_yz) + (n_z * \tau_zz))
+*            * (\gamma_z)
+*           ]
+*         * ((dw)_p / (d var)_p)
+*         ]
+*       ]
+*     sachant que l'expression donnant l'interpolation de la
+*     vitesse (u,v) sur une face i est de la forme :
+*     u_i =   (\gamma_x,gauche * u_gauche)
+*           + (\gamma_x,droite * u_droite) (=0 dans le cas mur)
+*           + (\epsilon_xx,i * (du/dx)_i)
+*           + (\epsilon_xy,i * (du/dy)_i)
+*           + (\epsilon_xz,i * (du/dz)_i)
+*     v_i =   (\gamma_y,gauche * v_gauche)
+*           + (\gamma_y,droite * v_droite) (=0 dans le cas mur)
+*           + (\epsilon_yx,i * (dv/dx)_i)
+*           + (\epsilon_yy,i * (dv/dy)_i)
+*           + (\epsilon_yz,i * (dv/dz)_i)
+*     w_i =   (\gamma_z,gauche * w_gauche)
+*           + (\gamma_z,droite * w_droite) (=0 dans le cas mur)
+*           + (\epsilon_zx,i * (dw/dx)_i)
+*           + (\epsilon_zy,i * (dw/dy)_i)
+*           + (\epsilon_zz,i * (dw/dz)_i)
+*     (voir dans xlap13.eso et ci-dessus pour les valeurs des coeffs
+*      \gamma et \epsilon)
+                        NLCENP=KRCENT.LECT(NPPRIM)
+                        IF (NLCENP.EQ.0) THEN
+                           WRITE(IOIMP,*) 'Erreur grave n°3'
+                           GOTO 9999
+                        ENDIF
+*       normale sortante pour IPD=1, rentrante pour IPD=2
+                        SIGNOR=(-1.D0)**(IPD+1)
+                        VOLUEL=MPVOLU.VPOCHA(NLCEND,1)
+                        SURFFA=MPSURF.VPOCHA(NLFACE,1)
+                        CNX   =MPNORM.VPOCHA(NLFACE,1)
+                        CNY   =MPNORM.VPOCHA(NLFACE,2)
+                        CNZ   =MPNORM.VPOCHA(NLFACE,3)
+                        RHOP  =MPROC.VPOCHA(NLCENP,1)
+                        UP    =MPVITC.VPOCHA(NLCENP,1)
+                        VP    =MPVITC.VPOCHA(NLCENP,2)
+                        WP    =MPVITC.VPOCHA(NLCENP,3)
+                        FACTOR=SIGNOR*(1.D0/VOLUEL)*SURFFA
+                        IF (IPP.EQ.NPTEL) THEN
+                           FACTDU= ((CNX*TAUXX)+(CNY*TAUXY)+(CNZ*TAUXZ))
+     $                          * GAMMXG
+                           FACTDV= ((CNX*TAUXY)+(CNY*TAUYY)+(CNZ*TAUYZ))
+     $                          * GAMMYG
+                           FACTDW= ((CNX*TAUXZ)+(CNY*TAUYZ)+(CNZ*TAUZZ))
+     $                          * GAMMZG
+                        ELSEIF (IPP.EQ.NPTEL+1) THEN
+                           FACTDU= ((CNX*TAUXX)+(CNY*TAUXY)+(CNZ*TAUXZ))
+     $                          * GAMMXD
+                           FACTDV= ((CNX*TAUXY)+(CNY*TAUYY)+(CNZ*TAUYZ))
+     $                          * GAMMYD
+                           FACTDW= ((CNX*TAUXZ)+(CNY*TAUYZ)+(CNZ*TAUZZ))
+     $                          * GAMMZD
+                        ELSEIF (IPP.GE.1.AND.IPP.LT.NPTEL) THEN
+                           ALPHAX=KDUNDX.VELCHE(IPP+1,IELEM)
+                           ALPHAY=KDUNDY.VELCHE(IPP+1,IELEM)
+                           ALPHAZ=KDUNDZ.VELCHE(IPP+1,IELEM)
+                           FACTDU= ((CNX*TAUXX)+(CNY*TAUXY)+(CNZ*TAUXZ))
+     $                          * ((EPSIXX*ALPHAX)+(EPSIXY*ALPHAY)
+     $                          +(EPSIXZ*ALPHAZ))
+                           FACTDV= ((CNX*TAUXY)+(CNY*TAUYY)+(CNZ*TAUYZ))
+     $                          * ((EPSIYX*ALPHAX)+(EPSIYY*ALPHAY)
+     $                          +(EPSIYZ*ALPHAZ))
+                           FACTDW= ((CNX*TAUXZ)+(CNY*TAUYZ)+(CNZ*TAUZZ))
+     $                          * ((EPSIZX*ALPHAX)+(EPSIZY*ALPHAY)
+     $                          +(EPSIZZ*ALPHAZ))
+                        ELSE
+                           WRITE(IOIMP,*) 'Erreur grave n°3'
+                           GOTO 9999
+                        ENDIF
+                        DUDRHO=-UP /RHOP
+                        DUDROU=1.D0/RHOP
+                        DVDRHO=-VP /RHOP
+                        DVDROV=1.D0/RHOP
+                        DWDRHO=-WP /RHOP
+                        DWDROW=1.D0/RHOP
+                        IF (.NOT.LMUR) THEN
+                           CCGRV2.POIPR2(IPP,IEL2)=NPPRIM
+                           RETRHO.VALMA2(IPD,IPP,IEL2)=
+     $                          FACTOR*( (FACTDU*DUDRHO)
+     $                          +(FACTDV*DVDRHO)
+     $                          +(FACTDW*DWDRHO))
+                           RETROU.VALMA2(IPD,IPP,IEL2)=
+     $                          FACTOR*  (FACTDU*DUDROU)
+                           RETROV.VALMA2(IPD,IPP,IEL2)=
+     $                          FACTOR*  (FACTDV*DVDROV)
+                           RETROW.VALMA2(IPD,IPP,IEL2)=
+     $                          FACTOR*  (FACTDW*DWDROW)
+                        ELSE
+                           CCGRV2.POIPR1(IPP,IEL1)=NPPRIM
+                           RETRHO.VALMA1(IPD,IPP,IEL1)=
+     $                          FACTOR*( (FACTDU*DUDRHO)
+     $                          +(FACTDV*DVDRHO)
+     $                          +(FACTDW*DWDRHO))
+                           RETROU.VALMA1(IPD,IPP,IEL1)=
+     $                          FACTOR*  (FACTDU*DUDROU)
+                           RETROV.VALMA1(IPD,IPP,IEL1)=
+     $                          FACTOR*  (FACTDV*DVDROV)
+                           RETROW.VALMA1(IPD,IPP,IEL1)=
+     $                          FACTOR*  (FACTDW*DWDROW)
+                        ENDIF
+                     ENDIF
+ 124              CONTINUE
+ 122           CONTINUE
+               IF (.NOT.LMUR) THEN
+                  IEL2=IEL2+1
+               ELSE
+                  IEL1=IEL1+1
+               ENDIF
+            ENDIF
+ 12      CONTINUE
+         NPP1=NPTEL
+         NPP2=NPTEL+1
+         NEL1=IEL1-1
+         NEL2=IEL2-1
+         SEGADJ RETRHO
+         SEGADJ RETROU
+         SEGADJ RETROV
+         SEGADJ RETROW
+         SEGADJ CCGRV2
+         CCGRV2.LMATSI(**)=RETRHO
+         CCGRV2.LMATSI(**)=RETROU
+         CCGRV2.LMATSI(**)=RETROV
+         CCGRV2.LMATSI(**)=RETROW
+* On accumule les matrices résultantes dans IJACO
+         CALL AJMTK(CCGRV2,IJACO,IMPR,IRET)
+         IF (IRET.NE.0) GOTO 9999
+         SEGSUP RETRHO
+         SEGSUP RETROU
+         SEGSUP RETROV
+         SEGSUP RETROW
+         SEGSUP CCGRV2
+*
+         SEGDES MCOGRV
+         SEGDES KDUNDZ
+         SEGDES KDUNDY
+         SEGDES KDUNDX
+ 1    CONTINUE
+      SEGDES ICOGRV
+      SEGDES MPGRVF
+      SEGDES MPVITC
+      SEGDES MPMUC
+      SEGDES MPROC
+      SEGDES MPVOLU
+      SEGDES MPNORM
+      SEGDES MPSURF
+      SEGDES MELEFL
+      SEGDES KRFACE
+      SEGDES KRCENT
+      SEGDES NOMINC
+      IF (LCLITO) THEN
+         SEGDES KRTOIM
+         SEGDES MPTOIM
+      ENDIF
+      IF (LCLIMV) THEN
+         SEGDES KRVIMP
+      ENDIF
+*
+* Normal termination
+*
+      IRET=0
+      RETURN
+*
+* Format handling
+*
+*
+* Error handling
+*
+ 9999 CONTINUE
+      IRET=1
+      WRITE(IOIMP,*) 'An error was detected in subroutine xlap2d'
+      RETURN
+*
+* End of subroutine XLAP2D
+*
+      END
+
+
+
+
+
+
+
+
+
+

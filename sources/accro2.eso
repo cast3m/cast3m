@@ -1,0 +1,925 @@
+C ACCRO2    SOURCE    BP208322  16/11/18    21:15:01     9177
+      SUBROUTINE ACCRO2
+C========================================================================
+C   Cree la matrice de liaison entre le champ u et w
+C   avec une formulation faible a 3 champs : u w et t
+C   FAIBLE => On utilise les fonctions de forme
+c
+C   Option PENA et STAB pour créer les matrices de penalite Kww
+C   et de stabilisation Ktt (utile si LATIN utilisée)
+c
+C   En sortie, on a Kfaibl = [Ktt Ktu Ktw ; Kut 0 0 ; Kwt 0 Kww]
+C   [0  Ktu Ktw ; sym. ] = \int t * (u-w) ds
+c
+c   ajout des enrichissements XFEM
+c
+C   Creation : Benoit Trolle (SNCF-Lamcos), avril 2012
+C   Integration dans Cast3m : BP, decembre 2012
+C========================================================================
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCREEL
+-INC CCOPTIO
+-INC SMCOORD
+-INC SMELEME
+-INC SMRIGID
+-INC SMLMOTS
+-INC CCHAMP
+-INC CCGEOME
+-INC SMMODEL
+-INC SMINTE
+-INC SMCHAML
+-INC SMLREEL
+
+
+C  Segment contenant les informations sur un element
+      SEGMENT INFO
+        INTEGER INFELL(JG)
+      ENDSEGMENT
+
+      POINTEUR INFO1.INFO,INFO2.INFO
+      POINTEUR    MCHEX1.MCHELM
+      external shape
+      DATA EPSI/1.D-9/
+      DIMENSION ICOR(6),IMEL(6),imtt(10)
+      DIMENSION QSI(3),XPO(3)
+
+C  INITIALISATION DES INCONNUES obligatoires et facultatives
+      PARAMETER (NOBL=3,NFAC=9,NMOCLE=3)
+      CHARACTER*4 DDLOBL(NOBL),DDLFAC(NFAC),MODDL,MODDL2
+      CHARACTER*4 DUAOBL(NOBL),DUAFAC(NFAC),MOCLE(NMOCLE)
+      CHARACTER*4 DDLOB2(NOBL),DDLFA2(NOBL)
+      CHARACTER*4 DUAOB2(NOBL),DUAFA2(NOBL)
+
+      DATA DDLOBL/'UX  ','UY  ','UZ  '/
+      DATA DDLFAC/'AX  ','AY  ','AZ  ',
+     >'B1X ','B1Y ','B1Z ',
+     >'B2X ','B2Y ','B2Z '/
+      DATA DUAOBL/'FX  ','FY  ','FZ  '/
+      DATA DUAFAC/'FAX ','FAY ','FAZ ',
+     >'FB1X','FB1Y','FB1Z',
+     >'FB2X','FB2Y','FB2Z'/
+
+c     nom de composantes speciales
+      DATA DDLOB2/'UX  ','UY  ','UZ  '/
+      DATA DDLFA2/'AX  ','AY  ','AZ  '/
+      DATA DUAOB2/'FX  ','FY  ','FZ  '/
+      DATA DUAFA2/'FAX ','FAY ','FAZ '/
+
+      DATA MOCLE /'PENA','STAB','NOMU'/
+
+c-----------------------------------------------------
+c     Segment de travail
+c-----------------------------------------------------
+      SEGMENT MTRAV
+        REAL*8 SHPP2(6,NBNN2)
+        REAL*8 XE2(3,NBNN2),XEL2(3,NBNN2),NGENE2(1,NBNN2)
+        REAL*8 XE3(3,NBNN2)
+        REAL*8 SHPP1(6,NBNN1)
+        REAL*8 XE1(3,NBNN1),XEL1(3,NBNN1)
+        REAL*8 NGENE1(1,NBNN1)
+        REAL*8 REL(nbnn2,nbnn2),REL1(nbnn2,nbnn1)
+        REAL*8 RINT(nbnn2,nbnn2)
+        REAL*8 RINT0(nbnn2,ngau2*nbnn1),RINT1(nbnn2,ngau2*nbnn1)
+        REAL*8 RINT2(nbnn2,ngau2*nbnn1),RINT3(nbnn2,ngau2*nbnn1)
+        INTEGER ITYMAT(2,4*nbnn1*ngau2)
+        INTEGER ITAMYT(ngau2*NBNN1,4)
+        INTEGER PRELEM(3*nbnn1*ngau2)
+        INTEGER ElemPG(ngau2)
+      ENDSEGMENT
+
+c      tableaux comptant le nbre d EF de chaque ddl
+      PARAMETER(NDDLMAX=6)
+      INTEGER NELDDL(NDDLMAX)
+
+      if(iimpi.ge.2) then
+      write(ioimp,*) '-----------------------------------------------'
+      write(ioimp,*) '               ENTREE dans ACCRO2'
+      write(ioimp,*) '-----------------------------------------------'
+      endif
+
+      SEGACT MCOORD
+
+c-----------------------------------------------------
+c     LECTURE DES MOT CLES PENAlite et STABilistation
+c-----------------------------------------------------
+      RLATIN=0.d0
+      XISTAB=0.d0
+      INOMU=0
+ 700  ICLE=0
+      CALL LIRMOT(MOCLE,NMOCLE,ICLE,0)
+      IF (ICLE.EQ.1) GOTO 701
+      IF (ICLE.EQ.2) GOTO 702
+      IF (ICLE.EQ.3) THEN
+        INOMU=1
+        GOTO 700
+      ENDIF
+      GOTO 799
+
+c     LECTURE DE LA DIRECTION DE RECHERCHE (FLOTTANT)
+ 701  CALL LIRREE(RLATIN,1,IRETOU)
+      IF (IERR.NE.0) RETURN
+      if(iimpi.ge.2) write(ioimp,*) 'On a lu la raideur :',RLATIN
+      GOTO 700
+
+c     LECTURE DE LA STABILISATION (FLOTTANT)
+ 702  CALL LIRREE(XISTAB,1,IRETOU)
+      IF (IERR.NE.0) RETURN
+      if(iimpi.ge.2) write(ioimp,*) 'On a lu la STABILISATION :',XISTAB
+      GOTO 700
+
+ 799  CONTINUE
+
+
+c-----------------------------------------------------
+c     RECUPERATION DU MAILLAGE MASSIF
+c-----------------------------------------------------
+      CALL LIROBJ ('MMODEL',IPMODL,1,IRETOU)
+      IF(IERR.NE.0) RETURN
+      MMODE1=IPMODL
+      segact,MMODE1
+c  Récupération du nombre de zones du modèle
+      N1 = MMODE1.KMODEL(/1)
+      if(N1.gt.1) write(ioimp,*) 'attention 1 seule zone a ce jour!'
+      IMODE1 = MMODE1.KMODEL(1)
+      segdes,MMODE1
+C Récupération du maillage et du numéro d'élément du modèle
+      segact,IMODE1
+      nele1 = IMODE1.NEFMOD
+      IPT1 = IMODE1.IMAMOD
+      SEGACT IPT1
+C Récupération du numéro d'élément du maillage, du nombre de noeuds et d'éléments
+      iele1 = IPT1.itypel
+      nbnn1 = IPT1.num(/1)
+      nbel1 = IPT1.num(/2)
+c   récupération des caractéristique EF IPT1
+cbp : on essaie d'abord avec INFELE
+      mele1 = IMODE1.IMAMOD
+      MINTE1 = IMODE1.INFELE(11)
+cbp : si echec, on retente avec elquoi
+      if(mele1.eq.0.or.MINTE1.eq.0) then
+        call elquoi(nele1,0,3,IPTR1,IMODE1)
+        INFO = IPTR1
+        segact,INFO
+        mele1 =  INFELL(1)
+        MINTE1 = INFELL(11)
+        segdes,INFO
+      endif
+      segdes,IMODE1
+cbp : si toujours pb, erreur...
+      if(mele1.eq.0.or.MINTE1.eq.0) then
+        write(ioimp,*) 'donnees relatives a l element fini inconnues'
+        call erreur(591)
+      endif
+
+
+c-----------------------------------------------------
+c     RECUPERATION DU MAILLAGE INTERFACE
+c-----------------------------------------------------
+      IPMAI2 = 0
+      CALL LIROBJ ('MMODEL',IPMODL,0,IRETOU)
+      IF(IERR.NE.0) RETURN
+
+C    -DANS LE CAS OU ON A UN MODELE EN ENTREE
+      IF (IRETOU.EQ.1)THEN
+         MMODE2=IPMODL
+         segact,MMODE2
+         N2 = MMODE2.KMODEL(/1)
+         if(N2.gt.1) write(ioimp,*) 'attention 1 seule zone a ce jour!'
+         IMODE2 = MMODE2.KMODEL(1)
+         segdes,MMODE2
+         segact,IMODE2
+         nele2 = IMODE2.NEFMOD
+         IPT2 = IMODE2.IMAMOD
+         SEGACT IPT2
+c pour l'instant on dit que nele = iele (marche pour iele entre 2 et 26, voir bdata.eso)
+         iele2 = IPT2.itypel
+         nbnn2 = IPT2.num(/1)
+         nbel2 = IPT2.num(/2)
+
+c   recuperation des caracteritiques de l'element
+cbp : on essaie d'abord avec INFELE
+         MINTE2 = IMODE2.INFELE(11)
+         ngau2  = IMODE2.INFELE(6)
+cbp : si echec, on retente avec elquoi
+         if(MINTE2.eq.0.or.ngau2.eq.0) then
+c          write(ioimp,*) 'appel elquoi',iele2,nele2
+           call elquoi(nele2,0,3,IPTR2,IMODE2)
+           INFO = IPTR2
+           segact,INFO
+           MINTE2 = INFELL(11)
+           ngau2 = INFELL(6)
+           segdes,INFO
+         endif
+         segdes,IMODE2
+cbp : si toujours pb, erreur...
+        if(mele1.eq.0.or.MINTE1.eq.0) then
+           write(ioimp,*) 'donnees relatives a l element fini INTERFACE'
+     &     ,'inconnues'
+           call erreur(591)
+         endif
+
+C    -DANS LE CAS OU ON A UN MAILLAGE EN ENTREE
+      ELSE
+         CALL LIROBJ('MAILLAGE',IPMAI2,1,IRETOU)
+         IF(IERR.NE.0) RETURN
+         IPT2 = IPMAI2
+         SEGACT IPT2
+c pour l'instant on dit que nele = iele (marche pour iele entre 2 et 26, voir bdata.eso)
+         iele2 = IPT2.itypel
+         nele2 = iele2
+         if (nele2.lt.2.or.nele2.gt.26) then
+         write(ioimp,*)'element geometrique different de l element fini'
+            call erreur(16)
+         endif
+         nbnn2 = IPT2.num(/1)
+         nbel2 = IPT2.num(/2)
+         ngau2 = -3
+c     SEG2
+         if (nele2.EQ.2) ngau2 = 2
+c     SEG3
+         if (nele2.EQ.3) ngau2 = 3
+c     TRI3
+         if (nele2.EQ.4) ngau2 = 1
+c     TRI6
+         if (nele2.EQ.6) ngau2 = 4
+c     QUA4
+         if (nele2.EQ.8) ngau2 = 4
+c     QUA8
+         if (nele2.EQ.10) ngau2 = 9
+         if(ngau2.eq.-3) then
+         write(ioimp,*)'nombre de points d integration inconnu pour',
+     &         'ce type d element geometrique'
+         call erreur(16)
+         endif
+      ENDIF
+
+      call RESHPT(ngau2,nbnn2,iele2,nele2,0,IPTR2,IRET)
+      MINTE2 = IPTR2
+      segact,MINTE1,MINTE2
+
+
+c-----------------------------------------------------
+c     RECHERCHE DU MCHAML ISSU MCHEX1 D ENRICHISSEMENT
+c-----------------------------------------------------
+      MCHAM1=0
+      NBENR2=0
+      segact,IMODE1
+      NOBMOD = IMODE1.IVAMOD(/1)
+      IF (NOBMOD.NE.0) THEN
+         DO 1002 iobmo1=1,NOBMOD
+            if((IMODE1.TYMODE(iobmo1)).ne.'MCHAML')   goto 1002
+            MCHEX1 = IMODE1.IVAMOD(iobmo1)
+            segact,MCHEX1
+            if((MCHEX1.TITCHE).ne.'ENRICHIS')  goto 1003
+            MCHAM1 = MCHEX1.ICHAML(1)
+            segact,MCHAM1
+            NBENR2 = MCHAM1.IELVAL(/1)
+            do ienr2=1,NBENR2
+               MELVA1=MCHAM1.IELVAL(IENR2)
+               if(MELVA1.ne.0) segact,MELVA1
+            enddo
+ 1003       continue
+            segdes,MCHEX1
+ 1002    CONTINUE
+      ENDIF
+
+c-------------------------------------
+c     INITIALISATION DES OBJETS DE TRAVAIL : MTRAV et ITYMAT
+c-------------------------------------
+
+      segini,MTRAV
+
+*bp : NTYMAT = (U ou H ou HB1 ou HB1B2) * dim * nbre de configs possibles
+*     NTYMAT = nbre de types de matrices
+*      nbre de configs varie entre :
+*     -on peut avoir tous les pt de Gauss dans 1 seul elements de structure
+*     -jusqu'à chaque pt de Gauss dans un element distinct
+      ity=0
+c     boucle sur les enrichissements possibles U, H , HB1, HB1B2
+      if(iimpi.ge.3) write(ioimp,*) 'ity , ino1 , ienr1'
+      do ienr1=1,4
+c       boucle sur les nombre de noeuds "structure"
+        do ino1=(nbnn1),(ngau2*nbnn1)
+          ity=ity+1
+          ITYMAT(1,ity)=ino1
+          ITYMAT(2,ity)=ienr1
+          ITAMYT(ino1,ienr1)=ity
+          if(iimpi.ge.3) write(ioimp,*) ity,ino1,ienr1
+        enddo
+      enddo
+      NTYMAT = 4*(nbnn1*(ngau2-1)+1)
+      if(iimpi.ge.3) write(ioimp,*) 'ity*idim=',ity,NTYMAT
+
+
+c--------------------------------------------------------------------
+c     INITIALISATION DU SEGMENT MRIGID
+c--------------------------------------------------------------------
+      NRIGEL = NTYMAT*idim
+      segini,MRIGID
+      IFORIG = IFOUR
+      MTYMAT ='RIGIDITE'
+c    -on prepare le meleme
+      NBSOUS = 0
+      NBREF = 0
+
+      ityty=0
+c on initialise la taille matrice en fonction du type de matrice
+      do ity=1,NTYMAT
+      do iidim=1,idim
+
+         ityty=ityty+1
+         COERIG(ityty) = 1.D0
+
+*     dim de la matrice RE elementaire = nbnoeud*TX + nbnoeud*AX + nbnoeud*AX
+         nbno1 = ITYMAT(1,ity)
+         nenr1 = ITYMAT(2,ity)
+         if(nenr1.le.2) then
+           NLIGRP = nbnn2 + nbnn2 + nbno1
+         else
+           NLIGRP = nbnn2 + nbnn2 + ((nenr1-1)*nbno1)
+         endif
+         NLIGRD = NLIGRP
+
+c       -creation du MELEME
+         NBNN = nbnn2 + nbno1
+         NBELEM=0
+         SEGINI,MELEME
+         ITYPEL=28
+         IRIGEL(1,ityty) = MELEME
+
+c       -remplissage du DESCR
+         SEGINI,DESCR
+         IRIGEL(3,ityty) = DESCR
+         iddl=0
+c        remplissage des ddl LX de la fissure (ici appelé FX)
+c        on iverse donc inconnue et duale []*FX=UX
+         do ino2=1,nbnn2
+           iddl=iddl+1
+           if (nenr1.eq.1) then
+               LISINC(iddl)=DUAOB2(iidim)
+               LISDUA(iddl)=DDLOB2(iidim)
+           else
+             LISINC(iddl)=DUAFA2(iidim)
+             LISDUA(iddl)=DDLFA2(iidim)
+           endif
+           NOELEP(iddl)=ino2
+           NOELED(iddl)=ino2
+         enddo
+c        remplissage des ddl UX de la fissure (ici appelé WX) []*WX=TX
+         do ino2=1,nbnn2
+           iddl=iddl+1
+           if (nenr1.eq.1) then
+               LISINC(iddl)=DDLOB2(iidim)
+               LISDUA(iddl)=DUAOB2(iidim)
+           else
+             LISINC(iddl)=DDLFA2(iidim)
+             LISDUA(iddl)=DUAFA2(iidim)
+           endif
+           NOELEP(iddl)=ino2
+           NOELED(iddl)=ino2
+         enddo
+c        remplissage des ddl de la structure
+         if (nenr1.eq.1) then
+           do ino1=1,nbno1
+               iddl=iddl+1
+               LISINC(iddl)=DDLOBL(iidim)
+               LISDUA(iddl)=DUAOBL(iidim)
+               NOELEP(iddl)=nbnn2+ino1
+               NOELED(iddl)=nbnn2+ino1
+           enddo
+         else
+           do ini1=1,(nenr1-1)
+           do ino1=1,nbno1
+               iddl=iddl+1
+               LISINC(iddl)=DDLFAC(iidim+(3*(ini1-1)))
+               LISDUA(iddl)=DUAFAC(iidim+(3*(ini1-1)))
+               NOELEP(iddl)=nbnn2+ino1
+               NOELED(iddl)=nbnn2+ino1
+           enddo
+           enddo
+         endif
+         if(iimpi.ge.3) write(ioimp,*) ityty,(LISINC(iou),iou=1,NLIGRP)
+         SEGDES,DESCR
+
+c       -initialisation du XMATRI
+         NELRIG=0
+         SEGINI,XMATRI
+         IRIGEL(4,ityty) = XMATRI
+         IRIGEL(5,ityty) = NIFOUR
+         IRIGEL(6,ityty) = 0
+         IRIGEL(7,ityty) = 0
+         IRIGEL(8,ityty) = 0
+
+      enddo
+      enddo
+
+
+c----------------------------------------------------------------------
+c     1. RECHERCHE DES ELEMENTS DE STRUCTURE CONTENANT DES POINTS DE GAUSS
+c        DES ELEMENTS DE LA FISSURE
+c     2. REMPLISSAGE DU MELEME + MRIGID en FONCTION
+c----------------------------------------------------------------------
+
+C
+c==== Boucle sur les elements de fissure ==============================
+      DO 1100 iem2=1,nbel2
+
+         call doxe(xcoor,idim,nbnn2,ipt2.num,iem2,xe2)
+         nbenrj = 0
+         nbnno2 = 0
+         call ZERO(RINT,nbnn2,nbnn2)
+         call ZERO(RINT0,nbnn2,ngau2*nbnn1)
+         call ZERO(RINT1,nbnn2,ngau2*nbnn1)
+         call ZERO(RINT2,nbnn2,ngau2*nbnn1)
+         call ZERO(RINT3,nbnn2,ngau2*nbnn1)
+
+c======= Boucle sur les pt de G de fissure ============================
+         DO 1132 igau2=1,ngau2
+            izok = 0
+c   récupération des coordonnees du point de gauss dans le repère global
+            XPO(1) = 0.D0
+            XPO(2) = 0.D0
+            XPO(3) = 0.D0
+            DO  ino=1,nbnn2
+               XPO(1) = XPO(1) + (MINTE2.SHPTOT(1,ino,IGAU2)*xe2(1,ino))
+               XPO(2) = XPO(2) + (MINTE2.SHPTOT(1,ino,IGAU2)*xe2(2,ino))
+               IF(IDIM.EQ.3) then
+               XPO(3) = XPO(3) + (MINTE2.SHPTOT(1,ino,IGAU2)*xe2(3,ino))
+               ENDIF
+            ENDDO
+
+c            if(iimpi.ge.5) write(ioimp,*) 'Fissure: element',iem2,
+c      &     ' point de Gauss',igau2,' x=',XPO(1),XPO(2)
+
+c---------- Boucle sur les elements de structure ----------------------
+            DO 1131 iem1=1,nbel1
+
+c   si pas d'enrichissement, on travaille sur tous les elements
+               if(MCHAM1.eq.0) goto 1133
+c   on saute les elements non enrichi car a priori ne contiennent pas la fissure
+               do ienr2=1,NBENR2
+                  MELVA1=MCHAM1.IELVAL(IENR2)
+                  if(MELVA1.ne.0) then
+                    do inode1=1,nbnn1
+                  if(MELVA1.IELCHE(inode1,iem1).ne.0) goto 1133
+                    enddo
+                  endif
+               enddo
+               goto 1131
+ 1133          continue
+
+c   recuperation des coordonnées des noeuds de IPT1 : xel1 (dans le repère x,y,z)
+               call doxe(xcoor,idim,nbnn1,ipt1.num,iem1,xel1)
+
+c   calcul des fonctions de formes de IPT1 au pt de Gauss de IPT2
+               call QSIJS(xel1,iele1,nbnn1,idim,XPO,SHPP1,qsi,IRET)
+c            if(iimpi.ge.5) write(ioimp,*) 'Structure: element',iem1,
+c      &     ' noeuds:',(ipt1.num(iou,iem1),iou=1,nbnn1)
+c            if(iimpi.ge.5) write(ioimp,*)
+c      &     '  N_i=',(SHPP1(1,iou),iou=1,nbnn1)
+
+
+c   test pour savoir si PG est dans EF de IPT1
+               DO 1130 ino1=1,NBNN1
+                  if (SHPP1(1,ino1).LT.-1.01D-7) then
+                     go to 1131
+                  endif
+ 1130          continue
+               izok = 1
+c              ON a trouvé l'élément de structure !
+c           write(ioimp,*) 'ON a trouve l element de structure !'
+c     DETECTION DU TYPE D'ENRICHISSEMENT MAX DE CET ELEMENT = nbenrj
+               DO 3001 IENR2=1,NBENR2
+                 MELVA1=MCHAM1.IELVAL(IENR2)
+                 IF(MELVA1.eq.0) GOTO 3001
+                 DO 3002 ino1=1,nbnn1
+                   MLREEL = MELVA1.IELCHE(ino1,iem1)
+c                  Test pour savoir si le noeud est enrichi
+                   IF(MLREEL.eq.0) GOTO 3002
+                   nbenrj=max(nbenrj,IENR2)
+ 3002            continue
+ 3001          continue
+
+               if(iimpi.ge.3) write(ioimp,*) 'EF fissure ',iem2,
+     &         ' ptdeG ',igau2,' -> EF MASSIF ',iem1,' nbenrj=',nbenrj
+
+c        Préparation du Remplissage du MELEME
+               do 3003 ino1=1,nbnn1
+                  iino1=IPT1.NUM(ino1,iem1)
+                  if(nbnno2.gt.0) then
+                  do iino2=1,nbnno2
+                    if(PRELEM(iino2).eq.iino1) goto 3003
+                  enddo
+                  endif
+c                 nouveau noeud : on l'ajoute
+                  nbnno2=nbnno2+1
+                  PRELEM(nbnno2)=iino1
+ 3003          continue
+               if(iimpi.ge.3) then
+               write(ioimp,*) ' PRELEM=',( PRELEM(iou),iou=1,nbnno2)
+               write(ioimp,*) 'EF fissure ',iem2,' ptdeG ',igau2
+               endif
+
+C        CALCUL DE REL ET REL1
+
+c matrices des fonctions de forme de l'element associé à IPT2
+
+               do ino2=1,NBNN2
+                  xe3(1,ino2) = sqrt( xe2(1,ino2)*xe2(1,ino2)
+     1                              + xe2(2,ino2)*xe2(2,ino2) )
+                  NGENE2(1,ino2)=MINTE2.SHPTOT(1,ino2,IGAU2)
+                  do ipp2=1,6
+                     SHPP2(ipp2,ino2)=MINTE2.SHPTOT(ipp2,ino2,IGAU2)
+                  enddo
+                  if(iimpi.ge.4) then
+                  write(ioimp,*) 'SHPP2',(SHPP2(iou,ino2),iou=1,6)
+                  write(ioimp,*) 'xe2',(xe2(iou,ino2),iou=1,2)
+                  endif
+               enddo
+c              calcul du jacobien
+               if(idim.eq.2) then
+c              calcul du jacobien en 2D pour un seg2
+                  dXdQsi=0.D0
+                  dYdQsi=0.D0
+                  DO i=1,NBNN2
+                     dXdQsi=dXdQsi+SHPP2(2,i)*XE2(1,i)
+                     dYdQsi=dYdQsi+SHPP2(2,i)*XE2(2,i)
+                  ENDDO
+c           Dans le cas des seg2, poids des pts de gauss = 1
+                  DJAC2=SQRT(dXdQsi*dXdQsi+dYdQsi*dYdQsi)
+                else
+                      dXdQsi=0.D0
+                      dYdQsi=0.D0
+                      dZdQsi=0.D0
+                      dXdEta=0.D0
+                      dYdEta=0.D0
+                      dZdEta=0.D0
+                      DO i=1,NBNN2
+                         dXdQsi=dXdQsi+SHPP2(2,i)*XE2(1,i)
+                         dXdEta=dXdEta+SHPP2(3,i)*XE2(1,i)
+                         dYdQsi=dYdQsi+SHPP2(2,i)*XE2(2,i)
+                         dYdEta=dYdEta+SHPP2(3,i)*XE2(2,i)
+                         dZdQsi=dZdQsi+SHPP2(2,i)*XE2(3,i)
+                         dZdEta=dZdEta+SHPP2(3,i)*XE2(3,i)
+                      ENDDO
+                      z = (dXdQsi*dYdEta-dXdEta*dYdQsi)
+                      x = (dYdQsi*dZdEta-dYdEta*dZdQsi)
+                      y = (dZdQsi*dXdEta-dZdEta*dXdQsi)
+c           Dans le cas des tri3, poids du pts de gauss = 0.5
+                      DJAC2 = sqrt(x*x+y*y+z*z)*0.5
+               endif
+
+c matrices des fonctions de forme de l'element associé à IPT1
+               do ino1=1,NBNN1
+                  NGENE1(1,ino1)=SHPP1(1,ino1)
+               enddo
+               if(iimpi.ge.4) then
+                 write(ioimp,*) 'DJAC2=',DJAC2
+                 write(ioimp,*) 'NGENE1=',(NGENE1(1,iou),iou=1,NBNN1)
+                 write(ioimp,*) 'NGENE2=',(NGENE2(1,iou),iou=1,NBNN2)
+               endif
+
+c  calcul des matrices elementaires = produits des fonctions de forme
+               DO II=1,nbnn2
+                  XGENE2 = NGENE2(1,II)*DJAC2
+c calcul de K_ww, Kwt et Ktt
+                   DO JJ=1,nbnn2
+                      jjj = JJ
+C           CC = Jacobien * transposee(N)(II,i) * N(i,JJ) (somme sur i)
+                      CC = XGENE2*NGENE2(1,jjj)
+C           REL est une matrice symetrique
+                      REL(II,JJ) = CC
+                      REL(JJ,II) = REL(II,JJ)
+                   ENDDO
+c calcul de K_tu
+                   DO JJ=1,nbnn1
+C           CC = Jacobien * transposee(N)(II,i) * N(i,JJ) (somme sur i)
+                      CC=XGENE2*NGENE1(1,JJ)
+c                     write(ioimp,*) ' CC = ', CC
+c                      REL1(II,JJ)=-1.D0*CC
+                      REL1(II,JJ)=CC
+c                      REL(JJdec,II)=REL(II,JJdec)
+                   ENDDO
+                  if(iimpi.ge.4) write(ioimp,*)
+     1            'REL1(',II,',:)=',(REL1(II,iou),iou=1,NBNN1)
+               ENDDO
+
+C         CUMUL DANS RINT ET RINT1
+C     CUMUL DANS RINT(II,JJ) pour Kww, Kwt, Ktw et Ktt
+c     (4 fois la meme matrices = N^{w T} * N^{w} = N^{w T} * N^{t} = ...)
+               DO  II=1,nbnn2
+                   DO  JJ=1,nbnn2
+                         RINT(II,JJ) = RINT(II,JJ) + REL(II,JJ)
+                   ENDDO
+               ENDDO
+
+C     CUMUL DANS RINT1(II,JJ) pour Kut ( = N^{t T} * N^{u})
+C    INTEGRATION POSSIBLEMENT INCOMPATIBLE POUR KUT !
+c on peut prendre le 1er enrichissement (ou le standard) car on a
+c toujours les memes noeuds au debut (sans tenir compte des B1X)
+
+c              Stockage de l'element iem1 pour les differents PG
+               elemPG(igau2) = iem1
+
+               DO 4205 JJ=1,nbnn1
+                 iino1=IPT1.NUM(JJ,iem1)
+
+                 do JJ1 = 1,nbnno2
+                   if(PRELEM(JJ1).eq.iino1) goto 4207
+                 enddo
+                 write(IOIMP,*) 'On n a pas trouvé le noeud ',iino1
+                 call ERREUR(5)
+ 4207            continue
+                 itoto = 0
+
+c                UX
+                 DO II=1,nbnn2
+                     RINT0(II,JJ1) = RINT0(II,JJ1) + REL1(II,JJ)
+                 ENDDO
+c                AX
+                 DO II=1,nbnn2
+                   MELVA1 = MCHAM1.IELVAL(1)
+                   MLREEL = MELVA1.IELCHE(JJ,iem1)
+                   if(MLREEL.ne.0) then
+                     RINT1(II,JJ1) = RINT1(II,JJ1) + REL1(II,JJ)
+c                     write(ioimp,*) ' RINT1(',II,JJ1,') = ', RINT1(II,JJ1)
+                   endif
+                 ENDDO
+
+
+c                B1X
+                 IF(nbenrj.ge.2) THEN
+                   MELVA1 = MCHAM1.IELVAL(2)
+                   MLREEL = MELVA1.IELCHE(JJ,iem1)
+                   if(MLREEL.ne.0) then
+                     PSIX = 0.d0
+                     SEGACT,MLREEL
+                     do iii0 = 1,nbnn1
+                       PSIX  = PSIX + (SHPP1(1,iii0) * PROG(iii0))
+                     enddo
+                     SEGDES,MLREEL
+                     RX05= SQRT(ABS(PSIX))
+c                      write(ioimp,*) 'RX05 = ', RX05
+                     do II=1,nbnn2
+                       RINT2(II,JJ1) = RINT2(II,JJ1) + RX05*REL1(II,JJ)
+                     enddo
+                  endif
+                 ENDIF
+
+
+c                B2X
+                 IF(nbenrj.ge.3) THEN
+                   MELVA1 = MCHAM1.IELVAL(3)
+                   MLREEL = MELVA1.IELCHE(JJ,iem1)
+                   if(MLREEL.ne.0) then
+                     PSIX = 0.d0
+                     SEGACT,MLREEL
+                     do iii0 = 1,nbnn1
+                       PSIX  = PSIX + (SHPP1(1,iii0) * PROG(iii0))
+                     enddo
+                     SEGDES,MLREEL
+                     RX05= SQRT(ABS(PSIX))
+                     do II=1,nbnn2
+                        RINT3(II,JJ1) = RINT3(II,JJ1) + RX05*REL1(II,JJ)
+                     enddo
+                  endif
+                 ENDIF
+
+ 4205          CONTINUE
+
+               if(iimpi.ge.4) then
+                 DO II=1,nbnn2
+          write(ioimp,*) 'RINT1(',II,',:)=',(RINT1(II,iou),iou=1,nbnno2)
+                 ENDDO
+               endif
+
+
+c              on a trouvé le iem1 élément et on a fait le travail :
+c              on passe au point de gauss suivant
+               goto 1132
+
+ 1131       CONTINUE
+c---------- fin de la Boucle sur les elements de structure ----------------------
+            if(iimpi.ge.2) write(ioimp,*)
+     1      'Fin de la boucle sur les elements de structure'
+            if(izok.eq.0) write(ioimp,*) 'Attention le pt de Gauss '
+     &      ,igau2,'de l element ',iem2,' est hors support'
+
+
+ 1132    CONTINUE
+c======= fin de la Boucle sur les pt de G de fissure ============================
+
+c    --- Remplissage du MELEME et DU XMATRI ---
+         DO ityp1=1,2
+
+c         on commence par le MELEME des ddls Obligatoire (U)
+          izone = 1
+c         on poursuit avec le MELEME des ddls Sauts (H ou HB1 ou HB1B2)
+          if(ityp1.eq.2) izone=nbenrj+1
+          ity = ITAMYT(nbnno2,izone)
+
+          do iidim=1,idim
+          ityty = ((ity-1) * idim) + iidim
+          if(iimpi.ge.4) write(ioimp,*) ity,nbnno2,izone,' -> ',ityty
+
+c     --- Remplissage du MELEME ---
+          MELEME = IRIGEL(1,ityty)
+          NBNN   = NUM(/1)
+          NBELEM = NUM(/2) + 1
+          if(iimpi.ge.4) then
+          write(ioimp,*) 'on remplit le type de matrice ',ityty,
+     1                   ' NBNN,NBELEM=',NBNN,NBELEM
+          endif
+          segadj,MELEME
+c         element de fissure
+          do ino2=1,nbnn2
+            NUM(ino2,NBELEM) = IPT2.NUM(ino2,iem2)
+c             NUM(ino2+nbnn2,NBELEM) = IPT2.NUM(ino2,iem2)
+          enddo
+c         element de structure
+          do iino2=1,nbnno2
+c             NUM((2*nbnn2)+iino2,NBELEM) = PRELEM(iino2)
+            NUM(nbnn2+iino2,NBELEM) = PRELEM(iino2)
+          enddo
+
+c     --- Remplissage du XMATRI.RE ---
+          XMATRI = IRIGEL(4,ityty)
+          NLIGRD = RE(/1)
+          NLIGRP = RE(/2)
+          NELRIG = RE(/3) + 1
+          segadj,XMATRI
+
+          DO II=1,nbnn2
+
+c            -Ktt
+c             on choisit de ne garder que la partie diagonale
+             JJ=II
+              XMATRI.RE(II,JJ,NBELEM) = RINT(II,JJ)*XISTAB
+
+c            -Kwt
+              DO JJ=1,nbnn2
+                 XMATRI.RE(II,JJ+nbnn2,NBELEM) = RINT(II,JJ)
+                 XMATRI.RE(JJ+nbnn2,II,NBELEM) = RINT(II,JJ)
+c          write(ioimp,*) 'XMATRI.RE(',II,JJ+nbnn2,NBELEM,') =', RINT(II,JJ)
+              ENDDO
+
+C            -Kww
+c             on choisit de ne garder que la partie diagonale
+             JJ=II
+               XMATRI.RE(nbnn2+II,nbnn2+JJ,NBELEM) = RINT(II,JJ)*RLATIN
+
+C            -Kut (on a deja fait le travail de positionnement avant)
+              if(ityp1.eq.1) then
+c               UX
+                JJdec = 2*nbnn2
+                DO JJ=1,nbnno2
+                  XMATRI.RE(II,JJdec+JJ,NBELEM) = -1.*RINT0(II,JJ)
+                  XMATRI.RE(JJdec+JJ,II,NBELEM) = -1.*RINT0(II,JJ)
+c                 write (6,* ) 'XMATRI.RE(',II,JJdec+JJ,NBELEM,') =', XMA
+c     1TRI.RE(II,JJdec+JJ,NBELEM)
+                ENDDO
+              else
+c               AX
+                JJdec = 2*nbnn2
+                DO JJ=1,nbnno2
+                  XMATRI.RE(II,JJdec+JJ,NBELEM) = -1.*RINT1(II,JJ)
+                  XMATRI.RE(JJdec+JJ,II,NBELEM) = -1.*RINT1(II,JJ)
+c                 write (6,* ) 'XMATRI.RE(',II,JJdec+JJ,NBELEM,') =', XMA
+c     1TRI.RE(II,JJdec+JJ,NBELEM)
+                ENDDO
+
+c               B1X
+                IF(nbenrj.ge.2) THEN
+                   JJdec=JJdec+nbnno2
+                   DO JJ=1,nbnno2
+                      XMATRI.RE(II,JJdec+JJ,NBELEM) = -1.*RINT2(II,JJ)
+                      XMATRI.RE(JJdec+JJ,II,NBELEM) = -1.*RINT2(II,JJ)
+
+c             Cas ou les inconnues aux noeuds ne sont pas présentes
+c             mis à 0 de ces inconnues en mettant un 1 sur la diagonale
+
+c              Début de la boucle pour tester les noeuds de structure d'ancien point de gauss
+cbp                DO 5002 iigau2 = 1,igau2
+                DO 5002 iigau2 = 1,ngau2
+                   iiem1 = elemPG(iigau2)
+                   DO JJ1=1,nbnn1
+                      iino1=IPT1.NUM(JJ1,iiem1)
+                      if(PRELEM(JJ).eq.iino1) then
+                         MELVA1 = MCHAM1.IELVAL(2)
+                         MLREEL = MELVA1.IELCHE(JJ1,iiem1)
+                         if(MLREEL.ne.0) goto 5002
+                         XMATRI.RE(JJdec+JJ,JJdec+JJ,NBELEM) = 1
+c                         write(ioimp,*) 'XMATRI.RE(',JJd ec+JJ,JJdec+JJ,NBEL
+c     1EM,') =', XMATRI.RE(JJdec+JJ,JJdec+JJ,NBELEM)
+                      endif
+                   ENDDO
+5002             CONTINUE
+             ENDDO
+
+
+
+                ENDIF
+c               B2X
+                IF(nbenrj.ge.3) THEN
+                JJdec=JJdec+nbnno2
+                DO JJ=1,nbnno2
+                  XMATRI.RE(II,JJdec+JJ,NBELEM) = -1.*RINT3(II,JJ)
+                  XMATRI.RE(JJdec+JJ,II,NBELEM) = -1.*RINT3(II,JJ)
+                ENDDO
+                ENDIF
+              endif
+
+          ENDDO
+
+       enddo
+
+
+       ENDDO
+
+
+
+ 1100 CONTINUE
+c==== fin de la Boucle sur les elements de fissure ==============================
+c----------------------------------------------------------------------
+
+
+c------------------------------------
+c     AJUSTEMENT AVANT DE QUITTER
+c------------------------------------
+
+      if(iimpi.ge.2) write(ioimp,*) 'AJUSTEMENT AVANT DE QUITTER'
+
+
+C     BOUCLE SUR LES SOUS RIGIDITÉS
+      ityok = 0
+      DO 2000 ityty=1,(idim*NTYMAT)
+
+         MELEME = IRIGEL(1,ityty)
+         DESCR  = IRIGEL(3,ityty)
+         XMATRI = IRIGEL(4,ityty)
+         NBELEM = NUM(/2)
+         if(NBELEM.ne.0) then
+           ityok = ityok + 1
+           IRIGEL(1,ityok) = MELEME
+           IRIGEL(3,ityok) = DESCR
+           IRIGEL(4,ityok) = XMATRI
+           segdes,MELEME,XMATRI
+         else
+           segsup,MELEME,DESCR,XMATRI
+         endif
+ 2000 continue
+      NRIGEL = ityok
+      segadj,MRIGID
+
+c-------------------------------
+c     MENAGE AVANT DE QUITTER
+c-------------------------------
+
+      segsup,MTRAV
+      segdes,MINTE1,MINTE2
+      segdes,IPT1,IPT2
+      segdes,MCHAM1
+
+
+c-------------------------------
+c     ON REMPLACE LES FX PAR DES LX
+c-------------------------------
+      IF(INOMU.eq.0) THEN
+        JGN=4
+        JGM=2*idim
+        segini,MLMOT1
+        do iidim=1,idim
+           MLMOT1.MOTS(iidim) = DUAOBL(iidim)
+           MLMOT1.MOTS(iidim+idim) = DUAFAC(iidim)
+        enddo
+        ILMOT1 = MLMOT1
+        IPRIG1 = MRIGID
+        if(iimpi.ge.2) write(ioimp,*)'       APPEL A FX2LX       '
+        CALL FX2LX(IPRIG1,ILMOT1,IPRIG2)
+        MRIGID = IPRIG2
+        SEGSUP,MLMOT1
+      ENDIF
+
+c       write(ioimp,*) 'desactivation du MRIGID',MRIGID
+      SEGDES,MRIGID
+
+      if(iimpi.ge.3) write(ioimp,*) 'ecriture du MRIGID',MRIGID
+      CALL ECROBJ('RIGIDITE',MRIGID)
+
+      RETURN
+
+      END
+
+
+
+
+
+
+
+
+
+
+

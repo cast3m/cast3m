@@ -1,0 +1,1206 @@
+C SIGMA1    SOURCE    KICH      18/01/12    21:16:01     9691
+
+      SUBROUTINE SIGMA1(MATE,IMAT,IPMAIL,IPMINT,MELE,IELE,
+     &  IVADEP,NBPTEL,LRE,NSTRS,IVAMAT,NBGMAT,NELMAT,LHOOK,NMATT,
+     &  CMATE,MFR,NDEP,IPORE,IREPS2,NBPGAU,IVASTR,UZDPG,RYDPG,RXDPG,
+     &  IIPDPG)
+
+*---------------------------------------------------------------------*
+*         _________________________                                   *
+*        |                         |                                  *
+*        |  calcul des contraintes |                                  *
+*        |_________________________|                                  *
+*                                                                     *
+*        massif, poreux, joints poreux, incompressibles               *
+*                                                                     *
+*---------------------------------------------------------------------*
+*                                                                     *
+*   entrees :                                                         *
+*   ________                                                          *
+*                                                                     *
+*        mate     numero du materiau                                  *
+*        imat     (2 il y a une matrice de hooke,1 non  )             *
+*        ipmail   pointeur sur un segment  meleme                     *
+*        ipmint   pointeur sur un segment minte                       *
+*        mele     numero de l'element fini                            *
+*        iele     numero geometrique de l'element
+*        nbpgau   nombre de point d'integration pour la rigidite      *
+*        ivadep   pointeur sur le chamelem de deplacements            *
+*        nbptel   nombre de points par element                        *
+*        lre      nombre de ddl dans la matrice de rigidite           *
+*        nstrs    nombre de composante de contraintes/deformations    *
+*        ivamat   pointeur sur un segment mptval pour le materiau ou  *
+*                 pour une matrice de hooke                           *
+*        nbgmat   taille maxi des melval du materiau (pt de gauss)    *
+*        nelmat   taille maxi des melval du materiau (no d'element)   *
+*        lhook    dimension de la matrice de hooke                    *
+*        nmatt    nombre de composante de materiau (imat=1)           *
+*        cmate    nom du materiau                                     *
+*        mfr      numero de la formulation de l'element fini          *
+*        ndep     nombre de composantes de deplacements               *
+*        ipore    nombre de fonctions de forme                        *
+*        iresp2   flag pour indiquer si on veut les contraintes       *
+*                  de piola-kirchhoff                                 *
+*        uzdpg    = deformation au point nsdpge support de la         *
+*        rydpf    = deformation plane generalisee                     *
+*        rxdpg    =                                                   *
+*                                                                     *
+*   sorties :                                                         *
+*   ________                                                          *
+*                                                                     *
+*        ivastr   pointeur sur un segment mptval contenant les        *
+*                 les melvals de contraints
+*                                                                     *
+*---------------------------------------------------------------------*
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCHAMP
+-INC CCREEL
+-INC CCGEOME
+-INC SMCHAML
+-INC SMINTE
+-INC SMELEME
+-INC SMCOORD
+-INC SMLREEL
+
+      SEGMENT WRK1
+       REAL*8 DDHOOK(LHOOK,LHOOK) ,XDDL(LRE) ,XSTRS(NSTRS)
+       REAL*8 XE(3,NBBB) ,DDHOMU(LHOOK,LHOOK)
+      ENDSEGMENT
+c
+      SEGMENT WRK2
+       REAL*8 SHPWRK(6,NBNO) ,BGENE(LHOOK,LRE)
+      ENDSEGMENT
+c
+      SEGMENT WRK3
+       REAL*8 BPSS(3,3),XEL(3,NBBB)
+      ENDSEGMENT
+c
+      SEGMENT WRK5
+       REAL*8 XGENE(NSTN,LRN),COBMA(LHOOK),XWRK(LHOOK)
+       REAL*8 COBB(IDECAP),CPBB(IDECAP),KKBB(IDECAP,IDECAP)
+      ENDSEGMENT
+c
+      SEGMENT WRK8
+       REAL*8 XLOC(3,3),XGLOB(3,3),TXR(IDIM,IDIM)
+       REAL*8 D1HO(LHOOK,LHOOK),ROTH(LHOOK,LHOOK)
+      ENDSEGMENT
+c
+      SEGMENT,MVELCH
+       REAL*8 VALMAT(NV1)
+      ENDSEGMENT
+c
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS)    ,NSOF(NS)
+        INTEGER      IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+*
+      SEGMENT MTRACE
+        REAL*8 TRACE(3,NBPTEL)
+      ENDSEGMENT
+*
+      CHARACTER*8 CMATE
+      DIMENSION A(4,60),BB(3,60),UDPGE(3),PP(4,4)
+      LOGICAL BDPGE
+
+c   Introduction du point autour duquel se fait le mouvement
+c   de la section en defo plane generalisee
+c   Pas de rotation en 1D
+      BDPGE=.FALSE.
+      NDPGE=0
+      XDPGE=XZero
+      YDPGE=XZero
+      IF (IFOUR.EQ.-3) THEN
+        BDPGE=.TRUE.
+        NDPGE=3
+        UDPGE(1)=UZDPG
+        UDPGE(2)=RYDPG
+        UDPGE(3)=RXDPG
+        SEGACT,MCOORD
+        IREF=(IIPDPG-1)*(IDIM+1)
+        XDPGE=XCOOR(IREF+1)
+        YDPGE=XCOOR(IREF+2)
+      ELSE IF (IDIM.EQ.1) THEN
+        IF ((IFOUR.GE.7 .AND. IFOUR.LE.10) .OR. IFOUR.EQ.14) THEN
+          BDPGE=.TRUE.
+          NDPGE=1
+          UDPGE(1)=UZDPG
+        ELSE IF (IFOUR.EQ.11) THEN
+          BDPGE=.TRUE.
+          NDPGE=2
+          UDPGE(1)=UZDPG
+          UDPGE(2)=RXDPG
+        ENDIF
+      ENDIF
+*
+      MELEME=IPMAIL
+      NBNN=NUM(/1)
+      NBELEM=NUM(/2)
+*
+      IDECAP=0
+      NHRM=NIFOUR
+*
+      NV1=NMATT
+      SEGINI,MVELCH
+*
+      MINTE=IPMINT
+*
+      NBBB=NBNN
+      SEGINI WRK1
+*
+      IRTD=1
+c_______________________________________________________________________
+c
+c     numero des etiquettes      :
+c     etiquettes de 1 a 98 pour traitement specifique a l element
+c     dans la zone specifique a chaque element commencant par :
+c     5  continue
+c     element 5   etiquettes 1005 2005 3005 4005   ...
+c     44 continue
+c     element 44  etiquettes 1044 2044 3044 4044   ...
+c_______________________________________________________________________
+c
+      GOTO (99,99,99, 4,99, 4,99, 4,99, 4,99,99,99, 4, 4, 4, 4,99,99,99,
+     1      99,99, 4, 4, 4, 4,99,99,99,99,99,99,99,99,99,99,99,99,99,99,
+     2      99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,
+     3      99,99,99,99,99,99,99,99, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,79,79,
+     4      79,79,79,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,99,
+     5      99,99,99,99,99,99,99,80,80,80, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+     6       4, 4),MELE
+*
+      IF (MELE.EQ.183.OR.MELE.EQ.184.OR.
+     .    MELE.EQ.193.OR.MELE.EQ.194) GOTO 4
+      IF (MELE.GE.173.AND.MELE.LE.182) GOTO 173
+      IF (MELE.GE.185.AND.MELE.LE.190) GOTO 185
+      IF (MELE.EQ.273.OR.MELE.EQ.274) GOTO 4
+*
+      GOTO 99
+
+c_______________________________________________________________________
+c
+c   elements massifs et elements incompressibles
+c_______________________________________________________________________
+c
+ 4    CONTINUE
+c
+c  Cas non isotropes :
+c  Recuperation des fonctions de forme et leurs derivees au centre de
+c  l'element pour le calcul des axes locaux
+c
+      IPMIN2 = 0
+      IF ( (MATE.EQ.2.OR.MATE.EQ.3.OR.MATE.EQ.4) .AND. IMAT.EQ.1 ) THEN
+        NLG=NUMGEO(MELE)
+        CALL RESHPT(1,NBNN,NLG,MELE,0,IPMIN2,IRT1)
+        MINTE2=IPMIN2
+        SEGACT,MINTE2
+        SEGINI,WRK8
+      ENDIF
+c
+      NBNO=NBNN
+      SEGINI WRK2
+      IF (IREPS2.EQ.1) SEGINI MTRACE
+c
+c*    NDDD=NDEP
+c*    IF (IFOUR.EQ.-3) NDDD=NDEP-3
+      NDDD=NDEP-NDPGE
+c
+      DO 3004  IB=1,NBELEM
+c
+c     on cherche les deplacements
+c
+        MPTVAL=IVADEP
+        IE=1
+        DO 4004 IGAU=1,NBNN
+          DO 4004 ICOMP=1,NDDD
+            MELVAL=IVAL(ICOMP)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            XDDL(IE)=VELCHE(IGMN,IBMN)
+            IE=IE+1
+ 4004   CONTINUE
+        IF (BDPGE) THEN
+          DO i=1,NDPGE
+            XDDL(IE)=UDPGE(i)
+            IE=IE+1
+          ENDDO
+        ENDIF
+c
+c     on cherche  les coordonnees des noeuds de l element ib
+c
+        CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+c
+c     calcul des axes locaux dans le cas des materiaux orthotropes,
+c     anisotropes et unidirectionnel
+c
+C*      IF ((MATE.EQ.2.OR.MATE.EQ.3.OR.MATE.EQ.4) .AND. IMAT.EQ.1) THEN
+        IF (IPMIN2.NE.0) THEN
+          NBSH=MINTE2.SHPTOT(/2)
+          CALL RLOCAL(XE,MINTE2.SHPTOT,NBSH,NBNN,TXR)
+          IF (nbsh.EQ.-1) THEN
+            CALL ERREUR(525)
+            GOTO 9904
+          ENDIF
+        ENDIF
+c
+c     boucle sur les points de gauss
+c
+        ISDJC=0
+c
+        DO 5004  IGAU=1,NBPTEL
+c
+c
+c     calcul des coeff de modification de la matrice b-barre (incompres)
+c
+      IF (MFR.EQ.31.and.igau.eq.1) THEN
+C= NOM  :   ICT3, ICQ4, ICT6, ICQ8, ICC8, ICT4, ICP6, IC20, IC10, IC15
+C= MELE :    69 ,  70 ,  71 ,  72 ,  73 ,  74 ,  75 ,  76 ,  77 ,  78
+        CALL BBCAL2(IB,IGAU,IDIM,NBPGAU,IVACAR,
+     1   POIGAU,QSIGAU,ETAGAU,DZEGAU,MELE,MFR,NBNN,LRE,IFOUR,NSTRS,NHRM,
+     2   A,BB,XE,SHPTOT,SHPWRK,BGENE,XDPGE,YDPGE,PP)
+      ENDIF
+c
+          CALL BMATST(IGAU,NBPGAU,POIGAU,QSIGAU,ETAGAU,DZEGAU,
+     1                MELE,MFR,NBNN,LRE,IFOUR,NSTRS,NHRM,1.D0,XE,
+     2                SHPTOT,SHPWRK,BGENE,DJAC,XDPGE,YDPGE)
+c
+          IF (DJAC.EQ.0.D0) THEN
+            INTERR(1)=IB
+            CALL ERREUR(259)
+            GOTO 9904
+          ELSE IF (DJAC.LT.0.D0) THEN
+            ISDJC=ISDJC+1
+          ENDIF
+
+C En cas d'elements incompressibles : BGENE selon la methode B-BARRE
+          IF (MFR.EQ.31) THEN
+            CALL BBAR(IGAU,NBPGAU, POIGAU,QSIGAU,ETAGAU,DZEGAU,
+     &                MELE,NBNN,LRE,IFOUR,NSTRS,XE,DJAC,A,BB,BGENE)
+          ENDIF
+c
+c       on cherche les matrices de Hooke
+c
+          MPTVAL=IVAMAT
+          IF (IMAT.EQ.2) THEN
+            MELVAL=IVAL(1)
+            IBMN=MIN(IB  ,IELCHE(/2))
+            IGMN=MIN(IGAU,IELCHE(/1))
+            MLREEL=IELCHE(IGMN,IBMN)
+            IF (IGAU.LE.NBGMAT.AND.(IB.LE.NELMAT.OR.NBGMAT.GT.1)) THEN
+              SEGACT MLREEL
+              CALL DOHOOO(PROG,LHOOK,DDHOOK)
+              SEGDES MLREEL
+            ENDIF
+          ELSE IF (IMAT.EQ.1) THEN
+            DO 9004 IM=1,NMATT
+              IF (IVAL(IM).NE.0) THEN
+                MELVAL=IVAL(IM)
+                IBMN=MIN(IB  ,VELCHE(/2))
+                IGMN=MIN(IGAU,VELCHE(/1))
+                VALMAT(IM)=VELCHE(IGMN,IBMN)
+              ELSE
+                VALMAT(IM)=0.D0
+              ENDIF
+ 9004       CONTINUE
+c
+            IF (MATE.EQ.2.OR.MATE.EQ.3.OR.MATE.EQ.4) THEN
+              IF (IGAU.LE.NBGMAT)
+     1          CALL DOHMAO(VALMAT,CMATE,IFOUR,IDIM,TXR,XLOC,XGLOB,D1HO,
+     2                      ROTH,DDHOOK,LHOOK,1,IRTD)
+            ELSE
+              IF (IGAU.LE.NBGMAT.AND.(IB.LE.NELMAT.OR.NBGMAT.GT.1))
+     1          CALL DOHMAS(VALMAT,CMATE,IFOUR,LHOOK,1,DDHOOK,IRTD)
+            ENDIF
+          ENDIF
+c
+          CALL DBST(BGENE,DDHOOK,XDDL,LRE,NSTRS,XSTRS)
+c
+c       calcul des eps 2
+c
+          IF (IREPS2.EQ.1)
+     1      CALL DBST2(SHPWRK,DDHOOK,XDDL,XE,NBNO,IFOUR,NSTRS,XSTRS,
+     2                 TRACE,IGAU,XDPGE,YDPGE,UDPGE,NHRM)
+c
+c       remplissage du segment contenant les contraintes
+c
+          MPTVAL=IVASTR
+          DO 7004 ICOMP=1,NSTRS
+            MELVAL=IVAL(ICOMP)
+            IBMN=MIN(IB,VELCHE(/2))
+            VELCHE(IGAU,IBMN)=XSTRS(ICOMP)
+ 7004     CONTINUE
+c
+ 5004   CONTINUE
+c
+        IF (ISDJC.NE.0.AND.ISDJC.NE.NBPGAU) THEN
+          INTERR(1)=IB
+          CALL ERREUR(195)
+          GOTO 9904
+        ENDIF
+c
+c   Correction sur la partie quadratique de la contrainte dans le cas
+c   des elements incompressibles
+c
+        IF (IREPS2.EQ.1) THEN
+          IF (MFR.EQ.31) THEN
+            CALL DBBST2(TRACE,NBPTEL,IFOUR,MELE,POIGAU,QSIGAU,
+     &                  ETAGAU,DZEGAU,SHPTOT,NBNO,SHPWRK,XE,PP)
+            L=2
+            IF (IDIM.EQ.3 .OR. IFOUR .EQ. 0) L=3
+            DO 5005 ICOMP=1,L
+              MELVAL=IVAL(ICOMP)
+              IBMN=MIN(IB  ,VELCHE(/2))
+              DO 5006 IGAU=1,NBPTEL
+                VELCHE(IGAU,IBMN)=VELCHE(IGAU,IBMN)+TRACE(1,IGAU)
+ 5006         CONTINUE
+ 5005       CONTINUE
+            IF (L.EQ.2) THEN
+              MELVAL=IVAL(3)
+              IBMN=MIN(IB  ,VELCHE(/2))
+              DO 5007 IGAU=1,NBPTEL
+                VELCHE(IGAU,IBMN) = VELCHE(IGAU,IBMN)
+     &              + (TRACE(1,IGAU)/TRACE(2,IGAU)*TRACE(3,IGAU))
+ 5007         CONTINUE
+            ENDIF
+          ENDIF
+        ENDIF
+
+ 3004 CONTINUE
+c
+      IF (IRTD.EQ.0) THEN
+        MOTERR(1:8)=CMATE
+        MOTERR(9:12)=NOMFR(MFR/2+1)
+        INTERR(1)=IFOUR
+        CALL ERREUR(81)
+      ENDIF
+c
+ 9904 CONTINUE
+      SEGSUP WRK2
+      IF (IREPS2.EQ.1) SEGSUP,MTRACE
+C*    IF ((MATE.EQ.2.OR.MATE.EQ.3.OR.MATE.EQ.4) .AND. IMAT.EQ.1) THEN
+      IF (IPMIN2.NE.0) THEN
+        SEGDES MINTE2
+        SEGSUP WRK8
+      ENDIF
+      GOTO 510
+
+c____________________________________________________________________
+c
+c     milieux poreux
+c____________________________________________________________________
+c
+ 79   CONTINUE
+c
+c  Ces cas ne sont pas prevus actuellement !
+      IF ( IMAT.EQ.2 .OR.
+     &     (IMAT.EQ.1.AND.(MATE.LT.1.OR.MATE.GT.4))
+     &   )  GOTO 99
+
+c    pour ces elements  nbbb = nombre de noeuds
+c                       nbno = nombre de fonctions de forme
+c
+      NBNO=IPORE
+      NSTN=1
+      LPP=0
+c*****************   AM 08/01/01
+c*    NSTMU=2
+c*    IF (IFOUR.GE.0) NSTMU=3
+      NSTMU=3
+      LRN=NBNO-NBBB
+      LRB=LRE-LRN
+c
+c     Cas non isotropes :
+c     recuperation des fonctions de forme et leurs derivees
+c     au centre de l'element pour le calcul des axes locaux
+c
+      IPMIN2 = 0
+      IF ((MATE.EQ.2.OR.MATE.EQ.3.OR.MATE.EQ.4) .AND. IMAT.EQ.1) THEN
+        CALL RESHPT(1,NBNO,IELE,MELE,0,IPMIN2,IRT1)
+        MINTE2=IPMIN2
+        SEGACT MINTE2
+        SEGINI WRK8
+        NSTMU=LHOOK
+      ENDIF
+c
+      SEGINI WRK2,WRK5
+c Segment MTRACE initialise ici, necessaire mais inutilise
+      IF (IREPS2.EQ.1) SEGINI MTRACE
+c
+      I19 =0
+c
+      DO 3079  IB=1,NBELEM
+c
+c     on cherche d'abord les deplacements
+c
+        MPTVAL=IVADEP
+        IE=1
+        DO 4079 IGAU=1,NBNN
+          DO 4079 ICOMP=1,NDEP-1
+            MELVAL=IVAL(ICOMP)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            XDDL(IE)=VELCHE(IGMN,IBMN)
+            IE=IE+1
+ 4079   CONTINUE
+c
+c     puis les pressions
+c
+        MELVAL=IVAL(NDEP)
+        DO 40791 IGAU=1,LRN
+          IGAUSO=IBSOM(NSPOS(IELE)+IGAU-1)
+          IBMN=MIN(IB  ,VELCHE(/2))
+          IGMN=MIN(IGAUSO,VELCHE(/1))
+          XDDL(IE)=VELCHE(IGMN,IBMN)
+          IE=IE+1
+40791   CONTINUE
+c
+c     on cherche  les coordonnees des noeuds de l element ib
+c
+        CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+c
+c     calcul des axes locaux dans le cas des materiaux orthotropes,
+c     anisotropes et unidirectionnels
+c
+C*      IF ((MATE.EQ.2.OR.MATE.EQ.3.OR.MATE.EQ.4) .AND. IMAT.EQ.1) THEN
+        IF (IPMIN2.NE.0) THEN
+          NBSH=MINTE2.SHPTOT(/2)
+          CALL RLOCAL (XE,MINTE2.SHPTOT,NBSH,NBNN,TXR)
+          if (nbsh.eq.-1) then
+            call erreur(525)
+            GOTO 9979
+          endif
+        ENDIF
+c
+c     boucle sur les points de gauss
+c
+        ISDJC=0
+        CALL ZERO(COBMA,LHOOK,1)
+        DO 5079  IGAU=1,NBPTEL
+c
+          CALL BNPORE(IGAU,NBNO,NBBB,LRE,IFOUR,LHOOK,NSTN,NHRM,
+     .                1.D0,XE,SHPTOT,SHPWRK,BGENE,XGENE,DJAC,1)
+c
+          IF (DJAC.EQ.0.D0) THEN
+            INTERR(1)=IB
+            CALL ERREUR(259)
+            GOTO 9979
+          ELSE IF (DJAC.LT.0.D0) THEN
+            ISDJC=ISDJC+1
+          ENDIF
+c
+          MPTVAL=IVAMAT
+C*D       IF (IMAT.EQ.2) THEN
+C*D cas non prevu
+C*D         GO TO 99
+C*D       ELSE IF (IMAT.EQ.1) THEN
+            DO 9079 IM=1,NMATT
+              IF (IVAL(IM).NE.0) THEN
+                MELVAL=IVAL(IM)
+                IBMN=MIN(IB  ,VELCHE(/2))
+                IGMN=MIN(IGAU,VELCHE(/1))
+                VALMAT(IM)=VELCHE(IGMN,IBMN)
+              ELSE
+                VALMAT(IM)=0.D0
+              ENDIF
+ 9079       CONTINUE
+            IF (MATE.EQ.1) THEN
+              IF (IGAU.LE.NBGMAT.AND.(IB.LE.NELMAT.OR.NBGMAT.GT.1))
+     .          CALL DOHMAS(VALMAT,CMATE,IFOUR,LHOOK,1,DDHOOK,IRTD)
+            ELSE IF (MATE.EQ.2.OR.MATE.EQ.3.OR.MATE.EQ.4) THEN
+              IF (IGAU.LE.NBGMAT)
+     .          CALL PORMAO(VALMAT,CMATE,IFOUR,IDIM,TXR,XLOC,XGLOB,D1HO,
+     .                      ROTH,DDHOOK,LHOOK,COBMA,XMOB,1,IRTD)
+C*D         ELSE
+C*D           GOTO 99
+            ENDIF
+C*D       ENDIF
+c
+          CALL BST(BGENE,XDDL,LRE,LHOOK,XSTRS)
+c
+c     calcul des eps 2
+c
+          IF (IREPS2.EQ.1)
+     &      CALL BST2(SHPWRK,XDDL,XE,NBNN,IFOUR,XSTRS,TRACE,IGAU,
+     &                XDPGE,YDPGE,UDPGE,NHRM)
+*
+*       contribution de epsi a msr0
+*
+          IF (MATE.EQ.1) THEN
+C*D         IF (IMAT.EQ.1) THEN
+              DO 4879 I=1,NSTMU
+                COBMA(I)=VALMAT(3)
+ 4879         CONTINUE
+              XMOB=VALMAT(4)
+C*D         ELSE IF (IMAT.EQ.2) THEN
+C*D           GO TO 99
+C*D         ENDIF
+          ENDIF
+*
+          r_z=0.
+          DO 4878 K=1,NSTMU
+            r_z = r_z +COBMA(K)*XSTRS(K)
+ 4878     CONTINUE
+          XSTRS(NSTRS)=r_z
+          DO 4877 KA=1,LHOOK
+            XWRK(KA)=XSTRS(KA)
+ 4877     CONTINUE
+*
+          DO 4876 KA=1,LHOOK
+            r_z =0.D0
+            DO KB=1,LHOOK
+              r_z = r_z + DDHOOK(KA,KB)*XWRK(KB)
+            ENDDO
+            XSTRS(KA)=r_z
+ 4876     CONTINUE
+c
+c     calcul de l'effet de la pression
+c
+          IF (XMOB.EQ.0.D0) THEN
+            UNSURM=0.D0
+          ELSE
+            UNSURM=1.D0 / XMOB
+          ENDIF
+*
+          CALL SIGPOR(COBMA,UNSURM,XGENE,NSTN,XDDL,IFOUR,NSTRS,
+     .                XSTRS,LRB,LRN,LPP,MELE,I19,COBB,KKBB,IDECAP)
+c
+c     remplissage du segment contenant les contraintes
+c
+          MPTVAL=IVASTR
+          DO 7079 ICOMP=1,NSTRS
+            MELVAL=IVAL(ICOMP)
+            IBMN=MIN(IB  ,VELCHE(/2))
+            VELCHE(IGAU,IBMN)=XSTRS(ICOMP)
+ 7079     CONTINUE
+c
+ 5079   CONTINUE
+c
+        IF (ISDJC.NE.0.AND.ISDJC.NE.NBPGAU) THEN
+          INTERR(1)=IB
+          CALL ERREUR(195)
+          GOTO 9979
+        ENDIF
+c
+ 3079 CONTINUE
+c
+      IF (IRTD.EQ.0) THEN
+        MOTERR(1:8)=CMATE
+        MOTERR(9:12)=NOMFR(MFR/2+1)
+        INTERR(1)=IFOUR
+        CALL ERREUR(81)
+      ENDIF
+      IF (I19.NE.0) CALL ERREUR(19)
+c
+ 9979 CONTINUE
+      SEGSUP WRK2,WRK5
+      IF (IREPS2.EQ.1) SEGSUP MTRACE
+C*    IF ((MATE.EQ.2.OR.MATE.EQ.3.OR.MATE.EQ.4) .AND. IMAT.EQ.1) THEN
+      IF (IPMIN2.NE.0) THEN
+        SEGDES MINTE2
+        SEGSUP WRK8
+      ENDIF
+      GOTO 510
+
+c____________________________________________________________________
+c
+c     milieux poreux  SUITE
+c____________________________________________________________________
+c
+ 173  CONTINUE
+c
+c  Ces cas ne sont pas prevus actuellement !
+      IF ( IMAT.EQ.2 .OR. (IMAT.EQ.1.AND.MATE.NE.1) )  GOTO 99
+c
+c    pour ces elements  nbbb = nombre de noeuds
+c                       nbno = nombre de fonctions de forme
+c
+      IF (MELE.GE.173.AND.MELE.LE.177) THEN
+        IDECAP = 2
+      ELSE IF (MELE.GE.178.AND.MELE.LE.182) THEN
+        IDECAP = 3
+      ENDIF
+*
+      NBNO=IPORE
+      NSTN=IDECAP
+      NSTB=4
+      IF(IFOUR.EQ.2) NSTB=6
+
+      LPP=NBNO-NBBB
+      LRN=IDECAP*LPP
+      LRB=LRE-LRN
+
+      UNSURM = 0.
+
+      SEGINI WRK2,WRK5
+c Segment MTRACE initialise ici (necessaire mais inutilise)
+      IF (IREPS2.EQ.1) SEGINI MTRACE
+
+      I19 =0
+c
+      DO 3173  IB=1,NBELEM
+c
+c     on cherche d'abord les deplacements
+c
+        IE=1
+        MPTVAL=IVADEP
+        DO 4173 IGAU=1,NBNN
+          DO 4173 ICOMP=1,NDEP-IDECAP
+            MELVAL=IVAL(ICOMP)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            XDDL(IE)=VELCHE(IGMN,IBMN)
+            IE=IE+1
+ 4173   CONTINUE
+c
+c     puis les pressions
+c
+        DO 4473 IPR = 1,IDECAP
+          MELVAL=IVAL(NDEP-IDECAP+IPR)
+          DO 4273 IGAU=1,LPP
+            IGAUSO=IBSOM(NSPOS(IELE)+IGAU-1)
+            IBMN=MIN(IB  ,VELCHE(/2))
+            IGMN=MIN(IGAUSO,VELCHE(/1))
+            XDDL(IE)=VELCHE(IGMN,IBMN)
+            IE=IE+1
+ 4273     CONTINUE
+ 4473   CONTINUE
+c
+c     on cherche  les coordonnees des noeuds de l element ib
+c
+        CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+c
+c     boucle sur les points de gauss
+c
+        ISDJC=0
+        CALL ZERO (COBB,IDECAP,1)
+        CALL ZERO (CPBB,IDECAP,1)
+        CALL ZERO (KKBB,IDECAP,IDECAP)
+c
+        DO 5173  IGAU=1,NBPTEL
+c
+          CALL BNQORE(IGAU,NBNO,NBBB,LRE,IFOUR,NSTB,NSTN,NHRM,
+     &        1.D0,XE,SHPTOT,SHPWRK,BGENE,XGENE,DJAC,IDECAP,LHOOK,1)
+c
+          IF (DJAC.EQ.0.D0) THEN
+            INTERR(1)=IB
+            CALL ERREUR(259)
+            GOTO 9973
+          ELSE IF (DJAC.LT.0.D0) THEN
+            ISDJC=ISDJC+1
+          ENDIF
+c
+          MPTVAL=IVAMAT
+C*D       IF (IMAT.EQ.2) THEN
+C*D         GO TO 99
+C*D       ELSE IF (IMAT.EQ.1) THEN
+            DO 6173 IM=1,NMATT
+              IF (IVAL(IM).NE.0) THEN
+                MELVAL=IVAL(IM)
+                IBMN=MIN(IB  ,VELCHE(/2))
+                IGMN=MIN(IGAU,VELCHE(/1))
+                VALMAT(IM)=VELCHE(IGMN,IBMN)
+              ELSE
+                VALMAT(IM)=0.D0
+              ENDIF
+ 6173       CONTINUE
+C*D         IF (MATE.EQ.1) THEN
+              IF (IGAU.LE.NBGMAT.AND.(IB.LE.NELMAT.OR.NBGMAT.GT.1))
+     .          CALL DOHMAS(VALMAT,CMATE,IFOUR,LHOOK,1,DDHOOK,IRTD)
+C*D         ELSE
+C*D           GOTO 99
+C*D         ENDIF
+C*D       ENDIF
+c
+          IF (MFR.EQ.57) THEN
+            COBB(1)  = VALMAT(3)
+            COBB(2)  = VALMAT(4)
+            CPBB(1)  = VALMAT(5)
+            CPBB(2)  = VALMAT(6)
+            KKBB(1,1)= VALMAT(7)
+            KKBB(1,2)= VALMAT(8)
+            KKBB(2,1)= VALMAT(9)
+            KKBB(2,2)= VALMAT(10)
+          ELSE IF(MFR.EQ.59) THEN
+            COBB(1)  = VALMAT(3)
+            COBB(2)  = VALMAT(4)
+            COBB(3)  = VALMAT(5)
+            CPBB(1)  = VALMAT(6)
+            CPBB(2)  = VALMAT(7)
+            CPBB(3)  = VALMAT(8)
+            KKBB(1,1)= VALMAT(9)
+            KKBB(1,2)= VALMAT(10)
+            KKBB(1,3)= VALMAT(11)
+            KKBB(2,1)= VALMAT(12)
+            KKBB(2,2)= VALMAT(13)
+            KKBB(2,3)= VALMAT(14)
+            KKBB(3,1)= VALMAT(15)
+            KKBB(3,2)= VALMAT(16)
+            KKBB(3,3)= VALMAT(17)
+          ENDIF
+c
+          CALL BST(BGENE,XDDL,LRE,LHOOK,XSTRS)
+c
+c     calcul des eps 2
+c
+          IF (IREPS2.EQ.1)
+     &      CALL BST2(SHPWRK,XDDL,XE,NBNN,IFOUR,XSTRS,TRACE,IGAU,
+     &                XDPGE,YDPGE,UDPGE,NHRM)
+c
+c       contribution de epsi a msr0
+c
+          TRACEP=XSTRS(1)+XSTRS(2)+XSTRS(3)
+          DO 4873 K=1,IDECAP
+            XSTRS(NSTRS-IDECAP+K)=CPBB(K)*TRACEP
+ 4873     CONTINUE
+          DO 4773 KA=1,LHOOK
+            XWRK(KA)=XSTRS(KA)
+ 4773     CONTINUE
+          DO 7873 KA=1,LHOOK
+            r_z = 0.D0
+            DO KB=1,LHOOK
+              r_z = r_z + DDHOOK(KA,KB)*XWRK(KB)
+            ENDDO
+            XSTRS(KA) = r_z
+ 7873     CONTINUE
+c
+c     calcul de l'effet de la pression
+c
+          CALL SIGPOR(COBMA,UNSURM,XGENE,NSTN,XDDL,IFOUR,NSTRS,
+     .                XSTRS,LRB,LRN,LPP,MELE,I19,COBB,KKBB,IDECAP)
+c
+c     remplissage du segment contenant les contraintes
+c
+          MPTVAL=IVASTR
+          DO 7073 ICOMP=1,NSTRS
+            MELVAL=IVAL(ICOMP)
+            IBMN=MIN(IB  ,VELCHE(/2))
+            VELCHE(IGAU,IBMN)=XSTRS(ICOMP)
+ 7073     CONTINUE
+c
+ 5173   CONTINUE
+c
+        IF (ISDJC.NE.0.AND.ISDJC.NE.NBPGAU) THEN
+          INTERR(1)=IB
+          CALL ERREUR(195)
+          GOTO 9973
+        ENDIF
+c
+ 3173 CONTINUE
+c
+      IF (I19.NE.0) CALL ERREUR(19)
+      IF (IRTD.EQ.0) THEN
+        MOTERR(1:8)=CMATE
+        MOTERR(9:12)=NOMFR(MFR/2+1)
+        INTERR(1)=IFOUR
+        CALL ERREUR(81)
+      ENDIF
+ 9973 CONTINUE
+      SEGSUP WRK2,WRK5
+      IF (IREPS2.EQ.1) SEGSUP MTRACE
+      GOTO 510
+
+c____________________________________________________________________
+c
+c     joints poreux
+c____________________________________________________________________
+c
+ 80   CONTINUE
+c  Ces cas ne sont pas prevus actuellement !
+      IF ( IMAT.EQ.2 .OR. (IMAT.EQ.1.AND.MATE.NE.1) )  GOTO 99
+c
+c    pour ces elements  nbbb = nombre de noeuds
+c                       nbno = nombre de fonctions de forme
+c
+      NBNO=IPORE
+      NSTN=1
+      NSTMU=2
+      IF (IFOUR.EQ.2) NSTMU=3
+      LRN=(NBNO-NBBB)*3/2
+      LRB=LRE-LRN
+      NFAC=(3*NBBB-NBNO)/2
+c
+      SEGINI WRK2,WRK3,WRK5
+c
+      I19 =0
+c
+      DO 3080  IB=1,NBELEM
+c
+c     on cherche d'abord les deplacements
+c
+        MPTVAL=IVADEP
+        IE=1
+        DO 4180 IGAU=1,NFAC
+          DO 4280 ICOMP=1,NDEP-1
+            MELVAL=IVAL(ICOMP)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            XDDL(IE)=VELCHE(IGMN,IBMN)
+            IE=IE+1
+ 4280     CONTINUE
+ 4180   CONTINUE
+c
+c     puis les pressions
+c
+        MELVAL=IVAL(NDEP)
+        DO 4080 IGAU=1,NBNN
+          DO 4190 INSOM=1,NBSOM(IELE)
+            IF (IGAU.EQ.IBSOM(NSPOS(IELE)+INSOM-1)) GOTO 4191
+4190      CONTINUE
+          IF (IGAU.GT.NFAC) GOTO 4191
+          GOTO 4080
+4191      CONTINUE
+          IBMN=MIN(IB  ,VELCHE(/2))
+          IGMN=MIN(IGAU,VELCHE(/1))
+          XDDL(IE)=VELCHE(IGMN,IBMN)
+          IE=IE+1
+ 4080   CONTINUE
+c
+c     on cherche  les coordonnees des noeuds de l element ib
+c
+        CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+c
+c     calcul des exes locaux et des coordonnees locales
+c
+        CALL JOPLOC(XE,SHPTOT,NBBB,NBNO,IFOUR,XEL,BPSS)
+c
+c     boucle sur les points de gauss
+c
+        ISDJC=0
+        CALL ZERO(COBMA,LHOOK,1)
+c
+        DO 5080  IGAU=1,NBPTEL
+c
+          CALL BNPORJ(IGAU,NBNO,NBBB,LRE,IFOUR,LHOOK,NSTN,XE,XEL,
+     .                SHPTOT,SHPWRK,BPSS,BGENE,XGENE,DJAC,1)
+c
+          IF (DJAC.EQ.0.D0) THEN
+            INTERR(1)=IB
+            CALL ERREUR(259)
+            GOTO 9980
+          ELSE IF (DJAC.LT.0.D0) THEN
+            ISDJC=ISDJC+1
+          ENDIF
+c
+          MPTVAL=IVAMAT
+C*D       IF (IMAT.EQ.2) THEN
+C*D         GO TO 99
+C*D       ELSE IF (IMAT.EQ.1) THEN
+            DO 9080 IM=1,NMATT
+              IF (IVAL(IM).NE.0) THEN
+                MELVAL=IVAL(IM)
+                IBMN=MIN(IB  ,VELCHE(/2))
+                IGMN=MIN(IGAU,VELCHE(/1))
+                VALMAT(IM)=VELCHE(IGMN,IBMN)
+              ELSE
+                VALMAT(IM)=0.D0
+              ENDIF
+ 9080       CONTINUE
+C*D         IF (MATE.EQ.1) THEN
+              IF (IGAU.LE.NBGMAT.AND.(IB.LE.NELMAT.OR.NBGMAT.GT.1))
+     &          CALL DOUO88(VALMAT,CMATE,IFOUR,LHOOK,DDHOOK,IRTD)
+C*D         ELSE
+C*D           GO TO 99
+C*D         ENDIF
+C*D       ENDIF
+c
+          CALL BST(BGENE,XDDL,LRB,LHOOK,XSTRS)
+c
+c       contribution de epsi a msr0
+c
+          IF (IMAT.EQ.1) THEN
+            COBMA(NSTMU)=VALMAT(3)
+            XMOB=VALMAT(4)
+          ENDIF
+          XSTRS(NSTRS)=COBMA(NSTMU)*XSTRS(NSTMU)
+
+          DO 4887 KA=1,LHOOK
+            XWRK(KA)=XSTRS(KA)
+ 4887     CONTINUE
+
+          DO 4886 KA=1,LHOOK
+            r_z = 0.D0
+            DO KB=1,LHOOK
+              r_z = r_z + DDHOOK(KA,KB)*XWRK(KB)
+            ENDDO
+            XSTRS(KA)= r_z
+ 4886     CONTINUE
+c
+c     calcul de l'effet de la pression
+c
+          IF (XMOB.EQ.0.D0) THEN
+            UNSURM=0.D0
+          ELSE
+            UNSURM=1.D0 / XMOB
+          ENDIF
+c
+          CALL SIGPOR(COBMA,UNSURM,XGENE,NSTN,XDDL,IFOUR,NSTRS,
+     .                XSTRS,LRB,LRN,LPP,MELE,I19,COBB,KKBB,IDECAP)
+c
+c     remplissage du segment contenant les contraintes
+c
+          MPTVAL=IVASTR
+          DO 7080 ICOMP=1,NSTRS
+            MELVAL=IVAL(ICOMP)
+            IBMN=MIN(IB  ,VELCHE(/2))
+            VELCHE(IGAU,IBMN)=XSTRS(ICOMP)
+ 7080     CONTINUE
+c
+ 5080   CONTINUE
+c
+        IF (ISDJC.NE.0.AND.ISDJC.NE.NBPGAU) THEN
+          INTERR(1)=IB
+          CALL ERREUR(195)
+          GOTO 9980
+        ENDIF
+c
+ 3080 CONTINUE
+c
+      IF (IRTD.EQ.0) THEN
+        MOTERR(1:8)=CMATE
+        MOTERR(9:12)=NOMFR(MFR/2+1)
+        INTERR(1)=IFOUR
+        CALL ERREUR(81)
+      ENDIF
+      IF (I19.NE.0) CALL ERREUR(19)
+ 9980 CONTINUE
+      SEGSUP,WRK2,WRK3,WRK5
+      GOTO 510
+
+
+c____________________________________________________________________
+c
+c     joints poreux  - SUITE
+c____________________________________________________________________
+c
+185   CONTINUE
+c  Ces cas ne sont pas prevus actuellement !
+      IF ( IMAT.EQ.2 .OR. (IMAT.EQ.1.AND.MATE.NE.1) )  GOTO 99
+c
+c    pour ces elements  nbbb = nombre de noeuds
+c                       nbno = nombre de fonctions de forme
+c
+      IF (MELE.GE.185.AND.MELE.LE.187) THEN
+        IDECAP = 2
+      ELSE IF (MELE.GE.188.AND.MELE.LE.190) THEN
+        IDECAP = 3
+      ENDIF
+
+      NBNO=IPORE
+      NSTN=IDECAP
+      NSTMU=2
+      IF (IFOUR.EQ.2) NSTMU=3
+      NSTB=NSTMU
+      LPP=(NBNO-NBBB)*3/2
+      LRN=IDECAP*LPP
+      LRB=LRE-LRN
+
+      UNSURM = 0.
+
+      NFAC=(3*NBBB-NBNO)/2
+c
+      SEGINI WRK2,WRK3,WRK5
+c
+      I19 =0
+c
+      DO 3185  IB=1,NBELEM
+c
+c     on cherche d'abord les deplacements
+c
+        MPTVAL=IVADEP
+        IE=1
+        DO 4185 IGAU=1,NFAC
+          DO 4285 ICOMP=1,NDEP-1
+            MELVAL=IVAL(ICOMP)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            XDDL(IE)=VELCHE(IGMN,IBMN)
+            IE=IE+1
+ 4285     CONTINUE
+ 4185   CONTINUE
+c
+c     puis les pressions
+c
+        DO 4585 IPR=1,IDECAP
+          MELVAL=IVAL(NDEP-IDECAP+IPR)
+          DO 4085 IGAU=1,NBNN
+            DO 4195 INSOM=1,NBSOM(IELE)
+              IF (IGAU.EQ.IBSOM(NSPOS(IELE)+INSOM-1)) GOTO 4995
+4195        CONTINUE
+            IF (IGAU.GT.NFAC) GOTO 4995
+            GOTO 4085
+4995        CONTINUE
+            IBMN=MIN(IB  ,VELCHE(/2))
+            IGMN=MIN(IGAU,VELCHE(/1))
+            XDDL(IE)=VELCHE(IGMN,IBMN)
+            IE=IE+1
+ 4085     CONTINUE
+ 4585   CONTINUE
+c
+c     on cherche  les coordonnees des noeuds de l element ib
+c
+        CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+c
+c     calcul des exes locaux et des coordonnees locales
+c
+        CALL JOPLOC(XE,SHPTOT,NBBB,NBNO,IFOUR,XEL,BPSS)
+c
+c     boucle sur les points de gauss
+c
+        ISDJC=0
+        CALL ZERO (COBB,IDECAP,1)
+        CALL ZERO (CPBB,IDECAP,1)
+        CALL ZERO (KKBB,IDECAP,IDECAP)
+c
+        DO 5185  IGAU=1,NBPTEL
+c
+          CALL BNPQRJ(IGAU,NBNO,NBBB,LRE,IFOUR,LHOOK,NSTN,XE,XEL,
+     &         SHPTOT,SHPWRK,BPSS,BGENE,XGENE,DJAC,IDECAP,NSTB,1)
+c
+          IF (DJAC.EQ.0.D0) THEN
+            INTERR(1)=IB
+            CALL ERREUR(259)
+            GOTO 9980
+          ELSE IF (DJAC.LT.0.D0) THEN
+            ISDJC=ISDJC+1
+          ENDIF
+c
+          MPTVAL=IVAMAT
+C*D       IF (IMAT.EQ.2) THEN
+C*D         GO TO 99
+C*D       ELSE IF (IMAT.EQ.1) THEN
+            DO 9185 IM=1,NMATT
+              IF (IVAL(IM).NE.0) THEN
+                MELVAL=IVAL(IM)
+                IBMN=MIN(IB  ,VELCHE(/2))
+                IGMN=MIN(IGAU,VELCHE(/1))
+                VALMAT(IM)=VELCHE(IGMN,IBMN)
+              ELSE
+                VALMAT(IM)=0.D0
+              ENDIF
+ 9185       CONTINUE
+C*D         IF (MATE.EQ.1) THEN
+
+*ZZZZZZZZZZZZZ   VOIR SI LHOOK POSE PB A CE NIVEAU ????
+
+              IF (IGAU.LE.NBGMAT.AND.(IB.LE.NELMAT.OR.NBGMAT.GT.1))
+     &          CALL DOUO88(VALMAT,CMATE,IFOUR,LHOOK,DDHOOK,IRTD)
+C*D         ELSE
+C*D           GO TO 99
+C*D         ENDIF
+C*D       ENDIF
+c
+          CALL BST(BGENE,XDDL,LRB,LHOOK,XSTRS)
+c
+c       contribution de epsi a msr0
+c
+          IF (MFR.EQ.57) THEN
+            COBB(1)  = VALMAT(3)
+            COBB(2)  = VALMAT(4)
+            CPBB(1)  = VALMAT(5)
+            CPBB(2)  = VALMAT(6)
+            KKBB(1,1)= VALMAT(7)
+            KKBB(1,2)= VALMAT(8)
+            KKBB(2,1)= VALMAT(9)
+            KKBB(2,2)= VALMAT(10)
+          ELSE IF(MFR.EQ.59) THEN
+            COBB(1)  = VALMAT(3)
+            COBB(2)  = VALMAT(4)
+            COBB(3)  = VALMAT(5)
+            CPBB(1)  = VALMAT(6)
+            CPBB(2)  = VALMAT(7)
+            CPBB(3)  = VALMAT(8)
+            KKBB(1,1)= VALMAT(9)
+            KKBB(1,2)= VALMAT(10)
+            KKBB(1,3)= VALMAT(11)
+            KKBB(2,1)= VALMAT(12)
+            KKBB(2,2)= VALMAT(13)
+            KKBB(2,3)= VALMAT(14)
+            KKBB(3,1)= VALMAT(15)
+            KKBB(3,2)= VALMAT(16)
+            KKBB(3,3)= VALMAT(17)
+          ENDIF
+c
+CCCCC  ICI  A FINIR   PENSER A BNQORE AUSSI A CORRIGER
+
+
+          XSTRS(NSTRS)=COBMA(NSTMU)*XSTRS(NSTMU)
+
+          DO 4885 KA=1,LHOOK
+            XWRK(KA)=XSTRS(KA)
+ 4885     CONTINUE
+
+          DO 4785 KA=1,LHOOK
+            r_z = 0.D0
+            DO KB=1,LHOOK
+              r_z = r_z + DDHOOK(KA,KB)*XWRK(KB)
+            ENDDO
+            XSTRS(KA)= r_z
+ 4785     CONTINUE
+c
+c     calcul de l'effet de la pression
+c
+          IF (XMOB.EQ.0.D0) THEN
+            UNSURM=0.D0
+          ELSE
+            UNSURM=1.D0 / XMOB
+          ENDIF
+c
+          CALL SIGPOR(COBMA,UNSURM,XGENE,NSTN,XDDL,IFOUR,NSTRS,
+     .                XSTRS,LRB,LRN,LPP,MELE,I19,COBB,KKBB,IDECAP)
+c
+c     remplissage du segment contenant les contraintes
+c
+          MPTVAL=IVASTR
+          DO 7185 ICOMP=1,NSTRS
+            MELVAL=IVAL(ICOMP)
+            IBMN=MIN(IB  ,VELCHE(/2))
+            VELCHE(IGAU,IBMN)=XSTRS(ICOMP)
+ 7185     CONTINUE
+c
+ 5185   CONTINUE
+c
+        IF (ISDJC.NE.0.AND.ISDJC.NE.NBPGAU) THEN
+          INTERR(1)=IB
+          CALL ERREUR(195)
+          GOTO 9985
+        ENDIF
+c
+ 3185 CONTINUE
+c
+      IF (IRTD.EQ.0) THEN
+        MOTERR(1:8)=CMATE
+        MOTERR(9:12)=NOMFR(MFR/2+1)
+        INTERR(1)=IFOUR
+        CALL ERREUR(81)
+      ENDIF
+      IF (I19.NE.0) CALL ERREUR(19)
+ 9985 CONTINUE
+      SEGSUP,WRK2,WRK3,WRK5
+      GOTO 510
+
+c____________________________________________________________________
+  99  CONTINUE
+      MOTERR(1:4)=NOMTP(MELE)
+      MOTERR(9:12)='SIGM'
+      CALL ERREUR(86)
+
+C- Fin du sous-programme
+ 510  CONTINUE
+      SEGSUP,MVELCH,WRK1
+
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+

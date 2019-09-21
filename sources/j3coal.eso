@@ -1,0 +1,700 @@
+C J3COAL    SOURCE    CHAT      05/01/13    00:46:02     5004
+      SUBROUTINE J3COAL(WORK1,WORK2,LCAONB,VWORK,NFA,TOL,IRET)
+C----------------------------------------------------
+C     COALESCENCE DES TROUS A ET B
+C
+C     CODE IST(1,I): 0 point non traite
+C                    1 est sur le segment IST(2,I)
+C                    2 est sur les segments IST(2,I) et IST(3,I)
+C                   -1 est a l'interieur
+C                   -2 est a l'exterieur
+C
+C     CODE CRO(J,I): 1 cote sur le segment
+C                   -1 cote interieur
+C                   -2 cote exterieur
+C
+C     PP 6/97
+C     Pierre Pegon/JRC Ispra
+C----------------------------------------------------
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+-INC  CCOPTIO
+C
+      SEGMENT WORK
+        REAL*8 XYC(2,NPTO)
+        INTEGER IST(3,NPTO)
+        REAL*8 DENS(NPTO)
+        INTEGER JUN
+      ENDSEGMENT
+      POINTEUR WORK1.WORK,WORK2.WORK,WORK3.WORK
+C
+      SEGMENT WWORK
+        REAL*8 PORIG(3),VNORM(3),VI(3),VJ(3)
+        INTEGER FWORK
+        INTEGER TWORK(NTROU)
+      ENDSEGMENT
+C
+      SEGMENT VWORK
+        INTEGER FWWORK(NFACE)
+      ENDSEGMENT
+C
+      SEGMENT JUNC
+        INTEGER CRO(2,NPTO)
+      ENDSEGMENT
+C
+      LOGICAL LCONTI,LAINB,LAOUB,LCAONB
+      DIMENSION XY(2)
+C
+      IF (IIMPI.EQ.1789)THEN
+        WRITE(IOIMP,*)'>>> On entre dans j3coal <<<'
+      ENDIF
+C
+      VWORK=0
+      NFA=0
+C
+C     ON S'OCCUPE DU CAS DU CONTACT MULTI-PONCTUEL MAIS SANS COTE
+C     COMMUN ENTRE A ET B. POUR CELA, ON "MERGE" A ET B AU NIVEAU
+C     D'UN POINT COMMUN ET ON PASSE LE RESULTAT A LA MOULINETTE "14"
+C     DES POINTS COMMUNS
+C
+      IF(.NOT.LCAONB)THEN
+        NPTO1=WORK1.XYC(/2)
+        NPTO2=WORK2.XYC(/2)
+C
+        IPTO=0
+        NPTO=NPTO1+NPTO2
+        SEGINI,WORK
+C
+        DO IE1=1,NPTO1
+          IPTO=IPTO+1
+          DO IE2=1,2
+            XYC(IE2,IPTO)=WORK1.XYC(IE2,IE1)
+          ENDDO
+          DENS(IPTO)=WORK1.DENS(IE1)
+          IF(WORK1.IST(1,IE1).EQ.2)GOTO 100
+        ENDDO
+C
+        IRET=IRET+1
+        WRITE(IOIMP,*)'J3COAL: ON NE TROUVE PAS DE POINT COMMUN'
+        RETURN
+ 100    CONTINUE
+        I1=IE1
+C
+        CALL J3NUMP(WORK1.IST(1,I1),NPTO2,I2)
+C
+        DO IE1=1,NPTO2
+          I2=I2+1
+          IF(I2.GT.NPTO2)I2=I2-NPTO2
+          IPTO=IPTO+1
+          DO IE2=1,2
+            XYC(IE2,IPTO)=WORK2.XYC(IE2,I2)
+          ENDDO
+          DENS(IPTO)=WORK2.DENS(I2)
+        ENDDO
+C
+        IF(I1.NE.NPTO1)THEN
+          DO IE1=I1+1,NPTO1
+            IPTO=IPTO+1
+            DO IE2=1,2
+              XYC(IE2,IPTO)=WORK1.XYC(IE2,IE1)
+            ENDDO
+            DENS(IPTO)=WORK1.DENS(IE1)
+          ENDDO
+        ENDIF
+C
+        JUNC=WORK1.JUN
+        IF(JUNC.NE.0)SEGSUP,JUNC
+        SEGSUP,WORK1
+        WORK1=WORK
+C
+        GOTO 14
+C
+      ENDIF
+C
+C     ON COMPTE LE NOMBRE DE PLAGES OU A ET B ONT DES COTES COMMUNS
+C     (ON FAIT UN RECOUVREMENT POUR ETRE SUR DU BON COMPTE: L'ALGO
+C      SE PLANTE SI TOUS LES COTES SONT CONTIGUS, CE QUI EST IMPOSSIBLE)
+C
+      I1=0
+      LCONTI=.FALSE.
+      NPTO1=WORK1.XYC(/2)
+      JUNC=WORK1.JUN
+      DO IE1=1,NPTO1
+        ICRO=CRO(1,IE1)
+        IF(ICRO.EQ.1)THEN
+          IF(.NOT.LCONTI)THEN
+            LCONTI=.TRUE.
+            I1=I1+1
+          ENDIF
+        ELSE
+          LCONTI=.FALSE.
+        ENDIF
+      ENDDO
+      ICRO=CRO(2,NPTO1)
+      IF(ICRO.EQ.1.AND.LCONTI)I1=I1-1
+C
+      IF(I1.EQ.0)THEN
+        IRET=IRET+1
+        WRITE(IOIMP,*)'J3COAL: ON SE PLANTE SUR I1=0!'
+        RETURN
+      ENDIF
+      NPTO2=WORK2.XYC(/2)
+      IF(I1.EQ.1)GOTO 10
+C
+C     ON PREPARE LA STRUCTURE DE DONNEE QUI RECEUILLERA LES NOUVELLES FACES
+C
+      NFACE=I1-1
+      SEGINI,VWORK
+C
+C     S'IL Y A PLUSIEURS PLAGES, ON CHERCHE A LES REDUIRE A UNE
+C     EN SUPPRIMANT LES TROUS
+C
+C       A) On cree WORK3 qui contiendra a la fin le nouveau contour de A
+C
+      NPTO=NPTO1+NPTO2
+      IPTO3=0
+      SEGINI,WORK3
+      WORK3.JUN=0
+C
+C       B) On boucle sur I1=nbtrou+1
+C
+      IPLA1=1
+      NTRO1=I1-1
+      I0=I1
+      DO IE0=1,I0
+C
+C       C) On cherche la fin d'une plage
+C          tout en recopiant les bords dans WORK3
+C
+        DO IE1=IPLA1,NPTO1
+          ICRO=CRO(1,IE1)
+          ICRP=CRO(2,IE1)
+          IF((ICRO-1)*(ICRP-1).EQ.0)THEN
+            IPTO3=IPTO3+1
+            DO IE2=1,2
+              WORK3.XYC(IE2,IPTO3)=WORK1.XYC(IE2,IE1)
+            ENDDO
+            WORK3.DENS(IPTO3)=WORK1.DENS(IE1)
+          ENDIF
+          IF(ICRO.EQ.1.AND.ICRP.EQ.-2) GOTO 1
+        ENDDO
+        IRET=IRET+1
+        WRITE(IOIMP,*)'J3COAL: ON NE TROUVE PAS UNE FIN DE PLAGE'
+        RETURN
+ 1      CONTINUE
+        IPLA1=IE1
+C
+C       D) On forme le candidat trou: on commence par le morceau sur A
+C
+        NPTO=NPTO1+NPTO2
+        IPTO=0
+        SEGINI,WORK
+        JUN=0
+        DO IE1=1,NPTO1
+C
+          I1=IE1+IPLA1-1
+          IF(I1.GT.NPTO1)I1=I1-NPTO1
+C
+          IPTO=IPTO+1
+          DO IE2=1,2
+            XYC(IE2,IPTO)=WORK1.XYC(IE2,I1)
+          ENDDO
+          DENS(IPTO)=WORK1.DENS(I1)
+C
+          ICRO=CRO(1,I1)
+          ICRP=CRO(2,I1)
+          IF(ICRO.EQ.-2.AND.ICRP.EQ.1)GOTO 2
+C
+        ENDDO
+        IRET=IRET+1
+        WRITE(IOIMP,*)'J3COAL: ON NE TROUVE PAS LA FIN D"UN TROU'
+        RETURN
+ 2      CONTINUE
+        IPLB1=I1
+C
+C       E) On continue par le morceau sur B jusqu'a refermeture
+C
+        IF(WORK1.IST(1,IPLB1).NE.2)THEN
+          IRET=IRET+1
+          WRITE(IOIMP,*)'J3COAL: LA FIN DU TROU DE A DOIT SE TROUVER'
+          WRITE(IOIMP,*)'        SUR 2 COTES DE B'
+          RETURN
+        ENDIF
+C
+        XX=XYC(1,1)
+        YY=XYC(2,1)
+C
+        CALL J3NUMP(WORK1.IST(1,I1),NPTO2,IPLA2)
+C
+        DO IE1=1,NPTO2
+          I1=IE1+IPLA2
+          IF(I1.GT.NPTO2)I1=I1-NPTO2
+C
+          DO IE2=1,2
+            XY(IE2)=WORK2.XYC(IE2,I1)
+          ENDDO
+C
+          DIS=SQRT((XX-XY(1))**2+(YY-XY(2))**2)
+          IF(DIS.LT.TOL)GOTO 3
+C
+          IPTO=IPTO+1
+          DO IE2=1,2
+            XYC(IE2,IPTO)=XY(IE2)
+          ENDDO
+          DENS(IPTO)=WORK2.DENS(I1)
+C
+        ENDDO
+        IRET=IRET+1
+        WRITE(IOIMP,*)'J3COAL: LE CANDIDAT TROU NE SE REFERME PAS'
+        RETURN
+ 3      CONTINUE
+        NPTO=IPTO
+        SEGADJ,WORK
+        IPLB2=I1
+C
+C       F) On verifie que le trou ne contient strictement aucun pt de A
+C          et qu'il contient au moins un point exterieur
+C
+        LAINB=.FALSE.
+        LAOUB=.FALSE.
+        DO IE1=1,NPTO1
+          DO IE2=1,2
+            XY(IE2)=WORK1.XYC(IE2,IE1)
+          ENDDO
+          CALL J3INEX(XY,XYC,NPTO,TOL,ICOD,ISIGM,IRET)
+          IF(IRET.NE.0)RETURN
+          IF(ICOD.EQ.-1)LAINB=.TRUE.
+          IF(ICOD.EQ.-2)LAOUB=.TRUE.
+        ENDDO
+C
+C       G) Si le trou contient un point de A, ce n'est pas un trou...
+C          et on recopie la suite de A
+C
+        IF(LAINB)THEN
+          IF(LAOUB)THEN
+            IRET=IRET+1
+            WRITE(IOIMP,*)'J3COAL: CE TROU ERRONE NE PEUT ETRE'
+            WRITE(IOIMP,*) '        HORS DE A'
+            RETURN
+          ENDIF
+          NPL1=IPLB1-IPLA1-1
+          IF(NPL1.LT.0)NPL1=NPL1+NPTO1
+          IF (NPL1.NE.0)THEN
+            DO IE1=1,NPL1
+              I1=IPLA1+IE1
+              IF(I1.GT.NPTO1)I1=I1-NPTO1
+              IPTO3=IPTO3+1
+              DO IE2=1,2
+                WORK3.XYC(IE2,IPTO3)=WORK1.XYC(IE2,I1)
+              ENDDO
+              WORK3.DENS(IPTO3)=WORK1.DENS(I1)
+            ENDDO
+          ENDIF
+C
+C       G) Sinon on valide le trou ...
+C          (son orientation type face devrait-etre OK)
+C
+        ELSE
+          IF(.NOT.LAOUB)THEN
+            IRET=IRET+1
+            WRITE(IOIMP,*)'J3COAL: LE NOUVEAU TROU NE PEUT CONTENIR A'
+            RETURN
+          ENDIF
+C
+          NTRO1=NTRO1-1
+          NTROU=0
+          SEGINI,WWORK
+          FWORK=WORK
+          FWWORK(NFACE-NTRO1)=WWORK
+          NFA=NFA+1
+C
+C       H) ... et on change le contours de A (WORK3) (SEULEMENT
+C              avec des points INTERIEURS a B parcouru a l'envers)
+C
+          NPL2=IPLB2-IPLA2-1
+          IF(NPL2.LT.0)NPL2=NPL2+NPTO2
+          IF (NPL2.NE.0)THEN
+            DO IE1=1,NPL2
+              I1=IPLB2-IE1
+              IF(I1.GT.NPTO2)I1=I1-NPTO2
+              IPTO3=IPTO3+1
+              DO IE2=1,2
+                WORK3.XYC(IE2,IPTO3)=WORK2.XYC(IE2,I1)
+              ENDDO
+              WORK3.DENS(IPTO3)=WORK2.DENS(I1)
+            ENDDO
+          ENDIF
+        ENDIF
+C
+C       ?) Fin de boucle sur les trou
+C
+        IPLA1=IPLB1
+        IF(NTRO1.EQ.0)GOTO 4
+      ENDDO
+      IRET=IRET+1
+      WRITE(IOIMP,*)'J3COAL: LE NOMBRE DE TROU EST INCONSISTENT'
+      RETURN
+C
+C       I) On termine A (WORK3) jusqu'a fermeture
+C
+ 4    CONTINUE
+C
+      XX=WORK3.XYC(1,1)
+      YY=WORK3.XYC(2,1)
+      DO IE1=1,NPTO1
+        I1=IE1+IPLA1-1
+        IF(I1.GT.NPTO1)I1=I1-NPTO1
+C
+        DO IE2=1,2
+          XY(IE2)=WORK1.XYC(IE2,I1)
+        ENDDO
+C
+        DIS=SQRT((XX-XY(1))**2+(YY-XY(2))**2)
+        IF(DIS.LT.TOL)GOTO 5
+C
+        IPTO3=IPTO3+1
+        DO IE2=1,2
+          WORK3.XYC(IE2,IPTO3)=XY(IE2)
+        ENDDO
+        WORK3.DENS(IPTO3)=WORK1.DENS(I1)
+C
+      ENDDO
+C
+      IRET=IRET+1
+      WRITE(IOIMP,*)'J3COAL: ON N"ARRIVE PAS A REFERMER A'
+      RETURN
+C
+C       J) On ajuste A (WORK3) et on le re-compare a B
+C
+ 5    CONTINUE
+      NPTO=IPTO3
+      SEGADJ,WORK3
+C
+      CALL J3COTO(WORK3,WORK2,TOL,IRET)
+      IF(IRET.NE.0)RETURN
+      CALL J3JUNC(WORK3,WORK2,TOL,IRET)
+      IF(IRET.NE.0)RETURN
+      CALL J3JUNC(WORK2,WORK3,TOL,IRET)
+      IF(IRET.NE.0)RETURN
+C
+C       K) Si OK on substitue WORK3 a WORK1
+C
+      JUNC=WORK1.JUN
+      IF(JUNC.NE.0)SEGSUP,JUNC
+      SEGSUP,WORK1
+      WORK1=WORK3
+      NPTO1=WORK1.XYC(/2)
+C ???
+      NPTO2=WORK2.XYC(/2)
+C ???
+C
+C     QUAND IL N'Y A PLUS QU'UNE SEULE PLAGE, ON COALESCE NORMALEMENT
+C
+ 10   CONTINUE
+C
+      NPTO=NPTO1+NPTO2
+      IPTO3=0
+      SEGINI,WORK3
+      WORK3.JUN=0
+C
+C      A) On recopie dans WORK3 les points de A exterieurs a B jusqu'au
+C         debut de la plage de contact
+C
+      JUNC=WORK1.JUN
+      DO IE1=1,NPTO1
+        ICRO=CRO(1,IE1)
+        ICRP=CRO(2,IE1)
+        IF(ICRO*ICRP.EQ.4)THEN
+          IPTO3=IPTO3+1
+          DO IE2=1,2
+            WORK3.XYC(IE2,IPTO3)=WORK1.XYC(IE2,IE1)
+          ENDDO
+          WORK3.DENS(IPTO3)=WORK1.DENS(IE1)
+        ENDIF
+        IF(ICRO.EQ.-2.AND.ICRP.EQ.1)GOTO 11
+      ENDDO
+      IRET=IRET+1
+      WRITE(IOIMP,*)'J3COAL: ON NE TROUVE PAS UN DEBUT DE PLAGE'
+      RETURN
+C
+C       B) On recopie les points de B jusqu'au debut de la plage (vue de B)
+C
+ 11   CONTINUE
+      IF(WORK1.IST(1,IE1).NE.2)THEN
+        IRET=IRET+1
+        WRITE(IOIMP,*)'J3COAL: QUAND ON PASSE SUR B LE POINT DOIT ETRE'
+        WRITE(IOIMP,*)'        SUR 2 COTES DE B'
+        RETURN
+      ENDIF
+C
+      CALL J3NUMP(WORK1.IST(1,IE1),NPTO2,IPLA2)
+C
+      JUNC=WORK2.JUN
+      DO IE1=1,NPTO2
+        I1=IE1+IPLA2-1
+        IF(I1.GT.NPTO2)I1=I1-NPTO2
+C
+        IPTO3=IPTO3+1
+        DO IE2=1,2
+          WORK3.XYC(IE2,IPTO3)=WORK2.XYC(IE2,I1)
+        ENDDO
+        WORK3.DENS(IPTO3)=WORK2.DENS(I1)
+C
+        ICRO=CRO(1,I1)
+        ICRP=CRO(2,I1)
+        IF(ICRO.EQ.-2.AND.ICRP.EQ.1)GOTO 12
+C
+      ENDDO
+      IRET=IRET+1
+      WRITE(IOIMP,*)'J3COAL: LA PARTIE B DE LA COALESCENCE NE RETOMBE'
+      WRITE(IOIMP,*)'        PAS SUR UNE PLAGE'
+      RETURN
+C
+C       C) On finit la boucle sur A
+C
+ 12   CONTINUE
+      IE1=I1
+      IF(WORK2.IST(1,IE1).NE.2)THEN
+        IRET=IRET+1
+        WRITE(IOIMP,*)'J3COAL: QUAND ON PASSE SUR A LE POINT DOIT ETRE'
+        WRITE(IOIMP,*)'        SUR 2 COTES DE A'
+        RETURN
+      ENDIF
+C
+      CALL J3NUMP(WORK2.IST(1,IE1),NPTO1,IPLA1)
+      XX=WORK3.XYC(1,1)
+      YY=WORK3.XYC(2,1)
+C
+      DO IE1=1,NPTO1
+        I1=IE1+IPLA1
+        IF(I1.GT.NPTO1)I1=I1-NPTO1
+C
+        DO IE2=1,2
+          XY(IE2)=WORK1.XYC(IE2,I1)
+        ENDDO
+C
+        DIS=SQRT((XX-XY(1))**2+(YY-XY(2))**2)
+        IF(DIS.LT.TOL)GOTO 13
+C
+        IPTO3=IPTO3+1
+        DO IE2=1,2
+          WORK3.XYC(IE2,IPTO3)=XY(IE2)
+        ENDDO
+        WORK3.DENS(IPTO3)=WORK1.DENS(I1)
+C
+      ENDDO
+C
+      IRET=IRET+1
+      WRITE(IOIMP,*)'J3COAL: ON N"ARRIVE PAS A REFERMER A'
+      RETURN
+C
+C     ON DIMENSIONNE CORRECTEMENT WORK3 QUE L'ON SUBSTITUE ENSUITE
+C     A WORK1
+C
+ 13   CONTINUE
+C
+      NPTO=IPTO3
+      SEGADJ,WORK3
+C
+      JUNC=WORK1.JUN
+      IF(JUNC.NE.0)SEGSUP,JUNC
+      SEGSUP,WORK1
+      WORK1=WORK3
+C
+C     ENFIN ON VERIFIE QU'IL N'Y A PAS DES POINTS COMMUNS
+C
+ 14   CONTINUE
+      NPTO1=WORK1.XYC(/2)
+      DO IE1=1,NPTO1
+        WORK1.IST(1,IE1)=0
+      ENDDO
+      DO 21 IE1=1,NPTO1
+        XX=WORK1.XYC(1,IE1)
+        YY=WORK1.XYC(2,IE1)
+        DO 20 IE2=1,NPTO1
+          IF(IE2.EQ.IE1)GOTO 20
+          DO IE3=1,2
+            XY(IE3)=WORK1.XYC(IE3,IE2)
+          ENDDO
+          DIS=SQRT((XX-XY(1))**2+(YY-XY(2))**2)
+          IF(DIS.LT.TOL)THEN
+            WORK1.IST(1,IE1)=IE2
+            GOTO 21
+          ENDIF
+ 20     CONTINUE
+ 21   CONTINUE
+C
+      I1=0
+      DO IE1=1,NPTO1
+        IF(WORK1.IST(1,IE1).NE.0)I1=I1+1
+      ENDDO
+C
+C     I1 DOIT ETRE UN MULTIPLE DE 2
+C
+      IF(I1-(I1/2)*2.NE.0)THEN
+        IRET=IRET+1
+        WRITE(IOIMP,*)
+     >  'J3COAL: LE NB DE PTS COMMUNS DOIT ETRE UN MULTIPLE DE 2'
+        RETURN
+      ENDIF
+      I1=I1/2
+C
+C     S'IL N'Y EN A PAS, ON PEUT SORTIR ...
+C
+      IF(I1.EQ.0)RETURN
+C
+C     SINON C'EST REPARTI POUR UN TOUR!
+C
+C       A) On prepare la structure de donnes qui contiendra
+C          les nouvelles faces
+C
+      IF(LCAONB)THEN
+        NTRO1=I1
+      ELSE
+        NTRO1=I1-1
+      ENDIF
+      IF(VWORK.EQ.0)THEN
+        NFACE=NTRO1
+        SEGINI,VWORK
+      ELSE
+        NFACE=FWWORK(/1)
+        NFACE=NFACE+NTRO1
+        SEGADJ,VWORK
+      ENDIF
+      WORK3=0
+C
+C       B) On cherche les plages contigues entre les intersections
+C             (il y en a NFACE+1) mais seules NFACE sont des trous
+C          On attaque la boucle
+C
+      IPLA1=1
+      I0=NTRO1+1
+      DO IE0=1,I0
+C
+C       C) On localise le premier pont
+C
+        DO IE1=IPLA1,NPTO1
+          I1=WORK1.IST(1,IE1)
+          IF(I1.NE.0)GOTO 30
+        ENDDO
+        IRET=IRET+1
+        WRITE(IOIMP,*)
+     >  'J3COAL: ON NE TROUVE PAS LE NB CORRECT DE CONTOURS'
+        RETURN
+C
+C       D) On prepare le nouveau contours
+C
+ 30     CONTINUE
+        NPTO=NPTO1
+        IPTO=0
+        SEGINI,WORK
+        JUN=0
+C
+C       E) On referme le contour sur le point de premier pont en
+C          sautant eventuellement de pont en pont et en les coupant
+C          au fur et a mesure
+C
+        IPLA1=IE1
+        WORK1.IST(1,IE1)=0
+C
+        DO IE1=1,NPTO1
+C
+          IPTO=IPTO+1
+          DO IE2=1,2
+            XYC(IE2,IPTO)=WORK1.XYC(IE2,I1)
+          ENDDO
+          DENS(IPTO)=WORK1.DENS(I1)
+C
+          I1=I1+1
+          IF(I1.GT.NPTO1)I1=I1-NPTO1
+          IF(I1.EQ.IPLA1)GOTO 31
+C
+          I2=WORK1.IST(1,I1)
+          IF(I2.NE.0)THEN
+            WORK1.IST(1,I1)=0
+            I1=I2
+          ENDIF
+          IF(I1.EQ.IPLA1)GOTO 31
+        ENDDO
+        IRET=IRET+1
+        WRITE(IOIMP,*)
+     >  'J3COAL: ON NE TROUVE PAS LE NB CORRECT DE CONTOURS'
+        RETURN
+C
+C       F) On ajuste le contours
+C
+  31    CONTINUE
+        NPTO=IPTO
+        SEGADJ,WORK
+C
+C       G) On verifie que le trou ne contient strictement aucun pt de A
+C          et qu'il contient au moins un point exterieur
+C
+        LAINB=.FALSE.
+        LAOUB=.FALSE.
+        NPTO=IPTO
+        SEGADJ,WORK
+        DO IE1=1,NPTO1
+          DO IE2=1,2
+            XY(IE2)=WORK1.XYC(IE2,IE1)
+          ENDDO
+          CALL J3INEX(XY,XYC,NPTO,TOL,ICOD,ISIGM,IRET)
+          IF(IRET.NE.0)RETURN
+          IF(ICOD.EQ.-1)LAINB=.TRUE.
+          IF(ICOD.EQ.-2)LAOUB=.TRUE.
+        ENDDO
+C
+C       H) Si le trou contient un point de A, ce n'est pas un trou...
+C          C'est en fait la silhouette de A (bien oriente!)
+C
+        IF(LAINB)THEN
+          IF(LAOUB)THEN
+            IRET=IRET+1
+            WRITE(IOIMP,*)'J3COAL: LA NOUVELLE SILHOUETTE NE PEUT ETRE'
+            WRITE(IOIMP,*) '        HORS DE A'
+            RETURN
+          ENDIF
+          WORK3=WORK
+C
+C       I) Sinon on valide le trou ...
+C          (son orientation type face devrait-etre OK)
+C
+        ELSE
+          IF(.NOT.LAOUB)THEN
+            IRET=IRET+1
+            WRITE(IOIMP,*)'J3COAL: LE NOUVEAU TROU NE PEUT CONTENIR A'
+            RETURN
+          ENDIF
+C
+          NTRO1=NTRO1-1
+          NTROU=0
+          SEGINI,WWORK
+          FWORK=WORK
+          FWWORK(NFACE-NTRO1)=WWORK
+          NFA=NFA+1
+C
+        ENDIF
+C
+C       J) On finit la boucle
+C
+      ENDDO
+C
+C       K) A ce point NTRO1 doit etre nul et WORK3 NE 0
+C
+      IF((NTRO1.NE.0).OR.(WORK3.EQ.0))THEN
+        IRET=IRET+1
+        WRITE(IOIMP,*)'J3COAL: LE NOMBRE DE CONTOURS EST INCONSISTENT'
+        RETURN
+      ENDIF
+C
+C       L) WORK3 "nouveau A" vient substituer A
+C
+      JUNC=WORK1.JUN
+      IF(JUNC.NE.0)SEGSUP,JUNC
+      SEGSUP,WORK1
+      WORK1=WORK3
+C
+      RETURN
+      END
+
+

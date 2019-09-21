@@ -1,0 +1,699 @@
+C RELA2     SOURCE    PV        18/08/30    21:15:05     9896
+      SUBROUTINE RELA2(LEMOT)
+************************************************************************
+*   cet operateur impose des mouvements de corps rigide
+*   ou l accrochage de deux maillages
+*
+*   syntaxe :
+*          rig1 = rela   |   cori   depl    (rota)      |
+*                        |                              |  geo1 (geo2)
+*                        | ense ux uy uz ut rx ry rz rt |
+*
+*          cori  = mot cle
+*          ense  = mot cle
+*          depl  = pour imposer que la distance entre les points
+*                  reste constante
+*          rota  = pour imposer que tous les points ont les memes
+*                  rotations
+*          ux    = pour imposer que la valeur sur la composante ux
+*                  est la meme pour tous les points
+*          geo1  = objet de type meleme ou point
+*          geo2  = objet de type meleme
+*          rig1  = objet de type rigidite
+*
+*   accrochage syntaxe :
+*          rig1 = RELA  geo1 ACCR  geo2  ; ( geo2 massif )
+*
+************************************************************************
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+-INC CCOPTIO
+-INC CCGEOME
+-INC SMELEME
+-INC SMCOORD
+-INC SMRIGID
+-INC CCHAMP
+c
+      SEGMENT MOTDDV
+       CHARACTER*4 MOTDDL(0)
+      ENDSEGMENT
+      SEGMENT NOMINV
+       CHARACTER*4 NOMINC(0)
+      ENDSEGMENT
+      SEGMENT NUMAIT(NBMAIT)
+      SEGMENT NUESCL(NBESCL)
+c
+      CHARACTER*4 ITCORI(3),LEMOT
+      CHARACTER*4 MOACCR(2)
+      CHARACTER*4 MODEPL(6),MODEDU(6)
+      CHARACTER*8 CTYP
+      DIMENSION COEF(3)
+c
+      DATA ITCORI(1)/'DEPL'/
+      DATA ITCORI(2)/'ROTA'/
+      DATA ITCORI(3)/'NOVE'/
+      DATA MODEPL(1)/'UX  '/
+      DATA MODEPL(2)/'UY  '/
+      DATA MODEPL(3)/'UZ  '/
+      DATA MODEPL(4)/'UR  '/
+      DATA MODEPL(5)/'UZ  '/
+      DATA MODEPL(6)/'UT  '/
+      DATA MODEDU(1)/'FX  '/
+      DATA MODEDU(2)/'FY  '/
+      DATA MODEDU(3)/'FZ  '/
+      DATA MODEDU(4)/'FR  '/
+      DATA MODEDU(5)/'FZ  '/
+      DATA MODEDU(6)/'FT  '/
+      DATA MOACCR(1)/'FORT'/
+      DATA MOACCR(2)/'FAIB'/
+c
+      DATA ZERO,UNO   /0.D0,1.D0/
+
+
+* on teste la compatibilité des données ******************************
+* en fourier le mouvement de corps rigide n'a pas toujours de sens
+cbp       IF ( LEMOT.NE.'ENSE') THEN
+      IF ( LEMOT.EQ.'CORI') THEN
+* cette remarque ne vaut que pour l'option cori
+       IF (((IDIM.EQ.3).AND.(IFOMOD.NE.2)).OR.
+     +   ((IDIM.EQ.2).AND. (IFOMOD.EQ.2)).OR.
+     +   ((IFOUR.EQ.1).AND.( ABS(NIFOUR).GT.1))) THEN
+         CALL ERREUR(21)
+         RETURN
+       ENDIF
+      ENDIF
+c
+c on cherche a lire les directions ***********************************
+      SEGINI MOTDDV,NOMINV
+      IDEPL=0
+      IROTA=0
+      IENSE=0
+      JVER=1
+
+c
+      IF(IFOUR.NE.-2.AND.IFOUR.NE.-1.AND.IFOUR.NE.-3)GOTO 101
+c
+c     deformations planes ou contraintes planes ou def. planes generalisées
+      LDEPL=2
+      IADEPL=0
+      IAROTA=2
+      GOTO 107
+
+  101 CONTINUE
+      IF(IFOUR.NE.1) GOTO 103
+c
+c     fourier
+      LDEPL=3
+      IADEPL=3
+      IAROTA=2
+      GOTO 107
+
+  103 CONTINUE
+      IF(IFOUR.NE.2) GOTO 107
+c
+c     tridim
+      LDEPL=3
+      IADEPL=0
+      IAROTA=0
+
+  107 CONTINUE
+
+C option ACCRO ou GLIS *********************************************
+      IF(LEMOT.EQ.'ACCR'.OR.LEMOT.EQ.'GLIS') THEN
+      igli=0
+      iaccr=0
+      if (LEMOT.EQ.'GLIS' ) then
+        igli=1
+      else
+*       ACCRO : lecture facultative du mot clé FORT ou FAIBLE
+        CALL LIRMOT(MOACCR,2,iaccr,0)
+      endif
+      if (iaccr.eq.0) then
+c       RELA GLIS ou RELA ACCRO => ACCRO
+        CALL ACCRO (igli)
+      elseif (iaccr.eq.1) then
+c       RELA ACCRO 'FORT' => ACCRO3
+        CALL ACCRO3
+      elseif (iaccr.eq.2) then
+c       RELA ACCRO 'FAIBL' => ACCRO2
+        CALL ACCRO2
+      else
+c       Option indisponible
+        call erreur(19)
+      endif
+      RETURN
+      ENDIF
+
+c option ENSE ******************************************************
+      IF(LEMOT.EQ.'ENSE') THEN
+
+      IENSE = 1
+  445 CONTINUE
+      CALL LIRMOT(NOMDD,LNOMDD,IMOT,0)
+      IF(IMOT.EQ.0) GO TO 446
+      MOTDDL(**)=NOMDD(IMOT)
+      MOTDDL(**)=NOMDU(IMOT)
+      GO TO 445
+  446 CONTINUE
+      IBDDL=MOTDDL(/2)
+
+c option CORI ******************************************************
+      ELSE IF(LEMOT.EQ.'CORI') THEN
+
+cccccccc   a t on une directive depl
+c
+      IOBL=1
+ 4480 CONTINUE
+      CALL LIRMOT(ITCORI,3,IMOT,IOBL)
+      IF(IERR.NE.0) RETURN
+      IF(IMOT.EQ.0) GOTO 448
+      IOBL=0
+      GO TO (44801,44802,44803),IMOT
+44801 continue
+c
+cccccccccccc on a trouve le mot deplacement
+c
+      IDEPL=1
+      DO 4481 IA=1,LDEPL
+      NOMINC(**)=MODEPL(IADEPL+IA)
+      NOMINC(**)=MODEDU(IADEPL+IA)
+ 4481 CONTINUE
+      GO TO 4480
+44802 continue
+c
+cccccccc      on a trouve le mot rotation
+c
+      IROTA=1
+      GO TO 4480
+44803 continue
+      JVER=0
+      GO TO 4480
+  448 CONTINUE
+
+      ENDIF
+c endif des options ENSE et CORI ***********************************
+
+c
+c on cherche a lire le(s) maillage(s) ******************************
+c
+* cas de mot clé rota ou fourier 0 ou axis 0
+      IF ((IDEPL.EQ.1).AND.((IROTA.EQ.1).OR.
+     +   (NIFOUR.EQ.0 .AND. IFOMOD.EQ.1).OR.(IFOMOD.EQ.0))) THEN
+      CALL QUETYP(CTYP,1,IRETOU)
+      IF (IRETOU.EQ.0) GOTO 555
+        IF(CTYP.EQ.'MAILLAGE') THEN
+         CALL LIROBJ('MAILLAGE',KOBJET,1,IRETOU)
+         IF (IRETOU.EQ.0) GOTO 555
+         LP=0
+* on regarde si on a donné juste un point
+        ELSE IF (CTYP.EQ.'POINT   ') THEN
+         CALL LIROBJ('POINT   ',KOBJET,1,IRETOU)
+         IF (IRETOU.EQ.0) GOTO 555
+         LP=1
+        ELSE
+         GOTO 555
+        ENDIF
+       CALL LIROBJ('MAILLAGE',KOBJE2,0,IRETOU)
+       IF((IRETOU.EQ.0).AND.(LP.EQ.1)) THEN
+         CALL ERREUR(26)
+         GOTO 555
+       ENDIF
+       CALL RELA3 (KOBJET,KOBJE2,LP,IROTA)
+       GOTO 555
+      ELSE
+* cas sans mot clé rota (sauf  fourier 0 et axis 0)
+        CALL LIROBJ('MAILLAGE',KOBJET,1,IRETOU)
+        IF(IRETOU.EQ .0) GOTO 555
+      ENDIF
+
+      MELEME=KOBJET
+      SEGACT MELEME
+      IF(ITYPEL .NE.1) CALL CHANGE(MELEME,1)
+      NBPOIN=NUM(/2)
+c
+c  dans le cas depl on ecrit que la distance entre les points reste
+c  constante ,1 matrice avec
+c  en 2d , 3 noeuds maitres et 2(n-3)+3 relations
+c  en 3d , 4 noeuds maitres et 3(n-4)+6 relations
+c   on prend comme noeuds maitres possibles
+c       les 3 premiers noeuds non alignes en 2d
+c       les 4 premiers noeuds non coplanaires en 3d
+c
+      IF (IDEPL.EQ.1) THEN
+        IF (IDIM.EQ.2) NBMAIT=3
+        IF (IDIM.EQ.3) NBMAIT=4
+c   erreur nb de pts du maillage inferieur au nb de noeuds maitres
+        IF (NBPOIN.LT.NBMAIT.AND.JVER.EQ.1) THEN
+          CALL ERREUR(364)
+          GOTO 998
+        ENDIF
+        IF(JVER.EQ.1) THEN
+          NBESCL=NBPOIN-NBMAIT
+          SEGINI NUMAIT,NUESCL
+cc   cas 2d determination des 3 noeuds maitres
+          IF (IDIM.EQ.2) THEN
+            IP1=NUM(1,1)
+            IP2=NUM(1,2)
+            IREFP1=(IP1-1)*(IDIM+1)
+            IREFP2=(IP2-1)*(IDIM+1)
+            X12=XCOOR(IREFP2+1)-XCOOR(IREFP1+1)
+            Y12=XCOOR(IREFP2+2)-XCOOR(IREFP1+2)
+            P12N=SQRT(X12**2+Y12**2)
+            DO 300 I=3,NBPOIN
+              IP3=NUM(1,I)
+              IREFP3=(IP3-1)*(IDIM+1)
+              X13=XCOOR(IREFP3+1)-XCOOR(IREFP1+1)
+              Y13=XCOOR(IREFP3+2)-XCOOR(IREFP1+2)
+              P13N=SQRT(X13**2+Y13**2)
+              TEST=X12*X13+Y12*Y13
+              IF(ABS(TEST).GT.0.9997D0*(P12N*P13N)) GOTO 300
+              GOTO 399
+300         continue
+310         continue
+cccc   erreur  tous les points sont alignes ou quasiment
+            CALL ERREUR(362)
+            GOTO 999
+cc   cas 3d determination des 4 noeuds maitres
+          ELSE IF (IDIM.EQ.3) THEN
+            IP1=NUM(1,1)
+            IP2=NUM(1,2)
+            IREFP1=(IP1-1)*(IDIM+1)
+            IREFP2=(IP2-1)*(IDIM+1)
+            X12=XCOOR(IREFP2+1)-XCOOR(IREFP1+1)
+            Y12=XCOOR(IREFP2+2)-XCOOR(IREFP1+2)
+            Z12=XCOOR(IREFP2+3)-XCOOR(IREFP1+3)
+            P12N=SQRT(X12**2+Y12**2+Z12**2)
+            DO 350 I=3,NBPOIN
+              IP3=NUM(1,I)
+              IREFP3=(IP3-1)*(IDIM+1)
+              X13=XCOOR(IREFP3+1)-XCOOR(IREFP1+1)
+              Y13=XCOOR(IREFP3+2)-XCOOR(IREFP1+2)
+              Z13=XCOOR(IREFP3+3)-XCOOR(IREFP1+3)
+              P13N=SQRT(X13**2+Y13**2+Z13**2)
+              TEST=X12*X13+Y12*Y13+Z12*Z13
+              IF(ABS(TEST).GT.0.9997D0*(P12N*P13N)) GOTO 350
+              GOTO 360
+350         continue
+            GOTO 380
+360         continue
+            XN=Y12*Z13-Z12*Y13
+            YN=Z12*X13-X12*Z13
+            ZN=X12*Y13-Y12*X13
+            PN=XN**2+YN**2+ZN**2
+            DO 370 I=3,NBPOIN
+              IP4=NUM(1,I)
+              IREFP4=(IP4-1)*(IDIM+1)
+              X14=XCOOR(IREFP4+1)-XCOOR(IREFP1+1)
+              Y14=XCOOR(IREFP4+2)-XCOOR(IREFP1+2)
+              Z14=XCOOR(IREFP4+3)-XCOOR(IREFP1+3)
+              P14N=SQRT(X14**2+Y14**2+Z14**2)
+              TEST=XN*X14+YN*Y14+ZN*Z14
+              IF(ABS(TEST).LT.0.025D0*(PN*P14N)) GOTO 370
+              GOTO 399
+370         continue
+380         continue
+cccc   erreur  tous les points sont coplanaires ou quasiment
+            CALL ERREUR(363)
+            GOTO 999
+          ENDIF
+399       continue
+          NUMAIT(1)=IP1
+          NUMAIT(2)=IP2
+          NUMAIT(3)=IP3
+          IF (IDIM.EQ.3) NUMAIT(4)=IP4
+          I1=0
+          DO 397 I=3,NBPOIN
+            DO 398 J=1,NBMAIT
+              IF(NUM(1,I).EQ.NUMAIT(J)) GOTO 397
+398         continue
+            I1=I1+1
+            NUESCL(I1)=NUM(1,I)
+397       continue
+        ELSEIF(JVER.EQ.0) THEN
+          NBESCL=NBPOIN-NBMAIT
+          IF(NBESCL.GT.0) THEN
+            SEGINI NUMAIT,NUESCL
+          ELSE
+            NBMAIT=NBPOIN
+            NBESCL=0
+            SEGINI NUMAIT
+          ENDIF
+          DO 396 I=1,NBMAIT
+              NUMAIT(I)=NUM(1,I)
+  396     CONTINUE
+          IF(NBESCL.GT.0) THEN
+             DO 395 I=1,NBESCL
+                NUESCL(I)=NUM(1,I+NBMAIT)
+  395        CONTINUE
+          ENDIF
+        ENDIF
+      ENDIF
+c
+c  dans le cas ense ,on ecrit que la valeur sur un ddl
+c  donne est la meme pour tous les points ,ibddl/2 matrices avec
+c  (n-1) relations
+c
+      IF(IENSE.EQ.1) NNMAT=IBDDL/2
+      IF(IDEPL.EQ.1) THEN
+       NNMAT=1
+* en fourier 1 on a en plus que ur=-ut a tout point et une relation d'analogie
+* sur uz entre deux noeuds (p.ex. 2 noeuds maitres)
+       IF(ABS(NIFOUR).EQ.1) NNMAT=3
+      ENDIF
+      IF(NNMAT.EQ.0) GO TO 555
+      NRIGE=7
+      NRIGEL=NNMAT
+      SEGINI MRIGID
+      ICHOLE=0
+      IMGEO1=0
+      IMGEO2=0
+      ISUPEQ=0
+      IFORIG=IFOMOD
+      MTYMAT='RIGIDITE'
+      KRIGI=MRIGID
+c
+cccc on rajoute les noeuds associes aux multiplicateurs au maillage
+c
+cc      segact mcoord
+ccccccccc   nombre de noeuds
+      NBNO=XCOOR(/1)/(IDIM+1)
+      NBNOI=NBNO
+      IF(IENSE.EQ.1) NBPTS=NBNO+NNMAT*(NBPOIN-1)
+      IF(IDEPL.EQ.1) THEN
+         IF(IDIM.EQ.2) NBPTS=NBNO+(2*(NBPOIN-3)+3)
+         IF(IDIM.EQ.3) NBPTS=NBNO+(3*(NBPOIN-4)+6)
+         IF(NBPOIN.EQ.2) NBPTS=NBNO +1
+         IF(ABS(NIFOUR).EQ.1)NBPTS = NBPTS + NBPOIN + 1
+      ENDIF
+      SEGADJ MCOORD
+c
+cccc  boucle sur les rigidites elementaires
+c   si idepl=1 et irota=1 la 1ere rigidite elementaire est associee a
+c   l option depl et les suivantes a l option rota
+c
+
+      IF (IENSE.EQ.1) NBRELA=NBPOIN-1
+      I7=0
+      DO 7 IAA=1,NNMAT
+      IF (IDEPL.EQ.1) THEN
+        IF (IAA.EQ.1) THEN
+          IF(IDIM.EQ.2) NBRELA=2*(NBPOIN-3)+3
+          IF(IDIM.EQ.3) NBRELA=3*(NBPOIN-4)+6
+          IF(NBPOIN.EQ.2) NBRELA=1
+        ELSE IF (IAA.eq.2) THEN
+* fourier 1 ur=-ut
+          NBRELA=NBPOIN
+* fourier 1 relation d'analogie sur uz
+        ELSE IF (IAA.eq.3) THEN
+          nbrela = 1
+        ENDIF
+      ENDIF
+*      print*,'idepl=',idepl
+*      print*,'iaa=',iaa
+cccccccc on cree le noeud nbno+1 et nbno+2
+cccccccc on les met a l origine
+      DO 5 IA=1,NBRELA
+      XCOOR(NBNOI*(IDIM+1)+1)=0.D0
+      XCOOR(NBNOI*(IDIM+1)+2)=0.D0
+      IF (IDIM.EQ.3) XCOOR(NBNOI*(IDIM+1)+3)=0.D0
+      XCOOR(NBNOI*(IDIM+1)+(IDIM+1))=0.D0
+      NBNOI=NBNOI+1
+    5 CONTINUE
+c
+c     on initialise le segment meleme associe aux blocages
+c
+      NBSOUS=0
+      NBREF=0
+      NBNN=3
+      NBELEM=NBRELA
+      SEGINI IPT1
+      IRIGEL(1,IAA)=IPT1
+      IPT1.ITYPEL=22
+      DO 400 I4=1,NBRELA
+      IPT1.ICOLOR(I4)=IDCOUL
+c punti associati ai moltiplicatori
+      IPT1.NUM(1,I4)=NBNO+I7+1
+      I7=I7+1
+400   continue
+c caricamento nodi pseudo-elementi
+* option ensemble
+      IF (IENSE.EQ.1) THEN
+        DO 420 I9=1,NBRELA
+        IPT1.NUM(2,I9)=NUM(1,I9)
+        IPT1.NUM(3,I9)=NUM(1,I9+1)
+420     continue
+* fourier 1 ur = -ut
+      ELSE IF (IDEPL.EQ.1.AND.IAA.EQ.2) THEN
+        DO 421 I9=1,NBRELA
+        IPT1.NUM(2,I9)=NUM(1,I9)
+        IPT1.NUM(3,I9)=NUM(1,I9)
+421     continue
+      ELSE IF (IDEPL.EQ.1.AND.IAA.EQ.1) THEN
+        I9=0
+        IF(NBPOIN.GT.NBMAIT) THEN
+c pseudo-elements pour les relations des autres noeuds avec
+c         les noeuds maitres
+          DO 430 IC=1, NBESCL
+          ICOREC = 0
+          DO 431 IB=1,NBMAIT-1
+            I9=I9+1
+            IPT1.NUM(3,I9)=NUESCL(IC)
+            IPT1.NUM(2,I9)=NUMAIT(IB)
+* on teste si le noeud esclave est colineaire avec les 2 maitres
+         IF (IB.EQ.2) THEN
+            IREFES = (NUESCL(IC)-1)*(IDIM+1)
+            XX13=XCOOR(IREFES+1)-XCOOR(IREFP1+1)
+            YY13=XCOOR(IREFES+2)-XCOOR(IREFP1+2)
+            PP13N=SQRT(XX13**2+YY13**2)
+            TTEST=X12*XX13+Y12*YY13
+             IF (IDIM.EQ.3) THEN
+               ZZ13 = XCOOR(IREFES+3)-XCOOR(IREFP1+3)
+               PP13N=PP13N+ZZ13**2
+               TTEST=TTEST+Z12*ZZ13
+              ENDIF
+             IF(ABS(TTEST).GT.0.9997D0*(P12N*PP13N)) THEN
+              IPT1.NUM(2,I9)=NUMAIT(IB+1)
+              ICOREC = 1
+             ENDIF
+          ELSE IF (IB.EQ.3) THEN
+           IF (ICOREC.EQ.1) THEN
+                IPT1.NUM(2,I9)=NUMAIT(IB+1)
+* on teste si le noeud esclave est coplanaire avec les 3 maitres
+           ELSE
+            TTEST=XN*XX13+YN*YY13+ZN*ZZ13
+       IF(ABS(TTEST).LT.0.025D0*(P12N*P13N))IPT1.NUM(2,I9)=NUMAIT(IB+1)
+           ENDIF
+          ENDIF
+431       continue
+430       continue
+        ENDIF
+c pseudo-elements pour les relations entre les noeuds maitres
+        DO 432 IB=2,NBMAIT
+          I9=I9+1
+          IPT1.NUM(2,I9)=NUMAIT(1)
+          IPT1.NUM(3,I9)=NUMAIT(IB)
+432     continue
+        IF(NBMAIT.GE.3) THEN
+          DO 433 IB=3,NBMAIT
+             I9=I9+1
+             IPT1.NUM(2,I9)=NUMAIT(2)
+             IPT1.NUM(3,I9)=NUMAIT(IB)
+433       continue
+        ENDIF
+        IF (NBMAIT.GE.4) THEN
+          DO 434 IB=4,NBMAIT
+             I9=I9+1
+             IPT1.NUM(2,I9)=NUMAIT(3)
+             IPT1.NUM(3,I9)=NUMAIT(IB)
+434       continue
+        ENDIF
+      ENDIF
+* fourier 1, relation d'analogie sur uz
+* on cherche les 2 noeuds maitres avec xmax et xmin
+* pour etre sur de ne pas avoir choisi 2 noeuds ayan la
+* meme coordonnee x
+       if ((idepl.eq.1).and.(iaa.eq.3)) then
+          xx = xcoor(irefp1+1)
+          x1 = xx
+          ipp1 = ip1
+         if (xcoor(irefp2+1).gt.xx) then
+           x1 =xcoor(irefp2+1)
+           ipp1 = ip2
+         else if (xcoor(irefp3+1).gt.xx) then
+           x1 =xcoor(irefp3+1)
+           ipp1 = ip3
+         endif
+          x2 = xx
+          ipp2 =ip1
+         if (xcoor(irefp2+1).lt.xx) then
+           x2 =xcoor(irefp2+1)
+           ipp2 = ip2
+         else if (xcoor(irefp3+1).lt.xx) then
+           x2 =xcoor(irefp3+1)
+           ipp2 = ip3
+         endif
+        ipt1.num(2,1)=ipp2
+        ipt1.num(3,1)=ipp1
+       endif
+*  correction on place les pts mult au barycentre des noeuds associes
+*   a chaque relation
+        DO 425 IA=1,NBRELA
+        IREF1=(IPT1.NUM(1,IA)-1)*(IDIM+1)
+        IREF2=(IPT1.NUM(2,IA)-1)*(IDIM+1)
+        IREF3=(IPT1.NUM(3,IA)-1)*(IDIM+1)
+        XCOOR(IREF1+1)=(XCOOR(IREF2+1)+XCOOR(IREF3+1))/2
+        XCOOR(IREF1+2)=(XCOOR(IREF2+2)+XCOOR(IREF3+2))/2
+        IF(IDIM.EQ.3) XCOOR(IREF1+3)=(XCOOR(IREF2+3)+XCOOR(IREF3+3))/2
+ 425    CONTINUE
+cccccccc   on vient de crer les segment meleme resultat
+cccccccc   on va creer les raideurs
+      IRIGEL(2,IAA)=0
+      IRIGEL(5,IAA)=NIFOUR
+      IRIGEL(6,IAA)=0
+      IRIGEL(7,IAA)=0
+      IF(IENSE.EQ.1.OR.IAA.GT.1) NLIGRE=3
+      IF(IDEPL.EQ.1.AND.IAA.EQ.1) NLIGRE=2*IDIM+1
+      NLIGRP=NLIGRE
+      NLIGRD=NLIGRE
+      SEGINI DESCR
+      IRIGEL(3,IAA)=DESCR
+c         on remplit le tableau des descripteurs de rig
+
+        LISINC(1)='LX'
+        LISDUA(1)='FLX'
+        NOELEP(1)=1
+        NOELED(1)=1
+      IF(IENSE.EQ.1) THEN
+        JAA=2*(IAA-1)
+        LISINC(2)=MOTDDL(JAA+1)
+        LISINC(3)=LISINC(2)
+        LISDUA(2)=MOTDDL(JAA+2)
+        LISDUA(3)=LISDUA(2)
+        NOELEP(2)=2
+        NOELEP(3)=3
+        NOELED(2)=2
+        NOELED(3)=3
+      ELSE IF (IDEPL.EQ.1.AND.IAA.EQ.1) THEN
+        DO 250 I=1,IDIM
+        JAA=2*(I-1)
+        J=1+2*(I-1)
+        LISINC(J+1)=NOMINC(JAA+1)
+        LISINC(J+2)=LISINC(J+1)
+        LISDUA(J+1)=NOMINC(JAA+2)
+        LISDUA(J+2)=LISDUA(J+1)
+        NOELEP(J+1)=2
+        NOELEP(J+2)=3
+        NOELED(J+1)=2
+        NOELED(J+2)=3
+250   continue
+
+* fourier 1 ur = -ut
+      ELSE IF (IDEPL.EQ.1.AND.IAA.EQ.2) THEN
+        LISINC(2)=MODEPL(4)
+        LISINC(3)=MODEPL(6)
+        LISDUA(2)=MODEDU(4)
+        LISDUA(3)=MODEDU(6)
+        NOELEP(2)=2
+        NOELEP(3)=3
+        NOELED(2)=2
+        NOELED(3)=3
+      ELSE IF (IDEPL.EQ.1.AND.IAA.EQ.3) THEN
+        LISINC(2)=MODEPL(3)
+        LISINC(3)=MODEPL(3)
+        LISDUA(2)=MODEDU(3)
+        LISDUA(3)=MODEDU(3)
+        NOELEP(2)=2
+        NOELEP(3)=3
+        NOELED(2)=2
+        NOELED(3)=3
+      ENDIF
+      SEGDES DESCR
+c
+      NELRIG=NBRELA
+      SEGINI xMATRI
+      IRIGEL(4,IAA)=xMATRI
+      COERIG(IAA)=1.D0
+c
+c  remplissage de  RE
+
+      IF (IENSE.EQ.1.OR.IAA.GT.1) THEN
+           do iou=1,nelrig
+*      SEGINI XMATRI
+*      IXMATR=XMATRI
+            RE(1,1,iou)=  0.D0
+            RE(2,1,iou)= 1.D0
+         IF (IENSE.EQ.1) THEN
+            RE(3,1,iou)= -1.D0
+* ur = - ut
+         ELSE IF (IAA.EQ.2) THEN
+            RE(3,1,iou)= 1.D0
+* analogie sur uz en fourier 1
+         ELSE
+            RE(3,1,iou)= -x2/x1
+         ENDIF
+              DO 777 I=1,1
+                DO 666 J=2,NLIGRE
+                  RE(I,J,iou)=RE(J,I,iou)
+ 666             CONTINUE
+ 777           CONTINUE
+       enddo
+*      SEGDES XMATRI
+*      DO 3 IA=1,NELRIG
+*      IMATTT(IA)=IXMATR
+*    3 CONTINUE
+      ELSE IF (IDEPL.EQ.1.AND.IAA.EQ.1) THEN
+      DO 740 IA=1,NELRIG
+      DO 741 I=1,IDIM
+        IREF2=(IPT1.NUM(2,IA)-1)*(IDIM+1)
+        IREF3=(IPT1.NUM(3,IA)-1)*(IDIM+1)
+      COEF(I)=XCOOR(IREF2+I)-XCOOR(IREF3+I)
+741   continue
+*      SEGINI XMATRI
+*      IMATTT(IA)=XMATRI
+      RE(1,1,ia)= 0.D0
+
+      DO 760 I1=2,NLIGRE
+      I4=INT(I1/2)
+      COEF1=COEF(I4)
+      IF((2*I4).LT.I1) COEF1=-COEF(I4)
+      DO 760 I2=1,1
+      RE(I1,I2,ia)=COEF1
+      RE(I2,I1,ia)=COEF1
+760   continue
+*      SEGDES XMATRI
+740   continue
+      ENDIF
+      SEGDES xMATRI
+c
+      SEGDES IPT1
+    7 CONTINUE
+
+c
+*  nettoyage eventuel des relations
+      call relasi(mrigid)
+      SEGDES MRIGID
+      CALL ECROBJ('RIGIDITE',MRIGID)
+999   continue
+      IF (IDEPL.EQ.1) THEN
+          SEGSUP NUMAIT
+          IF(NBESCL.GT.0) SEGSUP NUESCL
+      ENDIF
+998   continue
+       SEGDES MELEME
+  555 CONTINUE
+      SEGSUP MOTDDV,NOMINV
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+

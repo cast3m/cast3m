@@ -1,0 +1,313 @@
+C DETO2     SOURCE    CHAT      06/06/01    21:16:08     5450
+      SUBROUTINE DETO2(X1,X2,X3,X4,P1,T1,
+     1                 RAD,TAD,PAD,FACT,VCJ,
+     2                 RZ,TZ,PZ,
+     3                 RAICC,TAICC,PAICC,
+     4                 AN,AH2,AH2O,AN2,AO2,TINT,IINT,NBC,NBT,IRET)
+C-----------------------------------------------------------------------
+C Calcul pour un mélange donné des états CJ, ZND et AICC
+C-----------------------------------------------------------------------
+C
+C---------------------------
+C Parametres Entree/Sortie :
+C---------------------------
+C
+C E/  X1        : Nombre de moles de H2
+C E/  X2        : Nombre de moles de O2
+C E/  X3        : Nombre de moles de H2O
+C E/  X4        : Nombre de moles de N2
+C E/  P1        : Pression du mélange initiale (Pa)
+C E/  T1        : Température du mélange initiale (K)
+C  /S RAD       : Densité pour l'état CJ (kg/m3)
+C  /S TAD       : Température pour l'état CJ (K)
+C  /S PAD       : Pression pour l'état CJ (Pa)
+C  /S FACT      : Taux de combustion pour l'état CJ (-)
+C  /S VCJ       : Vitesse de CJ (m/s)
+C  /S RZ        : Densité pour l'état ZND (kg/m3)
+C  /S TZ        : Température pour l'état ZND (K)
+C  /S PZ        : Pression pour l'état ZND (Pa)
+C  /S RAICC     : Densité pour l'état AICC (kg/m3)
+C  /S TAICC     : Température pour l'état AICC (K)
+C  /S PAICC     : Pression pour l'état AICC (Pa)
+C E/  AN(NBT)   : Masse molaire des especes (en gramme)
+C E/  AH2(NBT)  : Coeff du devt en T des propriétés de h2
+C E/  AH2O(NBT) : Coeff du devt en T des propriétés de h2o
+C E/  AN2(NBT)  : Coeff du devt en T des propriétés de n2
+C E/  AO2(NBT)  : Coeff du devt en T des propriétés de o2
+C E/  TINT      : Température seuil (K)
+C E/  IINT      : Nombre de coeff nécessaire à T donnée
+C E/  NBC       : Nombre de constituants du mélange
+C E/  NBT       : Nombre de coeff total
+C  /S IRET      : Indicateur de succès (0=OK, 1=Problème)
+C
+C-----------------------------------------------------------------------
+C
+C---------------------------
+C Principe de l'algorithme :
+C---------------------------
+C
+C 1) On part du point représentatif de l'état initial
+C 2) On suppose la combustion complète
+C 3) On calcule le point CJ itérativement en diminuant le volume
+C    spécifique à partir des conditions suivantes : le point est sur
+C    l'adiabatique d'hugoniot des produits et la tangente au point
+C    passe par l'état initial (deux newtons imbriqués)
+C 4) On calcule le taux de production/destruction de H2
+C 5) Si équilibre, le point obtenu est le point de CJ (déto stable) ;
+C    Sinon, on diminue le taux de combustion et on repart en 3)
+C    (newton le plus externe)
+C
+C 6) On calcule ensuite le point ZND qui est sur l'hugoniot des gaz
+C    frais et sur la droite de Rayleigh reliant le point initial au
+C    point CJ (quand on aime newton on ne compte pas).
+C
+C 7) On calcule alors la vitesse de CJ à partir de la pente de la droite
+C    de Rayleigh VCJ = ((PCJ - PI) / (VI - VCJ))**0.5 * VI
+C
+C-----------------------------------------------------------------------
+C
+C Langage : FORTRAN77
+C
+C Auteurs : F.DABBENE et E.STUDER 02/99
+C
+C-----------------------------------------------------------------------
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+      LOGICAL INIT,DROITE,GAUCHE,AICC
+      DIMENSION X(4),WDOT(4),XC(4)
+      DIMENSION AN(*),AH2(*),AH2O(*),AN2(*),AO2(*)
+      DIMENSION NIT(9),NITER(9),TCX1(9),TCY1(9),TCX2(9),TCY2(9)
+      DO ITC = 1, 9
+        NIT(ITC)=0
+        NITER(ITC)=1
+      ENDDO
+C
+C- Récupération des données
+C
+      IRET = 1
+      X(1) = X1
+      X(2) = X2
+      X(3) = X3
+      X(4) = X4
+C
+C- Fraction molaire de chaque constituant
+C
+      XTOT = 0.D0
+      DO 1 K = 1,NBC
+         XTOT = XTOT + X(K)
+ 1    CONTINUE
+      DO 2 K = 1,NBC
+         X(K) = X(K) / XTOT
+ 2    CONTINUE
+C
+C- Enthalpie spécifique, densité et volume spécifique de l'état initial
+C
+      CALL DETOH(T1,X,AN,AH2,AH2O,AN2,AO2,TINT,H1,IINT,NBC,NBT)
+      CALL DETORO(P1,T1,X,AN,R1,NBC)
+      V1 = 1.D0/R1
+C
+C- On verifie que le mélange est susceptible de déroner.
+C- Dans le cas contraire, on renvoie la condition initiale
+C
+      IF ((X(1).LE.0.04D0) .OR. (X(3).GE.0.6D0)) THEN
+         RAD    =  R1
+         TAD    =  T1
+         PAD    =  P1
+         FACT   =  0.D0
+         VCJ    =  0.D0
+         RZ     =  R1
+         TZ     =  T1
+         PZ     =  P1
+         RAICC  =  R1
+         TAICC  =  T1
+         PAICC  =  P1
+         IRET   =  0
+         RETURN
+      ENDIF
+C
+C- Initialisation du taux de combustion (1=complète)
+C
+      FACT = 1.D0
+      AICC = .TRUE.
+C---------------------------------------------------------------------
+C- Retour du NEWTON sur le taux de combustion : la variable pivot est
+C- le taux de combustion.
+C---------------------------------------------------------------------
+ 70   CONTINUE
+C
+C- Evaluation des fractions molaires pour un taux de combustion égal à
+C- FACT et prise en compte d'un éventuel déficit en oxygène du mélange
+C
+      XC(1) = (X(1) - FACT*X(1)) * P1/T1
+      XC(2) = (X(2) - 0.5D0*FACT*X(1)) * P1/T1
+      XC(3) = (X(3) + FACT*X(1)) * P1/T1
+      XC(4) = X(4) * P1/T1
+      IF (XC(2).LT.0.D0) THEN
+         XC(2) = 0.D0
+         XC(1) = (X(1) - 2.D0*X(2)) * P1/T1
+         XC(3) = (X(3) + 2.D0*X(2)) * P1/T1
+      ENDIF
+      XTOT = 0.D0
+      DO 3 K = 1,NBC
+         XTOT = XTOT + XC(K)
+ 3    CONTINUE
+      DO 4 K = 1,NBC
+         XC(K) = XC(K) / XTOT
+ 4    CONTINUE
+C
+C- Initialisation de la densité R0 à la densité initiale
+C
+      R0 = R1
+C---------------------------------------------------------------------
+C- Retour du NEWTON sur le test d'appartenance du point initial à
+C- la tangente à l'hugoniot passant par le point CJ candidat :
+C- la variable pivot est la densité R0.
+C---------------------------------------------------------------------
+ 60   CONTINUE
+      R2 = R0
+      INIT=.TRUE.
+      DROITE = .FALSE.
+      GAUCHE = .FALSE.
+C---------------------------------------------------------------------
+C- Retour afin de calculer les états à gauche et à droite du point
+C- (PC,TC,R2) susceptible d'etre l'etat de CJ afin d'évaluer la
+C- tangente à l'hugoniot.
+C---------------------------------------------------------------------
+ 50   CONTINUE
+      PC = P1
+C---------------------------------------------------------------------
+C- Retour du NEWTON permettant d'évaluer l'état d'équilibre (PC,TC)
+C- la densité étant fixée (=R2=R0) : on cherche (PC,TC) appartenant
+C- à la courbe d'hugoniot pour un taux de réaction égal à FACT. La
+C- variable pivot est la pression PC (de facon indireste TC).
+C---------------------------------------------------------------------
+ 20   CONTINUE
+      WTM2 = XC(1)*AN(1) + XC(2)*AN(2) + XC(3)*AN(3) + XC(4)*AN(4)
+      WTM2 = WTM2 * 1.D-3
+      TC   = WTM2*PC/(R2*8.314D0)
+      CALL DETOH(TC,XC,AN,AH2,AH2O,AN2,AO2,TINT,H2,IINT,NBC,NBT)
+      FX   = 2.D0*(H2-H1)-((PC-P1)*((1.D0/R1)+(1.D0/R2)))
+      X1   = 1.D0
+      X2   = 5.D-5
+      CALL NEWTON(PC,FX,X1,X2,1000,3,NFIN3,NIT,NITER,TCX1,TCY1,TCX2,
+     $   TCY2)
+      IF (NFIN3 .EQ. 0) GOTO 20
+      IF (NFIN3 .EQ. 2) RETURN
+C
+C- Le point (PC,TC,R2) trouvé est l'état CJ à condition que la pente
+C- à l'hugoniot passe par le point initial (P1,T1,R1). Pour évaluer la
+C- pente, on calcule un état gauche et un état droit de (PC,TC,R2) en
+C- modifiant la densité de 1% (par défaut et par excès)
+C
+      IF (GAUCHE) THEN
+         PG     = PC
+         VG     = 1.D0/R2
+         GAUCHE = .FALSE.
+      ENDIF
+      IF (DROITE) THEN
+         PD     = PC
+         VD     = 1.D0/R2
+         DROITE = .FALSE.
+         GAUCHE = .TRUE.
+      ENDIF
+      IF (INIT) THEN
+         PAD    = PC
+         TAD    = TC
+         VAD    = 1.D0/R2
+C
+C- La première convergence donne l'état AICC puisque le point obtenu
+C- est le point sur l'hugoniot correspondant à un taux de combustion
+C- complète et à la densité initiale.
+C
+         IF (AICC) THEN
+            PAICC = PC
+            TAICC = TC
+            VAICC = 1.D0/R2
+            AICC  = .FALSE.
+         ENDIF
+         INIT   = .FALSE.
+         DROITE = .TRUE.
+      ENDIF
+      IF (DROITE) THEN
+         R2 = R0*0.99D0
+         GOTO 50
+      ENDIF
+      IF (GAUCHE) THEN
+         R2 = R0*1.01D0
+         GOTO 50
+      ENDIF
+C
+C- Equation de la droite passant par les points (PTEST,V1) et (PC,VC)
+C-    P = ALP*V + BCS
+C- On vérifie l'ecart entre PTEST et P1 ; en cas de non convergence
+C- on définit un nouveau R0 et on recommence la détermination d'un
+C- état CJ potentiel.
+C
+      ALP   = (PD-PG)/(VD-VG)
+      BCS   = PAD - (ALP*VAD)
+      PTEST = ALP*V1+BCS
+      FY    = PTEST - P1
+      X11   = 1.D0
+      X21   = 5.D-5
+      CALL NEWTON(R0,FY,X11,X21,1000,2,NFIN2,NIT,NITER,TCX1,TCY1,
+     $  tcx2,tcy2)
+      IF (NFIN2 .EQ. 0) GOTO 60
+      IF (NFIN2 .EQ. 2) RETURN
+C
+C- XC, PAD, TAD et VAD caractérisent un état CJ qui est le bon à
+C- condition que l'équilibre chimique soit réalisé : On calcule
+C- le taux de production de H2 (i.e. de chaque espece puisque ici
+C- cinétique à une réaction) qui doit etre nul ; sinon, on diminue
+C- le taux de combustion.
+C
+      CALL DETOWP(PAD,TAD,XC,AH2,AH2O,AO2,TINT,WDOT,IINT,NBC,NBT)
+      FZ  = WDOT(1)
+      X13 =-0.001D0
+      X23 = 1.D-20
+      CALL NEWTON(FACT,FZ,X13,X23,1000,1,NFIN1,NIT,NITER,TCX1,TCY1,
+     $ TCX2,TCY2)
+      IF (NFIN1 .EQ. 0) GOTO 70
+      IF (NFIN1 .EQ. 2) RETURN
+C
+C- Initialisation du volume spécifique de l'état ZND et de la pente
+C- de la droite de Rayleigh
+C
+      VZ    = V1/5.D0
+      PENTE = (PAD-P1) / (VAD-V1)
+C---------------------------------------------------------------------
+C- Retour du NEWTON du calcul ZND : on cherche le point d'intersection
+C- entre l'hugoniot passant par le point initial et la droite passant
+C- part CJ et le point initial. La variable pivot est le volume
+C- spécifique VZ.
+C---------------------------------------------------------------------
+ 80   CONTINUE
+      PZ   = P1 + (PENTE*(VZ-V1))
+      WTM1 = X(1)*AN(1) + X(2)*AN(2) + X(3)*AN(3) + X(4)*AN(4)
+      WTM1 = WTM1 * 1.D-3
+      TZ   = WTM1*PZ*VZ / 8.314D0
+      CALL DETOH(TZ,X,AN,AH2,AH2O,AN2,AO2,TINT,HZ,IINT,NBC,NBT)
+      FQ =-2.D0 * (HZ-H1) + (PZ-P1)*(V1+VZ)
+      X1 =-0.01D0
+      X2 = 5.D-5
+      X2 = 5.D-10
+      CALL NEWTON(VZ,FQ,X1,X2,1000,1,NFIN,NIT,NITER,TCX1,TCY1,
+     $ TCX2,TCY2)
+      IF (NFIN .EQ. 0) GOTO 80
+      IF (NFIN .EQ. 2) RETURN
+C
+C- Calcul des densités à partir des volumes spécifiques
+C
+      RAD   = 1.D0/VAD
+      RAICC = 1.D0/VAICC
+      RZ    = 1.D0/VZ
+C
+C- Calcul de la vitesse de Chapman-Jouguet
+C
+      VCJ = V1*SQRT((PAD-P1)/(V1-VAD))
+C
+      IF (RAD.GT.0.D0) IRET = 0
+      RETURN
+      END
+
+
+

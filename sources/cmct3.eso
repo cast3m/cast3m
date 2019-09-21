@@ -1,0 +1,864 @@
+C CMCT3     SOURCE    PV        17/09/29    21:15:06     9578
+      SUBROUTINE CMCT3(ICHP,IRIGC,IRIGB,IRIG2)
+*_______________________________________________________________________
+c
+c      opérateur cmct
+c
+c entrée
+c   ICHP  : champ par point qui stocke la masse inversée M-1
+c   IRIGB : rigidité B
+c   IRIGC : rigidité C
+c
+c sortie
+c   IRIG2 : rigidité contenant la matrice condensée C M-1 Bt
+c
+*_______________________________________________________________________
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*
+-INC CCOPTIO
+-INC SMRIGID
+-INC SMELEME
+-INC CCHAMP
+-INC SMCOORD
+-INC SMCHPOI
+*
+* Description des objets à traiter
+* PNTOB : pointeur de l'objet
+* TYPOB : type de l'objet
+* PNTCOB : pointeur vers une version locale de l'objet
+*          pour la RIGIDITE IMAT
+*                                PNTCOB(1,IMAT) pointe vers un CORES1
+*                                PNTCOB(2,IMAT) pointe vers un LSINCO
+*                                PNTCOB(3,IMAT) pointe vers un MCOEF
+
+      SEGMENT DESCOB
+      INTEGER PNTOB(NMAT)
+      INTEGER PNTCOB(4,NMAT)
+      ENDSEGMENT
+
+*  stockage des noms de tous les composantes primales.
+      SEGMENT LSINCP
+      CHARACTER*4 LISINP(NLIGP)
+      ENDSEGMENT
+*  LPSINP(ILIGP,IOBJ) dit si la composante est présente dans l'objet
+*  IOBJ (Matrice IRIGB, IRIGC ou ICHP)
+**  LPSINP(ILIGP,NOBJ+1) dit si la composante est présente dans
+**  tous les objets
+      SEGMENT LLINCP
+      LOGICAL LLSINP(NLIGP,NOBJ)
+      ENDSEGMENT
+
+*  stockage des noms des composantes duales.
+      SEGMENT LSINCD
+      CHARACTER*4 LISIND(NLIGD)
+      ENDSEGMENT
+*
+* Noms d'inconnues primales correspondant à LISIND
+*
+      SEGMENT CORIDP
+      CHARACTER*4 LISIDP(NLIGD)
+      ENDSEGMENT
+
+* correspondance entre les noms de composantes locale LISINC
+* et les noms de composantes dans LSINCP pour les RIGIDITES
+      SEGMENT CORES1
+      INTEGER IPCOR2(NRIGEL)
+      ENDSEGMENT
+      SEGMENT CORES2
+      INTEGER COR2P(NLIGRP)
+      INTEGER COR2D(NLIGRD)
+      ENDSEGMENT
+*
+* tableau pour dire en chaque point si la composante du tableau LISINP
+* est impliquée
+*
+      SEGMENT MTOPTS
+*               nombre d'occurence de la composante
+      INTEGER ITOPTS(NBPTS,NLIGP+1,NMAT)
+      ENDSEGMENT
+      SEGMENT NTOPTS
+*               valeur de l'inverse la masse en ce point
+      REAL*8  XTOPTS(NBPTS,NLIGP+1)
+      ENDSEGMENT
+      SEGMENT OTOPTS
+*               valeur de l'inverse la masse en ce point
+      LOGICAL LTOPTS(NBPTS,NLIGP+1)
+      ENDSEGMENT
+*
+* tableau pour pointer vers MCOEF à partir du nombre d'inconnues
+*
+      SEGMENT LSINCO
+      INTEGER LESINC(NINC+1,2,NMAT)
+      ENDSEGMENT
+      SEGMENT LTINCO
+      REAL*8  XMAS(NINC)
+      ENDSEGMENT
+*
+*  tableau des coefficient de la matrice C
+*  ordonné dans l'ordre des inconnues
+      SEGMENT MCOEF
+*        numero du noeud support du multiplicateur ligne 1
+      INTEGER ICOEF(2,NCOEF)
+*         valeur des coefficients
+      REAL*8 XCOEF(NCOEF)
+      ENDSEGMENT
+*
+      SEGMENT WORK1
+      REAL*8 XDUM(NBNN)
+      ENDSEGMENT
+      LOGICAL NOER,LOK,LDBG,LTYP22
+*
+      LDBG=.FALSE.
+      NMAT=1
+      IF (IRIGB.NE.IRIGC) NMAT=2
+      NOBJ=NMAT
+      IF (ICHP.NE.0) NOBJ=NMAT+1
+      IF (LDBG) THEN
+         WRITE(IOIMP,*) 'NMAT=',NMAT
+         WRITE(IOIMP,*) 'NOBJ=',NOBJ
+      ENDIF
+      SEGINI DESCOB
+      PNTOB(1)=IRIGC
+      IF (IRIGB.NE.IRIGC) THEN
+         PNTOB(2)=IRIGB
+      ENDIF
+*_______________________________________________________________________
+*
+*   la première etape consiste à établir la liste de tous les noms
+*   d'inconnue primale communes à la (aux) rigidités et à l'éventuel
+*   CHPOINT de masse. Cette liste est stockée dans LSINCP.
+*   On fait aussi la liste des duales par la même occasion
+*   On regarde aussi s'il n'y a que des MELEME de type 22, auquel cas
+*   on peut éviter le compactage du MCOEF (on est sûr que tous les ddls
+*   duaux sont distincts)
+*
+*     Calcul du nombre maxi
+      NLIGP = 1000
+      SEGINI LSINCP,LLINCP
+      NLIGD = 1000
+      SEGINI LSINCD
+      LTYP22=.TRUE.
+*
+      NLIGP1 = 0
+      NLIGD1 = 0
+      DO IMAT=1,NMAT
+         MRIGID=PNTOB(IMAT)
+         SEGACT MRIGID
+         NRIGEL=IRIGEL(/2)
+         DO I=1,NRIGEL
+            MELEME = IRIGEL(1,I)
+            SEGACT MELEME
+            LTYP22=LTYP22.AND.(ITYPEL.EQ.22)
+            DESCR = IRIGEL(3,I)
+            SEGACT  DESCR
+            NLIGRP=LISINC(/2)
+            IDEB=1
+            IF (ITYPEL.EQ.22) IDEB=2
+            DO 200 ILIGRP=IDEB,NLIGRP
+               DO ILIGP1=1,NLIGP1
+                  IF (LISINC(ILIGRP).EQ.LISINP(ILIGP1)) THEN
+                     LLSINP(ILIGP1,IMAT)=.TRUE.
+                     GOTO 200
+                  ENDIF
+               ENDDO
+* Petite astuce car on ne cherche que les composantes primales communes
+* à tous les objets donc pas besoin de concaténer celles au-delà
+* du premier objet
+               IF (IMAT.EQ.1) THEN
+                  NLIGP1 = NLIGP1 + 1
+                  IF (NLIGP1.GT.NLIGP) THEN
+                     NLIGP=NLIGP+1000
+                     SEGADJ LSINCP,LLINCP
+                  ENDIF
+                  LISINP(NLIGP1) = LISINC(ILIGRP)
+                  LLSINP(NLIGP1,IMAT)=.TRUE.
+               ENDIF
+ 200        CONTINUE
+            NLIGRD=LISDUA(/2)
+            IF (ITYPEL.EQ.22) NLIGRD=1
+            DO 202 ILIGRD=1,NLIGRD
+               DO ILIGD1=1,NLIGD1
+                  IF (LISDUA(ILIGRD).EQ.LISIND(ILIGD1)) GOTO 202
+               ENDDO
+               NLIGD1 = NLIGD1 + 1
+               IF (NLIGD1.GT.NLIGD) THEN
+                  NLIGD=NLIGD+1000
+                  SEGADJ LSINCD
+               ENDIF
+               LISIND(NLIGD1) = LISDUA(ILIGRD)
+ 202        CONTINUE
+            SEGDES DESCR
+            SEGDES MELEME
+         ENDDO
+         SEGDES MRIGID
+      ENDDO
+      IF (ICHP.NE.0) THEN
+         MCHPOI=ICHP
+         SEGACT MCHPOI
+         NSOUPO=IPCHP(/1)
+         DO ISOUPO=1,NSOUPO
+            MSOUPO=IPCHP(ISOUPO)
+            SEGACT MSOUPO
+            NC=NOCOMP(/2)
+            DO 204 IC=1,NC
+               DO ILIGP1=1,NLIGP1
+                  IF (NOCOMP(IC).EQ.LISINP(ILIGP1)) THEN
+                     LLSINP(ILIGP1,NOBJ)=.TRUE.
+                     GOTO 204
+                  ENDIF
+               ENDDO
+ 204        CONTINUE
+            SEGDES MSOUPO
+         ENDDO
+         SEGDES MCHPOI
+      ENDIF
+*
+      IF (LDBG) THEN
+         WRITE(IOIMP,*) 'LTYP22=',LTYP22
+         WRITE(IOIMP,*) 'Liste des inconnues avant compactage'
+         WRITE(IOIMP,*) '  1) Duales'
+         WRITE (IOIMP,2019) (LISIND(I),I=1,NLIGD1)
+         WRITE(IOIMP,*) '  2) Primales'
+         WRITE (IOIMP,2019) (LISINP(I),I=1,NLIGP1)
+         do j=1,nobj
+            WRITE(IOIMP,*) '  Presence de la composante primale dans ',
+     $           'l''objet ',j
+            WRITE (IOIMP,2021) (LLSINP(I,j),I=1,NLIGP1)
+         enddo
+      ENDIF
+* On compacte LSINCD
+      NLIGD = NLIGD1
+      SEGADJ LSINCD
+* On compacte LSINCP
+      NLIGP = 0
+      DO ILIGP1=1,NLIGP1
+         LOK=.TRUE.
+         DO IOBJ=1,NOBJ
+            LOK=LOK.AND.LLSINP(ILIGP1,IOBJ)
+         ENDDO
+         IF (LOK) THEN
+            NLIGP=NLIGP+1
+            IF (ILIGP1.NE.NLIGP) LISINP(NLIGP)=LISINP(ILIGP1)
+         ENDIF
+      ENDDO
+      SEGADJ LSINCP
+      SEGSUP LLINCP
+      IF (LDBG) THEN
+         WRITE(IOIMP,*) 'Primales apres compactage'
+         WRITE (IOIMP,2019) (LISINP(I),I=1,LISINP(/2))
+      ENDIF
+*     On sort de manière anticipée s'il n'y a pas d'inconnues primales
+*     communes
+      IF (NLIGP.EQ.0) THEN
+         SEGSUP DESCOB,LSINCP,LSINCD
+         GOTO 9999
+      ENDIF
+*
+*   Les correspondances locale -> globale dans CORES1 pour les RIGIDITES
+*
+      DO IMAT=1,NMAT
+         MRIGID=PNTOB(IMAT)
+         SEGACT MRIGID
+         NRIGEL=IRIGEL(/2)
+         SEGINI CORES1
+         DO I=1,NRIGEL
+            MELEME = IRIGEL(1,I)
+            SEGACT MELEME
+            DESCR = IRIGEL(3,I)
+            SEGACT DESCR
+            NLIGRP=LISINC(/2)
+            NLIGRD=LISDUA(/2)
+            IF (ITYPEL.EQ.22) NLIGRD=1
+            SEGINI CORES2
+            IDEB=1
+            IF (ITYPEL.EQ.22) IDEB=2
+            DO 300 ILIGRP=IDEB,NLIGRP
+               DO ILIGP=1,NLIGP
+                  IF (LISINC(ILIGRP).EQ.LISINP(ILIGP)) THEN
+                     COR2P(ILIGRP)=ILIGP
+                     GOTO 300
+                  ENDIF
+               ENDDO
+               COR2P(ILIGRP)=NLIGP+1
+ 300        CONTINUE
+            DO 302 ILIGRD=1,NLIGRD
+               DO ILIGD=1,NLIGD
+                  IF (LISDUA(ILIGRD).EQ.LISIND(ILIGD)) THEN
+                     COR2D(ILIGRD)=ILIGD
+                     GOTO 302
+                  ENDIF
+               ENDDO
+ 302        CONTINUE
+            IPCOR2(I)=CORES2
+            IF (LDBG) THEN
+               IF (I.EQ.1.OR.I.EQ.NRIGEL) THEN
+                  WRITE(IOIMP,*)
+     $                 'Correspondance locale-globale matrice ',imat
+     $                 ,' nrigel=',I
+                  WRITE(IOIMP,*) '  Primales'
+                  WRITE (IOIMP,2019) (LISINC(II),II=1,LISINC(/2))
+                  WRITE (IOIMP,2020) (COR2P(II),II=1,COR2P(/1))
+                  WRITE(IOIMP,*) '  Duales'
+                  WRITE (IOIMP,2019) (LISDUA(II),II=1,LISDUA(/2))
+                  WRITE (IOIMP,2020) (COR2D(II),II=1,COR2D(/1))
+               ENDIF
+            ENDIF
+         ENDDO
+         PNTCOB(1,IMAT)=CORES1
+      ENDDO
+*
+*_______________________________________________________________________
+*  on remplit maintenant le tableau itopts en bouclant sur les sous zones de
+*  la rigidité
+*
+      NBPTS = XCOOR(/1) / (IDIM +1)
+      IF (LDBG) WRITE(IOIMP,*) 'NBPTS=',NBPTS
+      SEGINI MTOPTS
+      DO IMAT=1,NMAT
+         CORES1=PNTCOB(1,IMAT)
+         MRIGID=PNTOB(IMAT)
+         NRIGEL=IRIGEL(/2)
+         DO I=1,NRIGEL
+            MELEME = IRIGEL(1,I)
+            DESCR  = IRIGEL(3,I)
+            CORES2 = IPCOR2(I)
+            NLIGRD = NOELED(/1)
+            IF (ITYPEL.EQ.22) NLIGRD=1
+            IDEB=1
+            IF (ITYPEL.EQ.22) IDEB=2
+            DO  K=1,NUM(/2)
+               DO J=IDEB,NOELEP(/1)
+                  ITOPTS(NUM(NOELEP(J),K),COR2P(J),IMAT) =
+     &                 ITOPTS(NUM(NOELEP(J),K),COR2P(J),IMAT)
+     $                 + NLIGRD
+               ENDDO
+            ENDDO
+         ENDDO
+      ENDDO
+      NTOPTS=0
+      IF (ICHP.NE.0) THEN
+         SEGINI NTOPTS
+         SEGINI OTOPTS
+         MCHPOI=ICHP
+         SEGACT MCHPOI
+         NSOUPO=IPCHP(/1)
+         DO ISOUPO=1,NSOUPO
+            MSOUPO=IPCHP(ISOUPO)
+            SEGACT MSOUPO
+            MELEME=IGEOC
+            SEGACT MELEME
+            MPOVAL=IPOVAL
+            SEGACT MPOVAL
+            NC=NOCOMP(/2)
+            N=NUM(/2)
+            DO IC=1,NC
+               DO ILIGP=1,NLIGP
+                  IF (NOCOMP(IC).EQ.LISINP(ILIGP)) THEN
+                     IDK=ILIGP
+                     GOTO 304
+                  ENDIF
+               ENDDO
+               IDK=NLIGP+1
+ 304           CONTINUE
+               DO 306 I=1,N
+                  IF (VPOCHA(I,IC).NE.0.D0) THEN
+                     LTOPTS(NUM(1,I),IDK)=.TRUE.
+                     XTOPTS(NUM(1,I),IDK)=VPOCHA(I,IC)
+                  ENDIF
+ 306           CONTINUE
+            ENDDO
+            SEGDES MPOVAL,MELEME,MSOUPO
+         ENDDO
+         SEGDES MCHPOI
+      ELSE
+         SEGINI OTOPTS
+         DO ILIGP=1,NLIGP
+            DO IBPTS=1,NBPTS
+               LTOPTS(IBPTS,ILIGP)=.TRUE.
+            ENDDO
+         ENDDO
+      ENDIF
+      IF (LDBG) THEN
+         npo = MIN(nbpts,100)
+         WRITE(IOIMP,*) 'Point'
+         WRITE(IOIMP,2020) (II,II=1,npo)
+         do imat=1,nmat
+            do iligp=1,nligp
+               WRITE(IOIMP,*) ' Matrice ',imat,' inconnue ',LISINP(ILIGP
+     $              )
+               WRITE (IOIMP,2020) (ITOPTS(II,iligp,imat),II=1,npo)
+            enddo
+         enddo
+         if (ichp.ne.0) then
+            do iligp=1,nligp
+               WRITE(IOIMP,*) ' Chpoint  inconnue ',LISINP(ILIGP)
+               WRITE (IOIMP,2021) (LTOPTS(II,iligp),II=1,npo)
+               WRITE (IOIMP,2022) (XTOPTS(II,iligp),II=1,npo)
+            enddo
+         endif
+      ENDIF
+*
+*_______________________________________________________________________
+*
+*    calcul du nombre d'inconnues primales et creation de LESINC
+*    correspondance entre les inconnues et MCOEF
+*
+*
+      DO IMAT=1,NMAT
+         DO ILIGP=1,NLIGP
+            DO IBPTS=1,NBPTS
+               LTOPTS(IBPTS,ILIGP)=LTOPTS(IBPTS,ILIGP)
+     $              .AND.(ITOPTS(IBPTS,ILIGP,IMAT).NE.0)
+            ENDDO
+         ENDDO
+      ENDDO
+      NINC=0
+      DO ILIGP=1,NLIGP
+         DO IBPTS=1,NBPTS
+            IF (LTOPTS(IBPTS,ILIGP)) NINC=NINC+1
+         ENDDO
+      ENDDO
+      IF (LDBG) WRITE(IOIMP,*) 'NINC=',NINC
+*     On sort de manière anticipée s'il n'y a pas d'inconnues primales
+*     communes
+      IF (NINC.EQ.0) THEN
+         SEGSUP OTOPTS,MTOPTS
+         DO IMAT=1,NMAT
+            MRIGID=PNTOB(IMAT)
+            CORES1=PNTCOB(1,IMAT)
+            NRIGEL=IRIGEL(/2)
+            DO I=1,NRIGEL
+               MELEME = IRIGEL(1,I)
+               DESCR = IRIGEL(3,I)
+               SEGDES MELEME,DESCR
+               CORES2=IPCOR2(I)
+               SEGSUP CORES2
+            ENDDO
+            SEGSUP CORES1
+            SEGDES MRIGID
+         ENDDO
+         IF (NTOPTS.NE.0) SEGSUP NTOPTS
+         SEGSUP DESCOB,LSINCP,LSINCD
+         GOTO 9999
+      ENDIF
+*
+      DO IMAT=1,NMAT
+         DO ILIGP=1,NLIGP
+            DO IBPTS=1,NBPTS
+               IF (.NOT.LTOPTS(IBPTS,ILIGP)) THEN
+                  ITOPTS(IBPTS,ILIGP,IMAT)=0
+               ELSE
+                  ITOPTS(1,NLIGP+1,IMAT)=ITOPTS(1,NLIGP+1,IMAT)
+     $                 +ITOPTS(IBPTS,ILIGP,IMAT)
+               ENDIF
+            ENDDO
+         ENDDO
+      ENDDO
+      SEGSUP OTOPTS
+      IF (LDBG) THEN
+         do imat=1,nmat
+            do iligp=1,nligp
+               WRITE(IOIMP,*) ' Matrice ',imat,' inconnue ',LISINP(ILIGP
+     $              )
+               WRITE (IOIMP,2020) (ITOPTS(II,iligp,imat),II=1,npo)
+            enddo
+         enddo
+      ENDIF
+*
+*    on remplit LSINCO et LTINCO en numérotant les ddls dans l'ordre
+*    où ils sont rencontrés en parcourant la matrice la plus grosse.
+*    On pourrait les parcourir autrement (dans l'ordre de ITOPTS).
+*
+      IF (NMAT.EQ.2) THEN
+         NCOEF1=ITOPTS(1,NLIGP+1,1)
+         NCOEF2=ITOPTS(1,NLIGP+1,2)
+         IF (NCOEF1.GE.NCOEF2) THEN
+            IMAT1=1
+            IMAT2=2
+         ELSE
+            IMAT1=2
+            IMAT2=1
+         ENDIF
+      ELSE
+         NCOEF1=ITOPTS(1,NLIGP+1,1)
+         NCOEF2=0
+         IMAT1=1
+         IMAT2=0
+      ENDIF
+      IF (LDBG) THEN
+         WRITE(IOIMP,*) 'NCOEF1=',NCOEF1
+         WRITE(IOIMP,*) 'NCOEF2=',NCOEF2
+      ENDIF
+      MRIGID=PNTOB(IMAT1)
+      CORES1=PNTCOB(1,IMAT1)
+      NRIGEL=IRIGEL(/2)
+      SEGINI LSINCO
+      IF (ICHP.NE.0) THEN
+         SEGINI LTINCO
+      ELSE
+         LTINCO=0
+      ENDIF
+      IND1 = 1
+      IDUM1 = 1
+      IDUM2 = 1
+      DO 1600 I=1,NRIGEL
+         MELEME=IRIGEL(1,I)
+         DESCR=IRIGEL(3,I)
+         IDEB=1
+         IF (ITYPEL.EQ.22) IDEB=2
+         CORES2=IPCOR2(I)
+          DO 1500 K=1,NUM(/2)
+            DO 1400 J=IDEB,NOELEP(/1)
+               IF ( ITOPTS(NUM(NOELEP(J),K),COR2P(J),IMAT1).GT.0) THEN
+                  LESINC(IND1,1,IMAT1)=IDUM1
+                  IDUM1=IDUM1+ITOPTS(NUM(NOELEP(J),K),COR2P(J),IMAT1)
+*      ITOPTS va desormais contenir le numéro de l'inconnue dans LESINC
+                  ITOPTS(NUM(NOELEP(J),K),COR2P(J),IMAT1) = -1 * IND1
+                  IF(NMAT.EQ.2) THEN
+                     LESINC(IND1,1,IMAT2)=IDUM2
+                     IDUM2=IDUM2+ITOPTS(NUM(NOELEP(J),K),COR2P(J),IMAT2)
+                  ENDIF
+                  IF (ICHP.NE.0) THEN
+                     XMAS(IND1) = XTOPTS(NUM(NOELEP(J),K),COR2P(J))
+                  ENDIF
+                  IND1 = IND1 + 1
+               ENDIF
+ 1400       CONTINUE
+ 1500    CONTINUE
+ 1600 CONTINUE
+*=====
+      if ( (IND1-1) .NE. NINC ) then
+         write(*,*) 'erreur dans boucle lsinco'
+      endif
+*======
+      LESINC(IND1,1,IMAT1)=IDUM1
+      IF (NMAT.EQ.2) LESINC(IND1,1,IMAT2)=IDUM2
+      IF (LDBG) THEN
+         WRITE(IOIMP,*) 'IDUM1=',IDUM1
+         WRITE(IOIMP,*) 'IDUM2=',IDUM2
+         naff=min(ninc,100)
+         do 2004 k=1,nmat
+            write(*,*) 'k=',k
+            do 2002 i=1,naff+1
+               write(*,2003) i,lesinc(i,1,k),lesinc(i,2,k)
+ 2002       continue
+ 2004    continue
+      ENDIF
+*
+*_______________________________________________________________________
+* remplissage de MCOEF
+*
+*
+      DO IMAT=1,NMAT
+         MRIGID=PNTOB(IMAT)
+         CORES1=PNTCOB(1,IMAT)
+         NRIGEL=IRIGEL(/2)
+         NCOEF=LESINC(NINC+1,1,IMAT)-1
+         SEGINI MCOEF
+         DO 1900 I=1,NRIGEL
+            MELEME = IRIGEL(1,I)
+            DESCR  = IRIGEL(3,I)
+            CORES2 = IPCOR2(I)
+            XMATRI = IRIGEL(4,I)
+            SEGACT XMATRI
+            IDEB=1
+            IF (ITYPEL.EQ.22) IDEB=2
+            NLIGRD=NOELED(/1)
+            IF (ITYPEL.EQ.22) NLIGRD=1
+            DO 1800 K=1,NUM(/2)
+               DO 1700 J=IDEB,NOELEP(/1)
+                  NNINC = -1 * ITOPTS(NUM(NOELEP(J),K),COR2P(J),IMAT1)
+                  IF (NNINC.NE.0) THEN
+                     DO 1650 L=1,NLIGRD
+                        IDMCOE = LESINC(NNINC,1,IMAT)
+     $                       +LESINC(NNINC,2,IMAT)
+                        LESINC(NNINC,2,IMAT) = LESINC(NNINC,2,IMAT) + 1
+                        ICOEF(1,IDMCOE)=NUM(NOELED(L),K)
+                        ICOEF(2,IDMCOE)=COR2D(L)
+                        XCOEF(IDMCOE)=RE(L,J,k)*COERIG(I)
+ 1650                CONTINUE
+                  ENDIF
+ 1700          CONTINUE
+ 1800       CONTINUE
+*  on referme la boutique
+            SEGDES XMATRI
+            SEGSUP CORES2
+ 1900    CONTINUE
+*  on referme encore la boutique car meleme et descr
+*  peuvent être les mêmes pour plusieurs IRIGEL
+         DO 2000 I=1,NRIGEL
+            MELEME = IRIGEL(1,I)
+            DESCR = IRIGEL(3,I)
+            SEGDES MELEME,DESCR
+ 2000    CONTINUE
+         SEGSUP CORES1
+         SEGDES MRIGID
+*
+*=====
+         IF (LDBG) THEN
+            naff = min(ncoef,100)
+            do 2005 i=1,naff
+               write(*,2003) i,icoef(1,i),icoef(2,i),xcoef(i)
+ 2005       continue
+         ENDIF
+*=====
+         PNTCOB(3,IMAT)=MCOEF
+      ENDDO
+      SEGSUP MTOPTS
+*------------------------
+* Il faut maintenant compacter le MCOEF car le même ddl dual peut
+* apparaître plusieurs fois pour une même inconnue primale (ce n'était
+* pas le cas anciennement car les ddls duaux étaient des multiplicateurs
+* de lagrange supposés uniques (un par relation))
+*
+      IF (LTYP22) GOTO 755
+      DO IMAT=1,NMAT
+         MCOEF=PNTCOB(3,IMAT)
+         DO IINC=1,NINC
+            IDEB=LESINC(IINC,1,IMAT)
+            IFIN=IDEB+LESINC(IINC,2,IMAT)-1
+            DO I=IDEB,IFIN
+               IC1=ICOEF(1,I)
+               IC2=ICOEF(2,I)
+               IF (IC1.NE.0) THEN
+                  DO J=I+1,IFIN
+                     JC1=ICOEF(1,J)
+                     JC2=ICOEF(2,J)
+                     IF (JC1.EQ.IC1.AND.JC2.EQ.IC2) THEN
+                        XCOEF(I)=XCOEF(I)+XCOEF(J)
+                        ICOEF(1,J)=0
+                     ENDIF
+                  ENDDO
+               ENDIF
+            ENDDO
+         ENDDO
+*=====
+         IF (LDBG) THEN
+            WRITE(IOIMP,*) 'COMPACTAGE 1'
+            naff = min(ncoef,100)
+            do i=1,naff
+               write(*,2003) i,icoef(1,i),icoef(2,i),xcoef(i)
+            enddo
+         ENDIF
+*=====
+         IDECG=0
+         IDEB=LESINC(1,1,IMAT)
+         DO IINC=1,NINC
+            IFIN=IDEB+LESINC(IINC,2,IMAT)-1
+            IDECL=0
+            DO I=IDEB,IFIN
+               IF (ICOEF(1,I).EQ.0) THEN
+                  IDECL=IDECL+1
+               ELSE
+                  ICOEF(1,I-IDECG-IDECL)=ICOEF(1,I)
+                  ICOEF(2,I-IDECG-IDECL)=ICOEF(2,I)
+                  XCOEF(I-IDECG-IDECL)=XCOEF(I)
+               ENDIF
+            ENDDO
+            LESINC(IINC,2,IMAT)=LESINC(IINC,2,IMAT)-IDECL
+            IDEB=LESINC(IINC+1,1,IMAT)
+            IDECG=IDECG+IDECL
+            LESINC(IINC+1,1,IMAT)=LESINC(IINC+1,1,IMAT)-IDECG
+         ENDDO
+         NCOEF=LESINC(NINC+1,1,IMAT)-1
+         SEGADJ MCOEF
+         IF (LDBG) THEN
+            WRITE(IOIMP,*) 'NCOEF=',NCOEF
+            WRITE(IOIMP,*) 'COMPACTAGE 2'
+            naff=min(ninc,100)
+            do i=1,naff+1
+               k=imat
+               write(*,2003) i,lesinc(i,1,k),lesinc(i,2,k)
+            enddo
+            naff = min(ncoef,100)
+            do i=1,naff
+               write(*,2003) i,icoef(1,i),icoef(2,i),xcoef(i)
+            enddo
+         ENDIF
+      ENDDO
+ 755  CONTINUE
+*_______________________________________________________________________
+*
+*   il ne reste plus qu' a creer les matrices élémentaires
+*
+      NOER = .TRUE.
+* Construction des noms d'inconnues primales correspondant à LISIND
+      NLIGD=LISIND(/2)
+      SEGINI CORIDP
+      DO ILIGD=1,NLIGD
+         CALL PLACE(NOMDU,LNOMDU,idx,LISIND(ILIGD))
+         IF (idx.EQ.0) THEN
+            LISIDP(ILIGD)=LISIND(ILIGD)
+         ELSE
+            LISIDP(ILIGD)=NOMDD(idx)
+         ENDIF
+      ENDDO
+*
+*  il y a autant de matrices élémentaires qu'il y a de coefficients
+*
+      NRIGEL=NINC
+      SEGINI MRIGID
+      IRIG2 = MRIGID
+      MTYMAT='CMCT    '
+*
+*    boucle sur les sous zones
+*
+      DO 700 I=1,NRIGEL
+*         GRXDUM = 0.D0
+*         PTXDUM = 9.D50
+         COERIG(I) = 1.D0
+         NBNN=0
+         IDXDUA=0
+*
+* S'il y a deux rigidités à multiplier, on stocke la primale
+* puis la duale dans le MELEME et dans XDUM. A ce moment-là,
+* IDXDUA+1 est l'index de départ des noeuds et des valeurs de la duale.
+* On parcourt donc DESCOB à l'envers car on avait d'abord mis
+* la duale C avant la primale B
+*
+         DO IMAT=NMAT,1,-1
+            NBNN=NBNN+LESINC(I,2,IMAT)
+            IF (IDXDUA.EQ.0.AND.NMAT.EQ.2) IDXDUA=NBNN
+         ENDDO
+* creation du maillage et du vecteur des coefficients
+         NBELEM = 1
+         NBSOUS = 0
+         NBREF = 0
+         SEGINI WORK1
+         SEGINI MELEME
+         INOEU = 0
+         DO IMAT=NMAT,1,-1
+            MCOEF=PNTCOB(3,IMAT)
+            DO 1200 J=0,LESINC(I,2,IMAT)-1
+               INOEU = INOEU + 1
+               NUM(INOEU,1) = ICOEF(1,J+LESINC(I,1,IMAT))
+               XDUM(INOEU) = XCOEF(J+LESINC(I,1,IMAT))
+*               GRXDUM=MAX(GRXDUM,ABS(XDUM(INOEU)))
+*               IF (XDUM(INOEU).NE.0.D0) THEN
+*                  PTXDUM=MIN(PTXDUM,ABS(XDUM(INOEU)))
+*               ENDIF
+ 1200       CONTINUE
+*
+*  petit controle sur le conditionnement de la matrice
+*  il n'est pas forcément pertinent
+*
+*            IF (((PTXDUM/GRXDUM).LT.1.D-12).AND.NOER) THEN
+*               CALL ERREUR(-320)
+*               NOER = .FALSE.
+*            ENDIF
+         ENDDO
+         ITYPEL = 28
+         IRIGEL(1,I) = MELEME
+*
+*    segment descripteur DESCR
+*
+         NLIGRP=NBNN
+         IF (NMAT.EQ.1) THEN
+            NLIGRP = NBNN
+            NLIGRD = NBNN
+         ELSE
+            NLIGRP = IDXDUA
+            NLIGRD = NBNN-IDXDUA
+         ENDIF
+         SEGINI DESCR
+         IPASS=0
+         DO IMAT=NMAT,1,-1
+            MCOEF=PNTCOB(3,IMAT)
+            IPASS=IPASS+1
+            INOEU=0
+            DO 1300 J=0,LESINC(I,2,IMAT)-1
+               INOEU = INOEU + 1
+               IF (IPASS.EQ.1) THEN
+                  LISINC(INOEU) = LISIDP(ICOEF(2,J+LESINC(I,1,IMAT)))
+                  NOELEP(INOEU)=INOEU
+                  IF (NMAT.EQ.1) THEN
+                     LISDUA(INOEU) = LISIND(ICOEF(2,J+LESINC(I,1,IMAT)))
+                     NOELED(INOEU)=INOEU
+                  ENDIF
+               ENDIF
+               IF (IPASS.EQ.2) THEN
+                  LISDUA(INOEU)
+     $                 = LISIND(ICOEF(2,J+LESINC(I,1,IMAT)))
+                  NOELED(INOEU)=IDXDUA+INOEU
+               ENDIF
+ 1300        CONTINUE
+         ENDDO
+         IRIGEL(3,I) = DESCR
+*
+*   la matrice elle meme
+*
+         IF (ICHP.NE.0) THEN
+            XCOEF=XMAS(I)
+         ELSE
+            XCOEF=1.D0
+         ENDIF
+         NELRIG = 1
+         SEGINI XMATRI
+         IRIGEL(4,I)=XMATRI
+         DO 600 J=1,NLIGRP
+            DO 500 K=1,NLIGRD
+               RE(K,J,1)=XDUM(IDXDUA+K)*XDUM(J)*XCOEF
+ 500        CONTINUE
+ 600     CONTINUE
+*
+         SEGDES DESCR
+         SEGSUP WORK1
+         SEGDES MELEME
+*     S'il y a deux matrices en entrée, le résultat
+*     n'est sans doute pas symétrique
+         IF (NMAT.EQ.2) then
+           IRIGEL(7,I)=2
+           xmatri.symre=2
+         endif
+         SEGDES XMATRI
+ 700  CONTINUE
+      SEGDES MRIGID
+*
+* Ménage
+*
+
+      DO IMAT=1,NMAT
+         MCOEF=PNTCOB(3,IMAT)
+         SEGSUP MCOEF
+      ENDDO
+      SEGSUP LSINCO
+      IF (LTINCO.NE.0) SEGSUP LTINCO
+      SEGSUP CORIDP
+      SEGSUP LSINCP
+      RETURN
+*
+*   Rigidité vide si pas de ddls primaux communs entre les
+*   objets d'entrée
+*
+ 9999 CONTINUE
+      NRIGEL=0
+      SEGINI MRIGID
+      MTYMAT='CMCT    '
+      SEGDES MRIGID
+      IRIG2=MRIGID
+*
+ 2003 format(I4,1X,I4,1X,I4,2X,E12.5)
+ 2019 FORMAT (20(2X,A4) )
+ 2020 FORMAT (20(2X,I4) )
+ 2021 FORMAT (20(2X,L4) )
+ 2022 FORMAT(10(1X,1PG12.5))
+*_______________________________________________________________________
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

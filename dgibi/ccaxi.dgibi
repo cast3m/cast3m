@@ -1,0 +1,509 @@
+* fichier :  ccaxi.dgibi
+************************************************************************
+* Section : Fluides Thermique
+************************************************************************
+*****************  CAS TEST : CCAXI.DGIBI  ***********************
+*
+* Convection naturelle dans un cylindre différentiellement chauffé
+* (Thot en bas, Tcold en haut, Flux nul sur la paroi verticale)
+* (Navier-Stokes incompressible et approximation de Boussinesq)
+*
+* Pour les paramètres choisis ici, le signe de AT0 intervenant dans
+* la condition initiale en température modifie le sens de rotation
+* de la solution stationnaire.
+*
+* Ref biblio : Liang S.F. et al., Buoyancy driven convection in
+* cylindrical geometries, in J. Fluid Mech., vol 36, pp 239-246,
+* (1969).
+*
+*------------------------------------------------------------------
+*
+* Algorithme de projection et élément (v,T)/p MACRO/CENTREP1
+*
+*------------------------------------------------------------------
+*
+* Auteur : Frédéric DABBENE
+*          serre@semt2.smts.cea.fr le 01/09/2003
+*
+*------------------------------------------------------------------
+* Procédures spécifiques à évoluer et à généraliser
+*------------------------------------------------------------------
+* COURANT  : Calcul de la fonction de courant d'un domaine fermé
+* CALCNUSS : Calcul du Nusselt (en adimensionné = grad THETA)
+*------------------------------------------------------------------
+* RESIDU   : Calcul du residu en température, stratégie de pas de
+*            temps, mise à jour de la viscosité et affichages
+*------------------------------------------------------------------
+*
+* COMPLET : Booleen mis à FAUX pour les tests de non régresssion
+* GRAPH   : Booleen réalisation ou non des post-traitements
+* POST1   : Booleen indiquant si on affiche le résidu en NCLK
+* POST2   : Booleen indiquant si on affiche la température en NCLK
+* IRESU   : Critère d'arret sur l'incrément de température
+*
+COMPLET = faux ;
+GRAPH = faux ;
+POST1 = faux ;
+POST2 = faux ;
+'SI' COMPLET ;
+   IRESU = 1.D-8 ;
+'SINO' ;
+   IRESU = 1.D-3 ;
+'FINSI' ;
+*
+* NLI0  : Nombre d'isovaleurs
+NLI0  = 14   ;
+*
+* DT0   : Pas de temps
+* Pr    : Nombre de Prandtl
+* Ra    : Nombre de Rayleigh
+* AT0   : Coeff. pour l'initialisation de la température (entre -1 et 1)
+* ETA0  : Coeff. de la loi de viscosité en fonction de la température
+DT0  = 0.01 ;
+Pr   = 2500. ;
+Ra   = 5000. ;
+AT0  = 0.95 ;
+*** AT0  =-0.95 ;
+ETA0 =-0.2 ;
+*
+'OPTION' 'DIME' 2 'ELEM' 'QUA8' 'MODE' 'AXIS' 'ISOV' 'SULI' 'ECHO' 0 ;
+*------------------------------------------------------------------
+* Choix de l'élément fini et du décentrement
+*------------------------------------------------------------------
+IDCEN = 0 ;
+DISCR = 'MACRO'    ;
+KPRES = 'CENTREP1' ;
+'SI' ('EGA' IDCEN 0) ;
+   KSUPG = 'CENTREE' ;
+'SINON'              ;
+   KSUPG = 'SUPG'    ;
+*  KSUPG = 'SUPGDC'  ;
+'FINSI'              ;
+*
+*
+*==================================================================
+* Calcul de la fonction de courant d'un domaine fermé
+*==================================================================
+* E/  : UN       : CHPO     : Champ de vitesse
+* E/  : $DOMAINE : MMODEL 'NAVIER_STOKES' volumique
+* E/  : $CONTOUR : MMODEL 'NAVIER_STOKES' surfacique
+*  /S : PSI      : CHPO     : Fonction de courant
+*------------------------------------------------------------------
+* On vérifie qu'on est en dimension 2 mais pas que div(UN)=0
+* Si le domaine est ouvert, modifier les conditions aux limites
+*------------------------------------------------------------------
+'DEBPROC' courant un*chpoint $domaine*mmodel $contour*mmodel ;
+   VAL0 = 'VALE' 'DIME' ;
+   TEST = 'EGA' VAL0 2 ;
+   'SI' TEST ;
+      'MESS' 'Remember that Velocity have to be at zero divergence' ;
+   'SINON' ;
+      'ERRE' 832 ;
+      'QUIT' courant ;
+   'FINSI' ;
+   VAL1 = 'VALE' 'MODE'     ;
+   TEST = 'EGA' VAL1 'AXIS' ;
+   'SI' TEST ;
+      ROTU0   = 'KOPS' un 'ROT' $domaine ;
+      XC1 YC1 = 'COOR' ('DOMA' $domaine 'CENTRE') ;
+      VZ1     = 'NOEL' $domaine ('EXCO' un 'UY' 'SCAL') ;
+      ROTU0   = 2. * VZ1 '-' (ROTU0 * XC1) ;
+   'SINO' ;
+      ROTU0  = 'KOPS' un 'ROT' $domaine ;
+   'FINSI' ;
+   CONT0  = 'DOMA' $contour 'MAILLAGE' ;
+   RK = 'EQEX' $domaine 'OPTI' 'EF' 'IMPL'
+        'ZONE' $domaine 'OPER' 'LAPN' -1.    'INCO' 'PSI'
+        'ZONE' $domaine 'OPER' 'FIMP' ROTU0 'INCO' 'PSI'
+        'CLIM' 'PSI' 'TIMP' CONT0 0. ;
+   RK . 'INCO' = 'TABLE' 'INCO' ;
+   RK . 'INCO' . 'PSI' = 'KCHT' $domaine 'SCAL' 'SOMMET' 0. ;
+   EXEC RK ;
+   psi = 'COPI' RK . 'INCO' . 'PSI' ;
+'FINP' psi ;
+*
+*==================================================================
+* Calcul du Nusselt (en adimensionné = grad THETA)
+*==================================================================
+* E/  : TN       : CHPO     : Température
+* E/  : $DOMAINE : MMODEL 'NAVIER_STOKES' volumique
+* E/  : $COTE    : MMODEL 'NAVIER_STOKES' surfacique
+*  /S : NUSS1    : CHPO     : Nusselt local aux sommets
+*  /S : RES1     : FLOTTANT : Nusselt moyen
+*  /S : SUR1     : FLOTTANT : Surface totale considérée
+*------------------------------------------------------------------
+*
+'DEBPROC' calcnuss tn*chpoint $domaine*mmodel $cote*mmodel ;
+   GRADC0 = 'KOPS' tn 'GRAD' $domaine ;
+   GRADS0 = 'ELNO' $domaine GRADC0 ;
+   GS0    = 'KCHT' $cote 'VECT' 'SOMMET' GRADS0 ;
+   GC0    = 'NOEL' $cote GS0 ;
+   NORM1  = 'DOMA' $domaine 'NORMALE' ;
+   NCOTE  = 'KCHT' $cote 'VECT' 'CENTRE' NORM1 ;
+   MOT1   = 'MOTS' 'UX' 'UY' ;
+   NUSS1  = 'PSCA' GC0 NCOTE MOT1 MOT1 ;
+   S1     = 'DOMA' $cote 'VOLUME' ;
+   NUSS2  = NUSS1 * S1 ;
+   RES1   = 'MAXI' ('RESU' NUSS2) ;
+   SUR1   = 'MAXI' ('RESU' S1) ;
+'FINP' nuss1 res1 sur1 ;
+*------------------------------------------------------------------
+*
+*
+*==================================================================
+* Calcul du résidu en température et arrêt suivant un critère
+*==================================================================
+* E/  : RVX      : TABLE     : TABLE des données créées par EQEX
+*                  ARG1      : Fréquence d'impression
+*                  ARG2      : Critère d'arrêt
+*  /S : MAT1     : MATRIK    : Objet vide
+*  /S : CHP1     : CHPO      : Objet vide
+*------------------------------------------------------------------
+*
+'DEBPROC' residu rvx*table ;
+   RV   = rvx . 'EQEX' ;
+   FREQ = RVX . 'ARG1' ;
+   EPS0 = RVX . 'ARG2' ;
+   NITER = RV . 'NITER' ;
+   DD = RV . 'PASDETPS' . 'NUPASDT' ;
+   NN = DD '/' FREQ ;
+*
+* Pilotage du pas de temps
+   FREQ1 = 50 ;
+   N1    = DD '/' FREQ1 ;
+   L1    = 'EGA' (DD '-' (FREQ1*N1)) 0 ;
+   'SI' L1 ;
+      LIDT0 = 'PROG' (2. * RV . 'INCO' . 'DT') 2. ;
+      RV . 'INCO' . 'DT' = 'MINI' LIDT0 ;
+   'FINSI' ;
+*
+   L0 = 'EGA' (DD '-' (FREQ*NN)) 0 ;
+   'SI' L0 ;
+      RANG0 = RV . 'PASDETPS' . 'NUPASDT' ;
+      TIME0 = RV . 'PASDETPS' . 'TPS'     ;
+      TN0   = RV . 'INCO' . 'TN'  ;
+      TNM0  = RV . 'INCO' . 'TN2' ;
+      ERR0  = ('MAXIMUM' ('ABS' (TN0 '-' TNM0))) '+' 1.D-20 ;
+      ERR10 = ('LOG' ERR0 ) '/' ('LOG' 10.) ;
+      'MESSAGE' 'Résidu en Température au pas'
+           RANG0 '(' TIME0 ') :' ERR0 ':' ERR10 ;
+      RV . 'INCO' . 'IT'  = RV . 'INCO' . 'IT' 'ET' ('PROG' RANG0) ;
+      RV . 'INCO' . 'TI'  = RV . 'INCO' . 'TI' 'ET' ('PROG' TIME0) ;
+      RV . 'INCO' . 'ER'  = RV . 'INCO' . 'ER' 'ET' ('PROG' ERR10) ;
+      EV1 = 'EVOL' 'MANUEL' (RV . 'INCO' . 'IT') (RV . 'INCO' . 'ER') ;
+      Y1 = ('LOG' EPS0) '/' ('LOG' 10) ;
+      'SI' POST1 ;
+*
+* Impression "dynamique" du résidu
+           X1 = 0. ; X2 = RV . 'ITMA' ;
+          'DESSIN' EV1 'YBOR' Y1 0. 'NCLK' ;
+      'FINSI' ;
+      'SI' POST2 ;
+*
+** Impression "dynamique de la température
+**           L1 = 'PROG' 0. PAS 0.1 1. ;
+**           trace L1 tn0 DOM1 CNT1 'TITR' 'Température' 'NCLK' ;
+*
+* Impression "dynamique" de la vitesse
+           un  = RV . 'INCO' . 'UN' ;
+           mot1= 'MOTS' 'UX' 'UY' ;
+           nun = ('PSCA' un un mot1 mot1) ** 0.5 ;
+           un2 = un / (nun + 1.D-5) ;
+           vun = 'VECT' UN2 0.1 'UX' 'UY' 'JAUNE' ;
+           trace VUN DOM1 CNT0 'TITR' 'Vitesse Normalisee' 'NCLK' ;
+      'FINSI' ;
+      'SI' ((ERR10 < Y1) 'ET' (DD > 10)) ;
+         RV . 'TFINAL' = RV . 'PASDETPS' . 'TPS' ;
+      'FINSI' ;
+   'FINSI' ;
+*
+* Mise à jour de la viscosité à chaque pas de temps
+*
+   NU0 = ETA0 * RV . 'INCO' . 'TN' + 1. ;
+   NU0 = 'KCHT' $DOM1 'SCAL' 'SOMMET' 0. NU0 ;
+   RV . 'INCO' . 'NU'  = 'NOEL' $DOM1 NU0 ;
+*
+* Conservation de la température pour le prochain passage
+   RV . 'INCO' . 'TN2' = 'COPIER' RV . 'INCO' . 'TN' ;
+   mat1 chp1 = 'KOPS' 'MATRIK' ;
+'FINP' mat1 chp1 ;
+*------------------------------------------------------------------
+*
+*
+*==========================================================
+* Maillage
+*==========================================================
+*
+* Dimensions caractéristiques
+L   = 1. ;
+H   = 1. ;
+A   = L '/' H ;
+AS2 = A '/' 2. ;
+*
+* Décallage par rapport à l'axe pour les éléments quadratiques
+FLAG1 = vrai ;
+'SI' FLAG1 ;
+   RMIN = 0.0 ;
+'SINO' ;
+   RMIN = 0.01 ;
+'FINSI' ;
+*
+* Points du maillage
+*************************** Adim. : Longueur de référence = H
+*************************** A=L/H
+P0 = AS2  0.5 ;
+P1 = RMIN 0.0 ;
+P2 = AS2  0.0 ;
+P3 = A    0.0 ;
+P4 = A    0.5 ;
+P5 = A    1.0 ;
+P6 = AS2  1.0 ;
+P7 = RMIN 1.0 ;
+P8 = RMIN 0.5 ;
+*************************** Adim. : Longueur de référence = L
+*************************** A=H/L
+*P0 = 0.5  AS2;
+*P1 = RMIN 0.0 ;
+*P2 = 0.5  0.0 ;
+*P3 = 1.0  0.0 ;
+*P4 = 1.0  AS2 ;
+*P5 = 1.0  A   ;
+*P6 = 0.5  A   ;
+*P7 = RMIN A   ;
+*P8 = RMIN AS2 ;
+*
+* Données pour le mailleur
+NXY = -5 ;
+RAF =  1 ;
+NX0 = RAF * NXY  ;
+NX  = RAF * NXY  ;
+NY  = RAF * NXY  ;
+D0  = 0.10 / RAF ;
+D1  = 0.10 / RAF ;
+D2  = 0.10 / RAF ;
+*
+* Droites du maillage filaire
+P1P2 = P1 'DROI' NX0 P2 'DINI' D0 'DFIN' D2 ;
+P2P3 = P2 'DROI' NX  P3 'DINI' D2 'DFIN' D1 ;
+P1P3 = P1P2 'ET' P2P3 ;
+P3P4 = P3 'DROI' NY P4 'DINI' D1 'DFIN' D2 ;
+P4P5 = P4 'DROI' NY P5 'DINI' D2 'DFIN' D1 ;
+P3P5 = P3P4 'ET' P4P5 ;
+P5P6 = P5 'DROI' NX  P6 'DINI' D1 'DFIN' D2 ;
+P6P7 = P6 'DROI' NX0 P7 'DINI' D2 'DFIN' D0 ;
+P5P7 = P5P6 'ET' P6P7 ;
+P7P8 = P7 'DROI' NY P8 'DINI' D1 'DFIN' D2 ;
+P8P1 = P8 'DROI' NY P1 'DINI' D2 'DFIN' D1 ;
+P7P1 = P7P8 'ET' P8P1 ;
+*
+* Maillages, sous-maillages et modèles associés
+CNT1  = P1P3 ;
+CNT2  = P3P5 ;
+CNT3  = P5P7 ;
+CNT4  = P7P1 ;
+CNT0  = CNT1 'ET' CNT2 'ET' CNT3 'ET' CNT4 ;
+DOM1  = 'DALL' P1P3 P3P5 P5P7 P7P1 ;
+DOM1  = 'CHAN' DOM1 'QUAF' ;
+*
+$DOM1 = 'MODE' DOM1 'NAVIER_STOKES' DISCR ;
+$CNT0 = 'MODE' CNT0 'NAVIER_STOKES' DISCR ;
+$CNT1 = 'MODE' CNT1 'NAVIER_STOKES' DISCR ;
+$CNT2 = 'MODE' CNT2 'NAVIER_STOKES' DISCR ;
+$CNT3 = 'MODE' CNT3 'NAVIER_STOKES' DISCR ;
+$CNT4 = 'MODE' CNT4 'NAVIER_STOKES' DISCR ;
+*
+CCNT0 = 'DOMA' $CNT0 'CENTRE' ;
+CCNT1 = 'DOMA' $CNT1 'CENTRE' ;
+CCNT2 = 'DOMA' $CNT2 'CENTRE' ;
+CCNT3 = 'DOMA' $CNT3 'CENTRE' ;
+CCNT4 = 'DOMA' $CNT4 'CENTRE' ;
+DOMF  = 'DOMA' $DOM1 'FACE' ;
+'ELIM' DOMF (CCNT0 'ET' CCNT1 'ET' CCNT2 'ET' CCNT3 'ET' CCNT4) 1.D-4 ;
+DOM1  = 'DOMA' $DOM1 'MAILLAGE' ;
+CNT0  = 'DOMA' $CNT0 'MAILLAGE' ;
+CNT1  = 'DOMA' $CNT1 'MAILLAGE' ;
+CNT2  = 'DOMA' $CNT2 'MAILLAGE' ;
+CNT3  = 'DOMA' $CNT3 'MAILLAGE' ;
+CNT4  = 'DOMA' $CNT4 'MAILLAGE' ;
+MP1   = ('DOMA' $DOM1 KPRES) 'ELEM' 1 ;
+'DOMA' $DOM1 'IMPR' ;
+*
+*==========================================================
+* Définition des équations vitesse, pression et température
+*==========================================================
+*
+*
+* Paramètres physiques et pas de temps
+GB1  = Ra / Pr ;
+ALFA = 1. / Pr ;
+GB   = 0. (-1. * GB1) ;
+*
+* Equations en vitesse et température
+*   ITMA  : Nombre de pas de temps
+*   NITER : Nombre d'itérations internes
+*   OMEGA : Facteur de relaxation des itérations internes
+*   FIDT  : Nombre maximum de pas de temps
+RV = 'EQEX' $DOM1 'ITMA' 5000 'NITER' 1 'OMEGA' 1. 'FIDT' 10000
+     'OPTI' 'EF' KSUPG 'IMPL' KPRES
+     'ZONE' $DOM1 'OPER' residu 1 IRESU
+     'ZONE' $DOM1 'OPER' 'NS' 1. 'UN' 'NU' GB 'TN' 0. 'INCO' 'UN'
+     'ZONE' $DOM1 'OPER' 'LAPN' ALFA          'INCO' 'TN'
+     'ZONE' $DOM1 'OPER' 'KONV' 1. 'UN' ALFA  'INCO' 'TN'
+**   'ZONE' $DOM1 'OPER' 'TSCAL' ALFA 'UN' 0. 'INCO' 'TN'
+     'OPTI'  'EF' 'CENTREE'
+     'ZONE' $DOM1 'OPER' 'DFDT' 1. 'UN' 'DT' 'INCO' 'UN'
+     'ZONE' $DOM1 'OPER' 'DFDT' 1. 'TN' 'DT' 'INCO' 'TN' ;
+*
+* Conditions aux limites en vitesse et température
+RV = 'EQEX' RV 'CLIM'
+     'TN' 'TIMP' CNT1 1. 'TN' 'TIMP' CNT3 0.
+     'UN' 'UIMP' CNT0 0. 'UN' 'VIMP' CNT1 0.
+     'UN' 'VIMP' CNT2 0. 'UN' 'VIMP' CNT3 0. ;
+*
+* Equation en pression avec condition de Dirichlet en un point
+RVP = 'EQEX' 'OPTI' 'EF' KPRES
+      'ZONE' $DOM1  'OPER' 'KBBT' -1. 'INCO' 'UN' 'PRES'
+      'CLIM' 'PRES' 'TIMP' MP1 0. ;
+*
+* Initialisation des champs (table INCO)
+rv . 'INCO' = TABLE 'INCO' ;
+*
+XS YS = 'COOR' DOM1 ;
+TINI0 = 1. - XS * XS * AT0 + 1. * (1. - YS) ;
+TINI0 = 'KCHT' $DOM1 'SCAL' 'SOMMET' 0. TINI0 ;
+rv . 'INCO' . 'TN'   = 'KOPS' TINI0 '>|' 1. ;
+*
+rv . 'INCO' . 'UN'   = 'KCHT' $DOM1 'VECT' 'SOMMET' (0. 0.) ;
+rv . 'INCO' . 'PRES' = 'KCHT' $DOM1 'SCAL'  KPRES   0.      ;
+rv . 'INCO' . 'UNM'  = 'COPI' rv . 'INCO' . 'UN' ;
+rv . 'INCO' . 'TNM'  = 'COPI' rv . 'INCO' . 'TN' ;
+*
+NU0 = ETA0 * RV . 'INCO' . 'TN' + 1. ;
+NU0 = 'KCHT' $DOM1 'SCAL' 'SOMMET' 0. NU0 ;
+RV . 'INCO' . 'NU' = 'NOEL' $DOM1 NU0 ;
+*
+RV . 'INCO' . 'DT' = DT0 ;
+*
+* Champs supplémentaires pour la procédure residu
+rv . 'INCO' . 'UN2'  = 'COPI' rv . 'INCO' . 'UN' ;
+rv . 'INCO' . 'TN2'  = 'COPI' rv . 'INCO' . 'TN' ;
+rv . 'INCO' . 'IT'   = 'PROG' ;
+rv . 'INCO' . 'TI'   = 'PROG' ;
+rv . 'INCO' . 'ER'   = 'PROG' ;
+*
+* Méthode d'inversion du problème en vitesse
+rv . 'METHINV' .'TYPINV'   = 1      ;
+rv . 'METHINV' .'IMPINV'   = 0      ;
+rv . 'METHINV' .'NITMAX'   = 100    ;
+rv . 'METHINV' .'PRECOND'  = 3      ;
+rv . 'METHINV' .'RESID'    = 1.e-6  ;
+rv . 'METHINV' . 'FCPRECT' = 1      ;
+rv . 'METHINV' . 'FCPRECI' = 1      ;
+*
+* Méthode d'inversion du problème en pression
+rvp . 'METHINV' . 'TYPINV'  = 1      ;
+rvp . 'METHINV' . 'IMPINV'  = 0      ;
+rvp . 'METHINV' . 'NITMAX'  = 100    ;
+rvp . 'METHINV' . 'PRECOND' = 3      ;
+rvp . 'METHINV' . 'RESID'   = 1.e-12 ;
+rvp . 'METHINV' . 'FCPRECT' = 100    ;
+rvp . 'METHINV' . 'FCPRECI' = 100    ;
+*
+* Couplage vitesse/pression : Méthode de projection
+RV . 'PROJ' = RVP ;
+*
+*==========================================================
+* Résolution
+*==========================================================
+*
+EXEC RV ;
+*
+*==========================================================
+* Post traitement
+*==========================================================
+*
+* Nusselt
+nug resg surg = calcnuss (RV . 'INCO' . 'TN') $DOM1 $CNT1 ;
+nud resd surd = calcnuss (RV . 'INCO' . 'TN') $DOM1 $CNT3 ;
+resg = resg / surg ;
+resd = resd / surd ;
+*
+* Fonction de courant
+psi1 = courant (RV . 'INCO' . 'UN') $DOM1 $CNT0 ;
+*-------------------------> Début des tracés
+'SI' GRAPH ;
+*
+* Vitesse
+un  = RV . 'INCO' . 'UN' ;
+vun = 'VECT' UN 10. 'UX' 'UY' 'JAUNE' ;
+trace VUN DOM1 CNT0 'TITR' 'Vitesse' ;
+*
+* Température
+tn  = RV . 'INCO' . 'TN' ;
+trace tn DOM1 CNT0 NLI0 'TITR' 'Température' ;
+*
+* Fonction de courant
+trace psi1 DOM1 CNT0 NLI0 vun 'TITR' 'Fonction de courant' ;
+*
+* Pression
+pe = 'EXCO' rv . 'INCO' . 'PRESSION' 'PRES' ;
+pn = 'ELNO' $DOM1 ('KCHT' $DOM1 'SCAL' kpres pe) kpres;
+trace pn dom1 CNT0 NLI0 'TITR' 'Pression' ;
+*
+'FINSI' ;
+*-------------------------> Fin des tracés
+*
+*==========================================================
+* Test de non régression
+*==========================================================
+*
+* PSIMAX : Valeur max de la fonction de courant
+* DIFF0  : Ecart Nusselt chaud, Nusselt froid
+* NUMOY  : Nusselt moyen chaud/froid
+*
+'SAUT' 5 'LIGN' ;
+psim0 = 'MAXI'  ('ABS' PSI1) ;
+diff0  = 'ABS' (resg + resd) ;
+nmoy0  = 'ABS' (resg - resd / 2.) ;
+'SI' COMPLET ;
+     TPSI0 = 88.D-5 ;
+     TDIF0 = 1.D-2 ;
+     TMOY0 = 1.775 ;
+     DPSI0 = 3.D-5  ;
+     DMOY0 = 2.5D-2 ;
+'SINON' ;
+     TPSI0 = 1.  ;
+     TDIF0 = 10. ;
+     TMOY0 = 10. ;
+     DPSI0 = 1.  ;
+     DMOY0 = 10. ;
+'FINSI' ;
+DDIF0 = TDIF0  ;
+ER1 = psim0 - tpsi0 ABS ; TEST1 = ER1 < Dpsi0 ;
+ER2 = diff0 - Tdif0 ABS ; TEST2 = ER2 < Ddif0 ;
+ER3 = nmoy0 - Tmoy0 ABS ; TEST3 = ER3 < Dmoy0 ;
+'MESS' 'CHAMP/VALEUR/CIBLE/ERREUR/TOLERANCE/TEST' ;
+'MESS' '----------------------------------------' ;
+'MESS' '|PSI| max                ' psim0 Tpsi0 ER1 Dpsi0 ;
+list TEST1 ;
+'MESS' '|Nu(hot)|-|Nu(cold)|     ' diff0 Tdif0 ER2 Ddif0 ;
+list TEST2 ;
+'MESS' '(|Nu(hot)|+|Nu(cold)|)/2 ' nmoy0 Tmoy0 ER3 Dmoy0 ;
+list TEST3 ;
+TEST5 = TEST1 ET TEST2 ET TEST3 ;
+SI TEST5 ;
+   ERRE 0 ;
+SINO ;
+   ERRE 5 ;
+FINSI ;
+'FIN' ;
+
+
+
+
+
+
+
+
+
+

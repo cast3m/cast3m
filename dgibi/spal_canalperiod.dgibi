@@ -1,0 +1,1784 @@
+* fichier : spal_canalperiod.dgibi
+************************************************************************
+* NOM         : spal_canalperiod.dgibi
+*
+* DESCRIPTION : Calcule l'écoulement turbulent d'un fluide dans un canal
+*               plan grâce au modèle de Spalart-Allmaras. Pour obtenir
+*               un régime hydrauliquement établi, on maille seulement
+*               une courte tranche du canal et on impose des conditions
+*               de périodicité entre l'entrée et la sortie. Le
+*               mouvement du fluide est entretenu par un gradient de
+*               pression constant imposé entre ces mêmes frontières.
+*
+*               1) PROCÉDURES UTILISATEUR .................... 107
+*               2) CRÉATION DU MAILLAGE ...................... 427
+*               3) RÉSOLUTION DU PROBLÈME .................... 690
+*               4) POST-TRAITEMENT DES RÉSULTATS ............. 906
+*               5) COMPTE-RENDU DU CALCUL ................... 1656
+*
+* MOTS-CLÉS   : canal plan ; écoulement de Poiseuille ; turbulence ;
+*               RANS ; SA ; DNS Moser Kim Mansour ; périodicité ;
+*               gradient de pression
+*
+************************************************************************
+* HISTORIQUE : 7/10/2010 : JCARDO : création du jeu de données
+* HISTORIQUE :
+* HISTORIQUE :
+************************************************************************
+* Prière de PRENDRE LE TEMPS DE COMPLÉTER LES COMMENTAIRES
+* en cas de modification de ce cas test afin de faciliter
+* la maintenance !
+************************************************************************
+* CONFIGURATION :
+*
+*                              HAUT:
+*                              U=V=NU0=0
+*
+*                           PT1         PT4
+*            A                 +-------+
+*            |                 |       |
+*            |     ENTREE:     |       |     SORTIE:
+*            |       P=P1      |       |       P=0
+*    LY=2*HH |              PT5+-------+PT6    U(SORTIE)  =U(ENTREE)
+*            |              =(0;0)     |       V(SORTIE)  =V(ENTREE)
+*            |                 |       |       NU0(SORTIE)=NU0(ENTREE)
+*            |                 |       |
+*            V                 +-------+
+*                           PT2         PT3
+*
+*                              BAS:
+*                              U=V=NU0=0
+*
+*
+*                              <------->
+*                               LX << LY
+*
+*
+************************************************************************
+* PARAMÈTRES :
+*
+* Nombre de Reynolds turbulent visé (basé sur UTAU et HH)
+* Le maillage sera raffiné automatiquement près des parois
+* /!\ Les données DNS (section 4) proviennent d'un calcul à RETAU=590
+  RETAU0 = 590 ;
+*
+* Calcul complet ? (si FAUX: test de non-regression rapide)
+  COMPLET = FAUX ;
+*
+* Affichage graphique ?
+  GRAPH = FAUX ;
+*
+* Nouveau calcul ? (si FAUX: post-traitement d'un calcul déjà effectué)
+  NOUVEAU = VRAI ;
+*
+* Type d'éléments finis utilisés
+  DISCR = 'QUAF'     ;
+  KPRES = 'CENTREP1' ;
+*
+* Décentrement
+  DCENTR = 'SUPG' ;
+  KCMD   = 0.     ;
+*
+************************************************************************
+
+
+
+
+
+
+
+
+
+
+SMALL = 1.E-7 ;
+
+OPTI 'DIME' 2 'ELEM' 'QUA4' ;
+
+
+
+
+
+
+
+
+
+
+* +===================================================================+
+* |                                                                   |
+* |         1  -  P R O C É D U R E S   U T I L I S A T E U R         |
+* |                                                                   |
+* +===================================================================+
+
+
+
+
+* ======================================================================
+* 1) GESTION DES CONDITIONS DE PÉRIODICITÉ
+* ======================================================================
+
+************************************************************************
+* NOM         : PCLIM
+* DESCRIPTION : Impose des conditions de périodicité entre 2 frontières
+*               pendant un calcul de mécanique des fluides.
+************************************************************************
+* HISTORIQUE :  9/11/2010 : JCARDO : création de la procédure
+* HISTORIQUE :
+* HISTORIQUE :
+************************************************************************
+* Prière de PRENDRE LE TEMPS DE COMPLÉTER LES COMMENTAIRES
+* en cas de modification de ce sous-programme afin de faciliter
+* la maintenance !
+************************************************************************
+*   Syntaxe (cf. opérateur EQEX) :
+*   ______________________________
+*
+*          'ZONE' $MD 'OPER' 'PCLIM' GEOM1 (LENTI1)
+*                                    GEOM2 (LENTI2)
+*                                    'INCO' MOT1 ;
+*
+*     - MOT1          : objet 'MOT' contenant le nom de l'inconnue
+*     - GEOM1,GEOM2   : objets MAILLAGE à mettre en relation
+*     - LENTI1,LENTI2 : dans le cas d'une inconnue vectorielle, objets
+*                       LISTENTI indiquant les composantes concernées
+*
+************************************************************************
+
+DEBP PCLIM ;
+ARGU RX*'TABLE' ;
+RV = RX . 'EQEX' ;
+
+SI (EGA (RX . 'IARG') 2) ;
+    GEOM1  = RX . 'ARG1' ;
+    GEOM2  = RX . 'ARG2' ;
+    LENTI1 = 0 ;
+    LENTI2 = 0 ;
+SINON ;
+    GEOM1  = RX . 'ARG1' ;
+    GEOM2  = RX . 'ARG3' ;
+    LENTI1 = RX . 'ARG2' ;
+    LENTI2 = RX . 'ARG4' ;
+FINS ;
+
+MINC = EXTR (RX . 'LISTINCO') 1 ;
+CINC = RV . 'INCO' . MINC ;
+LCO  = EXTR CINC 'COMP' ;
+NCO  = DIME LCO ;
+
+
+* La matrice de rigidité correspondant aux conditions périodiques
+* n'est construite que lors du premier appel à la procédure PCLIM.
+* Lors des appels suivants, la procédure se contente de renvoyer la
+* matrice déjà calculée.
+
+SI ('EXIS' RX 'MRELA') ;
+    ST1  = RX . 'SRELA' ;
+    MAT1 = RX . 'MRELA' ;
+
+
+SINON ;
+
+    MLAG = 'LX' ;
+
+    MAT0 = RELA 'UX' GEOM1 - 'UY' GEOM2 ;
+    ST0  = DEPI MAT0 0. ;
+    MAT0 = KOPS 'RIMA' MAT0 ;
+
+
+*   Inconnue VECTORIELLE
+*   --------------------
+    SI (NCO > 1) ;
+
+        ST1 MAT1 = KOPS 'MATRIK' ;
+
+        SI (EGA LENTI1 0) ;
+            LENTI1 = LECT 1 'PAS' 1 NCO ;
+            LENTI2 = LENTI1 ;
+        FINS ;
+
+        REPE BLOC0 (DIME LENTI2) ;
+
+            MCO1 = EXTR LCO (EXTR LENTI1 &BLOC0) ;
+            MCO2 = EXTR LCO (EXTR LENTI2 &BLOC0) ;
+
+            MATI = KOPS 'CHANINCO' MAT0
+                        (MOTS 'LX'  'UX' 'UY') (MOTS MLAG MCO1 MCO2)
+                        (MOTS 'FLX' 'FX' 'FY') (MOTS MLAG MCO1 MCO2) ;
+            STI  = EXCO ST0 'FLX' MLAG ;
+
+            MAT1 = MAT1 ET MATI ;
+            ST1  = ST1  ET STI ;
+
+        FIN BLOC0 ;
+
+
+*   Inconnue SCALAIRE
+*   -----------------
+    SINON ;
+        MAT1 = KOPS 'CHANINCO' MAT0
+                    (MOTS 'LX'  'UX' 'UY') (MOTS MLAG MINC MINC)
+                    (MOTS 'FLX' 'FX' 'FY') (MOTS MLAG MINC MINC) ;
+        ST1  = EXCO ST0 'FLX' MLAG ;
+    FINS ;
+
+
+    RX . 'SRELA' = ST1 ;
+    RX . 'MRELA' = MAT1 ;
+
+FINS ;
+
+* Fin de la procédure
+FINP ST1 MAT1 ;
+
+
+
+
+* ======================================================================
+* 2) EXTENSION DE L'OPÉRATEUR 'FIMP' AUX INCONNUES VECTORIELLES
+* ======================================================================
+
+************************************************************************
+* NOM         : FIMPV
+* DESCRIPTION : Impose un effort vectoriel sur une partie du domaine.
+************************************************************************
+* HISTORIQUE :  9/11/2010 : JCARDO : création de la procédure
+* HISTORIQUE :
+* HISTORIQUE :
+************************************************************************
+* Prière de PRENDRE LE TEMPS DE COMPLÉTER LES COMMENTAIRES
+* en cas de modification de ce sous-programme afin de faciliter
+* la maintenance !
+************************************************************************
+*   Syntaxe (cf. opérateur EQEX) :
+*   ______________________________
+*
+*          'ZONE' $MD 'OPER' 'FIMPV' OBJ1 'INCO' MOT1
+*
+*     - $MD  : objet MMODEL relatif au sous-domaine concerné
+*     - MOT1 : objet 'MOT' contenant le nom de l'inconnue
+*     - OBJ1 : objet POINT ou CHPOINT SOMMET indiquant l'effort à
+*              appliquer, EXPRIMÉ DANS LE REPÈRE CARTÉSIEN GLOBAL
+*              (si OBJ1 est un 'MOT' on va chercher sa valeur dans la
+*               table 'INCO')
+*
+************************************************************************
+
+DEBP FIMPV ;
+ARGU RX*'TABLE' ;
+$MD = RX . 'DOMZ' ;
+RV  = RX . 'EQEX' ;
+
+* Inconnue sur laquelle porte la contrainte
+MINC = EXTR (RX . 'LISTINCO') 1 ;
+CINC = RV . 'INCO' . MINC ;
+LCO  = EXTR CINC 'COMP' ;
+NCO  = DIME LCO ;
+
+* Objet CHPOINT ou POINT (ou MOT) à imposer
+OBJ1 = RX . 'ARG1' ;
+SI (EGA (TYPE OBJ1) 'MOT') ;
+    OBJ1 = RV . 'INCO' . OBJ1 ;
+FINS ;
+
+* Construction des objets à renvoyer
+CHP0 MAT0 = KOPS 'MATRIK' ;
+CHP0 = KCHT $MD 'VECT' 'SOMMET' OBJ1 ;
+CHP0 = CHP0 * (DOMA $MD 'XXDIAGSI') ;
+LCO0 = EXTR CHP0 'COMP' ;
+CHP0 = NOMC LCO0 LCO CHP0 'NATURE' 'DISCRET' ;
+
+FINP CHP0 MAT0 ;
+
+
+
+
+* ======================================================================
+* 3) CRÉATION DE LIGNES NON UNIFORMES AVEC RESPECT STRICT DES DENSITÉS
+* ======================================================================
+
+************************************************************************
+* NOM         : @DROI
+* DESCRIPTION : Crée une ligne dont les éléments situés aux extrémités
+*               ont une longueur rigoureusement respectée
+*               /!\ La progression n'est plus parfaitement géométrique!
+************************************************************************
+* HISTORIQUE :  25/02/2011 : JCARDO : création de la procédure
+* HISTORIQUE :
+* HISTORIQUE :
+************************************************************************
+* Prière de PRENDRE LE TEMPS DE COMPLÉTER LES COMMENTAIRES
+* en cas de modification de ce sous-programme afin de faciliter
+* la maintenance !
+************************************************************************
+*   Syntaxe :
+*   _________
+*
+*       GEOM1 = @DROI | POIN1 | POIN2 ('DINI' DENS1) ('DFIN' DENS2) ;
+*                     | LIG1  |
+*
+*     - GEOM1       : MAILLAGE résultat composé de SEG2 ou SEG3
+*     - POIN1, POIN2: Objets POINT délimitant le segment GEOM1
+*     - DENS1, DENS2: Longueur du premier et du dernier élément.
+*                     Une valeur négative signifie que la longueur doit
+*                     être strictement respectée.
+*
+*       Si une ligne LIG1 est donnée à la place du point POIN1, cette
+*       ligne est prolongée jusqu'au point POIN2.
+*
+************************************************************************
+
+DEBP @DROI ;
+
+* ==============================
+* LECTURE DES ARGUMENTS
+* ==============================
+
+* Lecture de POIN1 ou LIG1
+ARGU LIG1/'MAILLAGE' ;
+SI (EXIS LIG1) ;
+    TYP1 = ELEM LIG1 'TYPE' ;
+    SI ((EXIS TYP1 'SEG2') OU (EXIS TYP1 'SEG3')) ;
+        PT1 = POIN LIG1 'FINAL' ;
+    SINON ;
+        MESS '/!\ On attendait un MAILLAGE linéique!' ;
+        FIN ;
+    FINS ;
+SINON ;
+    ARGU PT1*'POINT' ;
+FINS ;
+
+* Lecture de POIN2
+ARGU PT2*'POINT' ;
+
+* Lecture éventuelle de DENS1 et/ou DENS2
+D1 = 0. ;
+D2 = 0. ;
+REPE BLOCA 2 ;
+    ARGU MCLE/'MOT' ;
+    SI (EXIS MCLE) ;
+        SI (EGA MCLE 'DINI') ;
+            ARGU D1*'FLOTTANT' ;
+            ITER BLOCA ;
+        FINS ;
+        SI (EGA MCLE 'DFIN') ;
+            ARGU D2*'FLOTTANT' ;
+            ITER BLOCA ;
+        FINS ;
+        QUIT BLOCA ;
+    SINON ;
+        ITER BLOCA ;
+    FINS ;
+FIN BLOCA ;
+D10 = ABS D1 ;
+D20 = ABS D2 ;
+
+
+* ==============================
+* CRÉATION DE LA DROITE
+* ==============================
+
+* Détermination du vecteur directeur et de la longueur du segment
+DIR1 = PT2 MOIN PT1 ;
+LTOT = NORM DIR1    ;
+DIR1 = DIR1 / LTOT  ;
+
+* Raison de la progression géométrique (pas celle calculée par DECOUP!)
+* => correspond presque toujours à un nombre non entier d'éléments...
+K1 = (LTOT - D10) / (LTOT - D20) ;
+
+* Préparation de la ligne de commande pour créer GEOM1
+CMD1 = 'PT1' ;
+SI (D1 < 0.) ;
+    PT3 = PT1 PLUS (D10 * DIR1) ;
+    D10 = D10 * K1 ;
+    CMD1 = CHAI CMD1 ' DROI 1 PT3' ;
+FINS ;
+PT4 = PT2 ;
+CMD1 = CHAI CMD1 ' DROI PT4' ;
+SI (D1 NEG 0.) ;
+    CMD1 = CHAI CMD1 ' DINI D10' ;
+FINS ;
+SI (D2 NEG 0.) ;
+    CMD1 = CHAI CMD1 ' DFIN D20' ;
+FINS ;
+SI (D2 < 0.) ;
+    PT4 = PT2 MOIN (D20 * DIR1) ;
+    D20 = D20 / K1 ;
+    CMD1 = CHAI CMD1 ' DROI 1 PT2' ;
+FINS ;
+
+* Création de la ligne GEOM1 et fusion éventuelle avec LIG1
+GEOM1 = (TEXT CMD1) ;
+SI (EGA (TYPE LIG1) 'MAILLAGE') ;
+    GEOM1 = LIG1 ET GEOM1 ;
+FINS ;
+
+FINP GEOM1 ;
+
+
+
+
+
+
+
+
+
+
+* +===================================================================+
+* |                                                                   |
+* |           2  -  C R É A T I O N   D U   M A I L L A G E           |
+* |                                                                   |
+* +===================================================================+
+
+
+
+
+* +===================================================================+
+* | PARAMÈTRES DU MAILLAGE                                            |
+* +===================================================================+
+
+* HH: Demi-hauteur du canal
+* LX: Longueur du canal
+HH = 1.       ;
+LX = HH / 20. ;
+
+* AMAX: Allongement maximal approximatif des éléments du maillage
+* DPAR: Ordonnée y+ approx. du noeud le plus proche de la paroi
+* DCEN: Distance inter-nodale au centre du canal, en % de la hauteur LY
+SI (COMPLET) ;
+    AMAX = 8.  ;
+    DPAR = 0.5 ;
+    DCEN = 2.  ;
+SINON ;
+    AMAX = 10. ;
+    DPAR = 1.  ;
+    DCEN = 5.  ;
+FINS ;
+
+
+
+* +===================================================================+
+* | CREATION DU DOMAINE                                               |
+* +===================================================================+
+
+* NDISCR: Nombre de subdivisions par élément et par direction
+SI ((EGA DISCR 'MACRO') OU (EGA DISCR 'QUAF')) ;
+    NDISCR = 2. ;
+SINON ;
+    NDISCR = 1. ;
+FINS ;
+
+* LX2: Demi-longueur du canal
+* LY:  Hauteur du canal
+* DH:  Diamètre hydraulique du canal
+*     (= 4*Surface de passage / Périmètre mouillé)
+LX2 = LX/2. ;
+LY  = 2.*HH ;
+DH  = 4.*HH ;
+
+* LNU0: Valeur a priori de l'unité de paroi (= échelle visqueuse)
+LNU0 = HH/RETAU0 ;
+
+* DPAR0: Densité renormalisée des noeuds à la paroi
+* DCEN0: Densité renormalisée des noeuds au centre du canal
+DPAR0 = -1. * DPAR * LNU0 * NDISCR       ;
+DCEN0 = -1. * (DCEN*0.01) * LY * NDISCR  ;
+
+* Détermination du nombre NX d'éléments QUAF dans la longueur du canal
+DX0 = (ABS DPAR0) * ((AMAX*AMAX - 1.) ** 0.5) ;
+NX0 = MAXI ( LECT 2 (ENTI (LX/DX0)) ) ;
+DX0 = LX / NX0 ;
+* /!\ On veut que NX soit pair:
+NX  = NX0 + (NX0 @MOD 2) ;
+
+
+* Définition des sommets
+* ======================
+PT1 =  0.   HH      ;
+PT2 =  0.  (-1.*HH) ;
+PT3 =  LX  (-1.*HH) ;
+PT4 =  LX   HH      ;
+PT5 =  0.   0.      ;
+PT6 =  LX   0.      ;
+
+
+* Création des lignes frontières
+* ==============================
+ENTREE = PT1 @DROI PT5 'DINI' DPAR0 'DFIN' DCEN0
+             @DROI PT2 'DINI' DCEN0 'DFIN' DPAR0 ;
+BAS    = PT2  DROI NX PT3 ;
+SORTIE = PT3 @DROI PT6 'DINI' DPAR0 'DFIN' DCEN0
+             @DROI PT4 'DINI' DCEN0 'DFIN' DPAR0 ;
+HAUT   = PT4  DROI NX PT1 ;
+
+
+* Maillage de la surface du domaine
+* =================================
+DOM = DALL ENTREE BAS SORTIE HAUT 'PLAN' ;
+
+
+* Conversion en éléments pour les fluides
+* =======================================
+DOM    = CHAN DOM    'QUAF' ;
+ENTREE = CHAN ENTREE 'QUAF' ;
+BAS    = CHAN BAS    'QUAF' ;
+SORTIE = CHAN SORTIE 'QUAF' ;
+HAUT   = CHAN HAUT   'QUAF' ;
+
+ELIM (DOM ET ENTREE ET BAS ET SORTIE ET HAUT) SMALL ;
+
+
+* Création des modèles Navier-Stokes
+* ==================================
+$DOM    = MODE DOM    'NAVIER_STOKES' DISCR ;
+$ENTREE = MODE ENTREE 'NAVIER_STOKES' DISCR ;
+$BAS    = MODE BAS    'NAVIER_STOKES' DISCR ;
+$SORTIE = MODE SORTIE 'NAVIER_STOKES' DISCR ;
+$HAUT   = MODE HAUT   'NAVIER_STOKES' DISCR ;
+$PAROIS = $BAS ET $HAUT ;
+
+
+* Récupération du maillage d'éléments du type défini par DISCR
+* ============================================================
+DOM    = DOMA $DOM    'MAILLAGE' ;
+ENTREE = COUL 'VERT' (DOMA $ENTREE 'MAILLAGE') ;
+BAS    = COUL 'ORAN' (DOMA $BAS    'MAILLAGE') ;
+SORTIE = COUL 'ROUG' (DOMA $SORTIE 'MAILLAGE') ;
+HAUT   = COUL 'ORAN' (DOMA $HAUT   'MAILLAGE') ;
+PAROIS = COUL 'ORAN' (DOMA $PAROIS 'MAILLAGE') ;
+
+
+
+
+* +===================================================================+
+* | DIMENSIONS ET COORDONNÉES                                         |
+* +===================================================================+
+
+
+* Champs de coordonnées
+* =====================
+XX = COOR 1 DOM ;
+YY = COOR 2 DOM ;
+
+
+* Champ de distance à la paroi
+* ============================
+DPAROI = HH - (ABS YY) ;
+DPAROI = BORN DPAROI 'SCAL' 'MINIMUM' 0. ;
+
+
+* Nombre et position des noeuds
+* =============================
+NXN    = NBNO BAS ;
+NYN    = NBNO ENTREE ;
+
+LXXN   = EXTR (EVOL 'CHPO' XX BAS) 'ABSC' ;
+DXN    = LX / (NXN-1) ;
+
+LYYN   = EXTR (EVOL 'CHPO' YY ENTREE) 'ABSC' ;
+LDYN   = (ENLE LYYN 1) - (ENLE LYYN NYN) ;
+DYNMIN = MINI LDYN 'ABS' ;
+DYNMAX = MAXI LDYN 'ABS' ;
+
+
+* Nombre et position des éléments
+* ===============================
+NXE    = NBEL BAS ;
+NYE    = NBEL ENTREE ;
+
+LXXE   = EXTR LXXN (LECT 1 'PAS' (ENTI NDISCR) NXN) ;
+DXE    = LX / NXE ;
+
+LYYE   = EXTR LYYN (LECT 1 'PAS' (ENTI NDISCR) NYN) ;
+LDYE   = (ENLE LYYE 1) - (ENLE LYYE (NYE+1)) ;
+DYEMIN = MINI LDYE 'ABS' ;
+DYEMAX = MAXI LDYE 'ABS' ;
+
+
+
+
+* +===================================================================+
+* | MAILLAGES DÉRIVÉS                                                 |
+* +===================================================================+
+
+
+* Maillages utiles pour les conditions aux limites
+* ================================================
+_DOM  = CONT DOM         ;
+DOM1  = CHAN DOM  'POI1' ;
+_DOM1 = CHAN _DOM 'POI1' ;
+@DOM1 = DIFF DOM1 _DOM1  ;
+
+ENTREE1  = CHAN ENTREE 'POI1'          ;
+BAS1     = CHAN BAS    'POI1'          ;
+SORTIE1  = ENTREE1 PLUS (LX 0.)        ;
+HAUT1    = BAS1    PLUS (0. LY)        ;
+ELIM (_DOM1 ET SORTIE1 ET HAUT1) SMALL ;
+PAROIS1  = BAS1 ET HAUT1               ;
+
+@ENTREE1 = DIFF ENTREE1 (PT1 ET PT2) ;
+@BAS1    = DIFF BAS1    (PT2 ET PT3) ;
+@SORTIE1 = DIFF SORTIE1 (PT3 ET PT4) ;
+@HAUT1   = DIFF HAUT1   (PT4 ET PT1) ;
+
+
+* Maillages de post-traitement et de visualisation
+* ================================================
+DOUBLONS = DOM ;
+
+* Lignes horizontales de 0 à (NYN-1)
+SGX = TABL ;
+SGX . 0 = $BAS ;
+REPE I1 (NYN-2) ;
+    SGX . &I1 = $BAS PLUS (0. (EXTR LYYN (&I1 + 1))) ;
+    DOUBLONS = DOUBLONS ET (DOMA SGX . &I1 'MAILLAGE') ;
+FIN I1 ;
+SGX . (NYN - 1) = $HAUT ;
+
+* Lignes verticales de 0 à (NXN-1)
+SGY = TABL ;
+SGY . 0 = $ENTREE ;
+REPE I1 (NXN-2) ;
+    SGY . &I1 = $ENTREE PLUS ((DXN 0.)*&I1) ;
+    DOUBLONS = DOUBLONS ET (DOMA SGY . &I1 'MAILLAGE') ;
+FIN I1 ;
+SGY . (NXN - 1) = $SORTIE ;
+
+ELIM DOUBLONS SMALL ;
+
+
+* Nommage de quelques lignes particulières
+IX1   = ENTI ((NYN - 1) * 0.5) ;
+SGX1  = COUL 'ROSE' (DOMA (SGX . IX1) 'MAILLAGE') ;
+
+IY1   = ENTI ((NXN - 1) * 0.5) ;
+SGY1  = COUL 'ROSE' (DOMA (SGY . IY1) 'MAILLAGE') ;
+SGY1B = ELEM SGY1 (LECT 1   'PAS'  1 'NPAS' ((NYE/2) - 1)) ;
+SGY1H = ELEM SGY1 (LECT NYE 'PAS' -1 'NPAS' ((NYE/2) - 1)) ;
+
+
+
+
+* +===================================================================+
+* | AFFICHAGE GRAPHIQUE                                               |
+* +===================================================================+
+
+ALLONG = (DOMA $DOM 'DIAMAX') * (INVE (DOMA $DOM 'DIAMIN')) ;
+ALLONG = ELNO $DOM ALLONG 'CENTRE' ;
+
+MESS (CHAI 'Distance du premier point à la paroi: ' DYNMIN ' m') ;
+
+SI (GRAPH) ;
+
+    TRAC (DOM ET ENTREE ET BAS ET SORTIE ET HAUT ET SGX1 ET SGY1)
+         'TITR' 'Maillage complet' ;
+
+    TRAC ALLONG DOM
+         'TITR' 'Facteur d allongement' ;
+
+FINS ;
+
+
+
+
+
+
+
+
+
+
+* +===================================================================+
+* |                                                                   |
+* |         3  -  R É S O L U T I O N   D U   P R O B L È M E         |
+* |                                                                   |
+* +===================================================================+
+
+
+
+
+* +===================================================================+
+* | PARAMÈTRES DE L'ÉCOULEMENT ET DU SOLVEUR                          |
+* +===================================================================+
+
+
+* GRANDEURS PHYSIQUES
+* ===================
+* DPDX0 : Gradient de pression longitudinal
+* RHO   : Masse volumique
+* NU    : Viscosité cinématique moléculaire
+* MU    : Viscosité dynamique moléculaire
+DPDX0 = -1.         ;
+RHO   = 1.          ;
+NU    = 1. / RETAU0 ;
+MU    = NU * RHO    ;
+
+
+* SCHÉMA NUMÉRIQUE
+* ================
+* CVISQ : Formulation des contraintes visqueuses ('FTAU' ou 'MUCONS')
+CVISQ = 'MUCONS' ;
+
+* DT   : Valeur du pas de temps (constant au cours du calcul)
+* NPDT : Nombre de pas de temps calculés au total
+* NSAU : Nombre de pas de temps entre 2 sauvegardes intermédiaires
+SI (COMPLET) ;
+    DT = 1.E-3 ;
+    NPDT = 50000 ;
+    NSAU = 5000  ;
+SINON ;
+*   /!\ la CFL est trop élevée, mais de toutes façons on n'aura rien
+*        dans le faible temps imparti pour le test de non-regression
+*        => PAS DE VALIDATION POSSIBLE
+    DT = 1.E-1   ;
+    NPDT = 100   ;
+    NSAU = 100   ;
+FINS ;
+
+
+
+
+* +===================================================================+
+* | DISCRÉTISATION DES ÉQUATIONS DE REYNOLDS (= NAVIER-STOKES MOYEN)  |
+* +===================================================================+
+
+
+* ÉQUATIONS DE CONSERVATION DE LA QUANTITÉ DE MOUVEMENT
+* =====================================================
+* SPAL = Calcul de la viscosité turbulente
+* NS   = Discrétisation du terme convectif et du terme diffusif
+* DFDT = Discrétisation du terme instationnaire
+
+RV = EQEX 'OPTI' 'EF' 'IMPL' DCENTR 'CMD' KCMD KPRES CVISQ
+          'ZONE' $DOM 'OPER' 'SPAL' 'RHO' 'UN' 'MU' 'DT'
+*                                    'PERIODIC' @ENTREE1 @SORTIE1
+                                    'INCO' 'NU0'
+          'ZONE' $DOM 'OPER' 'NS' 'RHO' 'UN' 'MUFN' 'INCO' 'UN'
+          'OPTI' 'EFM1' 'IMPL' 'CENTREE'
+          'ZONE' $DOM 'OPER' 'DFDT' 'RHO' 'UNM' 'DT' 'INCO' 'UN'
+          ;
+
+* Paramètres avancés du modèle de Spalart-Allmaras
+RV . 'SPALART_ALLMARAS' = TABL ;
+RV . 'SPALART_ALLMARAS' . 'KSRC' = 'ALGO1' ;
+RV . 'SPALART_ALLMARAS' . 'DUMP' = VRAI ;
+
+RV . 'PAROIS' = TABL ;
+RV . 'PAROIS' . 'MODELE' = $PAROIS ;
+RV . 'PAROIS' . 'DIST'   = DPAROI ;
+
+* Paramètres du solveur pour la vitesse
+RV . 'NITER' = 1    ;
+RV . 'OMEGA' = 1.   ;
+RV . 'FIDT'  = 1    ;
+RV . 'METHINV' . 'TYPINV'   = 1     ;
+RV . 'METHINV' . 'IMPINV'   = 0     ;
+RV . 'METHINV' . 'NITMAX'   = 700   ;
+RV . 'METHINV' . 'PRECOND'  = 3     ;
+RV . 'METHINV' . 'ILUTLFIL' = 4     ;
+RV . 'METHINV' . 'ILUTDTOL' = 0.    ;
+RV . 'METHINV' . 'RESID'    = 1.E-9 ;
+RV . 'METHINV' . 'FCPRECT'  = 1     ;
+RV . 'METHINV' . 'FCPRECI'  = 1     ;
+
+
+* ÉQUATION DE CONSERVATION DE LA MASSE
+* ====================================
+* KBBT = Discrétisation de Div(U)=0 et du gradient de pression
+
+RVP = 'EQEX' 'OPTI' 'EF' KPRES
+             'ZONE' $DOM 'OPER' 'KBBT' (-1.) 'INCO' 'UN' 'PN'
+             ;
+
+* Paramètres du solveur pour la pression
+RVP . 'METHINV' . 'TYPINV'   = 1      ;
+RVP . 'METHINV' . 'IMPINV'   = 0      ;
+RVP . 'METHINV' . 'NITMAX'   = 800    ;
+RVP . 'METHINV' . 'PRECOND'  = 3      ;
+RVP . 'METHINV' . 'ILUTLFIL' = 10     ;
+RVP . 'METHINV' . 'ILUTDTOL' = 0.     ;
+RVP . 'METHINV' . 'RESID'    = 1.E-10 ;
+RVP . 'METHINV' . 'FCPRECT'  = 1      ;
+RVP . 'METHINV' . 'FCPRECI'  = 1      ;
+
+* Traitement du couplage vitesse-pression par projection
+RV . 'PROJ' = RVP ;
+
+
+
+
+* +===================================================================+
+* | DÉFINITION DES CONDITIONS INITIALES                               |
+* +===================================================================+
+
+UN0   = KCHT $DOM 'VECT' 'SOMMET' 'COMP' '1UN' '2UN' (0. 0.) ;
+UN0   = CHAN UN0 'ATTRIBUT' 'NATURE' 'DISCRET'               ;
+
+MUN0  = KCHT $DOM 'SCAL' 'SOMMET' MU            ;
+MUN0  = CHAN MUN0 'ATTRIBUT' 'NATURE' 'DISCRET' ;
+
+MUTN0 = KCHT $DOM 'SCAL' 'SOMMET' 0.             ;
+MUTN0 = CHAN MUTN0 'ATTRIBUT' 'NATURE' 'DISCRET' ;
+
+PN0   = KCHT $DOM 'SCAL' KPRES 0.              ;
+PN0   = CHAN PN0 'ATTRIBUT' 'NATURE' 'DISCRET' ;
+
+
+* Création de la table d'inconnues
+RV . 'INCO' = TABL 'INCO' ;
+RV . 'INCO' . 'UN'   = UN0          ;
+RV . 'INCO' . 'UNM'  = UN0          ;
+RV . 'INCO' . 'PN'   = PN0          ;
+RV . 'INCO' . 'RHO'  = RHO          ;
+RV . 'INCO' . 'MU'   = MU           ;
+RV . 'INCO' . 'NU0'  = MUTN0        ;
+RV . 'INCO' . 'MUFN' = (MUN0+MUTN0) ;
+RV . 'INCO' . 'DT'   = DT           ;
+
+
+
+
+* +===================================================================+
+* | DÉFINITION DES CONDITIONS AUX LIMITES                             |
+* +===================================================================+
+
+
+* CONDITIONS LIMITES AUX PAROIS
+* =============================
+
+* Conditions d'adhérence + turbulence nulle à la paroi
+RV = EQEX RV 'CLIM'
+              'UN'   'UIMP' PAROIS 0.
+              'UN'   'VIMP' PAROIS 0.
+              'NU0'  'TIMP' PAROIS 0.
+              ;
+
+
+* CONDITIONS LIMITES EN ENTRÉE/SORTIE DE CANAL
+* ============================================
+
+* Périodicité sur les 2 composantes de la vitesse
+RV = EQEX RV 'ZONE' $DOM 'OPER' 'PCLIM' @ENTREE1 @SORTIE1 'INCO' 'UN' ;
+
+
+* La formulation faible intrinsèque à notre résolution par éléments
+* finis ne permet pas d'imposer directement la pression.
+* On impose alors la contrainte totale (pression + cisaillement) dans
+* l'équation de quantité de mouvement. Deux possibilités pour spécifier
+* la perte de charge:
+*    a) on impose la "pression" en entrée du domaine
+*    b) on impose le "gradient de pression" sur tout le domaine
+RV = EQEX RV 'OPTI' 'EF'
+     'ZONE' $ENTREE 'OPER' 'FIMPV' ((ABS (DPDX0*LX)) 0.) 'INCO' 'UN'
+*     'ZONE' $DOM 'OPER' 'FIMPV' ((ABS DPDX0) 0.) 'INCO' 'UN'
+     ;
+
+
+
+
+* +===================================================================+
+* | EXÉCUTION DU CALCUL                                               |
+* +===================================================================+
+
+
+SI (NOUVEAU) ;
+
+    LPDT = (LECT (ENTI (NPDT/NSAU))*NSAU) ;
+    SI (NON (MULT NPDT NSAU)) ;
+        LPDT = LPDT ET (@MOD NPDT NSAU) ;
+    FINS ;
+
+    REPE ISAU (DIME LPDT) ;
+        RV . 'ITMA' = EXTR LPDT &ISAU ;
+        EXEC RV ;
+        OPTI 'SAUV' 'SPAL_CANALPERIOD.XDR' ;
+        SAUV ;
+    FIN ISAU ;
+
+
+
+
+
+
+
+
+
+
+* +===================================================================+
+* |                                                                   |
+* |  4  -  P O S T - T R A I T E M E N T   D E S   R É S U L T A T S  |
+* |                                                                   |
+* +===================================================================+
+
+
+
+
+SINON ;
+
+    GRAPH0 = GRAPH ;
+
+    OPTI 'REST' 'SPAL_CANALPERIOD.XDR' ;
+    REST ;
+
+    GRAPH = GRAPH0 ;
+
+FINS ;
+
+
+
+
+* +===================================================================+
+* | RÉCUPÉRATION ET CALCUL DES GRANDEURS UTILES                       |
+* +===================================================================+
+
+DGE = DOMA $ENTREE 'XXDIAGSI' ;
+DGS = DOMA $SORTIE 'XXDIAGSI' ;
+DGB = DOMA $BAS    'XXDIAGSI' ;
+DGH = DOMA $HAUT   'XXDIAGSI' ;
+
+* Masse volumique
+RHO = RV . 'INCO' . 'RHO' ;
+SI (EGA (TYPE RHO) 'CHPOINT') ;
+    USRHO = INVE RHO ;
+SINON ;
+    USRHO = 1. / RHO ;
+FINS ;
+
+* Viscosités
+MU  = RV . 'INCO' . 'MU' ;
+NU  = MU * USRHO ;
+MUF = RV . 'INCO' . 'MUFN' ;
+MUT = MUF - MU ;
+NU0 = RV . 'INCO' . 'NU0' ;
+
+* Vitesse
+UN   = RV . 'INCO' . 'UN' ;
+LCO  = EXTR UN 'COMP' ;
+UNX  = EXCO UN (EXTR LCO 1) ;
+UNY  = EXCO UN (EXTR LCO 2) ;
+
+* Vitesse débitante
+UQ = (MAXI (INTG (EVOL 'CHPO' UNX ENTREE))) / LY ;
+
+* Gradients de vitesse
+GRADUX = KOPS UNX 'GRADS' $DOM ;
+GRADUY = KOPS UNY 'GRADS' $DOM ;
+DUDX   = EXCO GRADUX 'UX' ;
+DUDY   = EXCO GRADUX 'UY' ;
+DVDX   = EXCO GRADUY 'UX' ;
+DVDY   = EXCO GRADUY 'UY' ;
+
+* Cisaillement
+TAU  = ABS (MU  * (DUDY+DVDX)) ;
+TAUT = ABS (MUT * (DUDY+DVDX)) ;
+TAUF = ABS (MUF * (DUDY+DVDX)) ;
+
+* Vitesse et coefficient de frottement
+TWH  = (MAXI (RESU (TAU*DGH)) 'ABS') / (MAXI (RESU DGH)) ;
+TWB  = (MAXI (RESU (TAU*DGB)) 'ABS') / (MAXI (RESU DGB)) ;
+TW   = 0.5 * (TWB + TWH) ;
+UTAU = (TW / RHO) ** 0.5 ;
+FF   = 8. * ((UTAU/UQ) ** 2) ;
+
+* Nombres de Reynolds
+RE    = UQ   * HH / NU ;
+RETAU = UTAU * HH / NU ;
+LNU   = NU / UTAU ;
+YPMIN = DYNMIN / LNU ;
+
+* Pression (relative) projetée aux noeuds
+PN = ELNO $DOM (RV . 'INCO' . 'PRESSION') KPRES ;
+
+* Gradient de pression
+PNE  = (MAXI (RESU (PN*DGE))) / (MAXI (RESU DGE)) ;
+PNS  = (MAXI (RESU (PN*DGS))) / (MAXI (RESU DGS)) ;
+DPDX = (PNS - PNE) / LX ;
+
+
+
+
+* +===================================================================+
+* | RÉSULTATS DNS DE MANSOUR (RETAU=590)                              |
+* +===================================================================+
+* Source: Moser, Kim, Mansour, Direct numerical simulation of turbulent
+*         channel flow up to Re=590, Phys. Fluids, 11(4):943, 1999
+
+* Ordonnées Y normalisées par HH
+LYDNS = PROG 0.0000E+00 7.5298E-05 3.0118E-04 6.7762E-04 1.2045E-03
+             1.8819E-03 2.7095E-03 3.6874E-03 4.8153E-03 6.0930E-03
+             7.5205E-03 9.0974E-03 1.0823E-02 1.2699E-02 1.4722E-02
+             1.6895E-02 1.9215E-02 2.1683E-02 2.4298E-02 2.7060E-02
+             2.9969E-02 3.3024E-02 3.6224E-02 3.9569E-02 4.3060E-02
+             4.6694E-02 5.0472E-02 5.4393E-02 5.8456E-02 6.2661E-02
+             6.7007E-02 7.1494E-02 7.6120E-02 8.0886E-02 8.5790E-02
+             9.0832E-02 9.6011E-02 1.0133E-01 1.0678E-01 1.1236E-01  ;
+LYDNS = LYDNS ET (PROG  1.1808E-01 1.2393E-01 1.2991E-01 1.3603E-01
+             1.4227E-01 1.4864E-01 1.5515E-01 1.6178E-01 1.6853E-01
+             1.7541E-01 1.8242E-01 1.8954E-01 1.9679E-01 2.0416E-01
+             2.1165E-01 2.1926E-01 2.2699E-01 2.3483E-01 2.4279E-01
+             2.5086E-01 2.5905E-01 2.6735E-01 2.7575E-01 2.8427E-01
+             2.9289E-01 3.0162E-01 3.1046E-01 3.1940E-01 3.2844E-01
+             3.3758E-01 3.4683E-01 3.5617E-01 3.6561E-01 3.7514E-01
+             3.8477E-01 3.9449E-01 4.0430E-01 4.1420E-01 4.2419E-01) ;
+LYDNS = LYDNS ET (PROG  4.3427E-01 4.4443E-01 4.5467E-01 4.6500E-01
+             4.7541E-01 4.8590E-01 4.9646E-01 5.0710E-01 5.1782E-01
+             5.2860E-01 5.3946E-01 5.5039E-01 5.6138E-01 5.7244E-01
+             5.8357E-01 5.9476E-01 6.0601E-01 6.1732E-01 6.2868E-01
+             6.4010E-01 6.5158E-01 6.6311E-01 6.7469E-01 6.8632E-01
+             6.9799E-01 7.0972E-01 7.2148E-01 7.3329E-01 7.4513E-01
+             7.5702E-01 7.6894E-01 7.8090E-01 7.9289E-01 8.0491E-01
+             8.1696E-01 8.2904E-01 8.4114E-01 8.5327E-01 8.6542E-01) ;
+LYDNS = LYDNS ET (PROG  8.7759E-01 8.8978E-01 9.0198E-01 9.1420E-01
+             9.2644E-01 9.3868E-01 9.5093E-01 9.6319E-01 9.7546E-01
+             9.8773E-01 1.0000E+00) ;
+
+* Ordonnées Y+ en unités de paroi (= RETAU au centre du canal)
+LYPDNS = PROG 0.0000E+00 4.4215E-02 1.7685E-01 3.9789E-01 7.0730E-01
+              1.1050E+00 1.5910E+00 2.1652E+00 2.8275E+00 3.5778E+00
+              4.4160E+00 5.3419E+00 6.3555E+00 7.4565E+00 8.6449E+00
+              9.9204E+00 1.1283E+01 1.2732E+01 1.4268E+01 1.5890E+01
+              1.7597E+01 1.9391E+01 2.1270E+01 2.3235E+01 2.5284E+01
+              2.7418E+01 2.9637E+01 3.1939E+01 3.4325E+01 3.6794E+01
+              3.9346E+01 4.1981E+01 4.4698E+01 4.7496E+01 5.0376E+01
+              5.3336E+01 5.6377E+01 5.9498E+01 6.2698E+01 6.5977E+01  ;
+LYPDNS = LYPDNS ET (PROG 6.9335E+01 7.2771E+01 7.6284E+01 7.9874E+01
+              8.3541E+01 8.7283E+01 9.1101E+01 9.4994E+01 9.8960E+01
+              1.0300E+02 1.0711E+02 1.1130E+02 1.1556E+02 1.1988E+02
+              1.2428E+02 1.2875E+02 1.3329E+02 1.3789E+02 1.4257E+02
+              1.4731E+02 1.5211E+02 1.5698E+02 1.6192E+02 1.6692E+02
+              1.7199E+02 1.7711E+02 1.8230E+02 1.8755E+02 1.9286E+02
+              1.9823E+02 2.0365E+02 2.0914E+02 2.1468E+02 2.2028E+02
+              2.2593E+02 2.3164E+02 2.3740E+02 2.4322E+02 2.4908E+02) ;
+LYPDNS = LYPDNS ET (PROG 2.5500E+02 2.6097E+02 2.6698E+02 2.7305E+02
+              2.7916E+02 2.8532E+02 2.9152E+02 2.9777E+02 3.0406E+02
+              3.1039E+02 3.1677E+02 3.2319E+02 3.2964E+02 3.3614E+02
+              3.4267E+02 3.4924E+02 3.5584E+02 3.6248E+02 3.6916E+02
+              3.7587E+02 3.8260E+02 3.8937E+02 3.9617E+02 4.0300E+02
+              4.0986E+02 4.1674E+02 4.2365E+02 4.3058E+02 4.3754E+02
+              4.4452E+02 4.5152E+02 4.5854E+02 4.6558E+02 4.7264E+02
+              4.7971E+02 4.8681E+02 4.9391E+02 5.0104E+02 5.0817E+02) ;
+LYPDNS = LYPDNS ET (PROG 5.1532E+02 5.2247E+02 5.2964E+02 5.3681E+02
+              5.4400E+02 5.5119E+02 5.5838E+02 5.6558E+02 5.7278E+02
+              5.7999E+02 5.8719E+02) ;
+
+* Vitesse axiale moyenne U
+LUDNS = PROG 0.0000E+00 4.4231E-02 1.7699E-01 3.9816E-01 7.0750E-01
+             1.1046E+00 1.5886E+00 2.1573E+00 2.8061E+00 3.5272E+00
+             4.3078E+00 5.1307E+00 5.9748E+00 6.8174E+00 7.6375E+00
+             8.4177E+00 9.1455E+00 9.8142E+00 1.0421E+01 1.0968E+01
+             1.1458E+01 1.1895E+01 1.2287E+01 1.2636E+01 1.2950E+01
+             1.3233E+01 1.3489E+01 1.3722E+01 1.3935E+01 1.4131E+01
+             1.4313E+01 1.4482E+01 1.4640E+01 1.4789E+01 1.4931E+01
+             1.5066E+01 1.5196E+01 1.5321E+01 1.5442E+01 1.5560E+01  ;
+LUDNS = LUDNS ET (PROG  1.5674E+01 1.5786E+01 1.5896E+01 1.6003E+01
+             1.6110E+01 1.6214E+01 1.6317E+01 1.6418E+01 1.6518E+01
+             1.6616E+01 1.6713E+01 1.6808E+01 1.6902E+01 1.6995E+01
+             1.7087E+01 1.7179E+01 1.7269E+01 1.7358E+01 1.7446E+01
+             1.7533E+01 1.7620E+01 1.7705E+01 1.7789E+01 1.7873E+01
+             1.7956E+01 1.8038E+01 1.8120E+01 1.8202E+01 1.8282E+01
+             1.8362E+01 1.8441E+01 1.8520E+01 1.8598E+01 1.8676E+01
+             1.8754E+01 1.8831E+01 1.8907E+01 1.8982E+01 1.9056E+01) ;
+LUDNS = LUDNS ET (PROG  1.9128E+01 1.9199E+01 1.9269E+01 1.9338E+01
+             1.9406E+01 1.9473E+01 1.9539E+01 1.9604E+01 1.9668E+01
+             1.9731E+01 1.9794E+01 1.9855E+01 1.9916E+01 1.9976E+01
+             2.0035E+01 2.0093E+01 2.0149E+01 2.0204E+01 2.0258E+01
+             2.0311E+01 2.0364E+01 2.0415E+01 2.0464E+01 2.0513E+01
+             2.0561E+01 2.0608E+01 2.0653E+01 2.0698E+01 2.0741E+01
+             2.0784E+01 2.0826E+01 2.0866E+01 2.0905E+01 2.0943E+01
+             2.0979E+01 2.1013E+01 2.1046E+01 2.1076E+01 2.1105E+01) ;
+LUDNS = LUDNS ET (PROG  2.1131E+01 2.1156E+01 2.1178E+01 2.1198E+01
+             2.1215E+01 2.1230E+01 2.1242E+01 2.1251E+01 2.1258E+01
+             2.1262E+01 2.1263E+01) ;
+
+* Gradient de vitesse moyenne dU/dY (= RETAU à la paroi)
+LGUDNS = PROG 5.8719E+02 5.8759E+02 5.8775E+02 5.8731E+02 5.8680E+02
+              5.8576E+02 5.8355E+02 5.7910E+02 5.7084E+02 5.5697E+02
+              5.3592E+02 5.0692E+02 4.7043E+02 4.2814E+02 3.8256E+02
+              3.3639E+02 2.9197E+02 2.5099E+02 2.1439E+02 1.8251E+02
+              1.5524E+02 1.3220E+02 1.1290E+02 9.6852E+01 8.3550E+01
+              7.2521E+01 6.3356E+01 5.5728E+01 4.9373E+01 4.4063E+01
+              3.9600E+01 3.5840E+01 3.2683E+01 3.0044E+01 2.7816E+01
+              2.5914E+01 2.4280E+01 2.2860E+01 2.1608E+01 2.0505E+01  ;
+LGUDNS = LGUDNS ET (PROG 1.9544E+01 1.8707E+01 1.7965E+01 1.7301E+01
+              1.6687E+01 1.6107E+01 1.5545E+01 1.5005E+01 1.4504E+01
+              1.4032E+01 1.3589E+01 1.3175E+01 1.2800E+01 1.2465E+01
+              1.2147E+01 1.1822E+01 1.1505E+01 1.1214E+01 1.0944E+01
+              1.0680E+01 1.0416E+01 1.0166E+01 9.9349E+00 9.7201E+00
+              9.5271E+00 9.3516E+00 9.1735E+00 8.9930E+00 8.8148E+00
+              8.6554E+00 8.5138E+00 8.3741E+00 8.2414E+00 8.1262E+00
+              8.0025E+00 7.8551E+00 7.6768E+00 7.4741E+00 7.2710E+00) ;
+LGUDNS = LGUDNS ET (PROG 7.0807E+00 6.9011E+00 6.7289E+00 6.5779E+00
+              6.4458E+00 6.3147E+00 6.1881E+00 6.0620E+00 5.9320E+00
+              5.8032E+00 5.6845E+00 5.5823E+00 5.4790E+00 5.3556E+00
+              5.2217E+00 5.0905E+00 4.9542E+00 4.8197E+00 4.6972E+00
+              4.5908E+00 4.4850E+00 4.3668E+00 4.2558E+00 4.1497E+00
+              4.0388E+00 3.9263E+00 3.8183E+00 3.7190E+00 3.6330E+00
+              3.5440E+00 3.4420E+00 3.3320E+00 3.2089E+00 3.0654E+00
+              2.9118E+00 2.7553E+00 2.5963E+00 2.4375E+00 2.2694E+00) ;
+LGUDNS = LGUDNS ET (PROG 2.0922E+00 1.9089E+00 1.7142E+00 1.5088E+00
+              1.3002E+00 1.0914E+00 8.7875E-01 6.6171E-01 4.3943E-01
+              2.1672E-01 0.0000E+00) ;
+
+* Pression moyenne P
+LPDNS = PROG  1.1583E-10 -4.0231E-10 -1.2880E-07 -3.0912E-06
+             -2.8168E-05 -1.4945E-04 -5.5903E-04 -1.6342E-03
+             -3.9750E-03 -8.3871E-03 -1.5808E-02 -2.7201E-02
+             -4.3448E-02 -6.5262E-02 -9.3127E-02 -1.2725E-01
+             -1.6754E-01 -2.1357E-01 -2.6463E-01 -3.1974E-01
+             -3.7777E-01 -4.3752E-01 -4.9778E-01 -5.5747E-01
+             -6.1556E-01 -6.7122E-01 -7.2379E-01 -7.7281E-01
+             -8.1799E-01 -8.5912E-01 -8.9612E-01 -9.2900E-01  ;
+LPDNS = LPDNS ET (PROG   -9.5791E-01 -9.8303E-01 -1.0046E+00
+             -1.0228E+00 -1.0380E+00 -1.0503E+00 -1.0599E+00
+             -1.0671E+00 -1.0722E+00 -1.0755E+00 -1.0773E+00
+             -1.0778E+00 -1.0769E+00 -1.0747E+00 -1.0715E+00
+             -1.0673E+00 -1.0625E+00 -1.0569E+00 -1.0509E+00
+             -1.0445E+00 -1.0378E+00 -1.0311E+00 -1.0243E+00
+             -1.0172E+00 -1.0098E+00 -1.0020E+00 -9.9380E-01
+             -9.8541E-01 -9.7686E-01 -9.6818E-01 -9.5935E-01) ;
+LPDNS = LPDNS ET (PROG   -9.5045E-01 -9.4154E-01 -9.3260E-01
+             -9.2361E-01 -9.1455E-01 -9.0542E-01 -8.9626E-01
+             -8.8706E-01 -8.7781E-01 -8.6856E-01 -8.5929E-01
+             -8.4986E-01 -8.4010E-01 -8.2986E-01 -8.1922E-01
+             -8.0835E-01 -7.9730E-01 -7.8603E-01 -7.7461E-01
+             -7.6309E-01 -7.5145E-01 -7.3967E-01 -7.2780E-01
+             -7.1585E-01 -7.0381E-01 -6.9174E-01 -6.7973E-01
+             -6.6781E-01 -6.5600E-01 -6.4434E-01 -6.3286E-01) ;
+LPDNS = LPDNS ET (PROG   -6.2160E-01 -6.1057E-01 -5.9982E-01
+             -5.8939E-01 -5.7929E-01 -5.6945E-01 -5.5978E-01
+             -5.5026E-01 -5.4089E-01 -5.3164E-01 -5.2247E-01
+             -5.1334E-01 -5.0428E-01 -4.9532E-01 -4.8647E-01
+             -4.7774E-01 -4.6920E-01 -4.6088E-01 -4.5284E-01
+             -4.4512E-01 -4.3774E-01 -4.3077E-01 -4.2426E-01
+             -4.1823E-01 -4.1272E-01 -4.0778E-01 -4.0351E-01
+             -3.9995E-01 -3.9704E-01 -3.9472E-01 -3.9298E-01) ;
+LPDNS = LPDNS ET (PROG   -3.9179E-01 -3.9107E-01 -3.9069E-01
+             -3.9056E-01) ;
+
+* Composante R11 du tenseur de Reynolds, normalisée par UTAU²
+LUUDNS = PROG 7.8003E-28 3.2061E-04 5.1136E-03 2.5785E-02 8.1096E-02
+              1.9683E-01 4.0482E-01 7.3979E-01 1.2321E+00 1.8957E+00
+              2.7157E+00 3.6428E+00 4.6014E+00 5.5079E+00 6.2915E+00
+              6.9073E+00 7.3390E+00 7.5940E+00 7.6943E+00 7.6684E+00
+              7.5456E+00 7.3529E+00 7.1132E+00 6.8448E+00 6.5619E+00
+              6.2763E+00 5.9966E+00 5.7282E+00 5.4746E+00 5.2376E+00
+              5.0183E+00 4.8166E+00 4.6318E+00 4.4625E+00 4.3076E+00
+              4.1662E+00 4.0371E+00 3.9194E+00 3.8125E+00 3.7158E+00  ;
+LUUDNS = LUUDNS ET (PROG 3.6283E+00 3.5486E+00 3.4753E+00 3.4071E+00
+              3.3436E+00 3.2845E+00 3.2291E+00 3.1773E+00 3.1287E+00
+              3.0832E+00 3.0407E+00 3.0008E+00 2.9626E+00 2.9255E+00
+              2.8894E+00 2.8550E+00 2.8216E+00 2.7885E+00 2.7553E+00
+              2.7218E+00 2.6885E+00 2.6554E+00 2.6223E+00 2.5893E+00
+              2.5568E+00 2.5242E+00 2.4911E+00 2.4577E+00 2.4241E+00
+              2.3902E+00 2.3562E+00 2.3222E+00 2.2877E+00 2.2519E+00
+              2.2148E+00 2.1771E+00 2.1393E+00 2.1017E+00 2.0637E+00) ;
+LUUDNS = LUUDNS ET (PROG 2.0252E+00 1.9861E+00 1.9463E+00 1.9062E+00
+              1.8658E+00 1.8252E+00 1.7848E+00 1.7448E+00 1.7053E+00
+              1.6661E+00 1.6269E+00 1.5874E+00 1.5480E+00 1.5094E+00
+              1.4717E+00 1.4346E+00 1.3979E+00 1.3617E+00 1.3260E+00
+              1.2908E+00 1.2561E+00 1.2224E+00 1.1895E+00 1.1573E+00
+              1.1262E+00 1.0960E+00 1.0665E+00 1.0371E+00 1.0078E+00
+              9.7860E-01 9.4963E-01 9.2092E-01 8.9268E-01 8.6521E-01
+              8.3889E-01 8.1354E-01 7.8856E-01 7.6402E-01 7.4059E-01) ;
+LUUDNS = LUUDNS ET (PROG 7.1880E-01 6.9869E-01 6.7994E-01 6.6252E-01
+              6.4673E-01 6.3278E-01 6.2099E-01 6.1165E-01 6.0499E-01
+              6.0112E-01 5.9990E-01) ;
+
+* Composante R22 du tenseur de Reynolds, normalisée par UTAU²
+LVVDNS = PROG 5.4179E-29 5.2474E-10 1.2894E-07 3.0913E-06 2.8168E-05
+              1.4945E-04 5.5903E-04 1.6342E-03 3.9750E-03 8.3871E-03
+              1.5808E-02 2.7201E-02 4.3448E-02 6.5262E-02 9.3127E-02
+              1.2725E-01 1.6754E-01 2.1357E-01 2.6463E-01 3.1974E-01
+              3.7777E-01 4.3752E-01 4.9778E-01 5.5747E-01 6.1556E-01
+              6.7122E-01 7.2379E-01 7.7281E-01 8.1799E-01 8.5912E-01
+              8.9612E-01 9.2900E-01 9.5791E-01 9.8303E-01 1.0046E+00
+              1.0228E+00 1.0380E+00 1.0503E+00 1.0599E+00 1.0671E+00  ;
+LVVDNS = LVVDNS ET (PROG 1.0722E+00 1.0755E+00 1.0773E+00 1.0778E+00
+              1.0769E+00 1.0747E+00 1.0715E+00 1.0673E+00 1.0625E+00
+              1.0569E+00 1.0509E+00 1.0445E+00 1.0378E+00 1.0311E+00
+              1.0243E+00 1.0172E+00 1.0098E+00 1.0020E+00 9.9380E-01
+              9.8541E-01 9.7687E-01 9.6818E-01 9.5936E-01 9.5045E-01
+              9.4154E-01 9.3260E-01 9.2361E-01 9.1455E-01 9.0542E-01
+              8.9626E-01 8.8706E-01 8.7782E-01 8.6856E-01 8.5929E-01
+              8.4986E-01 8.4010E-01 8.2987E-01 8.1922E-01 8.0835E-01) ;
+LVVDNS = LVVDNS ET (PROG 7.9730E-01 7.8604E-01 7.7461E-01 7.6309E-01
+              7.5146E-01 7.3967E-01 7.2780E-01 7.1585E-01 7.0382E-01
+              6.9174E-01 6.7973E-01 6.6782E-01 6.5601E-01 6.4434E-01
+              6.3287E-01 6.2161E-01 6.1058E-01 5.9982E-01 5.8939E-01
+              5.7929E-01 5.6945E-01 5.5978E-01 5.5026E-01 5.4089E-01
+              5.3165E-01 5.2247E-01 5.1334E-01 5.0428E-01 4.9532E-01
+              4.8647E-01 4.7775E-01 4.6920E-01 4.6088E-01 4.5284E-01
+              4.4512E-01 4.3775E-01 4.3077E-01 4.2426E-01 4.1824E-01) ;
+LVVDNS = LVVDNS ET (PROG 4.1272E-01 4.0778E-01 4.0351E-01 3.9995E-01
+              3.9704E-01 3.9472E-01 3.9298E-01 3.9179E-01 3.9107E-01
+              3.9069E-01 3.9056E-01) ;
+
+* Composante R33 du tenseur de Reynolds, normalisée par UTAU²
+LWWDNS = PROG 8.5292E-28 1.3126E-04 2.0297E-03 9.7381E-03 2.8591E-02
+              6.3627E-02 1.1816E-01 1.9292E-01 2.8591E-01 3.9313E-01
+              5.0967E-01 6.3093E-01 7.5333E-01 8.7449E-01 9.9290E-01
+              1.1074E+00 1.2166E+00 1.3193E+00 1.4140E+00 1.4997E+00
+              1.5758E+00 1.6421E+00 1.6986E+00 1.7460E+00 1.7850E+00
+              1.8167E+00 1.8417E+00 1.8609E+00 1.8746E+00 1.8833E+00
+              1.8874E+00 1.8873E+00 1.8837E+00 1.8770E+00 1.8677E+00
+              1.8561E+00 1.8431E+00 1.8290E+00 1.8140E+00 1.7979E+00  ;
+LWWDNS = LWWDNS ET (PROG 1.7803E+00 1.7614E+00 1.7418E+00 1.7224E+00
+              1.7033E+00 1.6846E+00 1.6660E+00 1.6470E+00 1.6280E+00
+              1.6090E+00 1.5896E+00 1.5703E+00 1.5519E+00 1.5342E+00
+              1.5170E+00 1.5001E+00 1.4833E+00 1.4663E+00 1.4486E+00
+              1.4301E+00 1.4117E+00 1.3938E+00 1.3766E+00 1.3595E+00
+              1.3417E+00 1.3234E+00 1.3052E+00 1.2876E+00 1.2704E+00
+              1.2532E+00 1.2359E+00 1.2184E+00 1.2005E+00 1.1819E+00
+              1.1631E+00 1.1445E+00 1.1264E+00 1.1086E+00 1.0912E+00) ;
+LWWDNS = LWWDNS ET (PROG 1.0742E+00 1.0574E+00 1.0404E+00 1.0231E+00
+              1.0054E+00 9.8743E-01 9.6942E-01 9.5123E-01 9.3273E-01
+              9.1418E-01 8.9579E-01 8.7788E-01 8.6017E-01 8.4230E-01
+              8.2452E-01 8.0720E-01 7.9033E-01 7.7300E-01 7.5481E-01
+              7.3609E-01 7.1728E-01 6.9853E-01 6.7989E-01 6.6150E-01
+              6.4315E-01 6.2482E-01 6.0700E-01 5.9018E-01 5.7416E-01
+              5.5850E-01 5.4341E-01 5.2915E-01 5.1576E-01 5.0301E-01
+              4.9074E-01 4.7893E-01 4.6765E-01 4.5681E-01 4.4659E-01) ;
+LWWDNS = LWWDNS ET (PROG 4.3736E-01 4.2909E-01 4.2144E-01 4.1444E-01
+              4.0836E-01 4.0351E-01 3.9998E-01 3.9751E-01 3.9577E-01
+              3.9483E-01 3.9460E-01) ;
+
+* (-) Composante R12 du tenseur de Reynolds, normalisée par UTAU²
+LUVDNS = PROG 3.4110E-32 8.3643E-08 5.4165E-06 6.2838E-05 3.6100E-04
+              1.4079E-03 4.2722E-03 1.0806E-02 2.3664E-02 4.5923E-02
+              8.0246E-02 1.2791E-01 1.8812E-01 2.5805E-01 3.3350E-01
+              4.0991E-01 4.8325E-01 5.5066E-01 6.1046E-01 6.6206E-01
+              7.0561E-01 7.4172E-01 7.7121E-01 7.9495E-01 8.1381E-01
+              8.2863E-01 8.4013E-01 8.4890E-01 8.5537E-01 8.5990E-01
+              8.6280E-01 8.6434E-01 8.6467E-01 8.6388E-01 8.6215E-01
+              8.5967E-01 8.5663E-01 8.5323E-01 8.4963E-01 8.4591E-01  ;
+LUVDNS = LUVDNS ET (PROG 8.4195E-01 8.3760E-01 8.3283E-01 8.2766E-01
+              8.2219E-01 8.1646E-01 8.1043E-01 8.0407E-01 7.9745E-01
+              7.9067E-01 7.8385E-01 7.7705E-01 7.7015E-01 7.6297E-01
+              7.5554E-01 7.4804E-01 7.4057E-01 7.3311E-01 7.2557E-01
+              7.1796E-01 7.1026E-01 7.0242E-01 6.9434E-01 6.8600E-01
+              6.7752E-01 6.6897E-01 6.6034E-01 6.5164E-01 6.4292E-01
+              6.3421E-01 6.2543E-01 6.1651E-01 6.0750E-01 5.9849E-01
+              5.8941E-01 5.8021E-01 5.7095E-01 5.6170E-01 5.5239E-01) ;
+LUVDNS = LUVDNS ET (PROG 5.4291E-01 5.3325E-01 5.2351E-01 5.1368E-01
+              5.0372E-01 4.9369E-01 4.8360E-01 4.7332E-01 4.6286E-01
+              4.5232E-01 4.4176E-01 4.3112E-01 4.2037E-01 4.0954E-01
+              3.9862E-01 3.8766E-01 3.7680E-01 3.6606E-01 3.5527E-01
+              3.4436E-01 3.3334E-01 3.2224E-01 3.1098E-01 2.9953E-01
+              2.8797E-01 2.7642E-01 2.6498E-01 2.5368E-01 2.4238E-01
+              2.3102E-01 2.1963E-01 2.0819E-01 1.9667E-01 1.8512E-01
+              1.7357E-01 1.6201E-01 1.5040E-01 1.3873E-01 1.2707E-01) ;
+LUVDNS = LUVDNS ET (PROG 1.1551E-01 1.0404E-01 9.2622E-02 8.1169E-02
+              6.9647E-02 5.8062E-02 4.6422E-02 3.4768E-02 2.3138E-02
+              1.1543E-02 0.0000E+00) ;
+
+* Energie cinétique turbulente, normalisée par UTAU²
+LKDNS = 0.5 * (LUUDNS + LVVDNS + LWWDNS) ;
+
+* Vitesse débitante
+EVUDNS = EVOL 'MANU' LYDNS LUDNS ;
+UQDNS  = (MAXI (INTG EVUDNS)) / (MAXI LYDNS) ;
+
+* Vitesse et coefficient de frottement
+UTAUDNS = 1. ;
+TWDNS   = 1.*UTAUDNS*UTAUDNS ;
+FFDNS   = 8. * ((UTAUDNS/UQDNS) ** 2) ;
+
+* Nombres de Reynolds
+RETAUDNS = EXTR LGUDNS 1 ;
+REDNS    = RETAUDNS * UQDNS / UTAUDNS ;
+
+
+
+
+* AFFICHAGE DES RÉSULTATS
+***********************************************************************
+***********************************************************************
+SI (GRAPH) ;
+
+
+
+
+* +===================================================================+
+* | PROFILS DE VITESSE                                                |
+* +===================================================================+
+
+LEG2 = TABL ;
+LEG2 . 2 = 'TIRR ' ;
+LEG2 . 'TITRE' = TABL ;
+LEG2 . 'TITRE' . 1 = 'SPAL: paroi basse' ;
+LEG2 . 'TITRE' . 2 = 'SPAL: paroi haute' ;
+LEG2 . 'TITRE' . 3 = 'DNS' ;
+LEG2 . 'TITRE' . 4 = 'Reichardt' ;
+
+
+* Normalisation par la vitesse débitante
+* --------------------------------------
+EVUB = EVOL 'CHPO' UNX SGY1B ;
+EVUH = EVOL 'CHPO' UNX SGY1H ;
+LYB  = EXTR EVUB 'ABSC' ;
+LYH  = EXTR EVUH 'ABSC' ;
+LUB  = EXTR EVUB 'ORDO' ;
+LUH  = EXTR EVUH 'ORDO' ;
+EVUQB = EVOL 'ROUG' 'MANU' (LUB/UQ) (LYB/HH) ;
+EVUQH = EVOL 'ORAN' 'MANU' (LUH/UQ) (LYH/HH) ;
+
+EVUQDNS = EVOL 'CYAN' 'MANU' (LUDNS*(1./UQDNS)) LYDNS ;
+
+DESS (EVUQB ET EVUQH ET EVUQDNS)
+    'TITR' 'Profil de vitesse axiale sur un demi canal'
+    'TITX' 'UX/UQ'
+    'TITY' 'Y/HH'
+    'YBOR' 0. HH 'GRIL' 'LEGE' LEG2 ;
+
+
+* Normalisation par les unités de paroi
+* -------------------------------------
+EVUPB = EVOL 'ROUG' 'MANU' (ENLE (LYB*(RETAU/HH)) 1)
+                           (ENLE (LUB/UTAU)       1) ;
+EVUPH = EVOL 'ORAN' 'MANU' (ENLE (LYH*(RETAU/HH)) 1)
+                           (ENLE (LUH/UTAU)       1) ;
+
+EVUPDNS = EVOL 'CYAN' 'MANU' (ENLE LYPDNS 1) (ENLE LUDNS 1) ;
+
+* Formule analytique de Reichardt
+LYPR = PROG 0.1 'PAS' 0.1  30
+                'PAS' 1.   100.
+                'PAS' 50.  1.E3 ;
+LR1   = PROG (DIME LYPR)*1. ;
+KA    = RV . 'SPALART_ALLMARAS' . 'KCONST' . 'KAPPA' ;
+LUPR  = (1./KA) * (LOG (LR1 + (KA*LYPR)))
+      + (7.8 * ( LR1 - (EXP (LYPR*(-1./11.)))
+         + ((LYPR*(-1./11.)) * (EXP (LYPR*(-1./3.)))) )) ;
+EVUPR = EVOL 'VERT' 'MANU' LYPR LUPR ;
+
+DESS (EVUPB ET EVUPH ET EVUPDNS ET EVUPR)
+    'TITR' 'Profil de vitesse axiale en proche-paroi'
+    'TITX' 'Y+ = Y*UTAU/NU'
+    'TITY' 'U+ = UX/UTAU'
+    'LOGX' 'XBOR' YPMIN RETAU 'GRIL' 'LEGE' LEG2 ;
+
+
+
+
+* +===================================================================+
+* | PROFIL DE PRESSION                                                |
+* +===================================================================+
+
+EVPB = EVOL 'CHPO' PN SGY1B ;
+EVPH = EVOL 'CHPO' PN SGY1H ;
+LPB  = EXTR EVPB 'ORDO' ;
+LPH  = EXTR EVPH 'ORDO' ;
+EVPB = EVOL 'ROUG' 'MANU' (LPB*(2./(UQ*UQ))) (LYB/HH) ;
+EVPH = EVOL 'ORAN' 'MANU' (LPH*(2./(UQ*UQ))) (LYH/HH) ;
+
+EVPDNS = EVOL 'CYAN' 'MANU' (LPDNS*(2./(UQDNS*UQDNS))) LYDNS ;
+
+DESS (EVPB ET EVPH ET EVPDNS)
+    'TITR' 'Profils de pression'
+    'TITX' 'P/(1/2*UQ²)'
+    'TITY' 'Y/HH'
+    'YBOR' 0. HH 'GRIL' 'LEGE' LEG2 ;
+
+
+
+
+* +===================================================================+
+* | PROFILS DE CISAILLEMENT                                           |
+* +===================================================================+
+
+EVTOB  = EVOL 'CHPO' TAU  SGY1B ;
+EVTOH  = EVOL 'CHPO' TAU  SGY1H ;
+LTOB   = EXTR EVTOB 'ORDO' ;
+LTOH   = EXTR EVTOH 'ORDO' ;
+
+EVTOTB = EVOL 'CHPO' TAUT SGY1B ;
+EVTOTH = EVOL 'CHPO' TAUT SGY1H ;
+LTOTB  = EXTR EVTOTB 'ORDO' ;
+LTOTH  = EXTR EVTOTH 'ORDO' ;
+
+LTOFB  = LTOB + LTOTB ;
+LTOFH  = LTOH + LTOTH ;
+
+LTODNS  = LGUDNS / RETAUDNS ;
+LTOTDNS = LUVDNS ;
+LTOFDNS = LTODNS + LTOTDNS ;
+
+
+* Cisaillement turbulent
+* ----------------------
+EVTOTB = EVOL 'ROUG' 'MANU' (LTOTB/TW) (LYB/HH) ;
+EVTOTH = EVOL 'ORAN' 'MANU' (LTOTH/TW) (LYH/HH) ;
+
+EVTOTDNS = EVOL 'CYAN' 'MANU' LTOTDNS LYDNS ;
+
+DESS (EVTOTB ET EVTOTH ET EVTOTDNS)
+    'TITR' 'Profils de cisaillement turbulent'
+    'TITX' 'Taut/Tw'
+    'TITY' 'Y/HH'
+    'YBOR' 0. HH 'GRIL' 'LEGE' LEG2 ;
+
+
+* Cisaillement moyen
+* ------------------
+EVTOB = EVOL 'ROUG' 'MANU' (LTOB/TW) (LYB/HH) ;
+EVTOH = EVOL 'ORAN' 'MANU' (LTOH/TW) (LYH/HH) ;
+
+EVTODNS = EVOL 'CYAN' 'MANU' LTODNS LYDNS ;
+
+DESS (EVTOB ET EVTOH ET EVTODNS)
+    'TITR' 'Profils de cisaillement moyen'
+    'TITX' 'Tau/Tw'
+    'TITY' 'Y/HH'
+    'YBOR' 0. HH 'GRIL' 'LEGE' LEG2 ;
+
+
+* Cisaillement total
+* ------------------
+EVTOFB = EVOL 'ROUG' 'MANU' (LTOFB/TW) (LYB/HH) ;
+EVTOFH = EVOL 'ORAN' 'MANU' (LTOFH/TW) (LYH/HH) ;
+
+EVTOFDNS = EVOL 'CYAN' 'MANU' LTOFDNS LYDNS ;
+
+DESS (EVTOFB ET EVTOFH ET EVTOFDNS)
+    'TITR' 'Profils de cisaillement total'
+    'TITX' '(Tau+Taut)/Tw'
+    'TITY' 'Y/HH'
+    'YBOR' 0. HH 'GRIL' 'LEGE' LEG2 ;
+
+
+* Bugdet cisaillement
+* -------------------
+LEG3 = TABL ;
+LEG3 . 2 = 'TIRR ' ;
+LEG3 . 4 = 'TIRR ' ;
+LEG3 . 6 = 'TIRR ' ;
+LEG3 . 'TITRE' = TABL ;
+LEG3 . 'TITRE' . 1 = 'SPAL: Tau visq.' ;
+LEG3 . 'TITRE' . 2 = 'DNS:  Tau visq.' ;
+LEG3 . 'TITRE' . 3 = 'SPAL: Tau turb.' ;
+LEG3 . 'TITRE' . 4 = 'DNS:  Tau turb.' ;
+LEG3 . 'TITRE' . 5 = 'SPAL: Tau total' ;
+LEG3 . 'TITRE' . 6 = 'DNS:  Tau total' ;
+
+EVTOPB   = EVOL 'ROUG' 'MANU' (ENLE (LTOB/TW)        1)
+                              (ENLE (LYB*(RETAU/HH)) 1) ;
+EVTOTPB  = EVOL 'CYAN' 'MANU' (ENLE (LTOTB/TW)       1)
+                              (ENLE (LYB*(RETAU/HH)) 1) ;
+EVTOFPB  = EVOL 'VERT' 'MANU' (ENLE (LTOFB/TW)       1)
+                              (ENLE (LYB*(RETAU/HH)) 1) ;
+
+EVTOPDNS = EVOL 'ROUG' 'MANU' (ENLE LTODNS           1)
+                              (ENLE LYPDNS           1) ;
+EVTOTPDN = EVOL 'CYAN' 'MANU' (ENLE LTOTDNS          1)
+                              (ENLE LYPDNS           1) ;
+EVTOFPDN = EVOL 'VERT' 'MANU' (ENLE LTOFDNS          1)
+                              (ENLE LYPDNS           1) ;
+
+DESS (EVTOPB ET EVTOPDNS ET EVTOTPB ET EVTOTPDN ET EVTOFPB ET EVTOFPDN)
+    'TITR' 'Budget du cisaillement'
+    'TITX' 'Cisail. normé par Tw'
+    'TITY' 'Y+ = Y*UTAU/NU'
+    'LOGY' 'YBOR' YPMIN RETAU 'GRIL' 'LEGE' LEG3 ;
+
+
+
+
+* +===================================================================+
+* | PROFIL D'ÉNERGIE CINÉTIQUE TURBULENTE                             |
+* +===================================================================+
+*
+* /!\ L'énergie cinétique turbulente n'est pas calculée par le modèle
+*     de Spalart-Allmaras. On doit se contenter de la déterminer par
+*     des considérations dimensionnelles plus ou moins pertinentes...
+
+DPAROI = KOPS (RV . 'PAROIS' . 'DIST') '|<' 1.E-15 ;
+DPAROIP = DPAROI * UTAU / NU ;
+LM1 = KA * DPAROIP * (1. - (EXP ((-1./26.) * DPAROIP))) ;
+*KT  = 2. * MUT * ((ABS DUDX) + (ABS DVDY)) ;
+*KT = (MUT * USRHO * (UTAU**3) / (0.09*HH)) ** 0.5 ;
+KT = (MUT * USRHO * (INVE LM1) / (NU)) ** 2 ;
+
+EVKB  = EVOL 'CHPO' KT  SGY1B ;
+EVKH  = EVOL 'CHPO' KT  SGY1H ;
+LKB   = EXTR EVKB 'ORDO' ;
+LKH   = EXTR EVKH 'ORDO' ;
+EVKB  = EVOL 'ROUG' 'MANU' (LKB/(UTAU*UTAU)) (LYB/HH) ;
+EVKH  = EVOL 'ORAN' 'MANU' (LKH/(UTAU*UTAU)) (LYH/HH) ;
+
+EVKDNS = EVOL 'CYAN' 'MANU' LKDNS LYDNS ;
+
+
+DESS (EVKB ET EVKH ET EVKDNS)
+    'TITR' 'Profils d énergie cinétique turbulente'
+    'TITX' 'k/Utau²'
+    'TITY' 'Y/HH'
+    'YBOR' 0. HH 'GRIL' 'LEGE' LEG2 ;
+
+
+
+
+* +===================================================================+
+* | PROFIL DE VISCOSITÉ TURBULENTE                                    |
+* +===================================================================+
+*
+* /!\ La viscosité turbulente n'a pas véritablement de sens pour un
+*     calcul DNS. On la calcule uniquement à titre d'information.
+
+EVNU0B = EVOL 'CHPO' NU0 SGY1B ;
+EVNU0H = EVOL 'CHPO' NU0 SGY1H ;
+LNU0B  = EXTR EVNU0B 'ORDO' ;
+LNU0H  = EXTR EVNU0H 'ORDO' ;
+
+EVNUTB = EVOL 'CHPO' (MUT*USRHO) SGY1B ;
+EVNUTH = EVOL 'CHPO' (MUT*USRHO) SGY1H ;
+LNUTB  = EXTR EVNUTB 'ORDO' ;
+LNUTH  = EXTR EVNUTH 'ORDO' ;
+
+LNUTDNS = LUVDNS / LGUDNS ;
+
+
+* Comparaison de la viscosité turbulente à la DNS
+* -----------------------------------------------
+EVNUTB = EVOL 'ROUG' 'MANU' (LNUTB/(HH*UTAU)) LYB ;
+EVNUTH = EVOL 'ORAN' 'MANU' (LNUTH/(HH*UTAU)) LYH ;
+
+EVNUTDNS = EVOL 'CYAN' 'MANU' LNUTDNS LYDNS ;
+
+DESS (EVNUTB ET EVNUTH ET EVNUTDNS)
+    'TITR' 'Profils de viscosité turbulente'
+    'TITX' 'Nut/(HH*Utau)'
+    'TITY' 'Y/HH'
+    'YBOR' 0. HH 'GRIL' 'LEGE' LEG2 ;
+
+
+* Comparaison de la viscosité turbulente à la viscosité modifiée
+* --------------------------------------------------------------
+LEG4 = TABL ;
+LEG4 . 2 = 'TIRR ' ;
+LEG4 . 4 = 'TIRR ' ;
+LEG4 . 5 = 'TIRC ' ;
+LEG4 . 6 = 'TIRL ' ;
+LEG4 . 'TITRE' = TABL ;
+LEG4 . 'TITRE' . 1 = 'NU0: paroi basse' ;
+LEG4 . 'TITRE' . 2 = 'NU0: paroi haute' ;
+LEG4 . 'TITRE' . 3 = 'NUT: paroi basse' ;
+LEG4 . 'TITRE' . 4 = 'NUT: paroi haute' ;
+LEG4 . 'TITRE' . 5 = 'NUT: DNS' ;
+LEG4 . 'TITRE' . 6 = (CHAI 'Y=' KA '*X') ;
+
+EVNU0PB = EVOL 'ROUG' 'MANU' (ENLE (LYB*(RETAU/HH)) 1)
+                             (ENLE (LNU0B*(1./NU))  1) ;
+EVNU0PH = EVOL 'ORAN' 'MANU' (ENLE (LYH*(RETAU/HH)) 1)
+                             (ENLE (LNU0H*(1./NU))  1) ;
+
+EVNUTPB = EVOL 'ROSE' 'MANU' (ENLE (LYB*(RETAU/HH)) 1)
+                             (ENLE (LNUTB*(1./NU))  1) ;
+EVNUTPH = EVOL 'VIOL' 'MANU' (ENLE (LYH*(RETAU/HH)) 1)
+                             (ENLE (LNUTH*(1./NU))  1) ;
+
+EVNUTPDN = EVOL 'CYAN' 'MANU' (ENLE LYPDNS             1)
+                              (ENLE (LNUTDNS*RETAUDNS) 1) ;
+
+* Droite Y=KAPPA*X (comportement de NU0 à la paroi)
+EVPROP = EVOL 'VERT' 'MANU' (PROG 1. 'PAS' 1   80.    )
+                            (PROG KA 'PAS' KA (80.*KA)) ;
+
+DESS (EVNU0PB ET EVNU0PH ET EVNUTPB ET EVNUTPH ET EVNUTPDN ET EVPROP)
+    'TITR' 'Profil de viscosité modifiée en proche-paroi'
+    'TITX' 'Y+ = Y*UTAU/NU'
+    'TITY' 'NU0/NU'
+    'LOGX' 'XBOR' YPMIN RETAU 'GRIL' 'LEGE' LEG4 ;
+
+
+
+
+* +===================================================================+
+* | BUDGET DE VISCOSITÉ TURBULENTE                                    |
+* +===================================================================+
+
+LEG5 = TABL ;
+LEG5 . 4 = 'TIRR ' ;
+LEG5 . 'TITRE' = TABL ;
+LEG5 . 'TITRE' . 1 = 'Diffusion' ;
+LEG5 . 'TITRE' . 2 = 'Production' ;
+LEG5 . 'TITRE' . 3 = 'Destruction' ;
+LEG5 . 'TITRE' . 4 = 'INTG' ;
+
+CB1      = (RV.'SPALART_ALLMARAS'.'KCONST'.'CB1') ;
+NUD1     = (RV.'INCO'.'SPAL'.'KSI') * NU ;
+CDIFF    = (NU + NUD1) * (1./(RV.'SPALART_ALLMARAS'.'KCONST'.'SIGMA')) ;
+SADIFF1  = KOPS NUD1 'GRADS' $DOM ;
+LCO      = EXTR SADIFF1 'COMP' ;
+SADIFF1X = EXCO (KOPS (CDIFF*(EXCO SADIFF1 'UX')) 'GRADS' $DOM) 'UX' ;
+SADIFF1Y = EXCO (KOPS (CDIFF*(EXCO SADIFF1 'UY')) 'GRADS' $DOM) 'UY' ;
+SADIFF   = SADIFF1X + SADIFF1Y + (RV.'INCO'.'SPAL'.'B1') ;
+SAPROD   = (RV.'INCO'.'SPAL'.'B2') ;
+SADEST   = (-1.) * (RV.'INCO'.'SPAL'.'B3') ;
+
+
+EVSADIFF = EVOL 'CHPO' SADIFF SGY1B ;
+LSADIFF  = EXTR EVSADIFF 'ORDO' ;
+
+EVSAPROD = EVOL 'CHPO' SAPROD SGY1B ;
+LSAPROD  = EXTR EVSAPROD 'ORDO' ;
+
+EVSADEST = EVOL 'CHPO' SADEST SGY1B ;
+LSADEST  = EXTR EVSADEST 'ORDO' ;
+
+LSATOT   = LSADIFF + LSAPROD + LSADEST ;
+
+EVSADIFF = EVOL 'ROUG' 'MANU' (LYB/HH) (LSADIFF/(CB1*TW)) ;
+EVSAPROD = EVOL 'VERT' 'MANU' (LYB/HH) (LSAPROD/(CB1*TW)) ;
+EVSADEST = EVOL 'JAUN' 'MANU' (LYB/HH) (LSADEST/(CB1*TW)) ;
+EVSATOT  = EVOL 'ROSE' 'MANU' (LYB/HH) (LSATOT/(CB1*TW)) ;
+
+DESS (EVSADIFF ET EVSAPROD ET EVSADEST ET EVSATOT)
+    'TITR' 'Budget de la viscosité turbulente'
+    'TITX' 'Y/HH'
+    'TITY' '##/(CB1*Tw)'
+    'XBOR' 0. HH 'YBOR' -10. 10. 'GRIL' 'LEGE' LEG5 ;
+
+
+
+
+FINS ;
+***********************************************************************
+***********************************************************************
+
+
+
+
+
+
+
+
+
+
+* +===================================================================+
+* |                                                                   |
+* |         5  -  C O M P T E - R E N D U   D U   C A L C U L         |
+* |                                                                   |
+* +===================================================================+
+
+* Résultats analytiques en utilisant la corrélation de Blasius
+* (valables seulement pour 4000 < Re < 1.E5)
+UQBL    = (DPDX*(DH**1.25) / (-0.1582*RHO*(NU**0.25))) ** (4./7.) ;
+TWBL    = HH * (-1.) * DPDX ;
+UTAUBL  = (TWBL / RHO) ** 0.5 ;
+FFBL    = 8. * ((UTAUBL/UQBL) ** 2) ;
+RETAUBL = UTAUBL*HH/NU ;
+REBL    = UQBL  *HH/NU ;
+
+
+OPTI 'ECHO' 0 ;
+MESS '                                                               ' ;
+MESS '===============================================================' ;
+MESS 'RÉSUMÉ DU CALCUL                                               ' ;
+MESS '===============================================================' ;
+MESS 'Description            : Test de SPAL sur un canal périodique'   ;
+MESS (CHAI
+     'Nombre de pas de temps : ' ((RV . 'PASDETPS' . 'NUPASDT') - 1)
+     )                                                                 ;
+MESS (CHAI
+     'Durée du pas de temps  : ' (@ARR (RV.'INCO'.'DT'*1000.) 1) 'ms'
+            ' (CFL = ' (@ARR (MAXI (UNX*(RV.'INCO'.'DT')/DXE)) 2) ')'
+     )                                                                 ;
+MESS (CHAI
+     'Temps physique simulé  : ' (@ARR (RV . 'PASDETPS' . 'TPS') 3) 's'
+     )                                                                 ;
+MESS (CHAI
+     'Type d éléments        : ' DISCR ' ' KPRES
+     )                                                                 ;
+MESS (CHAI
+     'Décentrement           : ' DCENTR ' (KCMD=' (@ARR KCMD 2) ')'
+     )                                                                 ;
+MESS '                                                               ' ;
+MESS '                                                               ' ;
+MESS '===============================================================' ;
+MESS 'PARAMÈTRES DU MAILLAGE                                         ' ;
+MESS '===============================================================' ;
+MESS (CHAI
+     'Dimensions:                   : ' (@ARR LX 2) 'x' (@ARR LY 2) 'm'
+     )                                                                 ;
+MESS (CHAI
+     'Nombre d éléments             : ' NXE 'x' NYE '=' (NBEL DOM)
+     )                                                                 ;
+MESS (CHAI
+     'Nombre de noeuds              : ' NXN 'x' NYN '=' (NBNO DOM)
+     )                                                                 ;
+MESS (CHAI
+     'Taille de la 1ère maille      : ' (@ARR (DYNMIN*1000.) 3) 'mm'
+                             ' (DY+ = ' (@ARR YPMIN 2)          ')'
+     )                                                                 ;
+MESS (CHAI
+     'Taille des mailles centrales  : ' (@ARR DYNMAX 2) 'm'
+                             ' (DY+ = ' (@ARR (DYNMAX/LNU) 2)   ')'
+     )                                                                 ;
+MESS (CHAI
+     'Facteur d allongement maximum : ' (@ARR (MAXI ALLONG) 2)
+     )                                                                 ;
+MESS '                                                               ' ;
+MESS '                                                               ' ;
+MESS '===============================================================' ;
+MESS 'CARACTÉRISTIQUES DE L ÉCOULEMENT                               ' ;
+MESS '===============================================================' ;
+MESS (CHAI
+     '                               ' 'Modèle SA '
+                                       '   DNS    '
+                                       ' Blasius  '
+     )                                                                 ;
+MESS (CHAI
+     'Gradient de pression         : '  (@ARR DPDX     2) '     '
+                                        (@ARR (-1.)    2) '     '
+                                        (@ARR DPDX     2) '    Pa'
+     )                                                                 ;
+MESS (CHAI
+     'Vitesse moyenne              : '  (@ARR UQ       3) '    '
+                                        (@ARR UQDNS    3) '    '
+                                        (@ARR UQBL     3) '   m/s'
+     )                                                                 ;
+MESS (CHAI
+     'Vitesse de frottement        : '  (@ARR UTAU     3) '     '
+                                        (@ARR UTAUDNS  3) '     '
+                                        (@ARR UTAUBL   3) '    m/s'
+     )                                                                 ;
+MESS (CHAI
+     'Frottement à la paroi        : '  (@ARR TW       3) '     '
+                                        (@ARR TWDNS    3) '     '
+                                        (@ARR TWBL     3) '    Pa'
+     )                                                                 ;
+MESS (CHAI
+     'Coefficient de frottement    : '  (@ARR FF    2 'EXPOSANT') '   '
+                                        (@ARR FFDNS 2 'EXPOSANT') '   '
+                                        (@ARR FFBL  2 'EXPOSANT')
+     )                                                                 ;
+MESS (CHAI
+     'Nombre de Reynolds global    : '  (@ARR RE       1) '   '
+                                        (@ARR REDNS    1) '   '
+                                        (@ARR REBL     1)
+     )                                                                 ;
+MESS (CHAI
+     'Nombre de Reynolds de frot.  : '  (@ARR RETAU    1) '     '
+                                        (@ARR RETAUDNS 1) '     '
+                                        (@ARR RETAUBL  1)
+     )                                                                 ;
+MESS '                                                               ' ;
+MESS '                                                               ' ;
+OPTI 'ECHO' 1 ;
+
+
+
+
+
+
+
+
+
+
+*OPTI 'DONN' 5 ;
+
+FIN ;
+
+
+
+
+
+

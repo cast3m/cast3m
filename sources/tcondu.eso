@@ -1,0 +1,410 @@
+C TCONDU    SOURCE    GG250959  17/09/22    21:15:01     9565
+
+C=======================================================================
+C=                            T C O N D U                              =
+C=                            -----------                              =
+C=                                                                     =
+C=  Fonction :                                                         =
+C=  ----------                                                         =
+C=  Calcul de la matrice de CONDUCTIVITE THERMIQUE (type RIGIDITE)     =
+C=                                                                     =
+C=  Parametres :  (E)=Entree   (S)=Sortie                              =
+C=  ------------                                                       =
+C=   IPMODE   (E)   Segment IMODEL pour un modele elementaire  (ACTIF) =
+C=   IPCHEL   (E)   Segment MCHELM de CARACTERISTIQUES         (?)     =
+C=   ISUPMA   (E)   Support du champ de caracteristiques materiau      =
+C=   IPRIGI  (E/S)  Segment MRIGID : CONDUCTIVITE              (ACTIF) =
+C=======================================================================
+
+      SUBROUTINE TCONDU (IPMODE,IPCHEL,ISUPMA, IPRIGI)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCHAMP
+-INC CCGEOME
+-INC SMCOORD
+
+-INC SMELEME
+-INC SMINTE
+-INC SMMODEL
+      POINTEUR nomid1.NOMID
+-INC SMRIGID
+
+      INTEGER OOOVAL
+
+      SEGMENT NOTYPE
+        CHARACTER*16 TYPE(NBTYPE)
+      ENDSEGMENT
+
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS),NSOF(NS), IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+
+      CHARACTER*8 CMATE
+      CHARACTER*(LCONMO) CONM
+
+      PARAMETER ( NINF=3 )
+      DIMENSION INFOS(NINF)
+
+C=  LEFMAS   Liste des numeros d'elements finis MASSIFs a integration
+C            numerique pour la formulation thermique
+C=  NEFMAS   Longueur de cette liste                                   =
+C=  LEFCOQ   Liste des numeros d'elements finis COQUEs
+C=  NEFCOQ   Longueur de cette liste                                   =
+      PARAMETER ( NEFMAS = 14 , NEFCOQ=5 ,nefseg=5)
+      DIMENSION LEFMAS(NEFMAS), LEFCOQ(NEFCOQ),lefseg(nefseg)
+C= Petit tableau des "couleurs" pour les relations de conformite
+      DIMENSION LCOLOR(6)
+
+C  Elements         TRI3 TRI6 QUA4 QUA8 CUB8 CU20 PRI6 PR15 TET4 TE10
+C  MASSIFs          PYR5 PY13 T1D2 T1D3
+      DATA LEFMAS /    4,   6,   8,  10,  14,  15,  16,  17,  23,  24,
+     &                25,  26, 191, 192/
+C  COQUEs           COQ2 COQ3 COQ6 COQ4 COQ8
+      DATA LEFCOQ /   44,  27,  56,  49,  41  /
+C element        seg2  seg3  tuy2    tuy3
+      DATA LEFSEG/ 2  , 3  ,  46 ,  269  ,  270/
+      DATA LCOLOR / 1, 3, 6, 10, 16, 24 /
+
+      IPINTE = 0
+      MOMATE = 0
+      MOTYPE = 0
+
+C- Matrice de CONDUCTIVITE
+      MRIGID = IPRIGI
+c*      SEGACT,MRIGID
+      NRIGE0 = IRIGEL(/2)
+
+C- Recuperation du sous-modele et de la zone elementaire associee
+      IMODEL = IPMODE
+c*      SEGACT,IMODEL
+
+      NEF = NEFMOD
+
+C- Recuperation d'informations sur le maillage elementaire
+      IPT1 = IMAMOD
+      SEGACT,IPT1
+      NBNOE1 = IPT1.NUM(/1)
+      NBELE1 = IPT1.NUM(/2)
+*
+C- Quelques informations sur le modele (sauf EF de type 22 ou 259)
+      IF ((NEF.EQ.22).OR.(NEF.EQ.259)) GOTO 2200
+
+      CONM  = CONMOD
+      CMATE = CMATEE
+      MATE  = IMATEE
+
+      IMAS = 0
+      CALL PLACE2(LEFMAS,NEFMAS,IMAS,NEF)
+      ICOQ = 0
+      CALL PLACE2(LEFCOQ,NEFCOQ,ICOQ,NEF)
+      ise=0
+      call place2(lefseg,nefseg,ise,nef)
+      IRET = 1
+      CALL IDENT(IPT1,CONM,IPCHEL,0, INFOS,IRET)
+      IF (IRET.EQ.0) GOTO 9990
+
+C- Recuperation d'informations sur l'element fini
+      CALL TSHAPE(NEF,'GAUSS',IPINTE)
+      IF (IERR.NE.0) GOTO 9990
+      MINTE = IPINTE
+      SEGACT,MINTE
+
+C- Recuperation des caracteristiques materielles (obligatoires)
+      IF (ise.ne.0) THEN
+        nbrobl = 2
+        nbrfac = 0
+        SEGINI,nomid
+        lesobl(1) = 'K   '
+        IF(FORMOD(1).EQ.'DIFFUSION') LESOBL(1) = 'KD  '
+        lesobl(2) = 'SECT'
+      ELSE
+        nomid1 = LNOMID(6)
+        SEGINI,nomid=nomid1
+        IF (ICOQ.NE.0) THEN
+          nbrobl = lesobl(/2) + 1
+          nbrfac = 0
+          SEGADJ,nomid
+          lesobl(nbrobl) = 'EPAI'
+        ENDIF
+      ENDIF
+
+      NMATO = lesobl(/2)
+      NMATF = lesfac(/2)
+      NMATT = NMATO + NMATF
+      MOMATE = nomid
+
+C
+      nbtype = 1
+      SEGINI,notype
+      type(1) = 'REAL*8'
+      MOTYPE = notype
+
+ 2200 CONTINUE
+C- Definition du descripteur IDESCR
+      IDESCR = 0
+
+C-- Cas particulier des relations de conformite pour la thermique
+      IF ((NEF.EQ.22).OR.(NEF.EQ.259)) THEN
+C        IF (IPT1.ITYPEL.NE.22) GOTO 9990
+        IDEBUT = LCOLOR(IPT1.ICOLOR(1)) - 3
+        IF (NEF.EQ.259) THEN
+* creation d'un maillage avec un premier noeud par lélément
+* correspondant à un multiplicateur de lagrange
+          SEGACT IPT1
+          NBNN=IPT1.NUM(/1)+1
+          NBELEM=IPT1.NUM(/2)
+          NBSOUS=0
+          NBREF=0
+          SEGINI, IPT2
+          IPT2.ITYPEL=22
+          DO  J=1,IPT1.NUM(/2)
+              ipt2.icolor(j)=IPT1.icolor(j)
+              DO  I=1,IPT1.NUM(/1)
+                  IPT2.NUM(I+1,J)=IPT1.NUM(I,J)
+              ENDDO
+          ENDDO
+* creation n'un nouveau noeud pour supporter chaque multiplicateur de lagrange
+          NBPT1= XCOOR(/1)/(IDIM+1)
+          NBPTS=NBPT1+(IPT2.NUM(/2))
+          SEGADJ MCOORD
+          DO J=1,IPT1.NUM(/2)
+             NGLOB=(NBPT1+J-1)*(IDIM+1)
+* remplissage des coordonees des nouveux points
+             DO ID= 1,IDIM
+                 XCOOR(NGLOB+ID)=XCOOR((IPT2.NUM(2,J)-1)*(IDIM+1)+ID)
+             ENDDO
+             IPT2.NUM(1,J) = NBPT1 + J
+          ENDDO
+          SEGDES IPT1
+          NBNOE1= IPT2.NUM(/1)
+        ENDIF
+
+* Petite verification sur le nom de la composante mise en relation
+        nomid = LNOMID(1)
+        SEGACT,nomid
+        NEXIST = 0
+        DO i = 1, LNOMDD
+          IF (NOMDD(i).EQ.lesobl(1)) NEXIST = i
+        ENDDO
+        SEGDES,nomid
+
+        IF (NEXIST.EQ.0) THEN
+          CALL ERREUR(837)
+          GOTO 9990
+        ENDIF
+* Remplissage du DESCRipteur
+        NLIGRD = NBNOE1
+        NLIGRP = NLIGRD
+        SEGINI,DESCR
+        LISINC(1) = 'LX  '
+        LISDUA(1) = 'FLX '
+        NOELEP(1) = 1
+        NOELED(1) = 1
+        DO i = 2,NLIGRD
+          LISINC(i) = NOMDD(NEXIST)
+          LISDUA(i) = NOMDU(NEXIST)
+          NOELEP(i) = i
+          NOELED(i) = i
+        ENDDO
+        IDESCR = DESCR
+
+C-- Cas GENERAL
+      ELSE
+        NOMPRI = LNOMID(1)
+        NOMDUA = LNOMID(2)
+        CALL TCOND2(ICOQ,NBNOE1,IDESCR,NOMPRI,NOMDUA)
+        DESCR = IDESCR
+        SEGACT,DESCR
+        NLIGRD = LISDUA(/2)
+        NLIGRP = LISINC(/2)
+      ENDIF
+
+      SEGDES,DESCR
+      LRE = NLIGRD
+
+C- Partionnement si necessaire de la matrice de conductivite
+C- determinant ainsi le nombre d'objets elementaires de MRIGID
+      LTRK = oooval(1,4)
+      IF (LTRK.EQ.0) LTRK = oooval(1,1)
+C-- Ajout a la taille en mots de la matrice des infos du segment
+      LSEG = LRE*LRE*NBELE1 + 16
+      NBLPRT = (LSEG-1)/LTRK + 1
+      NBLMAX = (NBELE1-1)/NBLPRT + 1
+      NBLPRT = (NBELE1-1)/NBLMAX + 1
+C      write(ioimp,*) ' tcondu : nblprt nblmax = ',nblprt,nblmax,nbele1
+
+C Ajout de la matrice de CONDUCTIVITE a la matrice globale
+C ========================================================
+      NRIGEL = NRIGE0 + NBLPRT
+      SEGADJ,MRIGID
+
+      descr  = IDESCR
+      IF (NEF.EQ.259) THEN
+        meleme = IPT2
+      ELSE
+        meleme = IPT1
+      ENDIF
+      nbnn   = NBNOE1
+      nbelem = NBELE1
+      nbsous = 0
+      nbref  = 0
+
+C Boucle sur les PARTITIONS elementaires de la matrice
+C ====================================================
+      DO irige = 1, NBLPRT
+
+        IF (NBLPRT.GT.1) THEN
+C- Partitionnement du maillage support de la matrice elementaire
+          SEGACT,IPT1
+          ielem = (irige-1)*NBLMAX
+          nbelem = MIN(NBLMAX,NBELE1-ielem)
+*          write(ioimp,*) ' creation segment ',nbnn,nbelem
+          SEGINI,meleme
+          itypel = IPT1.itypel
+          DO ielt = 1, nbelem
+            jelt = ielt + ielem
+            DO inoe = 1, nbnn
+              IF (NEF.EQ.259) THEN
+                num(inoe,ielt) = IPT2.NUM(inoe,jelt)
+              ELSE
+                num(inoe,ielt) = IPT1.NUM(inoe,jelt)
+              ENDIF
+            ENDDO
+            icolor(ielt) = IPT1.ICOLOR(jelt)
+          ENDDO
+C- Recopie du descripteur
+          des1 = IDESCR
+          SEGINI,descr=des1
+          SEGDES,descr
+        ENDIF
+        ipmail = meleme
+        ipdesc = descr
+
+C- Initialisation de la matrice de rigidite elementaire (xmatri)
+        NELRIG = nbelem
+        SEGINI,xmatri
+        ipmatr = xmatri
+
+C- Creation des blocages thermiques dus aux relations de compatibilite
+        IF ((NEF.EQ.22).OR.(NEF.EQ.259)) THEN
+          DO ielt = 1, NELRIG
+            xmatri.re(2,1,ielt) = -1.
+            xmatri.re(1,2,ielt) = -1.
+            DO inoe = 3, NBNOE1
+              xmatri.re(inoe,1,ielt) = XCOEFF(IDEBUT+inoe)
+              xmatri.re(1,inoe,ielt) = xmatri.re(inoe,1,ielt)
+            ENDDO
+          ENDDO
+
+C- CAS GENERAL
+        ELSE
+
+          IVAMAT = 0
+          CALL KOMCHA(IPCHEL,ipmail,CONM,MOMATE,MOTYPE,1,INFOS,3,IVAMAT)
+          IF (IERR.NE.0) GOTO 9991
+          IF (ISUPMA.EQ.1) THEN
+            CALL VALCHE(IVAMAT,NMATT,IPINTE,0,MOMATE,NEF)
+            IF (IERR.NE.0) THEN
+              ISUPMA = 0
+              GOTO 9991
+            ENDIF
+          ENDIF
+C-- Calcul de la matrice elementaire pour la zone iMai et
+C-- Remplissage de la matrice globale (ipmatr)
+C---> Elements MASSIFs a integration NUMERIQUE
+          IF (IMAS.NE.0) THEN
+            CALL TNUMAC(NEF,ipmail,IPINTE,MATE,IVAMAT,NMATT, ipmatr,LRE)
+C---> Elements de COQUEs
+          ELSE IF (ICOQ.NE.0) THEN
+            GOTO (144,127,156,156,156), ICOQ
+            GOTO 100
+C-----> Element de COQUE AXISYMETRIQUE (COQ2)
+ 144        CONTINUE
+            CALL TCOQ2C(NEF,ipmail,IPINTE,MATE,IVAMAT,NMATT, ipmatr,LRE)
+            GOTO 100
+C-----> Element COQ3
+ 127        CONTINUE
+            CALL TCOQ3C(NEF,ipmail,IPINTE,MATE,IVAMAT,NMATT, ipmatr,LRE)
+            GOTO 100
+C-----> Element COQ8 ou COQ6 ou COQ4
+ 156      CONTINUE
+            CALL TCOQ8C(NEF,ipmail,IPINTE,MATE,IVAMAT,NMATT, ipmatr,LRE)
+            GOTO 100
+ 100        CONTINUE
+C----> Autres elements
+C   --> Element BARR (SEG2)  ou tuy3 (seg3 ) ou tuy2 (seg2) en conduction
+          ELSE IF (ise.ne.0) THEN
+            go to (201,202,201,201,202),ise
+            go to 200
+  201       CALL TSEG2C(NEF,ipmail,IPINTE,MATE,IVAMAT,NMATT, ipmatr,LRE)
+            go to 200
+  202       call tseg3C(nef,ipmail,ipinte,mate,ivamat,nmatt, ipmatr,lre)
+            go to 200
+  200       continue
+          ELSE
+            CALL ERREUR(19)
+          ENDIF
+
+C- Un peu de menage dans les segments
+ 9991     CONTINUE
+          IF (ISUPMA.EQ.1 .OR. NBLPRT.GT.1) THEN
+            CALL DTMVAL(IVAMAT,3)
+          ELSE
+            CALL DTMVAL(IVAMAT,1)
+          ENDIF
+
+        ENDIF
+C- Sortie prematuree en cas d'erreur
+        IF (IERR.NE.0) GOTO 9990
+
+        xmatri = ipmatr
+        SEGDES,xmatri
+        IF (NBLPRT.GT.1) THEN
+          meleme = ipmail
+          SEGDES,meleme
+        ENDIF
+
+C- Stockage de la matrice
+        jrige = NRIGE0 + irige
+        COERIG(jrige)   = 1.
+        IRIGEL(1,jrige) = ipmail
+        IRIGEL(2,jrige) = 0
+        IRIGEL(3,jrige) = ipdesc
+        IRIGEL(4,jrige) = ipmatr
+        IRIGEL(5,jrige) = NIFOUR
+        IRIGEL(6,jrige) = 0
+        IRIGEL(7,jrige) = 0
+        IRIGEL(8,jrige) = 0
+
+      ENDDO
+
+C MENAGE : desactivation/destruction de segments
+C ==============================================
+ 9990 CONTINUE
+c*      SEGDES,MRIGID
+c*      SEGDES,IMODEL
+      SEGDES,IPT1
+      IF (NEF.EQ.259) SEGDES,IPT2
+      IF (IPINTE.NE.0) THEN
+        MINTE = IPINTE
+        SEGDES,MINTE
+      ENDIF
+      IF (MOMATE.NE.0) THEN
+        nomid = MOMATE
+        SEGSUP,nomid
+      ENDIF
+      IF (MOTYPE.NE.0) THEN
+        notype = MOTYPE
+        SEGSUP,notype
+      ENDIF
+
+      RETURN
+      END
+
+
+
+

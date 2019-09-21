@@ -1,0 +1,908 @@
+C FUNOBJ    SOURCE    CB215821  19/05/21    21:15:09     10221
+      SUBROUTINE FUNOBJ(ID,ID1,XVAL1,BOOL1,BMAX)
+C  FUNOBJ permet d'effectuer la fusion par Tournoi (plus rapide en temps d'execution)
+C  de N objets d'un même type contenus dans un segment de travail noté SID
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C ENTREES
+C---------
+C ID     : POINTEUR sur le SEGMENT SID
+C BMAX   : VRAI si on calcule le MAXI, FAUX si on calcule le MINI
+C
+C SORTIES
+C---------
+C ID1    : POINTEUR ou ENTIER
+C XVAL1  : FLOTTANT
+C BOOL1  : LOGIQUE
+C
+C
+C CREATION
+C----------
+C
+C HISTORIQUE
+C-----------
+C 19/01/2016 : La comparaison aux 'MOTS' n'est plus faite dans la boucle
+C              Possibilite d'effectuer la fusion par TOURNOI ou
+C              SEQUENTIELLE pour tous les types supportes
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+-INC CCASSIS
+-INC SMCOORD
+-INC CCOPTIO
+-INC CCREEL
+-INC CCGEOME
+-INC TMTRAV
+-INC SMCHPOI
+-INC SMELEME
+-INC SMCHAML
+-INC SMRIGID
+-INC SMMODEL
+
+      PARAMETER (NBMO1=8)
+      CHARACTER*8 LESMO1(NBMO1)
+C     LESMO1 = LISTE DES OBJETS GERES PAR FUNOBJ
+      DATA LESMO1/'RIGIDITE','MATRIK  ','MMODEL  ','MAILLAGE',
+     &            'CHPOINT ','MCHAML  ','FLOTTANT','LOGIQUE '/
+
+C     BMAX : VRAI si on calcule le MAXI, FAUX si on calcule le MINI
+      logical ltelq, BOOL1, B1, B2, BMAX
+      REAL*8  XVAL1,X1
+
+C     Nombre d'objets restant a fusionner
+      INTEGER     NBREST,ITYP0
+
+C     SID : SEGMENT CONTENANT LES INFORMATIONS POUR LA FUSION DES OBJETS
+C     SID1: COPIE DE SID POUR NE PAS FAIRE SEGSUP DES SEGMENTS D'ENTREE
+      SEGMENT SID
+C       NBFUS  : NOMBRE D'OBJETS A FUSIONNER
+C       IPOINT : POINTEURS SUR LES NBFUS OBJETS A FUSIONNER
+C       BVAL   : LOGIQUES A FUSIONNER
+C       XVAL   : VALEURS MAXI / MINI LOCALES A FUSIONNER
+C       CHATYP : MOT DONNANT LE TYPE D'OBJET A FUSIONNER
+        INTEGER     IPOINT(NBFUS)
+        LOGICAL     BVAL  (NBFUS)
+        REAL*8      XVAL  (NBFUS)
+        CHARACTER*8 CHATYP
+      ENDSEGMENT
+      POINTEUR SID1.SID
+
+C     ITRAV : SEGMENT DE TRAVAIL POUR CRECHP
+      SEGMENT ITRAV
+        CHARACTER*4 INC (NN)
+        INTEGER     IHAR(NN)
+      ENDSEGMENT
+
+C     ICPR : SEGMENT POUR INDEXER RAPIDEMENT LES NOEUDS
+      SEGMENT ICPR(XCOOR(/1)/(IDIM+1))
+
+C     LISTYP:SEGMENT POUR LISTER LES TYPES D'ELEMENTS PRESENTS ET LEUR NOMBRES
+      SEGMENT LISTYP(NBTY,3)
+      SEGMENT IDELEM(NBTY)
+      SEGMENT INDEXM(NBMAIL)
+
+C     ISEG : SEGMENT QUELCONQUE POUR TRAITER DES SEGMENTS (SEGACT,SEGDES,etc.)
+      SEGMENT ISEG(0)
+
+      CHARACTER*8 CHA8,CHA8a,CHA8b
+      INTEGER     ISTADE
+
+C     Initialisations
+      ITYP0 = 0
+      ISTADE= 0
+      SID   = ID
+      CHA8  = SID.CHATYP
+      NBFUS = SID.IPOINT(/1)
+
+C     PRECONDITIONNEMENT pour ne pas relire des MOTS a chaque fois
+      CALL PLACE(LESMO1,NBMO1,ITYP0,CHA8)
+      IF (ITYP0.EQ.0) THEN
+        MOTERR(1:8 ) = CHA8
+        CALL ERREUR(1046)
+      ENDIF
+
+C     Gestion de la methode de fusion selon ITYP0
+      GOTO(555,111,111,777,444,111,333,333),ITYP0
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C   GESTION DE LA FUSION PAR TOURNOIS (2 par 2)
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+111   CONTINUE
+      SEGINI,SID1=SID
+      ltelq  = .TRUE.
+      BOOL1  = SID.BVAL(1)
+      XVAL1  = SID.XVAL(1)
+
+      NBREST = NBFUS
+C     Debut de la fusion d'objets par tournoi
+ 1    CONTINUE
+
+C     Stade de la competition
+      ISTADE = ISTADE + 1
+
+      IF (NBREST .EQ. 1) THEN
+C       Fin lorsqu'il ne reste plus qu'un seul objet a fusionner
+        ID1 = SID.IPOINT(1)
+        SEGSUP,SID1
+        RETURN
+
+      ELSEIF (MOD(NBREST,2) .EQ. 0) THEN
+C       Cas du Nombre pair d'objets restant a fusionner
+        DO 100 III = 1,(NBREST/2)
+          I1  = (III*2) - 1
+          I2  = (III*2)
+          id1 = SID.IPOINT(I1)
+          id2 = SID.IPOINT(I2)
+          B1  = SID.BVAL(I1)
+          B2  = SID.BVAL(I2)
+          X1  = SID.XVAL(I1)
+          X2  = SID.XVAL(I2)
+          GOTO(2,4,6,8,10,12,14,16),ITYP0
+
+C        'RIGIDITE'
+ 2        CONTINUE
+          call fusrig(id1,id2,iretou      )
+          GOTO 120
+
+C        'MATRIK'
+ 4        CONTINUE
+          call fusmtk(id1,id2,iretou      )
+          GOTO 120
+
+C        'MMODEL'
+ 6        CONTINUE
+          call fusmod(id1,id2,iretou      )
+          GOTO 120
+
+C        'MAILLAGE'
+ 8        CONTINUE
+          call fuse  (id1,id2,iretou,ltelq)
+          GOTO 120
+
+C        'CHPOINT'
+ 10       CONTINUE
+          call fuchpo(id1,id2,iretou      )
+          GOTO 120
+
+C        'MCHAML'
+ 12       CONTINUE
+          call etmchl(id1,id2,iretou      )
+          GOTO 120
+
+C        'FLOTTANT'
+ 14       CONTINUE
+          IF (BMAX) THEN
+            XVAL1= MAX(XVAL1,X1,X2)
+          ELSE
+            XVAL1= MIN(XVAL1,X1,X2)
+          ENDIF
+          GOTO 100
+
+C        'LOGIQUE'
+ 16       CONTINUE
+          IF (BMAX) THEN
+            BOOL1 = BOOL1 .AND. B1 .AND. B2
+          ELSE
+            BOOL1 = BOOL1 .OR. B1 .OR. B2
+          ENDIF
+          GOTO 100
+
+ 120      CONTINUE
+C         Menage des objets temporaires inutiles
+          CALL PLACE2(SID1.IPOINT,NBFUS,IPLAC,ID1)
+          IF (IPLAC.EQ.0) THEN
+            ISEG=ID1
+            SEGSUP,ISEG
+          ENDIF
+          CALL PLACE2(SID1.IPOINT,NBFUS,IPLAC,ID2)
+          IF (IPLAC.EQ.0) THEN
+            ISEG=ID2
+            SEGSUP,ISEG
+          ENDIF
+
+C         On remplace dans SID.IPOINT pour l'iteration suivante
+          SID.IPOINT(III) = iretou
+
+ 100    CONTINUE
+
+        NBREST = (NBREST/2)
+
+      ELSE
+C       Cas du Nombre impair d'objets restant a fusionner
+        DO 200 III = 1,((NBREST-1)/2)
+          I1  = (III*2) - 1
+          I2  = (III*2)
+          id1 = SID.IPOINT(I1)
+          id2 = SID.IPOINT(I2)
+          B1  = SID.BVAL(I1)
+          B2  = SID.BVAL(I2)
+          X1  = SID.XVAL(I1)
+          X2  = SID.XVAL(I2)
+          GOTO(3,5,7,9,11,13,15,17),ITYP0
+
+C        'RIGIDITE'
+ 3        CONTINUE
+          call fusrig(id1,id2,iretou      )
+          GOTO 220
+
+C        'MATRIK'
+ 5        CONTINUE
+          call fusmtk(id1,id2,iretou      )
+          GOTO 210
+
+C        'MMODEL'
+ 7        CONTINUE
+          call fusmod(id1,id2,iretou      )
+          GOTO 220
+
+C         'MAILLAGE'
+ 9        CONTINUE
+          call fuse  (id1,id2,iretou,ltelq)
+          GOTO 220
+
+C        'CHPOINT'
+ 11       CONTINUE
+          call fuchpo(id1,id2,iretou      )
+          GOTO 210
+
+C        'MCHAML'
+ 13       CONTINUE
+          call etmchl(id1,id2,iretou      )
+          GOTO 220
+
+C        'FLOTTANT'
+ 15       CONTINUE
+          IF (BMAX) THEN
+            XVAL1= MAX(XVAL1,X1,X2)
+          ELSE
+            XVAL1= MIN(XVAL1,X1,X2)
+          ENDIF
+          GOTO 200
+
+C        'LOGIQUE'
+ 17       CONTINUE
+          IF (BMAX) THEN
+            BOOL1 = BOOL1 .AND. B1 .AND. B2
+          ELSE
+            BOOL1 = BOOL1 .OR. B1 .OR. B2
+          ENDIF
+          GOTO 200
+
+ 220      CONTINUE
+C         Menage des objets temporaires inutiles
+          CALL PLACE2(SID1.IPOINT,NBFUS,IPLAC,ID1)
+          IF (IPLAC .EQ. 0) THEN
+            ISEG=ID1
+            SEGSUP, ISEG
+          ENDIF
+          CALL PLACE2(SID1.IPOINT,NBFUS,IPLAC,ID2)
+          IF (IPLAC .EQ. 0) THEN
+            ISEG=ID2
+            SEGSUP, ISEG
+          ENDIF
+
+ 210      CONTINUE
+C         On remplace dans SID.IPOINT pour l'iteration suivante
+          SID.IPOINT(III+1) = iretou
+
+ 200    CONTINUE
+
+C       Le dernier OBJET n'est pas traité, il est repris au debut pour l'iteration suivante
+        SID.IPOINT(1) = SID.IPOINT(NBREST)
+        SID.BVAL(1)   = SID.BVAL(NBREST)
+        SID.XVAL(1)   = SID.XVAL(NBREST)
+
+        NBREST = ((NBREST-1)/2) + 1
+
+      ENDIF
+      GOTO 1
+
+
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C   GESTION SEQUENTIELLE DE LA FUSION : COMME AVANT
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+ 333  CONTINUE
+      SEGINI,SID1=SID
+      ID1    = SID.IPOINT(1)
+      BOOL1  = SID.BVAL(1)
+      XVAL1  = SID.XVAL(1)
+
+C     Stade de la competition
+      ISTADE = ISTADE + 1
+
+      DO 300 III = 2,NBFUS
+        ID2 = SID.IPOINT(III)
+        B2  = SID.BVAL(III)
+        X2  = SID.XVAL(III)
+        GOTO(31,32,33,34,35,36,37,38),ITYP0
+
+C      'RIGIDITE'
+ 31     CONTINUE
+        call fusrig(id1,id2,iretou      )
+        GOTO 320
+
+C      'MATRIK'
+ 32     CONTINUE
+        call fusmtk(id1,id2,iretou      )
+        GOTO 320
+
+C      'MMODEL'
+ 33     CONTINUE
+        call fusmod(id1,id2,iretou      )
+        GOTO 320
+
+C      'MAILLAGE'
+ 34     CONTINUE
+        call fuse  (id1,id2,iretou,ltelq)
+        GOTO 320
+
+C      'CHPOINT'
+ 35     CONTINUE
+        call fuchpo(id1,id2,iretou      )
+        GOTO 310
+
+C      'MCHAML'
+ 36     CONTINUE
+        call etmchl(id1,id2,iretou      )
+        GOTO 320
+
+C      'FLOTTANT'
+ 37     CONTINUE
+        IF (BMAX) THEN
+          XVAL1= MAX(XVAL1,X2)
+        ELSE
+          XVAL1= MIN(XVAL1,X2)
+        ENDIF
+        GOTO 300
+
+C      'LOGIQUE'
+ 38     CONTINUE
+          IF (BMAX) THEN
+        BOOL1 = BOOL1 .AND. B2
+          ELSE
+          BOOL1 = BOOL1 .OR.  B2
+        ENDIF
+        GOTO 300
+C
+ 320    CONTINUE
+
+C       Menage des objets temporaires inutiles
+        IF (ISTADE.GT.1) THEN
+          ISEG=ID1
+          SEGSUP,ISEG
+        ENDIF
+
+ 310    CONTINUE
+C       On remplace ID1 par IRETOU
+        ID1 = iretou
+
+ 300  CONTINUE
+      SEGSUP,SID1
+      RETURN
+
+
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C   FUSION DE CHPOINT ESCLAVES : En une seule fois (Pas de CHPOINT temporaires)
+C   Je fais la methode GENERALE directement (sortie de BSIGMA visee)
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+ 444  CONTINUE
+      NN    = 0
+      NNIN  = 0
+      NNNOE = 0
+
+      NAT   =  1
+      NATi  = -1
+      NATf  = -1
+      CHA8  = '        '
+      CHA8a = '        '
+      CHA8b = '        '
+      DO 400 III = 1,NBFUS
+C       Ouverture de tous les MCHPOI
+        MCHPOI = SID.IPOINT(III)
+        SEGACT,MCHPOI
+        NSOUPO = MCHPOI.IPCHP(/1)
+        NAT    = MAX(NAT,MCHPOI.JATTRI(/1))
+        NATi   = MCHPOI.JATTRI(1)
+        CHA8   = MCHPOI.MTYPOI
+
+        IF (NATi .EQ. 0) THEN
+C         On ne peut pas assembler des CHPOINTS qui ont des NATURES indeterminee
+          CALL ERREUR(650)
+          RETURN
+        ENDIF
+
+        IF(III .EQ. 1) THEN
+          NATf = NATi
+          CHA8a=CHA8
+          CHA8b=CHA8
+        ELSE
+          IF (NATi .NE. NATf) THEN
+C           On ne peut pas assembler des CHPOINTS qui ont des NATURES differentes
+            CALL ERREUR(649)
+            RETURN
+          ENDIF
+          IF (CHA8 .NE. CHA8a) THEN
+            CHA8b='INDETERM'
+          ENDIF
+        ENDIF
+        DO 410 JJJ = 1,NSOUPO
+C         Ouverture de tous les MSOUPO
+          MSOUPO= MCHPOI.IPCHP(JJJ)
+          SEGACT,MSOUPO
+          IPT1  =MSOUPO.IGEOC
+          MPOVAL=MSOUPO.IPOVAL
+          SEGACT,IPT1,MPOVAL
+          NN    = NN + MSOUPO.NOHARM(/1)
+ 410    CONTINUE
+ 400  CONTINUE
+      SEGACT,MCOORD
+      SEGINI,ITRAV,ICPR
+
+C     Decompte et stokage des composantes differentes
+      DO 420 III = 1,NBFUS
+        MCHPOI = SID.IPOINT(III)
+        DO 430 JJJ = 1,MCHPOI.IPCHP(/1)
+          MSOUPO = MCHPOI.IPCHP(JJJ)
+          DO 431 KKK = 1,MSOUPO.NOHARM(/1)
+            DO 432 LLL = 1,NNIN
+              IF(MSOUPO.NOCOMP(KKK) .NE. ITRAV.INC (LLL)) GOTO 432
+              IF(MSOUPO.NOHARM(KKK) .EQ. ITRAV.IHAR(LLL)) GOTO 431
+ 432        CONTINUE
+            NNIN = NNIN + 1
+            ITRAV.INC (NNIN)=MSOUPO.NOCOMP(KKK)
+            ITRAV.IHAR(NNIN)=MSOUPO.NOHARM(KKK)
+ 431      CONTINUE
+
+          IPT1  =MSOUPO.IGEOC
+          MPOVAL=MSOUPO.IPOVAL
+          DO 433 MMM=1,IPT1.NUM(/2)
+            INOEUD=IPT1.NUM(1,MMM)
+            IF(ICPR(INOEUD) .EQ. 0) THEN
+              NNNOE = NNNOE + 1
+              ICPR(INOEUD)= NNNOE
+            ENDIF
+ 433      CONTINUE
+ 430    CONTINUE
+ 420  CONTINUE
+
+C     Creation de MTRAV et remplissage
+      SEGINI,MTRAV
+
+      DO 450 III = 1,NBFUS
+        MCHPOI = SID.IPOINT(III)
+        DO 460 JJJ = 1,MCHPOI.IPCHP(/1)
+          MSOUPO=MCHPOI.IPCHP(JJJ)
+          IPT1  =MSOUPO.IGEOC
+          MPOVAL=MSOUPO.IPOVAL
+
+C         Recherche de la composante correspondante
+          DO 461 KKK=1,MSOUPO.NOCOMP(/2)
+            DO 462 LLL=1,NNIN
+              IF(MSOUPO.NOCOMP(KKK) .NE. ITRAV.INC (LLL)) GOTO 462
+              IF(MSOUPO.NOHARM(KKK) .EQ. ITRAV.IHAR(LLL)) GOTO 463
+ 462        CONTINUE
+            CALL ERREUR(5)
+ 463        CONTINUE
+
+C           Selon l'ATTRIBUT de NATURE on ne fait pas la même operation
+            IF (NATi .EQ. 1) THEN
+C             NATURE DIFFUS on doit avoir la meme valeur en 1 pt d'une meme composante
+              DO 464 MMM=1,IPT1.NUM(/2)
+                INOEUD      =ICPR(IPT1.NUM(1,MMM))
+                IGEO(INOEUD)= IPT1.NUM(1,MMM)
+                XX1         = MPOVAL.VPOCHA(MMM,KKK)
+                XX2         = BB  (LLL,INOEUD)
+                I1          = IBIN(LLL,INOEUD)
+
+                IF    (I1 .EQ. 0)THEN
+C                 Premiere valeur qu'on place la
+                  IBIN(LLL,INOEUD)= 1
+                  BB  (LLL,INOEUD)= XX1
+
+                ELSEIF(I1 .EQ. 1) THEN
+C                 Autres valeurs qu'on trouve a la meme place
+                  XX3   = MAX(ABS(XX1)  ,ABS(XX2))
+                  XXPREC= MAX(XZPREC*XX3,XPETIT  )
+                  IF (ABS(XX1 - XX2) .GT. XXPREC) THEN
+C                   On ne peut pas assembler des CHPOINTS de nature DIFFUS
+C                   ayant des valeurs differentes en un point de la meme composante
+                    CALL ERREUR(651)
+                    RETURN
+                  ENDIF
+                ENDIF
+ 464          CONTINUE
+
+            ELSEIF (NATi .EQ. 2) THEN
+C             NATURE DISCRET on procede a l'addition des valeurs en 1 pt d'une meme composante
+              DO 465 MMM=1,IPT1.NUM(/2)
+                INOEUD      =ICPR(IPT1.NUM(1,MMM))
+                IGEO(INOEUD)= IPT1.NUM(1,MMM)
+                IBIN(LLL,INOEUD)= 1
+                BB  (LLL,INOEUD)= MPOVAL.VPOCHA(MMM,KKK)+BB(LLL,INOEUD)
+ 465          CONTINUE
+
+            ELSE
+C             On ne peut pas assembler des CHPOINTS qui ont des NATURES differentes
+              CALL ERREUR(649)
+              RETURN
+            ENDIF
+ 461      CONTINUE
+ 460    CONTINUE
+
+C       Remplissage des NOMS de composante et NUMEROS d'harmoniques
+        DO 451 JJJ = 1,NNIN
+          INCO(JJJ)=ITRAV.INC (JJJ)
+          NHAR(JJJ)=ITRAV.IHAR(JJJ)
+ 451    CONTINUE
+ 450  CONTINUE
+
+      CALL CRECHP (MTRAV,ID1)
+
+C     FERMETURE ET SUPPRESSION DES SEGMENTS
+      SEGSUP,ITRAV,ICPR,MTRAV
+
+      MCHPOI=ID1
+
+C     Dans crechp "NAT" vaut 1, on AJUSTE le SEGMENT si besoin
+      IF (NAT .GT. MCHPOI.JATTRI(/1)) SEGADJ,MCHPOI
+
+C     Le chapeau du CHPOINT est complete d'apres le premier de la liste
+      MCHPO4 = SID.IPOINT(1)
+      MCHPOI.MTYPOI=CHA8b
+      MCHPOI.MOCHDE='CHPOINT CREE PAR FUNOBJ'
+      DO IATT=1,NAT
+        MCHPOI.JATTRI(IATT)=MCHPO4.JATTRI(IATT)
+      ENDDO
+
+      CALL ACTOBJ('CHPOINT ',MCHPOI,1)
+      RETURN
+
+
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C   FUSION DE RIGIDITE ESCLAVES : En une seule fois (Pas de RIGIDITE temporaires)
+C   Seulement les CHAPEAUX sont fusionnes
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+ 555  CONTINUE
+C     OUVERTURE de tous les MRIGID
+      NRIGEL=0
+      DO III=1,NBFUS
+        MRIGID=SID.IPOINT(III)
+        SEGACT,MRIGID
+        NRIGEL=NRIGEL + IRIGEL(/2)
+        CHA8  =MRIGID.MTYMAT
+
+        IF(III .EQ. 1) THEN
+          CHA8a=CHA8
+          CHA8b=CHA8
+        ELSE
+          IF (CHA8 .NE. CHA8a) THEN
+            IF(CHA8 .EQ. 'RIGIDITE')THEN
+              CHA8b='RIGIDITE'
+            ELSE
+              CHA8b='INDETERM'
+            ENDIF
+          ENDIF
+        ENDIF
+      ENDDO
+
+      SEGINI,MRIGID
+      ID1           = MRIGID
+      MRIGID.ICHOLE = 0
+      MRIGID.IMGEO1 = 0
+      MRIGID.MTYMAT = CHA8b
+
+C     FUSION des CHAPEAUX
+      IC=0
+      DO III=1,NBFUS
+        RI1=SID.IPOINT(III)
+        JA =RI1.IRIGEL(/2)
+        JB =RI1.IRIGEL(/1)
+        DO KKK=1,JA
+          MELEME=RI1.IRIGEL(1,KKK)
+          SEGACT,MELEME
+          IF (NUM(/2) .NE. 0) THEN
+            IC=IC+1
+            COERIG(IC)=RI1.COERIG(KKK)
+            DO LLL=1,JB
+              IRIGEL(LLL,IC)=RI1.IRIGEL(LLL,KKK)
+            ENDDO
+          ENDIF
+        ENDDO
+      ENDDO
+
+C     Ajustement du SEGMENT le cas echeant
+      IF (NRIGEL .NE. IC) THEN
+        NRIGEL=IC
+        SEGADJ,MRIGID
+      ENDIF
+
+      SEGACT,MRIGID*NOMOD
+      RETURN
+
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C   FUSION DE RIGIDITE ESCLAVES : En une seule fois (Pas de RIGIDITE temporaires)
+C   Seulement les CHAPEAUX sont fusionnes
+C
+C  CB215821 : Impossible de faire COHABITER SMRIGID et SMMATRIK
+C             - Les SEGMENTS portent les memes nom...
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C 666  CONTINUE
+CC     OUVERTURE de tous les MATRIK
+C      NMATRI=0
+C      DO III=1,NBFUS
+C        MATRIK=SID.IPOINT(III)
+C        SEGACT,MATRIK
+C        NMATRI=NMATRI + IRIGEL(/2)
+C      ENDDO
+C
+C      NRIGE= 7
+C      NKID = 9
+C      NKMT = 7
+C      SEGINI,MATRIK
+C      ID1  = MATRIK
+C
+C      IC = 1
+C     DO III=1,NBFUS
+C        IP1 = SID.IPOINT(III)
+C        N1  = IP1.IRIGEL(/2)
+C
+CC       Copie des IRIGEL dans le resultat
+C        DO JJJ=1,N1
+C          DO KKK=1,NRIGE
+C            IRIGEL(KKK,IC + JJJ)=IP1.IRIGEL(KKK,JJJ)
+C          ENDDO
+C
+CC         On effectue une copie des segments IMATRI car ils pointent sur
+CC         d'autres objets élémentaires (les valeurs des matrices élémentaires)
+C          IMATR1=IP1.IRIGEL(4,JJJ)
+C          SEGINI,IMATR2=IMATR1
+C         SEGDES,IMATR2
+C          IRIGEL(4,IC + JJJ)=IMATR2
+C        ENDDO
+C        IC = IC + N1
+C        SEGDES,IP1
+C      ENDDO
+C
+C      SEGDES,MATRIK
+C      RETURN
+
+
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C   FUSION DE MELEME ESCLAVES :
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+ 777  CONTINUE
+      NBTY  = 100
+      NBMAIL= 100
+      IDMAIL= 0
+      SEGINI,INDEXM
+
+      SEGINI,LISTYP
+C     Ouverture de tous les MELEME
+      NMATRI= 0
+      NBTYP = 0
+      DO 7771 III=1,NBFUS
+        IPT1=SID.IPOINT(III)
+        SEGACT,IPT1
+        NBSOUS=IPT1.LISOUS(/1)
+        IF (NBSOUS .GT. 0) THEN
+C         Cas des MELEME COMPLEXES
+          DO 7772 JJJ=1,NBSOUS
+            IDMAIL=IDMAIL + 1
+
+            IF(IDMAIL .GT. NBMAIL)THEN
+              NBMAIL = NBMAIL * 2
+              SEGADJ,INDEXM
+            ENDIF
+
+            IPT2=IPT1.LISOUS(JJJ)
+            SEGACT,IPT2
+            NBELEM = IPT2.NUM(/2)
+
+            IF (NBELEM .GT. 0) THEN
+              ITYPE  = IPT2.ITYPEL
+              NBNN   = IPT2.NUM(/1)
+C             Recherche d'un TYPE DEJA RENCONTRE
+              IF (NBTYP .EQ. 0) THEN
+                NBTYP = 1
+                INDEXM(1) = 1
+                LISTYP(1,1)=ITYPE
+                LISTYP(1,2)=LISTYP(1,2) + NBELEM
+                LISTYP(1,3)=NBNN
+
+              ELSE
+                DO KKK=1,NBTYP
+                  IF(ITYPE  .EQ. LISTYP(KKK,1) .AND.
+     &               NBNN   .EQ. LISTYP(KKK,3)) THEN
+                     INDEXM(IDMAIL)=KKK
+                     LISTYP(KKK,2) =LISTYP(KKK,2) + NBELEM
+                     GOTO 7772
+                  ENDIF
+                ENDDO
+                NBTYP = NBTYP + 1
+                IF(NBTYP .GT. NBTY)THEN
+                  NBTY = NBTY * 2
+                  SEGADJ,LISTYP
+                ENDIF
+                INDEXM(IDMAIL) = NBTYP
+                LISTYP(NBTYP,1)= ITYPE
+                LISTYP(NBTYP,2)= LISTYP(NBTYP,2) + NBELEM
+                LISTYP(NBTYP,3)= NBNN
+              ENDIF
+            ENDIF
+ 7772     CONTINUE
+
+        ELSE
+C         Cas des MELEME SIMPLES
+          IDMAIL=IDMAIL + 1
+          IF(IDMAIL .GT. NBMAIL)THEN
+            NBMAIL = NBMAIL * 2
+            SEGADJ,INDEXM
+          ENDIF
+
+          NBELEM = IPT1.NUM(/2)
+          IF (NBELEM .GT. 0) THEN
+            ITYPE  = IPT1.ITYPEL
+            NBNN   = IPT1.NUM(/1)
+C           Recherche d'un TYPE DEJA RENCONTRE
+            IF (NBTYP .EQ. 0) THEN
+              NBTYP      = 1
+              INDEXM(1)  = 1
+              LISTYP(1,1)= ITYPE
+              LISTYP(1,2)= LISTYP(1,2) + NBELEM
+              LISTYP(1,3)= NBNN
+
+            ELSE
+              DO KKK=1,NBTYP
+                IF(ITYPE  .EQ. LISTYP(KKK,1) .AND.
+     &             NBNN   .EQ. LISTYP(KKK,3)) THEN
+                   INDEXM(IDMAIL)=KKK
+                   LISTYP(KKK,2) =LISTYP(KKK,2) + NBELEM
+                   GOTO 7771
+                ENDIF
+              ENDDO
+              NBTYP = NBTYP + 1
+              IF(NBTYP .GT. NBTY)THEN
+                NBTY = NBTY * 2
+                SEGADJ,LISTYP
+              ENDIF
+              INDEXM(IDMAIL) =NBTYP
+              LISTYP(NBTYP,1)=ITYPE
+              LISTYP(NBTYP,2)=LISTYP(NBTYP,2) + NBELEM
+              LISTYP(NBTYP,3)=NBNN
+            ENDIF
+          ENDIF
+        ENDIF
+ 7771 CONTINUE
+
+
+C     CREATION DU RESULTAT ET REMPLISSAGE
+      IDMAIL = 0
+      NBTY   = NBTYP
+      SEGINI,IDELEM
+      IF(NBTYP .EQ. 0)THEN
+C     Cas du MELEME resultat SIMPLE VIDE
+        ITEL   = ILCOUR
+        NBELEM = 0
+        NBNN   = 0
+        NBSOUS = 0
+        NBREF  = 0
+        SEGINI,MELEME
+        MELEME.ITYPEL=ITEL
+        SEGACT,MELEME*NOMOD
+
+      ELSEIF(NBTYP .EQ. 1)THEN
+C     Cas du MELEME resultat SIMPLE NON VIDE
+        NBELEM = LISTYP(1,2)
+        NBNN   = LISTYP(1,3)
+        NBSOUS = 0
+        NBREF  = 0
+        SEGINI,MELEME
+        MELEME.ITYPEL=LISTYP(1,1)
+        DO III=1,NBFUS
+          IPT1=SID.IPOINT(III)
+          NBELEM=IPT1.NUM(/2)
+          IF (NBELEM .GT. 0)THEN
+            JJ1=IDELEM(1)
+            DO JJJ=1,NBELEM
+              JJ1=JJ1 + 1
+              MELEME.ICOLOR(JJ1)=IPT1.ICOLOR(JJJ)
+              DO KKK=1,NBNN
+                MELEME.NUM(KKK,JJ1)=IPT1.NUM(KKK,JJJ)
+              ENDDO
+            ENDDO
+            IDELEM(1) = IDELEM(1) + NBELEM
+          ENDIF
+        ENDDO
+        SEGACT,MELEME*NOMOD
+
+      ELSE
+C       Cas du MELEME resultat COMPLEXE
+        NBNN   = 0
+        NBELEM = 0
+        NBSOUS = NBTYP
+        NBREF  = 0
+        SEGINI,MELEME
+
+        DO III=1,NBTYP
+          NBELEM=LISTYP(III,2)
+          NBNN  =LISTYP(III,3)
+          NBSOUS=0
+          NBREF =0
+          SEGINI,IPT3
+          IPT3.ITYPEL=LISTYP(III,1)
+          MELEME.LISOUS(III)=IPT3
+        ENDDO
+
+        DO III=1,NBFUS
+          IPT1=SID.IPOINT(III)
+          NBSOUS=IPT1.LISOUS(/1)
+          IF (NBSOUS .GT. 0) THEN
+C           Cas des MELEME COMPLEXES
+            DO JJJ=1,NBSOUS
+              IDMAIL=IDMAIL+1
+              IPT2=IPT1.LISOUS(JJJ)
+              NBELEM = IPT2.NUM(/2)
+              IF (NBELEM .GT. 0)THEN
+                NBTYP = INDEXM(IDMAIL)
+                NBNN  = IPT2.NUM(/1)
+                IPT3  = MELEME.LISOUS(NBTYP)
+                JJ1   = IDELEM(NBTYP)
+                DO LLL=1,NBELEM
+                  JJ1=JJ1 + 1
+                  IPT3.ICOLOR(JJ1)=IPT2.ICOLOR(LLL)
+                  DO KKK=1,NBNN
+                    IPT3.NUM(KKK,JJ1)=IPT2.NUM(KKK,LLL)
+                  ENDDO
+                ENDDO
+                IDELEM(NBTYP) = IDELEM(NBTYP) + NBELEM
+              ENDIF
+            ENDDO
+
+          ELSE
+C           Cas des MELEME SIMPLES
+            IDMAIL=IDMAIL+1
+            NBELEM = IPT1.NUM(/2)
+            IF (NBELEM .GT. 0)THEN
+              NBTYP = INDEXM(IDMAIL)
+              NBNN  = IPT1.NUM(/1)
+              IPT3  = MELEME.LISOUS(NBTYP)
+              JJ1   = IDELEM(NBTYP)
+              DO JJJ=1,NBELEM
+                JJ1=JJ1 + 1
+                IPT3.ICOLOR(JJ1)=IPT1.ICOLOR(JJJ)
+                DO KKK=1,NBNN
+                  IPT3.NUM(KKK,JJ1)=IPT1.NUM(KKK,JJJ)
+                ENDDO
+              ENDDO
+              IDELEM(NBTYP) = IDELEM(NBTYP) + NBELEM
+            ENDIF
+          ENDIF
+        ENDDO
+
+C       Fermeture des MELEME du resultat
+        IF (NBTY .GT. 1)THEN
+          DO III=1,NBTY
+            IPT3=MELEME.LISOUS(III)
+            SEGACT,IPT3*NOMOD
+          ENDDO
+        ENDIF
+        SEGACT,MELEME*NOMOD
+
+      ENDIF
+      ID1=MELEME
+
+C     Suppression des SEGMENTS de travail
+      SEGSUP,LISTYP,IDELEM,INDEXM
+
+      END
+
+

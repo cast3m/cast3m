@@ -1,0 +1,745 @@
+C PSIP3D    SOURCE    PASCAL    18/12/19    21:15:10     10047
+c
+      SUBROUTINE PSIP3D(ideux,melmai,melfis,melfro,xcrit,
+     &              msoup1,msoup2,msoup3)
+
+***********************************************************************
+c OPERATEUR : PSIP
+
+c APPELE PAR PSIPHI DANS LE CAS 3D
+c
+c CREATION : BP, 14/03/2012
+c MODIF : BP, 19/12/2013 plus d'appel au zonage
+c         BP, 2018-06 correction d'une petite erreur + //isation
+c
+***********************************************************************
+      IMPLICIT REAL*8(A-H,O-Z)
+      IMPLICIT INTEGER(I-N)
+-INC CCOPTIO
+-INC SMCOORD
+-INC SMELEME
+-INC SMCHPOI
+-INC CCREEL
+-INC CCASSIS
+C     Declaration du COMMON pour le travail en parallele
+      COMMON/psiabc/IPARAL
+
+      segment icpr(xcoor(/1)/(idim+1))
+      segment mxicpr
+        real*8 xicpr(xcoor(/1)/(idim+1))
+      endsegment
+      segment isup(npt)
+      segment sfis
+         integer ifis(nbelfi,2)
+      endsegment
+
+c     MTRI3 : toutes les infos pour decrire un ensemble de TRI3
+c     noeuds, coordonnees, vecteur unitaire des aretes, normale, aire
+      SEGMENT MTRI3
+        INTEGER KNODE(3,NTRI3)
+        REAL*8  XNODE(3,NTRI3),YNODE(3,NTRI3),ZNODE(3,NTRI3)
+c         REAL*8  XMIMA(NTRI3),YMIMA(NTRI3),ZMIMA(NTRI3)
+        REAL*8  VARE12(4,NTRI3),VARE23(3,NTRI3),VARE31(3,NTRI3)
+        REAL*8  VNORM(3,NTRI3),SURFAC(NTRI3)
+      ENDSEGMENT
+
+c     SPARAL : pour la parallelisation
+C     NBTHRD  : nombre de threads demandes
+c     KPT3    : ...
+      SEGMENT SPARAL
+        INTEGER NBTHRD
+        INTEGER IERROR(NBTHR)
+        INTEGER KPT3,KPOVA1,KPOVA2,KPOVA3
+        INTEGER KTRI3,KXICPR,KSUP,KFIS
+        INTEGER KCLE,KDEUX,KMIL5
+        REAL*8  XCRIT1
+      ENDSEGMENT
+
+      DATA EPSI/1.D-5/
+      INTEGER ooperm(7,2)
+      DATA ooperm/ 2, 4, 6, 1, 3, 5, 7,
+     $             4, 1, 5, 2, 6, 3, 7/
+
+      EXTERNAL PSI3Di
+      LOGICAL BTHRD
+
+
+***********************************************************************
+*     Initialisation, Recup, Activation
+***********************************************************************
+
+      idim1=idim+1
+c     idbug=numero du noeud pour lequel on souhaite afficher le calcul
+      idbug = 0
+c       idbug = 16346
+
+c     des chpoints (les msoup sont deja actifs)
+      mpova1=0
+      mpova2=0
+      mpova3=0
+      if(msoup2.gt.0) mpova2=msoup2.ipoval
+      if(msoup1.gt.0) mpova1=msoup1.ipoval
+      if(msoup3.gt.0) mpova3=msoup3.ipoval
+c     activation des maillages             / desactivation
+c     melmai : fait dans psiphi            / ligne 1325 ou 1329
+c     melfis : fait ligne 64               / ligne 1274
+c     melfro : fait (si ideux>=1) ligne 78 / ligne 356
+      ipt3=melmai
+c        segact,ipt3
+      npt=ipt3.num(/2)
+
+c     variables parfois testées
+      imil5=0
+
+
+***********************************************************************
+*     Preparation du maillage de la fissure
+***********************************************************************
+        meleme=melfis
+        segact meleme
+*       transfo du front en TRI3
+        if(itypel.ne.4)  call change(melfis,4)
+        meleme=melfis
+        segact meleme
+c rem: inutile car change laisse melfis actif
+        nseg=num(/2)
+
+*------ Cas ou l'on calcule phi ET psi --------------------------------
+        if (ideux.ge.1) then
+* on rearrange le melfis de facon à prevenir dans ifis(iel,1) quels
+* element touchent le front de fissure. Ceux ci sont ordonnées de facon
+* que le front de fissure soit du noeud 1 vers le noeud 2 de l'element
+          ipt2=melfro
+          segact ipt2
+          segini icpr
+          nbelem2 = ipt2.num(/2)
+          nbnode2 = ipt2.num(/1)
+* petite numerotation locale
+* icpr(noeud)>0 si le noeud appartient au front de fissure
+*            =numero du 1er element de melfro ou on a vu ce noeud
+* + on en profite pour calculer l'abscisse curviligne du front si ideux.eq.2
+* icpr(noeud)<0 si le noeud appartient au reste du contour de la fissure
+*            =-numero du 1er element de melcon ou on a vu ce noeud
+          if (ideux.ge.2) then
+            segini,mxicpr
+            xtau=0.d0
+            ic=ipt2.num(1,1)
+            x11= xcoor((ic-1)*idim1 +1)
+            y11= xcoor((ic-1)*idim1 +2)
+            z11= xcoor((ic-1)*idim1 +3)
+            do ia=1,nbelem2
+              do ib=1,nbnode2
+                ic=ipt2.num(ib,ia)
+                if (icpr(ic).eq.0) then
+                  icpr(ic)=ia
+                  x22= xcoor((ic-1)*idim1 +1)
+                  y22= xcoor((ic-1)*idim1 +2)
+                  z22= xcoor((ic-1)*idim1 +3)
+                  dxtau= sqrt( (x22-x11)*(x22-x11)+(y22-y11)*(y22-y11)
+     $           +(z22-z11)*(z22-z11) )
+                  xtau=xtau+dxtau
+                  xicpr(ic)=xtau
+                  x11=x22
+                  y11=y22
+                  z11=z22
+c           if(idebug.ge.1)
+c      $    write(6,*) 'ia,ib,ic,xicpr(ic)=',ia,ib,ic,xicpr(ic)
+                endif
+              enddo
+            enddo
+          else
+            do ia=1,nbelem2
+              do ib=1,nbnode2
+                ic=ipt2.num(ib,ia)
+                if (icpr(ic).eq.0) then
+                  icpr(ic)=ia
+                endif
+              enddo
+            enddo
+          endif
+* bp (23/02/2012) : calcul du contour et fin de remplissage de icpr
+         CALL ECROBJ('MAILLAGE',melfis)
+         CALL PRCONT
+         CALL LIROBJ('MAILLAGE',melcon,1,IRETOU)
+         IF (IERR.NE.0) RETURN
+         meleme = melfis
+         IPT6   = melcon
+         SEGACT,meleme,IPT6
+          nbelCON = IPT6.num(/2)
+          nbnoCON = IPT6.num(/1)
+            do ia=1,nbelCON
+              do ib=1,nbnoCON
+                ic=IPT6.num(ib,ia)
+                if(icpr(ic).eq.0)  icpr(ic)=-ia
+              enddo
+            enddo
+* nombre de segments appartenant au contour sans le front
+         nbelem6 = nbelCON - nbelem2
+* remplissage effectif de ifis contenu dans le segment sfis
+         i2firs = ipt2.num(1,1)
+         i2last = ipt2.num(nbnode2,nbelem2)
+         ivui2f = 0
+         ivui2l = 0
+c          write(6,*) 'i2firs,i2last=',i2firs,i2last
+         nbelfi=nseg
+         nbelem=nseg
+         nbnn=3
+         nbsous=0
+         nbref=0
+c          segini,ipt5=meleme
+* bp 20/12/2011 : on propose de remplir ipt5 avec :
+c + des elements du front (et du contour) d abord,
+c + des elements avec 1 point appartenant au front (et au contour) ensuite,
+c + les autres elements enfin.
+c bp 06/03/2012 : on propose de remplir ifis avec :
+c ifis(iseg,1) =2 si le segment [1-2] du iseg^ieme triangle appartient
+c au front de fissure, =3 si en plus c'est l extrémité du front,
+c =1 si l un des segments appartient au contour
+c =-1 si l'un des noeuds appartient au front
+c ifis(iseg,2) =+1+2+4 si les segments [1-2] [2-3] [3-1] du iseg^ieme triangle appartiennent au contour
+         segini,ipt5
+         ideb5 = 0
+         imil5 = nbelem2
+         ifin5 = nseg+1
+         segini sfis
+
+*--------boucle sur les elements de la fissure ----------------------
+         do iel=1,nseg
+c             write(*,*) 'boucle sur elements de fissure',iel,'/',nseg
+
+*     io est incrémenté de +1,+2,+4 si node 1,2,3 appartient au front
+*     ioo est incrémenté de +1,+2,+4 si node 1,2,3 appartient au contour
+            io=0
+            ioo=0
+*        ---boucle sur les noeuds des elements de la fissure ----------
+            do ib=1,num(/1)
+              ia=ib
+              if(ib.eq.3) ia = 4
+              ic = num(ib,iel)
+              if(icpr(ic).gt.0) io=io+ia
+              if(icpr(ic).lt.0) ioo=ioo+ia
+*             cas particulier d un segment avec 1 point appartenant au contour et un autre
+              if(ic.eq.i2firs.or.ic.eq.i2last) ioo=ioo+ia
+            enddo
+*        ---fin de boucle sur les noeuds des elements de la fissure ---
+
+*     remplissage de ipt5(i5,...) et ifis(i5,1)
+            i5=0
+            iperm=0
+*        ---cas ou 1 segment appartient au front
+            if (io.eq.3.or.io.gt.4) then
+              ideb5=ideb5+1
+              i5=ideb5
+*             (eventuelle) permutation des noeuds pour avoir segment 1-2 = front
+              if (io.eq.3) then
+                  ipt5.num(1,i5)=num(1,iel)
+                  ipt5.num(2,i5)=num(2,iel)
+                  ipt5.num(3,i5)=num(3,iel)
+              elseif(io.eq.5) then
+                  ipt5.num(1,i5)=num(3,iel)
+                  ipt5.num(2,i5)=num(1,iel)
+                  ipt5.num(3,i5)=num(2,iel)
+                  iperm=1
+              elseif(io.eq.6) then
+                  ipt5.num(1,i5)=num(2,iel)
+                  ipt5.num(2,i5)=num(3,iel)
+                  ipt5.num(3,i5)=num(1,iel)
+                  iperm=2
+              elseif(io.eq.7) then
+                  write(ioimp,*) 'ERREUR: '
+     $           ,'Plusieurs cotes d un meme triangle du maillage de '
+     $           ,'la fissure converti en TRI3 appartiennent au front!'
+                  return
+              endif
+*             ifis( ,1)=3 si c'est une extremité
+              if ((ipt5.num(1,i5)).eq.i2firs) then
+                ifis(i5,1)=3
+                ivui2f = ivui2f+1
+              elseif((ipt5.num(2,i5)).eq.i2last) then
+                ifis(i5,1)=3
+                ivui2l = ivui2l+1
+              else
+*             ifis( ,1)=2 si c'est un tri3 du front avec des voisins
+                ifis(i5,1)=2
+              endif
+*        ---cas ou 1 (ou 2) segment(s) appartient au contour
+            elseif(ioo.eq.3.or.ioo.gt.4) then
+              imil5=imil5+1
+              i5=imil5
+*             pas de permutation des noeuds
+              ipt5.num(1,i5)=num(1,iel)
+              ipt5.num(2,i5)=num(2,iel)
+              ipt5.num(3,i5)=num(3,iel)
+*             ifis( ,1)=1 si un segment appartient au contour
+              ifis(i5,1)=1
+*        ---cas ou seulement 1 point appartient au front
+            elseif(io.eq.1.or.io.eq.2.or.io.eq.4) then
+              ifin5=ifin5-1
+              i5=ifin5
+*             pas de permutation des noeuds
+              ipt5.num(1,i5)=num(1,iel)
+              ipt5.num(2,i5)=num(2,iel)
+              ipt5.num(3,i5)=num(3,iel)
+*             ifis( ,1)=-1 si 1 seul point du tri3 appartient au front
+              ifis(i5,1)=-1
+*        ---autres cas
+            else
+              ifin5=ifin5-1
+              i5=ifin5
+*             pas de permutation des noeuds
+              ipt5.num(1,i5)=num(1,iel)
+              ipt5.num(2,i5)=num(2,iel)
+              ipt5.num(3,i5)=num(3,iel)
+            endif
+
+*     remplissage de ifis(i5,2)
+*        ---uniquement si 1 (ou 2) segment(s) appartient au contour
+            if(ioo.eq.3.or.ioo.gt.4) then
+*             attention a l eventuelle permutation effectuee
+              if(iperm.ne.0)  ioo=ooperm(ioo,iperm)
+*            -ioo=3 => noeuds 1-2 = segment 1 appartient au contour
+              if (ioo.eq.3) then
+                 ifis(i5,2)=1
+*            -ioo=5 => noeuds 3-1 = segment 3 appartient au contour
+              elseif(ioo.eq.5) then
+                 ifis(i5,2)=4
+*            -ioo=6 => noeuds 2-3 = segment 2 appartient au contour
+              elseif(ioo.eq.6) then
+                 ifis(i5,2)=2
+*            -cas ou 3 points appartiennent au contour => travail en +
+              elseif(ioo.eq.7) then
+c             write(6,*)'tri3 avec 2 segments dans le contour!',iel,i5
+* rem: si les 3 points appartiennent au contour, on n'a pas de segments
+*      appartenant au front
+                 ii1 = ipt5.num(1,i5)
+                 ii2 = ipt5.num(2,i5)
+                 ii3 = ipt5.num(3,i5)
+                 write(*,*) i5,ii1,ii2,ii3
+c il faut trouver quels sont les 2 segments appartenant au contour !
+                 ia1 = -icpr(ii1)
+                 ia2 = -icpr(ii2)
+                 ia3 = -icpr(ii3)
+                 ia1min = min(ia1,ia2)
+                 ia1min = min(ia1min,ia3)
+                 ia1seg = 0
+                 do 11 ia1=ia1min,nbelCON
+                   ifis1 = 0
+                   do ib=1,nbnoCON
+                     if(ii1.eq.IPT6.num(ib,ia1))  ifis1=ifis1+1
+                     if(ii2.eq.IPT6.num(ib,ia1))  ifis1=ifis1+2
+                     if(ii3.eq.IPT6.num(ib,ia1))  ifis1=ifis1+4
+                   enddo
+                   if(ifis1.le.2) goto 11
+                   if(ifis1.eq.4) goto 11
+                   if(ifis1.eq.3) ifis(i5,2)=ifis(i5,2)+1
+                   if(ifis1.eq.6) ifis(i5,2)=ifis(i5,2)+2
+                   if(ifis1.eq.5) ifis(i5,2)=ifis(i5,2)+4
+                   if(ifis1.ge.7) then
+             write(ioimp,*) 'tri3 avec 3 segments dans le contour !'
+                     call erreur(26)
+                   endif
+                   if(ifis1.eq.3.or.ifis1.ge.5)  ia1seg=ia1seg+1
+                   if(ia1seg.eq.2) goto 12
+  11               continue
+c on n a pas trouvé les 2 segments appartenant au contour
+                   write(ioimp,*)'on n a pas trouvé les 2 segments',
+     $                   ' du tri3 devant appartenant au contour !'
+                   call erreur(26)
+c on a trouvé les 2 segments appartenant au contour
+  12               continue
+                 if(ifis(i5,2).lt.3.or.ifis(i5,2).ge.7) then
+             write(ioimp,*) 'impossible de detecter les 2 segments ',
+     $       'appartenant au contour avec les noeuds ',ii1,ii2,ii3
+             write(ioimp,*) 'ifis(ideb5,2)=',ifis(ideb5,2)
+             write(ioimp,*) 'IPT6 pour les segments :'
+             write(ioimp,*) ' ia1',ia1,(IPT6.num(iou,ia1),iou=1,2)
+             write(ioimp,*) ' ia2',ia2,(IPT6.num(iou,ia2),iou=1,2)
+             write(ioimp,*) ' ia3',ia3,(IPT6.num(iou,ia3),iou=1,2)
+                   call erreur(26)
+                   return
+                 endif
+              endif
+            endif
+
+
+
+         enddo
+*        fin de boucle sur les elements de la fissure -----------------
+
+c          if ((ifin5-ideb5).ne.1) then
+         if (ideb5.ne.nbelem2.or.(ifin5-imil5).ne.1) then
+       write(ioimp,*) 'pb avec le rearrangement de elements de fissure'
+       write(ioimp,*) ideb5,nbelem2,imil5,ifin5
+           call erreur(26)
+           return
+         endif
+*        si le front n est pas ferme, il faut avoir detecte ses 2 extremites
+*        sinon il est probable que la ligne du front melfro ne soit pas
+*        orientée comme le bord du maillage melfis
+         if ((ivui2f.ne.1).and.(ivui2l.ne.1)) then
+            write(ioimp,*) 'ERREUR: Les extremites du front (noeuds',
+     $      i2firs,i2last,') ont été detectees ',ivui2f, 'et ',ivui2l
+     $      ,' fois au lieu de 1 fois attendue'
+            write(ioimp,*) 'Verifiez la coherence avec l orientation'
+     $      ,'du maillage de la fissure fourni'
+     $      ,' et INVErser le sens du front le cas échéant.'
+c             write(6,*) 'front de fissure='
+c             CALL ECMAIL(ipt2,JENT2)
+c             write(6,*) 'surface de fissure='
+c             CALL ECMAIL(ipt5,JENT5)
+            call erreur(26)
+            return
+         endif
+c          segdes,meleme,IPT6
+         segdes,meleme,IPT6,ipt2
+         meleme=ipt5
+         melfis=meleme
+         segsup icpr
+
+        endif
+*------ fin du Cas ou l'on calcule phi ET psi --------------------------
+
+* sont actifs: melmai(=struct changée en poi1), ipt5=meleme=melfis,
+* sont inactifs: ipt2=melfro
+
+
+
+***********************************************************************
+* debut du travail suivant valeur de icle
+
+      if (xcrit.eq.0.d0) then
+        icle=0
+        xcrit=1.D10
+      else
+        icle=1
+*       ajout d'un epsilon 1.D-5 de rattrapage
+        xcrit = 1.00001D0 * xcrit
+      endif
+
+      melfis=meleme
+      melpoi=melmai
+
+***********************************************************************
+*     IL NE RESTE PLUS QU'A FAIRE LE TRAVAIL PROPREMENT DIT
+***********************************************************************
+
+*  pour chaque segment  de la fissure (melfis 2eme maillage lu)
+*  on calcule le champ phi et psi des noeuds autour de l'element
+        if(iimpi.ge.1) then
+c         call gibtem(xkt)
+        write(ioimp,*)'debut travail'
+        endif
+*
+       meleme=melfis
+c        segact,meleme
+       ipt3=melpoi
+c        segact,ipt3
+       npt=ipt3.num(/2)
+* attention on initialise isup avec les valeurs inverses,il faudra
+* le retourner
+c c        segini isup,isupfi,xdis,xdmin,xdmin1,rrlim
+c        segini isup,isupfi,xdis,xdmin,xdmin1
+       segini isup
+c        xdis,xdmin,xdmin1
+c        if(ideux.ge.1) segini xdmin2,xdmin3
+
+       NTRI3=nseg
+       SEGINI,MTRI3
+       call cpu_time(start_time)
+*=====================================================================
+*      Boucle sur les elements de la fissure =========================
+
+       do 444 iseg=1,nseg
+
+c          coordonnees du tri3
+           ia=num(1,iseg)
+           x11= xcoor((ia-1)*idim1 +1)
+           y11= xcoor((ia-1)*idim1 +2)
+           z11= xcoor((ia-1)*idim1 +3)
+           ib=num(2,iseg)
+           x22= xcoor((ib-1)*idim1 +1)
+           y22= xcoor((ib-1)*idim1 +2)
+           z22= xcoor((ib-1)*idim1 +3)
+           ic=num(3,iseg)
+           x33= xcoor((ic-1)*idim1 +1)
+           y33= xcoor((ic-1)*idim1 +2)
+           z33= xcoor((ic-1)*idim1 +3)
+c            if (x11.ge.x22) then
+c             xxmi=min(x22,x33) - xcrit
+c             xxma=max(x11,x33) + xcrit
+c            else
+c             xxmi=min(x11,x33) - xcrit
+c             xxma=max(x22,x33) + xcrit
+c            endif
+c            if (y11.ge.y22) then
+c             yymi=min(y22,y33) - xcrit
+c             yyma=max(y11,y33) + xcrit
+c            else
+c             yymi=min(y11,y33) - xcrit
+c             yyma=max(y22,y33) + xcrit
+c            endif
+c            if (z11.ge.z22) then
+c             zzmi=min(z22,z33) - xcrit
+c             zzma=max(z11,z33) + xcrit
+c            else
+c             zzmi=min(z11,z33) - xcrit
+c             zzma=max(z22,z33) + xcrit
+c            endif
+
+c          vecteurs des aretes
+           v12x=x22-x11
+           v12y=y22-y11
+           v12z=z22-z11
+           v23x=x33-x22
+           v23y=y33-y22
+           v23z=z33-z22
+           v31x=x11-x33
+           v31y=y11-y33
+           v31z=z11-z33
+
+c          vecteur normal
+           vx=v12y*(z33-z11)-v12z*(y33-y11)
+           vy=v12z*(x33-x11)-v12x*(z33-z11)
+           vz=v12x*(y33-y11)-v12y*(x33-x11)
+           bb=vx*vx + vy*vy+  vz*vz
+           aa= sqrt(bb)
+           if (aa.le.XPETIT) then
+             write(ioimp,*) 'element fissure de longueur nulle ',aa
+             write(ioimp,*) 'tri3.',iseg,'.',ia,'=',x11,y11,z11
+             write(ioimp,*) 'tri3.',iseg,'.',ib,'=',x22,y22,z22
+             write(ioimp,*) 'tri3.',iseg,'.',ic,'=',x33,y33,z33
+             call erreur(26)
+             return
+           endif
+           sur = bb/2.d0
+           vx=vx/aa
+           vy=vy/aa
+           vz=vz/aa
+           vxyz = max(abs(vx),abs(vy))
+           vxyz = max(vxyz,abs(vz))
+           if (vxyz.le.XPETIT) then
+           write(ioimp,*)'element fissure de longueur nulle',aa,vx,vy,vz
+             call erreur(26)
+             return
+           endif
+c            xsur = 1.D-8*sur
+
+c          vecteurs des aretes (suite)
+           v12lo= sqrt(v12x*v12x+v12y*v12y+v12z*v12z)
+           v23lo= sqrt(v23x*v23x+v23y*v23y+v23z*v23z)
+           v31lo= sqrt(v31x*v31x+v31y*v31y+v31z*v31z)
+           v12x= v12x/v12lo
+           v12y= v12y/v12lo
+           v12z= v12z/v12lo
+           v23x= v23x/v23lo
+           v23y= v23y/v23lo
+           v23z= v23z/v23lo
+           v31x= v31x/v31lo
+           v31y= v31y/v31lo
+           v31z= v31z/v31lo
+
+c          REMPLISSAGE DU SEGMENT MTRI3
+           MTRI3.KNODE(1,iseg)=ia
+           MTRI3.KNODE(2,iseg)=ib
+           MTRI3.KNODE(3,iseg)=ic
+           MTRI3.XNODE(1,iseg)=x11
+           MTRI3.XNODE(2,iseg)=x22
+           MTRI3.XNODE(3,iseg)=x33
+           MTRI3.YNODE(1,iseg)=y11
+           MTRI3.YNODE(2,iseg)=y22
+           MTRI3.YNODE(3,iseg)=y33
+           MTRI3.ZNODE(1,iseg)=z11
+           MTRI3.ZNODE(2,iseg)=z22
+           MTRI3.ZNODE(3,iseg)=z33
+           MTRI3.VARE12(1,iseg)=v12x
+           MTRI3.VARE12(2,iseg)=v12y
+           MTRI3.VARE12(3,iseg)=v12z
+           MTRI3.VARE12(4,iseg)=v12lo
+           MTRI3.VARE23(1,iseg)=v23x
+           MTRI3.VARE23(2,iseg)=v23y
+           MTRI3.VARE23(3,iseg)=v23z
+           MTRI3.VARE31(1,iseg)=v31x
+           MTRI3.VARE31(2,iseg)=v31y
+           MTRI3.VARE31(3,iseg)=v31z
+           MTRI3.VNORM(1,iseg)=vx
+           MTRI3.VNORM(2,iseg)=vy
+           MTRI3.VNORM(3,iseg)=vz
+           MTRI3.SURFAC(iseg)=sur
+
+ 444   continue
+*=====================================================================
+
+
+*=====================================================================
+*     2EME PHASE DU TRAVAIL (DOUBLE BOUCLE)
+*=====================================================================
+
+C     FAUT-IL PASSER EN // ?
+c     estimation grossiere
+c     car on n'a trouve que des cas ou la // est benefique
+      if (nseg*npt.lt.100) then
+        NBTHR = 1
+        BTHRD=.false.
+      else
+        NBTHR = NBTHRS
+        BTHRD = .TRUE.
+        CALL THREADII
+      endif
+
+C     CREATION ET REMPLISSAGE DU SEGMENT POUR LA //iSATION
+      SEGINI,SPARAL
+      SPARAL.NBTHRD = NBTHR
+      SPARAL.KPT3   = IPT3
+      SPARAL.KTRI3  = MTRI3
+      SPARAL.KCLE   = icle
+      SPARAL.KDEUX  = ideux
+      SPARAL.XCRIT1 = xcrit
+      SPARAL.KSUP   = isup
+      SPARAL.KPOVA1 = mpova1
+      SPARAL.KPOVA2 = mpova2
+      SPARAL.KPOVA3 = mpova3
+      SPARAL.KFIS   = sfis
+      SPARAL.KMIL5  = imil5
+      SPARAL.Kxicpr = mxicpr
+
+      IF (BTHRD) THEN
+C       Remplissage du 'COMMON/psiabc'
+        IPARAL=SPARAL
+        DO ith=2,NBTHR
+          CALL THREADID(ith,PSI3Di)
+        ENDDO
+        CALL PSI3Di(1)
+
+C       Attente de la fin de tous les threads en cours de travail
+        DO ith=2,NBTHR
+          CALL THREADIF(ith)
+        ENDDO
+
+C       On libere les Threads
+        CALL THREADIS
+
+C       Verification de l'erreur (Apres liberation des THREADS)
+        DO ith=1,NBTHR
+          IRETOU=SPARAL.IERROR(ith)
+          IF (IRETOU .GT. 0) THEN
+            CALL ERREUR(IRETOU)
+            RETURN
+          ENDIF
+        ENDDO
+
+      ELSE
+C       Appel de la SUBROUTINE qui fait le travail
+        CALL PSI3D0(1,SPARAL)
+C       Verification de l'erreur
+        IRETOU=SPARAL.IERROR(1)
+        IF (IRETOU .GT. 0) THEN
+          CALL ERREUR(IRETOU)
+          RETURN
+        ENDIF
+
+      ENDIF
+
+***********************************************************************
+*     FIN DU TRAVAIL
+***********************************************************************
+
+* on inverse isup
+* AVANT : isup(i) =0 veut dire que le point na pas été traité
+* APRES : isup(i) =1 veut dire que le point peut etre enleve (=0 sinon)
+        iaju=0
+        do ia=1,isup(/1)
+         if (isup(ia).eq.0) then
+            iaju=iaju+1
+            isup(ia)=1
+         else
+            isup(ia)=0
+         endif
+        enddo
+c         if (iaju+igard.ne.isup(/1)) then
+c             write(ioimp,*) 'psiphi : tout va mal '
+c      $                 ,iaju,'+',igard,'ne',isup(/1)
+c             call erreur(26)
+c             return
+c         endif
+c bp : test ci dessus un peu chiant a garder en // et pas tre utile
+        ipt1=ipt3
+        ipt4=melfis
+        segdes ipt4
+* iaju est le nombre de points a éliminer
+* isup(i) =1 veut dire que le point peut etre enleve (=0 sinon)
+
+* faut-il ajuster les champs?
+      if (iaju.ne.0) then
+*        si oui on recree les bons chpoints
+         nbelem=ipt1.num(/2)- iaju
+         nbnn=1
+         nbref=0
+         nbsous=0
+         segini ipt2
+         ipt2.itypel=1
+         nc=1
+         n=nbelem
+         segini mpova5
+*>>>bp&yt: ajout ligne suivante
+         if(ideux.ge.1) segini mpova4
+         if(ideux.ge.2) segini mpova6
+         iel=0
+         do i=1,ipt1.num(/2)
+          if (isup(i).eq.0) then
+            iel=iel+1
+            ipt2.num(1,iel)=ipt1.num(1,i)
+            mpova5.vpocha(iel,1)=mpova2.vpocha(i,1)
+*>>>bp&yt:  ajout ligne suivante
+* on met le meme maillage pour les 2 level set (car toujours utilisées ensemble)
+           if(ideux.ge.1)  mpova4.vpocha(iel,1)=mpova1.vpocha(i,1)
+           if(ideux.ge.2)  mpova6.vpocha(iel,1)=mpova3.vpocha(i,1)
+          endif
+         enddo
+         if (ideux.ge.2) then
+c            segact msoup3*mod
+           msoup3.ipoval=mpova6
+           msoup3.igeoc=ipt2
+           segdes msoup3,mpova6
+           segsup,mpova3
+         endif
+         if (ideux.ge.1) then
+c            segact msoup1*mod
+           msoup1.ipoval=mpova4
+           msoup1.igeoc=ipt2
+           segdes msoup1,mpova4
+           segsup,mpova1
+         endif
+c          segact msoup2*mod
+         msoup2.ipoval=mpova5
+         msoup2.igeoc=ipt2
+         segdes msoup2,mpova5,ipt2
+         segsup,mpova2
+         segdes ipt1
+      else
+         if(ideux.ge.2) segdes,msoup3,mpova3
+         if(ideux.ge.1) segdes,msoup1,mpova1
+         segdes msoup2,mpova2,ipt1
+      endif
+      if (ideux.ge.1) then
+          segsup,icpr,sfis
+          if(ideux.ge.2) segsup,mxicpr
+      endif
+      if (icle.eq.1) then
+c        segsup isup,isupfi,xdis,xdmin,xdmin1,rrlim
+c        segsup isup,isupfi,xdis,xdmin,xdmin1
+       segsup isup
+c        if(ideux.ge.1) segsup xdmin2,xdmin3
+      endif
+      SEGSUP,MTRI3
+
+      RETURN
+      END
+
+
+
+
+
+
+
+
+

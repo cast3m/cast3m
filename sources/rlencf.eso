@@ -1,0 +1,480 @@
+C RLENCF    SOURCE    CHAT      05/01/13    03:01:14     5004
+      SUBROUTINE RLENCF(MELFL,MELFP,MLEPOI,MLECOE)
+C************************************************************************
+C
+C PROJET            :  CASTEM 2000
+C
+C NOM               :  RLENCF
+C
+C DESCRIPTION       :  Appelle par GRADI2
+C
+C LANGAGE           :  FORTRAN 77 + ESOPE 2000 (avec extensions CISI)
+C
+C AUTEUR            :  A. BECCANTINI
+C
+C************************************************************************
+C
+C Inputs:
+C
+C MLESCF : list of SOMMET points and their CENTRE neighbors
+C
+C MATCOE : coeff. for linear exact reconstruction of MLESCF
+C
+C MLEFSC : list of FACES points and their neighbors (CENTRE and SOMMET
+C      points)
+C
+C MACOE1 : coeff. for linear exact reconstruction of MLEFSC
+C
+C Output
+C
+C MLEFC  :  list of FACES points and their neighbors (CENTRE points only)
+C
+C MACOE2 : coeff. for linear exact reconstruction of MLEFC
+C
+C     This subroutine computes the coefficients to compute the gradient
+C     at intefaces with respect to the values on its neighbors.
+C     The neighbors are 'CENTRE' points (in FACEL) ore 'SOMMET' points
+C     (in FACEP).  which allow to perform
+C     A linear exact reconstruction is performed via a least square
+C     method.
+C
+C**** Inputs:
+C
+C     MELFL  = the 'FACEL' meleme
+C     MELFP  = the 'FACEP' meleme
+C
+C**** Output:
+C
+C     MLEPOI = list of integers.
+C              MLEPOI.LECT(i) points to the list neighbors of
+C              MELFL.NUM(2,i)
+C     MLECOE =  list of integers.
+C               MLECOE.LECT(i) points to the matrix of coeffients to
+C               compute the gradient
+C
+C**** Variables de COOPTIO
+C
+C      INTEGER IPLLB, IERPER, IERMAX, IERR, INTERR
+C     &        ,IOTER,   IOLEC,  IOIMP,     IOCAR,  IOACQ
+C     &        ,IOPER,   IOSGB,  IOGRA,     IOSAU,  IORES
+C     &        ,IECHO,   IIMPI,  IOSPI
+C     &        ,IDIM
+CC     &        ,MCOORD
+C     &        ,IFOMOD, NIFOUR, IFOUR, NSDPGE, IONIVE
+C     &        ,NGMAXY, IZROSF, ISOTYP, IOSCR,LTEXLU
+C     &        ,NORINC,NORVAL,NORIND,NORVAD
+C     &        ,NUCROU, IPSAUV, IFICLE, IPREFI
+C
+      IMPLICIT INTEGER(I-N)
+      INTEGER NBSOUS,ISOUS,NBELEM,NBNO,NVMAX,NVMIN,NFAC,IFAC,IELEM
+     &     ,NGF,NGF1,NGC1,NGC2,INOEU,NGS,IPCOOR,NVOI,IVOI,NGV
+     &     ,IERSVD,IERR0
+     &     ,I1,I2,I3,I4
+
+      REAL*8 XF,YF,ZF, XV, YV, ZV,SMAX,SMIN,ERRTOL
+      PARAMETER(ERRTOL=1.0D-16)
+      LOGICAL LOGSVD
+-INC CCOPTIO
+-INC SMCOORD
+-INC SMELEME
+-INC SMLREEL
+-INC SMLENTI
+-INC SMCHPOI
+      INTEGER JG
+      INTEGER N1,N2
+      SEGMENT MATRIX
+      REAL*8 MAT(N1,N2)
+      ENDSEGMENT
+      POINTEUR MELFL.MELEME, MELFP.MELEME, MLEPOI.MLENTI,MLECOE.MLENTI
+     &     , MATA.MATRIX,MATU.MATRIX,MATV.MATRIX
+     &     ,MATCOE.MATRIX,MLRSIG.MLREEL,MLRTRA.MLREEL
+     &     ,MTAA.MATRIX, MINTAA.MATRIX,MLRIN1.MLREEL,MLRIN2.MLREEL
+     &     ,MLRIN3.MLREEL,MLEFP.MLENTI,MELFP1.MELEME
+C
+      SEGACT MELFP
+C
+C
+C**** En 2D MELFP est un maillage elementaire
+C     En 3D pas à priori
+C     -> MLEFP contains the list of LISOUS
+C
+      NBSOUS=MELFP.LISOUS(/1)
+C     NBSOUS=0 fais un peux chier!
+      JG=MAX(NBSOUS,1)
+      SEGINI MLEFP
+      IF(NBSOUS .EQ. 0)THEN
+         MLEFP.LECT(1)=MELFP
+      ELSE
+         DO ISOUS=1,NBSOUS,1
+            MLEFP.LECT(ISOUS)=MELFP.LISOUS(ISOUS)
+         ENDDO
+      ENDIF
+      SEGDES MELFP
+      SEGACT MELFL
+      NFAC=MELFL.NUM(/2)
+      JG=NFAC
+      SEGINI MLEPOI
+      SEGINI MLECOE
+C
+C**** Loop on the faces to compute NVMAX
+C     (maximum number of neighbors)
+C
+      NBSOUS=MLEFP.LECT(/1)
+      NVMAX=0
+      DO ISOUS = 1, NBSOUS, 1
+         MELFP1=MLEFP.LECT(ISOUS)
+         SEGACT MELFP1
+         NBELEM=MELFP1.NUM(/2)
+         NBNO=MELFP1.NUM(/1) - 1
+C
+C        The ISOUS elementary meleme  of 'FACEP' has NBELEM elements
+C        which contain NBNO sommets and one point face. Each face has
+C        NBNO 'SOMMET' neighbors and 2 'CENTRE' neighbors.
+C
+         NVMAX=MAX(NVMAX,NBNO+2)
+      ENDDO
+C
+C     MATA = matrix to "pseudoinvert" (NVMAX,IDIM+1)
+C     MATU = matrix of the singular right eigenvectors of MATA
+C            (NVMAX,IDIM+1)
+C     MATV = matrix of the singular left eigenvectors of MATA
+C            (IDIM+1,IDIM+1)
+C            But in invsvd.eso, MATV dimensions are NVMAX,IDIM+1
+C     MLRSIG = singular values of MATA (IDIM+1)
+C
+C     N.B. MATA = MATU MATSIG t(MATV)
+C          If MATA is non singular,
+C          inv(MATA) = MATV inv(MATSIG) t(MATU)
+C
+C     MLRTRA temporary vector of invsvd.eso
+C     NVMIN = IDIM + 1 (the most little dimension of the matrices)
+C
+      N1=NVMAX
+      N2=IDIM+1
+      SEGINI MATA
+      SEGINI MATU
+      SEGINI MATV
+      JG=IDIM+1
+      SEGINI MLRSIG
+      SEGINI MLRTRA
+      NVMIN=N2
+C
+C     MTAA : [t(MATA).MATA]
+C     MINTAA : [inve(t(MATA) MATA)]
+C     MLRIN1,2,3 : "temporary vectors"
+C
+      N1=NVMIN
+      N2=NVMIN
+      SEGINI MTAA
+      SEGINI MINTAA
+      JG=NVMIN
+      SEGINI MLRIN1
+      SEGINI MLRIN2
+      SEGINI MLRIN3
+C
+C**** Loop on faces to compute the coefficient
+C
+      NBSOUS=MLEFP.LECT(/1)
+      IFAC=0
+      DO ISOUS = 1, NBSOUS, 1
+         MELFP1=MLEFP.LECT(ISOUS)
+         NBELEM=MELFP1.NUM(/2)
+         NBNO=MELFP1.NUM(/1) - 1
+         DO IELEM=1,NBELEM,1
+            IFAC=IFAC+1
+            NGF=MELFP1.NUM(NBNO+1,IELEM)
+            NGF1=MELFL.NUM(2,IFAC)
+            NGC1=MELFL.NUM(1,IFAC)
+            NGC2=MELFL.NUM(3,IFAC)
+            IF(NGF .NE. NGF1)THEN
+               WRITE(IOIMP,*) 'Subroutine rlencf.eso'
+               CALL ERREUR(5)
+               GOTO 9999
+            ENDIF
+            IF(NGC1 .EQ. NGC2)THEN
+               JG=NBNO+1
+            ELSE
+               JG=NBNO+2
+            ENDIF
+C
+C********** We create the list of neighbors.
+C
+            SEGINI MLENTI
+            MLEPOI.LECT(IFAC)=MLENTI
+C
+C********** We create the matrix of coefficients.
+C
+            N2=JG
+            N1=NVMIN
+            SEGINI MATCOE
+            MLECOE.LECT(IFAC)=MATCOE
+C
+C********** We fill the list of neighbors.
+C
+            DO INOEU=1,NBNO,1
+               NGS=MELFP1.NUM(INOEU,IELEM)
+               MLENTI.LECT(INOEU)=NGS
+            ENDDO
+            MLENTI.LECT(NBNO+1)=NGC1
+            IF(NGC1 .NE. NGC2) MLENTI.LECT(NBNO+2)=NGC2
+         ENDDO
+         SEGDES MELFP1
+      ENDDO
+C
+C**** Test for MLEPOI
+C
+C      do ifac=1,nfac,1
+C         mlenti=mlepoi.lect(ifac)
+C         nbno=mlenti.lect(/1)
+C         write(*,*) 'ngf=',melfl.num(2,ifac)
+C         write(*,*) 'nvoi=',nbno
+C         write(*,*) (mlenti.lect(inoeu),inoeu=1,nbno,1)
+C      enddo
+C
+C**** We have to fill the matrix coefficient
+C
+      NFAC=MELFL.NUM(/2)
+      DO IFAC=1,NFAC,1
+         NGF=MELFL.NUM(2,IFAC)
+         IPCOOR=((NGF-1)*(IDIM+1))+1
+         XF=MCOORD.XCOOR(IPCOOR)
+         YF=MCOORD.XCOOR(IPCOOR+1)
+         IF(IDIM .EQ. 3) ZF=MCOORD.XCOOR(IPCOOR+2)
+C
+C******* The neighbors of NGF
+C
+         MLENTI=MLEPOI.LECT(IFAC)
+         NVOI=MLENTI.LECT(/1)
+C
+C******* The matrix where we store the coefficients
+C
+         MATCOE=MLECOE.LECT(IFAC)
+C
+C******* Loop involving the neighbors
+C        We create the matrix to "pseudoinvert"
+C
+         DO IVOI=1,NVOI,1
+            NGV=MLENTI.LECT(IVOI)
+            IPCOOR=((NGV-1)*(IDIM+1))+1
+            XV=MCOORD.XCOOR(IPCOOR)
+            YV=MCOORD.XCOOR(IPCOOR+1)
+            MATA.MAT(IVOI,1)=1
+            MATA.MAT(IVOI,2)=XV-XF
+            MATA.MAT(IVOI,3)=YV-YF
+            IF(IDIM.EQ.3)THEN
+               ZV=MCOORD.XCOOR(IPCOOR+2)
+               MATA.MAT(IVOI,4)=ZV-ZF
+            ENDIF
+         ENDDO
+C
+C********** Now we have to invert this matrix
+C
+         LOGSVD=.TRUE.
+         CALL INVSVD( NVMAX, NVOI, NVMIN, MATA.MAT,
+     &        MLRSIG.PROG,.TRUE.,MATU.MAT,.TRUE.,MATV.MAT,IERSVD,
+     &        MLRTRA.PROG)
+         IF(IERSVD.NE.0)THEN
+C
+C************* SVD decomposition of the matrix does not work
+C
+            LOGSVD=.FALSE.
+         ELSE
+C
+C************ We check the condition number of MATA
+C
+            SMAX=0.0D0
+            DO I1=1,NVMIN,1
+               SMAX=MAX(SMAX,MLRSIG.PROG(I1))
+            ENDDO
+            SMIN=SMAX
+            DO I1=1,NVMIN,1
+               SMIN=MIN(SMIN,MLRSIG.PROG(I1))
+            ENDDO
+            IF((SMIN/SMAX) .LT. ERRTOL)THEN
+               LOGSVD=.FALSE.
+            ENDIF
+         ENDIF
+C
+CC        TEST
+C         write(*,*) 'LOGSVD=.FALSE.'
+C         LOGSVD=.FALSE.
+C
+         IF(LOGSVD)THEN
+C
+C********** INVSVD worked
+C
+C           MATA = MATU MATSIG t(MATV)
+C           inv(MATA) = MATV inv(MATSIG) t(MATU)
+C
+            DO I4=1,NVMIN,1
+               DO IVOI=1,NVOI,1
+                  DO I2=1,IDIM+1,1
+C                    I2=1 is the only coefficient we are not interested
+C                    in. But we computed it to verify that
+C                    sum_ivoi MATCOE.MAT(ivoi,1) = 1
+C
+                     MATCOE.MAT(I2,IVOI)=MATCOE.MAT(I2,IVOI)+
+     &                    (MATV.MAT(I2,I4)*MATU.MAT(IVOI,I4)
+     &                    /MLRSIG.PROG(I4))
+                  ENDDO
+               ENDDO
+            ENDDO
+         ELSE
+            WRITE (IOIMP,*) 'rlencf.eso'
+C           22 0
+C           Opération malvenue. Résultat douteux
+            CALL ERREUR(22)
+C
+C********** INVSVD does not worked
+C           For each neighbor k we have to compute the solution
+C           of
+C
+C           t(MATA) MATA x = t(MATA) * b
+C
+C           where b= \sum_l e_l \delta(k,l) = e_k
+C
+C           To do that, we compute
+C
+C           X_0 = [inve(t(MATA) MATA)] [t(MATA) * b]
+C
+C           X_1 = X_0 + [inve(t(MATA) MATA)] [t(MATA) * b -
+C                  [t(MATA) MATA] X_0]
+C
+C
+C********** We compute [t(MATA) MATA]
+C           We store it in the upper triangle of MTAA(NVMIN,NVMIN)
+C
+            DO I1=1,NVMIN,1
+               DO I2=I1,NVMIN,1
+                  MTAA.MAT(I1,I2)=0.0D0
+               ENDDO
+            ENDDO
+C
+            DO I1=1,NVMIN,1
+               DO I2=I1,NVMIN,1
+                  DO I3=1,NVOI,1
+                     MTAA.MAT(I1,I2)=MTAA.MAT(I1,I2)+
+     &                    (MATA.MAT(I3,I1)*MATA.MAT(I3,I2))
+                  ENDDO
+               ENDDO
+            ENDDO
+C
+C********** We compute [inve(t(MATA) MATA)]
+C           CHOLDC stores it in the upper trianle of MINTAA(NVMIN,NVMIN)
+C
+            CALL CHOLDC(NVMIN,NVMIN,MTAA.MAT,MLRIN1.PROG,MINTAA.MAT,
+     &           MLRIN2.PROG,IERR0)
+            IF(IERR0.NE.0)THEN
+               WRITE(IOIMP,*) 'subroutine rlencf.eso.'
+C              26 2
+C              Tache impossible. Probablement données erronées
+               CALL ERREUR(26)
+               GOTO 9999
+            ENDIF
+C
+C********** We complete MTAA and MINTAA
+C
+            DO I1=1,NVMIN,1
+               DO I2=I1+1,NVMIN,1
+                  MINTAA.MAT(I2,I1)=MINTAA.MAT(I1,I2)
+                  MTAA.MAT(I2,I1)=MTAA.MAT(I1,I2)
+               ENDDO
+            ENDDO
+C
+            DO IVOI=1,NVOI,1
+C
+C************* We compute [t(MATA) . b]  and we store it in MLRIN1.PROG
+C
+               DO I1=1,NVMIN,1
+                  MLRIN1.PROG(I1)=MATA.MAT(IVOI,I1)
+                  MLRIN2.PROG(I1)=0.0D0
+                  MLRIN3.PROG(I1)=0.0D0
+               ENDDO
+C
+C************* X_0 = [inve(t(MATA) MATA)] [t(MATA) * b]
+C              X_0(i1) into MLRIN2.PROG(I1)
+C
+               DO I2=1,NVMIN,1
+                  DO I1=1,NVMIN,1
+                     MLRIN2.PROG(I1)=MLRIN2.PROG(I1)+
+     &                    (MINTAA.MAT(I1,I2)*MLRIN1.PROG(I2))
+                  ENDDO
+               ENDDO
+C
+C************ X_1 = X_0 + [inve(t(MATA) MATA)] [t(MATA) * b -
+C                  [t(MATA) MATA] X_0]
+C
+C             [t(MATA) MATA] X_0 into MLRIN3.PROG
+C
+               DO I2=1,NVMIN,1
+                  DO I1=1,NVMIN,1
+                     MLRIN3.PROG(I1)=MLRIN3.PROG(I1)+
+     &                    (MTAA.MAT(I1,I2)*MLRIN2.PROG(I2))
+                  ENDDO
+               ENDDO
+C
+C************* Now we have
+C              [t(MATA) . b]  in MLRIN1.PROG
+C              X_0(i1)        in MLRIN2.PROG(I1)
+C              [t(MATA) MATA] X_0 in MLRIN3.PROG
+C
+C              X_1(i1) in MATCOE.MAT(IVOI,i1)
+C
+               DO I1=1,IDIM+1,1
+C                 The only unuseful one is I1=1
+                  DO I2=1,NVMIN,1
+                     MATCOE.MAT(I1,IVOI)=MATCOE.MAT(I1,IVOI)+
+     &                    (MINTAA.MAT(I1,I2)*
+     &                    (MLRIN1.PROG(I2)-MLRIN3.PROG(I2)))
+                  ENDDO
+                  MATCOE.MAT(I1,IVOI)=MATCOE.MAT(I1,IVOI)+
+     &                 MLRIN2.PROG(I1)
+               ENDDO
+            ENDDO
+         ENDIF
+CC
+CC        TEST
+C         write(*,*) 'ngf =', NGF
+C         write(*,*) 'invide',LOGSVD
+C         write(*,*) 'nvois =',(mlenti.lect(ivoi),ivoi=1,nvoi,1)
+C         write(*,*) 'coeff(1) =',(matcoe.mat(1,ivoi),ivoi=1,nvoi,1)
+C         write(*,*) 'coeff(2) =',(matcoe.mat(2,ivoi),ivoi=1,nvoi,1)
+C         write(*,*) 'coeff(3) =',(matcoe.mat(3,ivoi),ivoi=1,nvoi,1)
+C         if(idim.eq.3) write(*,*) 'coeff(4)=',
+C     &        (matcoe.mat(4,ivoi),ivoi=1,nvoi,1)
+C         xv=0.0D0
+C         do ivoi=1,nvoi,1
+C            xv=xv+matcoe.mat(1,ivoi)
+C         enddo
+C         write(*,*) 'sum=',xv
+CC
+         MLENTI=MLEPOI.LECT(IFAC)
+         SEGDES MLENTI
+         MATCOE=MLECOE.LECT(IFAC)
+         SEGDES MATCOE
+      ENDDO
+C
+      SEGDES MATCOE
+      SEGDES MLEPOI
+C
+      SEGDES MELFL
+      SEGSUP MLEFP
+C
+      SEGSUP MATA
+      SEGSUP MATU
+      SEGSUP MATV
+      SEGSUP MLRSIG
+      SEGSUP MLRTRA
+C
+      SEGSUP MTAA
+      SEGSUP MINTAA
+      SEGSUP MLRIN1
+      SEGSUP MLRIN2
+      SEGSUP MLRIN3
+C
+ 9999 CONTINUE
+      RETURN
+      END
+
+
+

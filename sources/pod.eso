@@ -1,0 +1,710 @@
+C POD       SOURCE    CB215821  18/09/13    21:15:54     9917
+      SUBROUTINE POD
+************************************************************************
+* NOM         : POD
+* DESCRIPTION : Calcule la decomposition POD (Proper Orthogonalized
+*               Decomposition) d'un signal spatio-temporel
+************************************************************************
+* APPELE PAR : pilot.eso
+************************************************************************
+* SOUS-PROGRAMMES : tuu.eso  => produit tU*U
+*                   tumu.eso => produit tU*M*U
+*                   utu.eso  => produit U*tU
+*                   utum.eso => produit U*tU*M
+************************************************************************
+* SYNTAXE (GIBIANE) :
+*
+* (...) = POD |LDATA1          | (LENTI1)  |'SNAPSHOTS'| (MASS1) ----+
+*             |MOT1 (MOT2) TAB1|           |'CLASSIQUE'|             |
+*                                                                    |
+*                                 +----------------------------------+
+*                                 |
+*                                 |
+*                                 +---->  NBMOD ('TBAS' (MAIL1)) ;
+*
+************************************************************************
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+-INC CCOPTIO
+-INC CCASSIS
+-INC CCNOYAU
+-INC SMTABLE
+-INC SMLCHPO
+-INC SMCHPOI
+-INC SMELEME
+-INC SMLENTI
+-INC SMLMOTS
+-INC SMLREEL
+-INC SMRIGID
+-INC SMSOLUT
+-INC CCREEL
+      POINTEUR LCOMP.MLMOTS
+*
+      PARAMETER (NMET=2)
+      CHARACTER*4 MMET(NMET)
+      DATA MMET/'SNAP','CLAS'/
+*
+      CHARACTER*4 CHA4
+      CHARACTER*8 CHA8
+      CHARACTER*32 CHA32
+      CHARACTER*40 CHA40,CHB40
+      LOGICAL ZLOGI
+*
+      COMPLEX*16 SHIFT
+*
+*     TMODE = SEGMENTS DE TRAVAIL UTILISES POUR STOCKER LES VALEURS ET
+*             LES VECTEURS PROPRES CONTENUS DANS L'OBJET SOLUTION
+      SEGMENT TMODE
+         INTEGER IMOD(NBSOL)
+         REAL*8  XMOD(NBSOL)
+      ENDSEGMENT
+*
+*     TRAV1,TRAV2 = SEGMENTS DE TRAVAIL UTILISES LORS D'APPELS A ORDO
+      SEGMENT TRAV1
+         INTEGER ITRA((NTRA+1)/2)
+      ENDSEGMENT
+      SEGMENT TRAV2
+         INTEGER IORD(NTRA)
+         REAL*8  XORD(NTRA)
+         REAL*8  XTRA((NTRA+1)/2)
+      ENDSEGMENT
+*
+*     TICHPO,TXCOEF = SEGMENTS UTILISES POUR L'APPEL A L'OPERATEUR COLI
+      SEGMENT/TICHPO/(ICHPO(NCH))
+      SEGMENT/TXCOEF/(XCOEF(NCH)*D)
+*
+************************************************************************
+*
+*     OPERATEUR UTILISABLE SEULEMENT EN 2D OU EN 3D
+      IF (IDIM.EQ.1) THEN
+         INTERR(1)=1
+         CALL ERREUR(709)
+         RETURN
+      ENDIF
+*
+*
+*     +---------------------------------------------------------------+
+*     |                                                               |
+*     |           L E C T U R E   D E S   A R G U M E N T S           |
+*     |                                                               |
+*     +---------------------------------------------------------------+
+*
+*
+*     +---------------------------------------------------------------+
+*     |                 S I G N A L   D ' E N T R E E                 |
+*     +---------------------------------------------------------------+
+*
+      IPRO=0
+      CALL LIRRES(ILCHP1,1,IPRO,CHA32,NCH,0,ILREE1)
+      IF (IERR.NE.0) RETURN
+*
+*     FILTRAGE EVENTUEL DES COMPOSANTES DU SIGNAL FOURNI
+*     (TUU/TUMU/UTU/UTUM IGNORERONT 'LX' DONC INUTILE DE LA FILTRER ICI)
+      CALL LIROBJ('LISTMOTS',LCOMP,0,IRET)
+      IF (IRET.NE.0) THEN
+         SEGACT,LCOMP
+         NCOMP=LCOMP.MOTS(/2)
+         IF (NCOMP.EQ.0) THEN
+            MOTERR(1:8)='LISTMOTS'
+            CALL ERREUR(1027)
+            RETURN
+         ENDIF
+         MLCHP1=ILCHP1
+         SEGACT,MLCHP1
+         N1=NCH
+         SEGINI,MLCHPO
+         DO ICH=1,NCH
+            ICHP1=MLCHP1.ICHPOI(ICH)
+            ICHP2=0
+            DO ICO=1,NCOMP
+               CHA4=LCOMP.MOTS(ICO)
+               CALL EXCOPP(ICHP1,CHA4,NIFOUR,ICHP3,CHA4,NIFOUR,0)
+               IF (IERR.NE.0) RETURN
+               IF (ICHP2.EQ.0) THEN
+                  ICHP2=ICHP3
+               ELSE
+                  CALL ADCHPO(ICHP2,ICHP3,ICHP2,1D0,1D0)
+                  IF (IERR.NE.0) RETURN
+               ENDIF
+            ENDDO
+            ICHPOI(ICH)=ICHP2
+         ENDDO
+         SEGDES,MLCHP1
+         ILCHP1=MLCHPO
+      ENDIF
+*
+*
+*     +---------------------------------------------------------------+
+*     |               M E T H O D E   D E   C A L C U L               |
+*     +---------------------------------------------------------------+
+*
+*     MOT-CLE "SNAPSHOTS" OU "CLASSIQUE"
+*     (LES 4 PREMIERS CARACTERES SUFFISENT)
+      CALL LIRCHA(CHA4,0,IRET)
+      IF (IRET.EQ.0) GOTO 992
+      CALL CHRMOT(MMET,NMET,CHA4,IMET)
+      IF (IMET.EQ.0) GOTO 992
+*
+*     MATRICE DE MASSE (OU DE RAIDEUR) UTILISEE LORS DE L'INTEGRATION
+*     SUR LE MAILLAGE EN ELEMENTS FINIS
+      CALL LIROBJ('RIGIDITE',IRIG1,0,IZRIG)
+*     AUCUNE VERIFICATION N'EST FAITE CAR LE CAS GENERAL PEUT ETRE
+*     TRAITE SANS PLANTAGE, MAIS THEORIQUEMENT ON ATTEND ICI PLUTOT
+*     UNE MATRICE SYMETRIQUE DEFINIE POSITIVE
+*
+      GOTO 10
+*
+ 992  CONTINUE
+      MOTERR(1:4)=CHA4
+      WRITE(CHA8,FMT='("(",I1,"A5)")') NMET
+      WRITE(MOTERR(5:40),FMT=CHA8) (MMET(I),I=1,NMET)
+      CALL ERREUR(1052)
+      RETURN
+*
+*
+*     +---------------------------------------------------------------+
+*     |        N O M B R E   D E   M O D E S   D E M A N D E S        |
+*     +---------------------------------------------------------------+
+*
+ 10   CALL LIRENT(NBMOD,1,IRET)
+      IF (IERR.NE.0) RETURN
+*
+      IF (NBMOD.LE.0) THEN
+         WRITE(IOIMP,*) 'Le nombre de modes doit etre strictement ',
+     &                  'positif'
+         INTERR(1)=NBMOD
+         CALL ERREUR(36)
+         RETURN
+      ELSEIF (IMET.EQ.1.AND.NBMOD.GT.NCH) THEN
+         WRITE(IOIMP,*) "On demande plus de modes qu'il n'y a de ",
+     &                  "snapshots"
+         INTERR(1)=NBMOD
+         CALL ERREUR(36)
+         RETURN
+      ENDIF
+*
+*
+*     +---------------------------------------------------------------+
+*     |                   O P T I O N   " T B A S "                   |
+*     +---------------------------------------------------------------+
+*
+      CALL LIRCHA(CHA4,0,IZTBAS)
+      IF (IZTBAS.EQ.0) GOTO 100
+*
+      IF (CHA4.NE.'TBAS') THEN
+         MOTERR(1:4)=CHA4
+         MOTERR(5:40)='TBAS'
+         CALL ERREUR(1052)
+         RETURN
+      ENDIF
+*
+*     LECTURE EVENTUELLE D'UN MAILLAGE QUI SERA PLACE DANS LA TABLE
+      IF (IZTBAS.NE.0) THEN
+         CALL LIROBJ('MAILLAGE',IMAV1,0,IZMAV)
+      ENDIF
+*
+*
+*
+*
+*     +---------------------------------------------------------------+
+*     |                                                               |
+*     |        M A T R I C E   D E S   C O R R E L A T I O N S        |
+*     |                                                               |
+*     +---------------------------------------------------------------+
+*
+ 100  CONTINUE
+*
+      IF (IMET.EQ.1) THEN
+         IF (IZRIG.EQ.0) THEN
+*           POD "SNAPSHOTS" SANS MATRICE
+            CALL TUU(ILCHP1,(1.D0/NCH),IRIG2)
+         ELSE
+*           POD "SNAPSHOTS" AVEC MATRICE
+            CALL TUMU(ILCHP1,IRIG1,(1.D0/NCH),IRIG2)
+         ENDIF
+         IF (IERR.NE.0) RETURN
+      ELSEIF (IMET.EQ.2) THEN
+         IF (IZRIG.EQ.0) THEN
+*           POD "CLASSIQUE" SANS MATRICE
+            CALL UTU(ILCHP1,(1.D0/NCH),IRIG2)
+         ELSE
+*           POD "CLASSIQUE" AVEC MATRICE
+            CALL UTUM(ILCHP1,IRIG1,(1.D0/NCH),IRIG2)
+         ENDIF
+      ENDIF
+*
+*
+*
+*
+*     +---------------------------------------------------------------+
+*     |                                                               |
+*     |           C A L C U L   D E   L A   B A S E   P O D           |
+*     |                                                               |
+*     +---------------------------------------------------------------+
+*
+*
+*     +---------------------------------------------------------------+
+*     |             E S T I M A T I O N   D U   S H I F T             |
+*     +---------------------------------------------------------------+
+*     LA METHODE DE LA PUISSANCE PERMET D'OBTENIR RAPIDEMENT UNE BONNE
+*     ESTIMATION DE LA PLUS GRANDE VALEUR PROPRE
+*
+*     MCOP,MCOD = LISTMOTS CONTENANT LES COMPOSANTES PRIMALES ET DUALES
+      CALL EXTR16(IRIG2,0,MCOP)
+      IF (IERR.NE.0) RETURN
+      CALL EXTR16(IRIG2,1,MCOD)
+      IF (IERR.NE.0) RETURN
+*
+*     ICHP1 = CHAMP UNITAIRE SUR LE SUPPORT DE LA MATRICE IRIG2
+      CALL UNIFO1(IRIG2,1.,ICHP0)
+      IF (IERR.NE.0) RETURN
+      ICHP1=ICHP0
+*
+*     XVAL1 = MAXI(ABS(ICHP1))
+      CALL MAXIN1(ICHP1,0,'    ',0,XVAL1,1,1)
+      IF (IERR.NE.0) RETURN
+*
+*     ICHP2 = ICHP1 / XVAL1
+C     IOPERA= 5 pour l'operation DIVISION
+C     IARGU = 2 pour CHPOINT / FLOTTANT
+      IOPERA= 5
+      IARGU = 2
+      I1    = 0
+      CALL OPCHP1(ICHP1,IOPERA,IARGU,I1,XVAL1,ICHP2,IRET)
+      IF (IERR.NE.0) RETURN
+*
+*     NITMAX=NOMBRE D'ITERATIONS MAXIMUM
+*     RESMAX=VALEUR DU CRITERE DE CONVERGENCE
+      NITMAX=10
+      RESMAX=1.D-5
+      DO I=1,NITMAX
+*
+*        ICHP3 = IRIG2*ICHP2
+         CALL MUCPRI(ICHP2,IRIG2,ICHP3)
+         IF (IERR.NE.0) RETURN
+*
+*        XVAL2 = MAXI(ABS(ICHP3))
+         CALL MAXIN1(ICHP3,0,'    ',0,XVAL2,1,1)
+         IF (IERR.NE.0) RETURN
+*
+*        ICHP4 = ICHP3 / XVAL2
+C        IOPERA= 5 pour l'operation DIVISION
+C        IARGU = 2 pour CHPOINT / FLOTTANT
+         IOPERA= 5
+         IARGU = 2
+         I1    = 0
+         CALL OPCHP1(ICHP3,IOPERA,IARGU,I1,XVAL2,ICHP4,IRET)
+         IF (IERR.NE.0) RETURN
+*
+         XRES1=ABS((XVAL2-XVAL1)/XVAL1)
+         IF (XRES1.LT.RESMAX) GOTO 200
+*
+*        PREPARATION DE L'ITERATION SUIVANTE
+         CALL NOMC2(ICHP4,MCOD,MCOP,ICHP2)
+         IF (IERR.NE.0) RETURN
+         XVAL1=XVAL2
+*
+      ENDDO
+ 200  CONTINUE
+*
+      XFREQ=0.5/XPI*(XVAL1**0.5)
+      SHIFT=CMPLX(XFREQ,0.D0)
+*
+*
+*     +---------------------------------------------------------------+
+*     | R E S O L U T I O N   D U   S Y S T E M E   M A T R I C I E L |
+*     +---------------------------------------------------------------+
+*
+*     DANS CAST3M, ON NE PEUT ACUTELLEMENT PAS CALCULER UN PROBLEME
+*     AUX VALEURS PROPRES CLASSIQUE (AX-nX=0) ; PAR CONTRE ON SAIT
+*     RESOUDRE SA FORME DITE GENERALISEE (KX-nMX=0)
+*
+*     DETERMINATION DE LA SYMETRIE DE LA MATRICE DE "RAIDEUR" K
+*     => NORMALEMENT, ELLE DOIT ETRE SYMETRIQUE DANS TOUS LES CAS SAUF
+*        SI IMET=2 ET IZRIG=VRAI (POD "CLASSIQUE" AVEC MATRICE)
+      MRIGID=IRIG2
+      SEGACT,MRIGID
+      ISYM2=IRIGEL(7,1)
+      NRIGEL=IRIGEL(/2)
+      DO I=2,NRIGEL
+         IF (IRIGEL(7,I).NE.ISYM2) ISYM2=2
+      ENDDO
+      SEGDES,MRIGID
+*
+*     CREATION D'UNE MATRICE "MASSE" M VALANT L'IDENTITE
+      CALL KOPDIR(ICHP0,IMAS2)
+      IF (IERR.NE.0) RETURN
+      MRIGID=IMAS2
+      SEGACT,MRIGID*MOD
+      MTYMAT='MASSE'
+      SEGDES,MRIGID
+*
+*     RESOLUTION PROPREMENT DITE
+*     => SUBROUTINE A CHOISIR PARMI : PROCHE, INTVAL, SIMULT, ARPACK
+      JG=1
+      SEGINI,MLREEL
+      PROG(1)=XFREQ
+      SEGDES,MLREEL
+      SEGINI,MLENTI
+      LECT(1)=NBMOD
+      SEGDES,MLENTI
+      CALL ARPACK(IRIG2,IMAS2,0,ISOLUT,SHIFT,NBMOD,'LM',ISYM2,0)
+      IF (IERR.NE.0) RETURN
+*
+*     ON RECUPERE LES DONNEES CONTENUES DANS L'OBJET SOLUTION UNE BONNE
+*     FOIS POUR TOUTES
+      MSOLUT=ISOLUT
+      SEGACT,MSOLUT
+      MSOLE1=MSOLIS(4)
+      IF (MSOLE1.EQ.0) THEN
+         NBSOL=0
+         SEGINI,TMODE
+      ELSE
+         SEGACT,MSOLE1
+         NBSOL=MSOLE1.ISOLEN(/1)
+         IF (ISYM2.NE.0) NBSOL=NBSOL/2
+         SEGINI,TMODE
+         IF (NBSOL.NE.0) THEN
+            MSOLE2=MSOLIS(5)
+            SEGACT,MSOLE2
+            DO ISOL=1,NBSOL
+               IF (ISYM2.EQ.0) THEN
+                  IMOD(ISOL)=MSOLE2.ISOLEN(ISOL)
+                  MMODE=MSOLE1.ISOLEN(ISOL)
+                  SEGACT,MMODE
+                  XMOD(ISOL)=FMMODD(1)
+                  SEGDES,MMODE
+               ELSE
+*                 ON VERIFIE QUE LA FREQUENCE PROPRE IMAGINAIRE EST
+*                 BIEN NULLE, SINON...
+                  MMODE=MSOLE1.ISOLEN(2*ISOL)
+                  SEGACT,MMODE
+                  IF (FMMODD(1).NE.0) THEN
+                     WRITE(IOIMP,*) 'Les modes POD sont complexes'
+                     CALL ERREUR(21)
+                     RETURN
+                  ENDIF
+                  SEGDES,MMODE
+
+                  ISOL1=2*ISOL-1
+                  IMOD(ISOL)=MSOLE2.ISOLEN(ISOL1)
+                  MMODE=MSOLE1.ISOLEN(ISOL1)
+                  SEGACT,MMODE
+                  XMOD(ISOL)=FMMODD(1)
+                  SEGDES,MMODE
+               ENDIF
+            ENDDO
+            SEGDES,MSOLE2
+         ENDIF
+         SEGDES,MSOLE1
+      ENDIF
+      SEGDES,MSOLUT
+*
+*
+*     +---------------------------------------------------------------+
+*     |  C O N S T R U C T I O N   D E S   P O D   S N A P S H O T S  |
+*     +---------------------------------------------------------------+
+*
+      IF (IMET.EQ.1.AND.NBSOL.NE.0) THEN
+*
+*        ON RECOPIE LES SNAPSHOTS DANS LE SEGMENT TICHPO
+         SEGINI,TICHPO,TXCOEF
+         MLCHPO=ILCHP1
+         SEGACT,MLCHPO
+         DO K=1,NCH
+            ICHPO(K)=ICHPOI(K)
+         ENDDO
+         IF (IPRO.EQ.1.OR.IPRO.EQ.4) THEN
+            SEGDES,MLCHPO
+         ELSEIF (IPRO.EQ.2.OR.IPRO.EQ.3) THEN
+            SEGSUP,MLCHPO
+         ENDIF
+*
+*        MAILLAGE SUPER-ELEMENT DE LA MATRICE DES CORRELATIONS
+         MRIGID=IRIG2
+         SEGACT,MRIGID
+         IPT2=IRIGEL(1,1)
+         SEGDES,MRIGID
+         SEGACT,IPT2
+         IF (IPT2.NUM(/1).NE.NCH) THEN
+            CALL ERREUR(223)
+            RETURN
+         ENDIF
+*
+*        ON RECONSTRUIT LE I-EME MODE POD EN FAISANT LA COMBINAISON
+*        LINEAIRE DES COEFFICIENTS DU I-EME VECTEUR PROPRE AVEC LES
+*        CHAMPS DU LISTCHPO CONTENANT LE SIGNAL (LES "SNAPSHOTS")
+         SEGACT,MSOLE2*MOD
+         DO ISOL=1,NBSOL
+            MCHPO1=IMOD(ISOL)
+            SEGACT,MCHPO1
+            MSOUP1=MCHPO1.IPCHP(1)
+            SEGACT,MSOUP1
+            IPT1=MSOUP1.IGEOC
+            MPOVA1=MSOUP1.IPOVAL
+            SEGACT,IPT1,MPOVA1
+            IF (IPT1.NUM(/2).NE.NCH) THEN
+               CALL ERREUR(223)
+               RETURN
+            ENDIF
+            DO 300 I=1,NCH
+*              ON CHERCHE A QUEL CHPOINT DU LISTCHPO ON DOIT ASSOCIER
+*              LE I-EME NOEUD DU SUPPORT DU VECTEUR PROPRE
+               DO J=1,NCH
+                  IF (IPT1.NUM(1,I).EQ.IPT2.NUM(J,1)) THEN
+                     XCOEF(J)=MPOVA1.VPOCHA(I,1)
+                     GOTO 300
+                  ENDIF
+               ENDDO
+               CALL ERREUR(18)
+               RETURN
+ 300        CONTINUE
+            SEGDES,MPOVA1,IPT1,MSOUP1,MCHPO1
+*
+*           ON FAIT LA COMBINAISON LINEAIRE PUIS ON ENLEVE LES
+*           MULTIPLICATEURS DE LAGRANGE
+            CALL COMBIL(TICHPO,TXCOEF,NCH,ICHP1)
+            IF (IERR.NE.0) RETURN
+            MCHPOI=ICHP1
+            SEGACT,MCHPOI*MOD
+            NBSOU=IPCHP(/1)
+            NAT=JATTRI(/1)
+            NSOUPO=0
+            DO I=1,NBSOU
+               MSOUPO=IPCHP(I)
+               SEGACT,MSOUPO
+               IF (NOCOMP(1).EQ.'LX') GOTO 310
+               NSOUPO=NSOUPO+1
+               IPCHP(NSOUPO)=MSOUPO
+ 310           CONTINUE
+               SEGDES,MSOUPO
+            ENDDO
+            IF (NSOUPO.NE.NBSOU) SEGADJ,MCHPOI
+            SEGDES,MCHPOI
+*
+*           ON NORMALISE LES MODES (NORME INFINIE)
+            CALL MAXIM1(ICHP1,0,'    ',0,XMAX1)
+            IF (IERR.NE.0) RETURN
+            IF (XMAX1.NE.0.D0) THEN
+               CALL NORMA1(ICHP1,0,'    ',ICHP2)
+               IF (IERR.NE.0) RETURN
+               CALL DTCHPO(ICHP1)
+               ICHP1=ICHP2
+            ENDIF
+*
+*           ON MODIFIE DIRECTEMENT LE SEGMENT TMODE (ET AUSSI L'OBJET
+*           SOLUTION, POUR L'OPTION "TBAS") EN Y INSERANT LE MODE POD
+            IMOD(ISOL)=ICHP1
+            MSOLE2.ISOLEN(ISOL)=ICHP1
+         ENDDO
+*
+         SEGDES,MSOLE2
+         SEGDES,IPT2
+         SEGSUP,TICHPO,TXCOEF
+*
+      ENDIF
+*
+*
+*
+*
+*     +---------------------------------------------------------------+
+*     |                                                               |
+*     |     M I S E   E N   F O R M E   D E S   R E S U L T A T S     |
+*     |                                                               |
+*     +---------------------------------------------------------------+
+*
+*
+*     SOUS FORME D'UN OBJET TABLE
+*     ***************************
+      IF (IZTBAS.NE.0) THEN
+*
+*        APPEL A CRTBAS OU CCTBAS POUR TRANSFORMER L'OBJET SOLUTION
+*        EN OBJET TABLE
+         IF (ISYM2.EQ.0) THEN
+            CALL CRTBAS(ISOLUT,IMAS2)
+            IF (IERR.NE.0) RETURN
+         ELSE
+            CALL CCTBAS(ISOLUT,IMAS2)
+            IF (IERR.NE.0) RETURN
+         ENDIF
+         CALL LIROBJ('TABLE',MTABLE,1,IRET)
+         IF (IERR.NE.0) RETURN
+         CHA8='TABLE'
+         CALL ACMO(MTABLE,'MODES',CHA8,ITAB1)
+         IF (IERR.NE.0) RETURN
+*
+*        1) SI LA MATRICE EST NON SYMETRIQUE, ON A ETE OBLIGE D'APPELER
+*           CCTBAS ET ON DOIT MAINTENANT ENLEVER LA PARTIE IMAGINAIRE
+*        2) ON RAJOUTE UN INDICE "VALEUR_PROPRE" EN FIN DE TABLE
+         CALL QUERAN(II1,'MOT',13,XVAL,'VALEUR_PROPRE',ZLOGI,IOBJ)
+         IF (NBESC.NE.0) SEGACT,IPILOC
+         DO ISOL=1,NBSOL
+*           MTAB2 = SOUS-TABLE ASSOCIEE AU MODE NUMERO ISOL
+            CALL ACCTAB(ITAB1,'ENTIER',ISOL,0.D0,'MOT',.TRUE.,0,
+     &                        'TABLE',IVAL,XVAL,CHA8,ZLOGI,MTAB2)
+            IF (IERR.NE.0) RETURN
+            SEGACT,MTAB2*MOD
+            MLOTA=MTAB2.MLOTAB
+            M=0
+*           BOUCLE SUR LES INDICES DE MTAB2
+            DO 410 I=1,MLOTA
+*
+*              VALEUR DU I-EME INDICE (TOUJOURS DE TYPE MOT)
+               CHA8=MTAB2.MTABTV(I)
+               IMO1=IPCHAR(MTAB2.MTABII(I))
+               IMO2=IPCHAR(MTAB2.MTABII(I)+1)
+               ILON=IMO2-IMO1
+               CHA40(1:ILON)=ICHARA(IMO1:IMO1+ILON-1)
+*
+               IF (ISYM2.NE.0) THEN
+*
+*                 INDICE ASSOCIE A LA PARTIE IMAGINAIRE => ON SAUTE
+                  J1=INDEX(CHA40(1:ILON),'_IMAG')
+                  IF (J1.NE.0) GOTO 410
+*
+*                 INDICE ASSOCIE A LA PARTIE REELLE => ON RENOMME
+                  J2=INDEX(CHA40(1:ILON),'_REEL')
+                  IF (J2.NE.0) THEN
+                     IL=J2-1
+                     CHB40=CHA40(1:IL)
+                     CALL QUERAN(II2,'MOT',IL,XVAL,CHB40,ZLOGI,IOBJ)
+                     MTAB2.MTABII(I)=II2
+                  ENDIF
+*
+*                 DECALAGE DES DONNEES DE MTAB2 PUISQUE LES INDICES
+*                 ASSOCIES A LA PARTIE IMAGINAIRE NE SONT PLUS LA
+                  M=M+1
+                  IF (M.NE.I) THEN
+                     MTAB2.MTABTI(M)=MTAB2.MTABTI(I)
+                     MTAB2.MTABTV(M)=MTAB2.MTABTV(I)
+                     MTAB2.RMTABI(M)=MTAB2.RMTABI(I)
+                     MTAB2.MTABII(M)=MTAB2.MTABII(I)
+                     MTAB2.MTABIV(M)=MTAB2.MTABIV(I)
+                     MTAB2.RMTABV(M)=MTAB2.RMTABV(I)
+                  ENDIF
+*
+               ELSE
+                  M=M+1
+               ENDIF
+*
+*              ON MEMORISE LA FREQUENCE DU MODE
+               IF (CHA40(1:9).EQ.'FREQUENCE') XFRQ=MTAB2.RMTABV(I)
+*
+ 410        CONTINUE
+*
+*           ON AJOUTE UN INDICE "VALEUR_PROPRE" EN FIN DE TABLE
+            XVAL=(2.D0*XPI*XFRQ)**2
+            M=M+1
+            MTAB2.MLOTAB=M
+            SEGADJ,MTAB2
+            MTAB2.MTABTI(M)='MOT'
+            MTAB2.MTABTV(M)='FLOTTANT'
+            MTAB2.MTABII(M)=II1
+            MTAB2.RMTABV(M)=XVAL
+*
+            SEGDES,MTAB2
+         ENDDO
+         IF (NBESC.NE.0) SEGDES,IPILOC
+*
+*        ON ORDONNE LES MODES PAR VALEUR PROPRE DECROISSANTE...
+         NTRA=NBSOL
+         SEGINI,TRAV1,TRAV2
+         DO ISOL=1,NBSOL
+            CALL ACCTAB(ITAB1,'ENTIER',ISOL,0.D0,'MOT',.TRUE.,0,
+     &                        'TABLE',IVAL,XVAL,CHA8,ZLOGI,ITAB2)
+            IF (IERR.NE.0) RETURN
+*
+*           ON NE PEUT PAS UTILISER XMOD(ISOL) CAR CRTBAS/CCTBAS A
+*           MODIFIE L'ORDRE DES MODES PAR RAPPORT A L'OBJET SOLUTION
+            CALL ACCTAB(ITAB2,'MOT',0,0.D0,'FREQUENCE',.TRUE.,0,
+     &                        'FLOTTANT',IVAL,XVAL,CHA8,ZLOGI,IOBJ)
+            IF (IERR.NE.0) RETURN
+*
+            IMOD(ISOL)=ITAB2
+            XORD(ISOL)=XVAL
+            IORD(ISOL)=ISOL
+         ENDDO
+         CALL ORDM03(XORD(1),IORD(1),NTRA,XTRA(1),ITRA(1),.FALSE.)
+*
+*        ...PUIS ON MET A JOUR LA TABLE DES MODES
+         DO ISOL=1,NBSOL
+            ITAB2=IMOD(IORD(ISOL))
+            CALL ECCTAB(ITAB1,'ENTIER',ISOL,0.D0,'MOT',.TRUE.,0,
+     &                        'TABLE',IVAL,XVAL,CHA8,ZLOGI,ITAB2)
+            CALL ECCTAB(ITAB2,'MOT',ISOL,0.D0,'NUMERO_MODE',.TRUE.,0,
+     &                        'ENTIER',ISOL,XVAL,CHA8,ZLOGI,IOBJ)
+         ENDDO
+         SEGSUP,TRAV1,TRAV2
+*
+*        ENFIN, ON MET A JOUR LE MAILLAGE CONTENU DANS LA TABLE
+         IF (IZMAV.EQ.0) THEN
+            NBNN=1
+            NBELEM=0
+            NBSOUS=0
+            NBREF=0
+            SEGINI,MELEME
+            ITYPEL=1
+            IMAV1=MELEME
+            SEGDES,MELEME
+         ENDIF
+         CALL ECCTAB(ITAB1,'MOT',ISOL,0.D0,'MAILLAGE',.TRUE.,0,
+     &                     'MAILLAGE',ISOL,XVAL,CHA8,ZLOGI,IMAV1)
+*
+*
+         CALL ECROBJ('TABLE',MTABLE)
+*
+*
+*     SOUS FORME DE DEUX OBJETS LISTCHPO ET LISTREEL
+*     **********************************************
+      ELSE
+*
+         IF (NBSOL.NE.0) THEN
+*
+*           ON ORDONNE LES MODES PAR VALEUR PROPRE DECROISSANTE...
+            NTRA=NBSOL
+            SEGINI,TRAV1,TRAV2
+            DO ISOL=1,NBSOL
+               XORD(ISOL)=XMOD(ISOL)
+               IORD(ISOL)=ISOL
+            ENDDO
+            CALL ORDM03(XORD(1),IORD(1),NTRA,XTRA(1),ITRA(1),.FALSE.)
+*
+*           ...PUIS ON REMPLIT LE LISTCHPO ET LE LISTREEL
+            N1=NBSOL
+            JG=NBSOL
+            SEGINI,MLCHPO,MLREEL
+            DO ISOL=1,NBSOL
+               ISOL1=IORD(ISOL)
+               PROG(ISOL)=XMOD(ISOL1)
+               ICHPOI(ISOL)=IMOD(ISOL1)
+            ENDDO
+*
+            SEGSUP,TRAV1,TRAV2
+*
+         ELSE
+            N1=0
+            JG=0
+            SEGINI,MLCHPO,MLREEL
+         ENDIF
+*
+         SEGDES,MLCHPO,MLREEL
+*
+*
+         CALL ECROBJ('LISTREEL',MLREEL)
+         CALL ECROBJ('LISTCHPO',MLCHPO)
+*
+      ENDIF
+*
+      SEGSUP,TMODE
+*
+      RETURN
+*
+      END
+*
+*
+
+
+
+
+
+

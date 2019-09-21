@@ -1,0 +1,553 @@
+C FEFP1     SOURCE    PV        17/09/29    21:15:11     9578
+
+      SUBROUTINE FEFP1(IPMODL,IPCHE1,IPCHE2,IPCHE3,IPCAR,
+     .                 IPCHE7,IPCHE8,IPCHE9,IPRIGI,
+     .                 PRECIS,NITMAX,NUPDATE)
+*************************************************************************
+*  entrees:
+*   ipmodl = pointeur sur un objet mmodel
+*   ipche1 = pointeur sur un mchaml de deformations
+*   ipche2 = pointeur sur un mchaml de variables internes initiales
+*   ipche3 = pointeur sur un mchaml de deplacements entre depart et arrivee
+*   ipcar  = pointeur sur un mchaml de caracteristiques
+*   precis = precision des iterations internes
+*   nitmax = maximum number of iterations at local level
+*   nupdate = total (0) / update (1) lagrangian formulation
+* sorties:
+*   ipche7 = pointeur sur un mchaml de contraintes
+*   ipche8 = pointeur sur un mchaml de variables internes
+*   ipche9 = pointeur sur un mchaml de deformations
+*   iprigi = pointeur sur l'objet de type rigidite
+*************************************************************************
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCGEOME
+-INC SMCHAML
+-INC SMCOORD
+-INC SMELEME
+-INC SMINTE
+-INC SMMODEL
+-INC SMRIGID
+      SEGMENT NOTYPE
+         CHARACTER*16 TYPE(NBTYPE)
+      ENDSEGMENT
+      SEGMENT MPTVAL
+         INTEGER IPOS(NS), NSOF(NS), IVAL(NCOSOU)
+         CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+      CHARACTER*8 CMATE
+      CHARACTER*(NCONCH) CONM
+      PARAMETER (NINF=3)
+      INTEGER INFOS(NINF)
+      LOGICAL lsupfo,lsupva,lsupdp,lsupma,lsupco,lsupdd
+
+************************
+* Activar el modelo
+************************
+      MMODEL=IPMODL
+      SEGACT MMODEL
+c     Usa N1
+      NSOUS=MMODEL.KMODEL(/1)
+
+************************
+* Creation de los 3 mchelms de salida
+************************
+      N1=NSOUS
+      L1=11
+      N3=6
+      SEGINI MCHELM
+c     Usa L1, N1, N3
+      MCHELM.TITCHE='CONTRAINTES'
+      MCHELM.IFOCHE=IFOUR
+      IPCHE7=MCHELM
+      L1=18
+      SEGINI MCHEL1
+      MCHEL1.TITCHE='VARIABLES INTERNES'
+      MCHEL1.IFOCHE=IFOUR
+      IPCHE8=MCHEL1
+      L1=25
+      SEGINI MCHEL2
+      MCHEL2.TITCHE='DEFORMATIONS INELASTIQUES'
+      MCHEL2.IFOCHE=IFOUR
+      IPCHE9=MCHEL2
+
+************************
+* Creacion del objeto rigidite
+************************
+      NRIGE =7
+      NRIGEL=NSOUS
+      SEGINI MRIGID
+c     Usa NRIGE, NRIGEL
+      MRIGID.MTYMAT = 'RIGIDITE'
+      MRIGID.ICHOLE=0
+      MRIGID.IMGEO1=0
+      MRIGID.IMGEO2=0
+      MRIGID.IFORIG=IFOUR
+      DO ISOUS=1,NSOUS
+         MRIGID.COERIG(ISOUS)=1.D0
+         MRIGID.IRIGEL(4,ISOUS)=0
+      ENDDO
+      IPRIGI=MRIGID
+
+c*****************************************************************
+c     INICIO bucle sobre zonas
+c*****************************************************************
+      DO 1000 ISOUS=1,NSOUS
+c*****************************************************************
+
+************************
+* Recuperar la informacion general de la zona
+************************
+c Activa el modelo de la zona
+      IMODEL=KMODEL(ISOUS)
+      SEGACT IMODEL
+c     Usa MN3, NFOR, NMAT
+      MELE  =IMODEL.NEFMOD
+      MELEME=IMODEL.IMAMOD
+c     malla
+      CONM  =IMODEL.CONMOD
+c     nombre del componente (blanco por defecto)
+
+c Activa la malla
+      SEGACT MELEME
+c     Usa NBNN,NBELEM,NBSOUS,NBREF
+      NBNN  =MELEME.NUM(/1)
+      NBELEM=MELEME.NUM(/2)
+
+c Tipo de material
+      NFOR  =IMODEL.FORMOD(/2)
+c     tamanyo nombre formulacion
+      NMAT  =IMODEL.MATMOD(/2)
+c     tamanyo nombre material
+      CALL NOMATE(FORMOD,NFOR,MATMOD,NMAT,CMATE,MATE,INPLAS)
+c     entra: FORMOD,NFOR,MATMOD,NMAT
+c     sale : CMATE,MATE,INPLAS
+
+* Controla que sea material de trabajo:
+* VMT_FEFP, RHMC_FEFP, POWDERCAP_FEFP,POWDER_FEFP
+      IF ((INPLAS.ne.114).and.(INPLAS.ne.115).and.
+     .    (INPLAS.ne.116).and.(INPLAS.ne.117)) then
+         write(*,*) ' Material no disponible',inplas
+      ENDIF
+
+************************
+*  informacion de elementos finitos
+************************
+*  activa un segmento q se llama luego INFO, q tiene INFELE
+*      CALL ELQUOI(MELE,0,5,IPINF,IMODEL)
+c     entra: MELE,IMODEL
+c     sale : IPINF
+*      INFO =IPINF
+*      MELE =INFO.INFELE(1)
+       MELE =INFELE(1)
+c     numero de elemento finito
+*      NBGS =INFO.INFELE(4)
+       NBGS =INFELE(4)
+c     num de puntos de integracion para sigma
+*      NBG  =INFO.INFELE(6)
+        NBG  =INFELE(6)
+c     num de puntos de integracion para rigidite
+*      IPORE=INFO.INFELE(8)
+        IPORE=INFELE(8)
+c     nombre funciones de forma
+*      LRE  =INFO.INFELE(9)
+        LRE  =INFELE(9)
+c     grados libertad en rigidite
+*      LHOOK=INFO.INFELE(10)
+         LHOOK=INFELE(10)
+c     tamaño matriz de hook
+*      MINTE=INFO.INFELE(11)
+      minte=infmod(7)
+c     segmento de integracion
+*      MFR  =INFO.INFELE(13)
+       MFR  =INFELE(13)
+c     formulacion de los elementos
+*      NDDL =INFO.INFELE(15)
+        NDDL =INFELE(15)
+c     numero maximo de grados de libertad por nodo
+*      NSTRS=INFO.INFELE(16)
+       NSTRS=INFELE(16)
+c     componentes de sigma y defor
+
+*  Controla que sean elementos masivos
+      IF ((MFR.lt.1).or.(MFR.gt.1)) then
+         write(*,*) ' Tipo de elemento no disponible'
+      ENDIF
+
+************************
+* Llena informacion base en los 3 campos de salida
+************************
+      MCHELM.IMACHE(ISOUS)=MELEME
+      MCHELM.CONCHE(ISOUS)=CONM
+      MCHEL1.IMACHE(ISOUS)=MELEME
+      MCHEL1.CONCHE(ISOUS)=CONM
+      MCHEL2.IMACHE(ISOUS)=MELEME
+      MCHEL2.CONCHE(ISOUS)=CONM
+      MCHELM.INFCHE(ISOUS,1)=0
+      MCHELM.INFCHE(ISOUS,2)=0
+      MCHELM.INFCHE(ISOUS,3)=NIFOUR
+      MCHELM.INFCHE(ISOUS,4)=MINTE
+      MCHELM.INFCHE(ISOUS,5)=0
+      MCHELM.INFCHE(ISOUS,6)=5
+      MCHEL1.INFCHE(ISOUS,1)=0
+      MCHEL1.INFCHE(ISOUS,2)=0
+      MCHEL1.INFCHE(ISOUS,3)=NIFOUR
+      MCHEL1.INFCHE(ISOUS,4)=MINTE
+      MCHEL1.INFCHE(ISOUS,5)=0
+      MCHEL1.INFCHE(ISOUS,6)=5
+      MCHEL2.INFCHE(ISOUS,1)=0
+      MCHEL2.INFCHE(ISOUS,2)=0
+      MCHEL2.INFCHE(ISOUS,3)=NIFOUR
+      MCHEL2.INFCHE(ISOUS,4)=MINTE
+      MCHEL2.INFCHE(ISOUS,5)=0
+      MCHEL2.INFCHE(ISOUS,6)=5
+
+************************
+* Llena informacion base de la rigidite
+************************
+*     Activa segmento MINTE
+      NBNO =NBNN
+      SEGACT MINTE
+c     Usa NBPGAU,NBNO
+      NBPGAU=MINTE.POIGAU(/1)
+*     Inicializa segmento descr, descripcion incognitas matriz rigidite
+      NLIGRP=LRE
+      NLIGRD=LRE
+      SEGINI DESCR
+c     Usa NLIGRP,NLGRD
+      IPDESCR=DESCR
+      if(lnomid(1).ne.0) then
+         nomid=lnomid(1)
+         segact nomid
+         modepl=nomid
+         ndepl=lesobl(/2)
+         ndum=lesfac(/2)
+         lsupdp=.false.
+      else
+         lsupdp=.true.
+         CALL IDPRIM(IMODEL,MFR,MODEPL,NDEPL,NDUM)
+      endif
+c     entra: MFR,IFOUR
+c     sale : MODEPL (nombres comp. despl),NDEPL (numero obli),NDUM (n. opta)
+      if(lnomid(2).ne.0) then
+       nomid=lnomid(2)
+       segact nomid
+       moforc=nomid
+       nforc=lesobl(/2)
+       lsupfo=.false.
+      else
+       CALL IDDUAL(IMODEL,MFR,MOFORC,NFORC,NDUM)
+       lsupfo=.true.
+      endif
+c     entra: MFR,IFOUR
+c     sale : MOFORC (nombres comp. fuerz),NFORC (numero obli),NDUM (n. opta)
+*     Llena el segmento descr con los nombres de las incognitas
+      IDDL=1
+      NCOMP =NDEPL
+      NBNNS =NBNN
+      NOMID =MODEPL
+      SEGACT NOMID
+      NOMID =MOFORC
+      SEGACT NOMID
+*      write(6,*)'nbnns ncomp nligrp nligrd',nbnns,ncomp,nligrp,nligrd
+      DO INOEUD=1,NBNNS
+          DO ICOMP=1,NCOMP
+               NOMID=MODEPL
+               DESCR.LISINC(IDDL)=LESOBL(ICOMP)
+               NOMID=MOFORC
+               DESCR.LISDUA(IDDL)=LESOBL(ICOMP)
+               NOELEP(IDDL)=INOEUD
+               NOELED(IDDL)=INOEUD
+               IDDL=IDDL+1
+          ENDDO
+      ENDDO
+      NOMID =MODEPL
+      SEGDES NOMID
+      NOMID =MOFORC
+      SEGDES NOMID
+*     Inicializa segment xmatri,  le segment
+*     contenant les matrices de rigidite elementaires
+      NELRIG =NBELEM
+      SEGINI xMATRI
+c     usa NELRIG
+* Trata la rigidite
+      MRIGID.IRIGEL(1,ISOUS)=MELEME
+      MRIGID.IRIGEL(2,ISOUS)=0
+      MRIGID.IRIGEL(3,ISOUS)=IPDESCR
+      MRIGID.IRIGEL(4,ISOUS)=xMATRI
+      MRIGID.IRIGEL(5,ISOUS)=NIFOUR
+      MRIGID.IRIGEL(6,ISOUS)=0
+c     no simetricas = 2, simetricas = 0
+      IRIGE7=0
+c con friccion tiene que usarse simetrizadas...
+c queda pendiente de arreglar
+      if (INPLAS.eq.116.or.INPLAS.eq.117) IRIGE7=2
+      MRIGID.IRIGEL(7,ISOUS)=IRIGE7
+      xmatri.symre=irige7
+************************
+* tratamiento de los 4 campos dados
+************************
+c DUDAS ESTE TROZO
+c     creation du tableau infos: no se para q, pero evita error en komcha
+c     nbno, no se pq!
+      NBNO=NBNNE(NUMGEO(MELE))
+c     aqui se miraba que las tensiones y las var int ini fuesen compatibles ??
+c     ahora no hay campo de tensiones iniciales pero si campo de def plasticas
+c     se ha de hacer eso igualmente????. => Si no se hace da un error en comcha !
+      CALL IDENT(MELEME,CONM,IPCHE1,IPCHE2,INFOS,IRTD)
+c      entra:
+c        meleme = puntero zona considerada
+c        conm   = nombre del constituyente?
+c        ipche1 y ipche2 = puntero campos
+c      sale
+c        INFOS  = tabla de infche para komcha
+c        IRTD = 0 si no son compatibles
+c      IF (IRTD.EQ.0)THEN
+c         write(*,*)' no compatibles'
+c         SEGDES IMODEL*NOMOD,MMODEL*NOMOD
+c         SEGSUP MCHELM,MCHEL1,MCHEL2
+c         INFO=IPINF
+c         SEGSUP INFO
+c         RETURN
+c      ENDIF
+c DUDAS ESTE TROZO
+**********************************************
+c tipo de variables de trabajo
+      NBTYPE =1
+      SEGINI NOTYPE
+      NOTYPE.TYPE(1)='REAL*8'
+********************************************** IPCHE1 => IVADPI
+*  deformaciones plasticas iniciales
+      if(lnomid(13).ne.0) then
+         nomid=lnomid(13)
+         segact nomid
+         modein=nomid
+         ndef=lesobl(/2)
+         nfac=lesfac(/2)
+         lsupdd=.false.
+      else
+         lsupdd=.true.
+         CALL IDDEIN(IMODEL,IFOUR,MODEIN,NDEF,NFAC)
+      endif
+
+      CALL KOMCHA(IPCHE1,MELEME,CONM,MODEIN,NOTYPE,1,INFOS,3,IVADPI)
+********************************************** IPCHE2 => IVARI
+*  variables internes
+      if(lnomid(10).ne.0) then
+         nomid=lnomid(10)
+         segact nomid
+         movari=nomid
+         nvari=lesobl(/2)
+         nvarf=lesfac(/2)
+         lsupva=.false.
+      else
+         lsupva=.true.
+         CALL IDVARI(MFR,IMODEL,MOVARI,NVARI,NVARF)
+      endif
+      CALL KOMCHA(IPCHE2,MELEME,CONM,MOVARI,NOTYPE,1,INFOS,3,IVARI)
+      NVART=NVARI+NVARF
+********************************************** IPCHE3 => IVADESP
+* campo de desplazamientos
+      if(lnomid(1).ne.0) then
+         nomid=lnomid(1)
+         segact nomid
+         modepl=nomid
+         ndep=lesobl(/2)
+         nfac=lesfac(/2)
+         lsupdp=.false.
+      else
+         lsupdp=.true.
+        CALL IDPRIM(IMODEL,MFR,MODEPL,NDEP,NFAC)
+      endif
+      CALL KOMCHA(IPCHE3,MELEME,CONM,MODEPL,NOTYPE,1,INFOS,3,IVADESP)
+********************************************** IPMODL => IVAMAT
+*  caracteristiques materielles
+      if(lnomid(6).ne.0) then
+         nomid=lnomid(6)
+         segact nomid
+         momatr=nomid
+         nmatr=lesobl(/2)
+         nmatf=lesfac(/2)
+         lsupma=.false.
+      else
+         lsupma=.true.
+         CALL IDMATR(MFR,IMODEL,MOMATR,NMATR,NMATF)
+      endif
+      CALL KOMCHA(IPCAR,MELEME,CONM,MOMATR,NOTYPE,1,INFOS,3,IVAMAT)
+      NMATT=NMATR+NMATF
+      SEGSUP NOTYPE
+********************************************** IPCAR => no hay...
+*  caracteristiques geometriques
+
+**********************************************
+* Creacion de los mchamls de las zonas
+**********************************************
+      NBPTEL=NBGS
+      NEL   =NBELEM
+      N1PTEL=NBPTEL
+      N1EL  =NEL
+*********************************
+*  tensiones
+*********************************
+      if(lnomid(4).ne.0) then
+         nomid=lnomid(4)
+         segact nomid
+         mostrs=nomid
+         nstrs=lesobl(/2)
+         nfac=lesfac(/2)
+         lsupco=.false.
+      else
+         lsupco=.true.
+         CALL IDCONT(IMODEL,IFOUR,MOSTRS,NSTRS,NFAC)
+      endif
+c     entra: IMODEL,IFOUR
+c     sale : MOSTRS,NSTRS,NFAC
+      N2    =NSTRS
+      SEGINI MCHAML
+c     usa N2
+      MCHELM.ICHAML(ISOUS)=MCHAML
+      NS    =1
+      NCOSOU=NSTRS
+      SEGINI MPTVAL
+c     usa NS, NCOSOU
+      IVASTF=MPTVAL
+      NOMID =MOSTRS
+      SEGACT NOMID
+c     usa NBROBL, NBRFAC
+      DO ICOMP=1,NSTRS
+         MCHAML.NOMCHE(ICOMP)=NOMID.LESOBL(ICOMP)
+         MCHAML.TYPCHE(ICOMP)='REAL*8'
+         N2PTEL=0
+         N2EL  =0
+         SEGINI MELVAL
+c        usa N1PTEL, N1EL, N2PTEL, N2EL
+         MCHAML.IELVAL(ICOMP)=MELVAL
+         IVAL(ICOMP)=MELVAL
+      enddo
+      SEGDES NOMID
+*********************************
+*  variables internes
+      N2    =NVART
+      SEGINI MCHAM1
+      MCHEL1.ICHAML(ISOUS)=MCHAM1
+      NS    =1
+      NCOSOU=NVART
+      SEGINI MPTVAL
+      IVARIF=MPTVAL
+      NOMID =MOVARI
+      SEGACT NOMID
+      DO ICOMP=1,NVARI
+         MCHAM1.NOMCHE(ICOMP)=LESOBL(ICOMP)
+         MCHAM1.TYPCHE(ICOMP)='REAL*8'
+         N2PTEL=0
+         N2EL  =0
+         SEGINI MELVAL
+         MCHAM1.IELVAL(ICOMP)=MELVAL
+         IVAL(ICOMP)=MELVAL
+      enddo
+      if (nvari.lt.nvart) then
+       DO ICOMP=NVARI+1,NVART
+         MCHAM1.NOMCHE(ICOMP)=LESFAC(ICOMP)
+         MCHAM1.TYPCHE(ICOMP)='REAL*8'
+         N2PTEL=0
+         N2EL  =0
+         SEGINI MELVAL
+         MCHAM1.IELVAL(ICOMP)=MELVAL
+         IVAL(ICOMP)=MELVAL
+       enddo
+      endif
+      SEGDES NOMID
+*********************************
+*  deformations inelastiques
+      N1PTEL=NBPTEL
+      N1EL  =NEL
+      N2    =NDEF
+      SEGINI MCHAM2
+      MCHEL2.ICHAML(ISOUS)=MCHAM2
+      NS    =1
+      NCOSOU=NDEF
+      SEGINI MPTVAL
+      IVADPF=MPTVAL
+      NOMID =MODEIN
+      SEGACT NOMID
+      DO ICOMP=1,NDEF
+         MCHAM2.NOMCHE(ICOMP)=LESOBL(ICOMP)
+         MCHAM2.TYPCHE(ICOMP)='REAL*8'
+         N2PTEL=0
+         N2EL  =0
+         SEGINI MELVAL
+         MCHAM2.IELVAL(ICOMP)=MELVAL
+         IVAL(ICOMP)=MELVAL
+      enddo
+      SEGDES NOMID
+******************************************************************
+      KERRE=0
+      CALL FEFP2(MATE,INPLAS,MELE,MELEME,MINTE,xMATRI,
+     .     NBELEM,NBPTEL,NBNN,LRE,MFR,
+     .     IVADESP,IVADPI,IVARI,IVAMAT,
+     .     IVASTF,IVARIF,IVADPF,LHOOK,IRIGE7,
+     .     NDEP,NDEF,NSTRS,NVART,NMATT,PRECIS,NITMAX,
+     .     NUPDATE,KERRE)
+
+******************************************************************
+* Desactivar segmentos
+c   desactiva malla y modelo de la zona (*NOMOD?)
+         SEGDES MELEME
+         SEGDES IMODEL
+c   desactiva las entradas
+         CALL DTMVAL (IVADPI ,1)
+         CALL DTMVAL (IVARI  ,1)
+         CALL DTMVAL (IVADESP,1)
+         CALL DTMVAL (IVAMAT ,1)
+c   desactiva/elimina las salidas
+         CALL DTMVAL (IVASTF ,1)
+         CALL DTMVAL (IVARIF ,1)
+         CALL DTMVAL (IVADPF ,1)
+         SEGDES MCHAML,MCHAM1,MCHAM2,MINTE,xMATRI,DESCR
+         IF (KERRE.NE.0) THEN
+           CALL DTMVAL (IVASTF,3)
+           CALL DTMVAL (IVARIF,3)
+           CALL DTMVAL (IVADPF,3)
+           SEGSUP MCHAML,MCHAM1,MCHAM2,MINTE,xMATRI,DESCR
+           GO TO 888
+         END IF
+c   elimina auxiliares
+         NOMID=MODEPL
+         IF (MODEPL.NE.0.and.lsupdp) SEGSUP NOMID
+         NOMID=MOFORC
+         IF (lsupfo.and.MOFORC.NE.0) SEGSUP NOMID
+         NOMID=MOSTRS
+         IF (MOSTRS.NE.0.and.lsupco) SEGSUP NOMID
+         NOMID=MOVARI
+         IF (lsupva.and.MOVARI.NE.0) SEGSUP NOMID
+         NOMID=MODEIN
+         IF (MODEIN.NE.0.and.lsupdd) SEGSUP NOMID
+         NOMID=MOMATR
+         IF (MOMATR.NE.0.and.lsupma) SEGSUP NOMID
+*         INFO=IPINF
+*         IF (IPINF .NE.0) SEGSUP INFO
+c*****************************************************************
+c     FIN bucle sobre zonas
+1000  continue
+c*****************************************************************
+ 888  CONTINUE
+
+c desactiva el modelo
+      SEGDES MMODEL
+c desactiva/elimina las salidas
+      SEGDES MCHELM,MCHEL1,MCHEL2,MRIGID
+      IF(KERRE.NE.0) SEGSUP MCHELM,MCHEL1,MCHEL2,MRIGID
+
+      RETURN
+      END
+
+
+
+
+
+
+
+
+

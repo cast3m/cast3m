@@ -1,0 +1,516 @@
+C PRO2      SOURCE    GG250959  18/01/09    21:15:13     9688
+      SUBROUTINE PRO2(IPGEA,IPCHEL,isort,IPOUT,ilphmo)
+C=====================================================================
+C
+C SOUS-PROGRAMME DE L'OPERATEUR PROIET
+C
+C ENTREES :
+C
+C   IPGEA  = POINTEUR DE UN OBJET MAILLAGE.
+C   IPCHEL = POINTEUR DE UN OBJET CHAMELEM
+C  isort  0  on veut un chpo brutal a 1 sous zone non repartitionné
+C             en sortie pointuer su un segment ipca
+C         1  on veut un champ  conforme  partitionne
+c ilphmo  pointeur sur un listmot phases du modele cible
+C SORTIES  :
+C
+C   IPOUT = POINTEUR SUR UN OBJET DE TYPE CHPOINT
+C
+C=====================================================================
+C
+C   TRES INSPIRE DE LA FONCTION ACCRO DEVELOPPEE PAR JMB
+C
+C=====================================================================
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+*-
+-INC CCREEL
+-INC CCOPTIO
+-INC SMCOORD
+-INC SMELEME
+-INC SMCHPOI
+-INC SMLCHPO
+-INC SMLMOTS
+-INC SMCHAML
+-INC TMTRAV
+-INC CCGEOME
+-INC SMMODEL
+-INC SMLENTI
+      SEGMENT nomiii
+           character*4  NOMINC(0)
+      endsegment
+      DATA EPSI,GRAND/1.D-9,1.D20/
+      SEGMENT MDATA
+         INTEGER IPCA(NBSZ)
+      ENDSEGMENT
+      SEGMENT IPEX(NODES)
+      SEGMENT ISOM(NBSOM(IPT3.ITYPEL))
+      SEGMENT MTR1
+       CHARACTER*4 IPCOM(0)
+      ENDSEGMENT
+      SEGMENT SEPHAS
+       CHARACTER*8 LIPHAS(NPHAS)
+      ENDSEGMENT
+      SEGMENT LLIZA(NLIZA6)
+      SEGMENT/MTR4/(IPHAR(0))
+      segment inomil(0)
+      SEGMENT/MTRA/(NOPOIN(XCOOR(/1)/(IDIM+1)))
+*
+      LOGICAL drphas
+C
+      segment info
+        integer infell(JG)
+      endsegment
+C
+      SEGMENT ICOUNT
+        INTEGER IEINT(2,NODES),IDEJVU(NODES),IACCRO
+* ient (1,i)= j, ient(2,i)=k  veut dire que le ieme point de ipt2 est dans
+* le k ieme element de la jeme sous zone.
+* idejvu(i)=1 veut dire que le ieme noeud de ipt2 est deja traité
+        REAL*8 QQQ(3,NODES),CKRIT(NODES)
+* CKRIT est le meilleur des criteres déja rencontré
+      ENDSEGMENT
+      SEGMENT ICOSOM
+        INTEGER IPTT(NBSZ),ICENV(NBSZ),IVOL(NBSZ)
+      ENDSEGMENT
+      SEGMENT WORK1
+        REAL*8 CORDEL(3,NBNN),QSI(3),XPO(3),SHPP(6,NBNN),V1(3),V2(3)
+        REAL*8 XEL(3,NBNN),BPSS(3,3),XPT(3),cored(3,NBNN),V3(3)
+        REAL*8 R(3),U(3),W(3,3)
+        INTEGER II(3)
+      ENDSEGMENT
+      segment siele
+        integer iiele(2,nsous)
+      endsegment
+      external shape
+
+C    lecture optionnelle du modele associe au MCHAML origine
+      IPMOD=0
+      SIELE= 0
+      call lirobj('MMODEL',IPMOD,0,iret)
+*      write(6,*) ' dans pro2 lecture de ipmod ',ipmod
+      if(ipmod.ne.0) then
+      mmodel = ipmod
+      segact mmodel
+      NSOUS=KMODEL(/1)
+
+      segini siele
+
+      DO 30 ISOUS = 1, NSOUS
+        IMODEL = KMODEL(ISOUS)
+        SEGACT,IMODEL
+        MELEME = IMAMOD
+        SEGACT MELEME
+        MELE = NEFMOD
+C   COQUE INTEGREE OU PAS ?
+      IF(INFMOD(/1).NE.0)THEN
+          NPINT=INFMOD(1)
+      ELSE
+          NPINT=0
+      ENDIF
+C
+      call elquoi(mele,npint,6,ipinf,imodel)
+      if (ierr.ne.0) then
+        segdes imodel,mmodel
+C#MC        segsup mchelm
+        iret=0
+        return
+      endif
+C
+        info=ipinf
+        iiele(1,isous)=IMAMOD
+        iiele(2,isous)= infelL(14)
+        segdes meleme,imodel
+        segsup info
+30    CONTINUE
+        endif
+C   lecture optionnelle du critere de rattrapage de points exterieurs
+        ccrit=1.D-5
+        call lirree(ccrit,0,iretou)
+        ccrit = -ABS(ccrit)
+*       write(6,*) ' dans pro2 lecture de ccrit', ccrit
+C
+C     ON VA CHANGER LE MAILLAGE RECEPTEUR EN ELEMENTS POI1
+C         SI IL NE L EST PAS DEJA
+
+      IPT2 = IPGEA
+      SEGACT IPT2
+      IF(IPT2.ITYPEL.NE.1) CALL CHANGE(IPGEA,1)
+      SEGDES IPT2
+      IF(IERR.NE.0) RETURN
+C
+      IPT2 = IPGEA
+      SEGACT IPT2
+      NODES = IPT2.NUM(/2)
+      SEGDES IPT2
+      SEGINI ICOUNT
+      IACCRO  = 0
+      do 3259 iu=1,nodes
+3259  ckrit(iu)=-1.d10
+C
+C   LE MAILLAGE SUPPORT DU CHAMELEM DOIT ETRE MASSIF
+C
+      MCHEL1 = IPCHEL
+      SEGACT MCHEL1
+      NBSZ = MCHEL1.IMACHE(/1)
+*      write(6,*) ' nbsz',nbsz
+C
+      nbnnma=0
+      DO 10 IOB=1, NBSZ
+C
+        IPT1=MCHEL1.IMACHE(IOB)
+        SEGACT IPT1
+C
+        ITY = IPT1.ITYPEL
+C   En dimension 1 : EF massifs s'appuient sur SEG2 ou SEG3
+        IF (IDIM.EQ.1) THEN
+          IF (ITY.NE.2.AND.ITY.NE.3) THEN
+            CALL ERREUR(16)
+            SEGDES IPT1
+            RETURN
+          ENDIF
+        ELSE
+C   En dimension 2,3 :
+cbp           IF (ITY.LT.4) THEN
+          IF (ITY.LT.4.OR.(IDIM.eq.3.and.ITY.LT.14)) THEN
+            write(ioimp,*) 'IDIM,ITYPEL=',IDIM,ITY
+            CALL ERREUR(16)
+            SEGDES IPT1
+            RETURN
+          ENDIF
+        ENDIF
+        nbnnma=max(nbnnma,ipt1.num(/1))
+C
+ 10   CONTINUE
+C      SEGACT MCOORD
+
+      SEGINI MDATA
+Ckich on regarde les phases du MCHAML a projeter
+      nphas = nbsz
+      segini sephas
+      liphas(1) = mchel1.conche(1)(17:24)
+      nphas = 1
+      if ( mchel1.conche(/2).gt.1) then
+       do 11 jpha =2, mchel1.conche(/2)
+        do k = 1,nphas
+        if (mchel1.conche(jpha)(17:24).eq.liphas(k)) goto 11
+        enddo
+        nphas = nphas + 1
+        liphas(nphas) = mchel1.conche(jpha)(17:24)
+ 11    continue
+      segadj sephas
+      endif
+Ckich on fabrique un maillage contenant tous les maillages du champ
+c de pointeurs distincts
+      nbsous=nbsz
+      nbelem=0
+      nbnn=0
+      nbref=0
+      segini ipt6
+
+      nbsous = 1
+      ipt6.lisous(1) = mchel1.imache(1)
+      DO 20 IOB=2,NBSZ
+
+         ipt5 = mchel1.imache(iob)
+         segact ipt5
+         if   (ipt5.itypel.eq.48) goto 20
+         do is= 1, nbsous
+          if (ipt6.lisous(is).eq.mchel1.imache(iob)) goto 20
+         enddo
+c verifie que les maillages sont disjoints : avertit
+         do 22 is= 1, nbsous
+          ip1 = ipt6.lisous(is)
+          ip2 = mchel1.imache(iob)
+          call interb(ip1,ip2,iret,iob1)
+          if (iret.eq.1) goto 22
+       write(ioimp,*) 'maillages non disjoints dans le MCHAML'
+* kich : on peut faire mieux, pardon.
+          goto 23
+   22    continue
+
+   23   nbsous = nbsous + 1
+        IPT6.lisous(nbsous)=MCHEL1.IMACHE(IOB)
+   20  continue
+        segadj ipt6
+C
+C       ICI LE  ZONAGE
+C============================================
+        CALL  ZONEG2(IPT6,IPT2,ICount,1)
+c       write(6,*) ' dans pro2 sortie de zoneg2'
+C============================================
+C
+C-------------------------
+C            TABLEAU  des POINT PAS  VUS
+C     en previson de rectifications ulterieures
+        NBOUB  = NODES - IACCRO
+*       write(6,*) ' nboubl ' , nboub
+      SEGACT IPT2
+
+*      SEGINI IOUBLI
+*     SEGACT IEXCLU
+      IUOO = 0
+      DO 21 I=1,NODES
+       IP = IPT2.NUM(1,I)
+       IF(IDEJVU(I).EQ.1) THEN
+          go to 210
+       ELSE
+         IF(CKRIT(I).GT.CCRIT) THEN
+            IDEJVU(I)=1
+            IUOO= IUOO + 1
+*      IPTOU(IUO,1)=IP
+         ELSE
+*            IP = IPT2.NUM(1,I)
+*            write(6,*) ' ip ckrit (i)'
+*            write(6,*) ip, ckrit(i), qqq(1,i),qqq(2,i),qqq(3,i)
+            GO TO 21
+         ENDIF
+      endif
+210   IPCA(IEINT(1,I))=1
+21    CONTINUE
+      iaccro=iaccro+iuoo
+*       write(6,*) ' nodes iaccro',nodes,iaccro
+CC   on donne le nombre de points non projetés
+
+       if (NBOUB.ne.iuoO) then
+       INTERR(1)=NBOUB-IUOO
+*       write(6,*) ' nombre de points non accrochés ',interr(1)
+       CALL ERREUR(-322)
+       endif
+
+       segact ipt6
+Ckich : on fabrique 1 chpoint par phase presente dans le MMODEL
+c stocke dans un listchpo, dans l ordre de MOTS (posibilite terme nul)
+       if (ilphmo.lt.0) then
+         jgn = 8
+         jgm = 1
+         segini mlmots
+         mots(1) = liphas(1)
+       else
+         mlmots = ilphmo
+c          n1 = nphas
+          n1 = mots(/2)
+          segini mlchpo
+       endif
+
+       ipout = 0
+       DO 700 IMP = 1,MOTS(/2)
+         drphas = .false.
+         do iphas = 1,NPHAS
+           if(mots(imp).eq.liphas(iphas)) then
+             drphas = .true.
+             goto 703
+           endif
+         enddo
+ 703     if(.not.drphas) then
+           write(6,*) ' pas de projection phase ', mots(imp)
+          goto 700
+         endif
+
+C** recherche du noms de composantes existantes dans le chpoint
+       segini nomiii
+       NA=0
+       DO 220 i=1,nbsz
+ckich maintenant maillage disjoints        if(ipca(i).eq.0) go to 220
+        if (mchel1.conche(i)(17:24).ne.liphas(iphas)) goto 220
+        mchaml = mchel1.ichaml(i)
+        segact mchaml
+        do 221 j=1,nomche(/2)
+         IF( TYPCHE(J).NE.'REAL*8') GO TO 221
+        IF(NA.NE.0) THEN
+        do 222 k=1,nominc(/2)
+         if( nominc(k).eq.nomche(j)(1:4)) go to 221
+  222   continue
+        nominc(**)=nomche(j)
+        ELSE
+        nominc(**)=nomche(j)
+        na=1
+        ENDIF
+  221  continue
+  220  continue
+       nnin=nominc(/2)
+       nnnoe=iaccro
+*       write(6,*) ' nnin nnoe ',nnin,nnnoe,iphas
+       segini mtrav
+C
+C****  remplissage de mtrav en calculant les valeurs
+C
+       do 311 iu = 1 , nominc(/2)
+        inco(iu)=nominc(iu)
+  311  continue
+       segsup nomiii
+
+c recense les zones du mchel1 compatibles avec le maillage de ipt6 et la phase
+       nliza6 = ipt6.lisous(/1)
+       segini lliza
+       do iza6 = 1,nliza6
+        do ips = 1,nbsz
+          IF (ipt6.lisous(iza6).eq.mchel1.imache(ips).AND.
+     &      liphas(iphas).eq.mchel1.conche(ips)(17:24)) THEN
+             if (lliza(iza6).eq.0) then
+               jg = 1
+               segini mlenti
+               LLIZA(IZA6) = mlenti
+               lect(1) = ips
+             else
+               mlenti = lliza(iza6)
+               jg = lect(/1)+1
+               segadj mlenti
+               lect(jg) = ips
+             endif
+          ENDIF
+        enddo
+        mlenti = lliza(iza6)
+       enddo
+
+       segact ipt2
+       ipla=0
+       nbnn = nbnnma
+       SEGINI ,WORK1
+       do 224 I=1,nodes
+       if(idejvu(i).eq.1) then
+       ipla=ipla+1
+       igeo(ipla)=ipt2.num(1,i)
+       ip=ipt2.num(1,i)
+       igeo(ipla)=ipt2.num(1,i)
+       iza6=ieint(1,i)
+       iel=ieint(2,i)
+*
+        IF (LLIZA(iza6).EQ.0)  goto 302
+        mlenti = lliza(iza6)
+        nza = lect(/1)
+
+         do 300 iz = 1,nza
+         IZA=lect(iz)
+
+ 301   mchaml=mchel1.ichaml(iza)
+       ipt1=mchel1.imache(iza)
+       segact ipt1, mchaml
+
+
+       if(ipmod.ne.0) then
+C    recherche  element fini  pour fonction de forme dans qsijs
+        do lk=1,nsous
+        if(ipt1.eq.iiele(1,lk)) then
+        kel=iiele(2,lk)
+        goto  31
+        endif
+        enddo
+31     continue
+       else
+C  par defaut on utilise les fonctions de transformation geometriques
+        kel =IPT1.ITYPEL
+       endif
+C
+C         Coordonnées des sommets de l'élements IEL
+C
+         nbnn=ipt1.num(/1)
+          CALL DOXE(XCOOR,IDIM,NBNN,IPT1.NUM,IEL,CORDEL)
+C
+          IDI2 = IDIM
+          do ih=1,idim
+          qsi(ih)=qqq(ih,i)
+          enddo
+C
+C         Coordonnées  du point dans l'element de référence
+C
+         CALL SHAPE(QSI(1),QSI(2),QSI(3),KEL,SHPP,IRET)
+*         if ( qsi(1).lt.-1.00001.or.qsi(1).gt.100001) then
+*         if ( qsi(2).lt.-1.00001.or.qsi(2).gt.100001) then
+*         if ( qsi(3).lt.-1.00001.or.qsi(3).gt.100001) then
+*         write(6,*) ip,iza,iel,kel,(qsi(ih),ih=1,idim)
+*         write(6,*) ( shpp(1,ioup),ioup=1,nbnn)
+*         endif
+*        endif
+*        endif
+C
+C         Calcul des valeurs pour chaque type de composantes
+C
+         do 200 il=1,ielval(/1)
+            IF (TYPCHE(il).EQ.'REAL*8') THEN
+C
+           do 225 kcol=1,nnin
+*        write(6,2323)il,nomche(il)(1:4),inco(1)
+* 2323   format('IL ', I2, 'nomche', A4, ' inco' , A4)
+             if(nomche(il)(1:4).eq.inco(kcol)) go to 226
+  225       continue
+  226      continue
+*             if(kcol.ne.1) then
+*                      write(6,*) 'kcol nnin',kcol,nnin
+*                      write(6,*)' iza il ipla',iza,il,ipla
+*          return
+*             endif
+              MELVAL = IELVAL(il)
+             SEGACT MELVAL
+              IEMN = MIN(IEL,VELCHE(/2))
+              NHAR(kcol) = MCHEL1.INFCHE(iza,3)
+              DO 150, NP = 1, NBNN
+              IBMN = MIN(NP,velche(/1))
+               bb(kcol,ipla)=SHPP(1,NP)*VELCHE(IBMN,IEMN)+bb(kcol,ipla)
+C
+ 150          CONTINUE
+              ibin(kcol,ipla)=ibin(kcol,ipla)+1
+*              SEGDES MELVAL
+C
+            ENDIF
+ 200      CONTINUE
+ 300    continue
+ 302    continue
+       endif
+  224  CONTINUE
+
+      do iza6 = 1,nliza6
+        mlenti = lliza(iza6)
+        segsup mlenti
+      enddo
+      segsup lliza
+
+      ITRAV=MTRAV
+      DO 4370 IB=1,NNNOE
+      DO 4370 IA=1,NNIN
+*      write(6,fmt='('' ia ib bb ibin '',2i4,e12.5,i5)')ia,ib,bb(ia,ib),
+*     * ibin(ia,ib)
+      IF (IBIN(IA,IB).GT.1)  THEN
+*        write(6,*) ' ibin gt 1  ib ,ia' , ib ,ia, ibin(ia,ib)
+        BB(IA,IB)=BB(IA,IB) / IBIN(IA,IB)
+        IBIN(IA,IB)=1
+      ENDIF
+ 4370 CONTINUE
+*      SEGDES MTRAV
+C
+C     RECONSTUCTION DE LA PARTITION
+C
+      CALL CRECHP(ITRAV,ICHPOI1)
+C
+      IPOUT=ICHPOI1
+      MCHPOI=ICHPOI1
+      SEGACT MCHPOI*MOD
+*   le champ est forcement diffus
+      JATTRI(1)=1
+      MTYPOI='PROJECTI'
+      IFOPOI=IFOUR
+      SEGDES MCHPOI
+      SEGSUP MTRAV
+ckich dans le listchpoint
+*      write(6,*) 'pro2',ilphmo,mchpoi,ipout
+      if (ilphmo.gt.0) then
+*      write(6,*) 'pro2',mchpoi,ipout,'iphas',liphas(iphas),iphas,imp
+         ichpoi(imp) = MCHPOI
+       endif
+ 700  CONTINUE
+      if (ipout.le.0) then
+       call erreur(-79)
+       return
+      endif
+      if (ilphmo.gt.0) ipout = mlchpo
+      SEGSUP ICOUNT,MDATA
+
+      RETURN
+      END
+
+
+
+
+
+

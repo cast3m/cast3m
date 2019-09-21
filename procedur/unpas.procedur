@@ -1,0 +1,3881 @@
+$$$$ UNPAS
+* UNPAS     PROCEDUR  PV        19/03/04    21:15:10     10135
+'DEBPROC' UNPAS   PRECED*'TABLE';
+*
+*----------------------------------------------------------------------*
+*         PROCEDURE UNPAS                                              *
+*                                                                      *
+*    calcul d'un increment de solution en grand deplacement plastique  *
+*    par la methode des residus                                        *
+*----------------------------------------------------------------------*
+*    En entree
+*     PRECED  la table passee à PASAPAS
+*
+*  kich nota champ de materiau : etablit au debut de procedure UNPAS
+*  estimation des caracteristiques fin de pas (TI     ): ZMAT22  -->> ZMATXX
+*  caracteristiques debut de pas              (TEMPS0) : ZMAT11
+*  puis dans la boucle de non-convergence
+*      ZMAT1 initialise avec ZMAT11
+*  materiau fin de pas de temps : ZMAT2 sorti de COMP,
+*    range dans WTAB.'MAT1' en sortie unpas
+************************************************************************
+*    sortie STAB12  indice :                                           *
+*                                                                      *
+*      DEPT   increment de deplacement  sur le pas                     *
+*      SIGF   contraintes a la fin du pas                              *
+*      VARF   variables internes a la fin du pas                       *
+*      DFPF   deformation inelastique a la fin du pas                  *
+*      CONV   logique valant vrai si pas de probleme de convergence    *
+*      DEFF   deformations a la fin du pas si grandes deformations     *
+*----------------------------------------------------------------------*
+*
+*CB215821 : Recuperation de XPETIT (07/12/2016)
+XPETIT   = 'VALE' 'PETI'    ;
+XGRAND   = 'VALE' 'GRAND'   ;
+
+*  declanchement du recalcul de la matrice
+  ITRCLC = -1. * WTAB.'DELTAITER';
+  'SI' (ITRCLC > -20) ; ITRCLC = -20; 'FINSI';
+
+WTAB = PRECED.'WTABLE'      ;
+LAG_TOT=VRAI;
+'SI' ('EXIS' WTAB 'LAG_TOT'); LAG_TOT=WTAB.'LAG_TOT'; 'FINS';
+conti= PRECED.'CONTINUATION';
+estim= PRECED.'ESTIMATION'  ;
+*
+*  initialisation et reprise des valeurs des tables ****************
+*
+MXMYMZ = 'MOTS' 'MX'  'MY'  'MZ'  'MT'  'FP'  'FPQ'  'FTP'
+                'IMX' 'IMY' 'IMZ' 'IMT' 'IFP' 'IFPQ' 'IFTP' ;
+MXMFLX = 'MOTS' 'MX'  'MY'  'MZ'  'MT'  'FLX' 'FP'  'FPQ'  'FTP'
+                'IMX' 'IMY' 'IMZ' 'IMT' 'FLX' 'IFP' 'IFPQ' 'IFTP' ;
+MLPRIM = 'MOTS' 'UX'  'UY'  'UZ'  'UR'  'UT'   'RX'   'RY'  'RZ'  'RT'
+                'LX'  'P'   'PQ'  'TP'   'ALFA' 'BETA'
+                'IUX' 'IUY' 'IUZ' 'IUR'  'IUT'  'IRX'  'IRY' 'IRZ' 'IRT'
+                'IP' 'IPQ'  'ITP' 'IALF' 'IBET' ;
+MLDUAL = 'MOTS' 'FX'  'FY'  'FZ'  'FR'   'FT'   'MX'   'MY'  'MZ'  'MT'
+                'FLX' 'FP'  'FPQ' 'FTP'  'FALF' 'FBET'
+                'IFX' 'IFY' 'IFZ' 'IFR'  'IFT'  'IMX'  'IMY' 'IMZ' 'IMT'
+                'IFP' 'IFPQ' 'IFTP' 'IFAL' 'IFBE' ;
+MLDEPL = 'MOTS' 'UX' 'UY' 'UZ' 'UR' 'UT'  'IUX' 'IUY' 'IUZ' 'IUR' 'IUT'
+                'ALFA' 'BETA' 'IALF' 'IBET' ;
+MLROTA = 'MOTS' 'RX' 'RY' 'RZ' 'RT' 'P' 'PQ' 'TP'
+                'IRX' 'IRY' 'IRZ' 'IRT' 'IP' 'IPQ' 'ITP';
+MLDEFOR = 'MOTS'  'EPXX' 'EPYY' 'EPZZ' 'EPSS' 'EPTT' 'EPRR'
+                  'GAXY' 'GAXZ' 'GAYZ' 'GAST' 'GASN' 'GATN'
+                  'GARZ' 'GART' 'GAZT' 'GXY '
+*                 'CX  ' 'CY  ' 'CZ  '
+                  'EPSE' ;
+MVPRIM = 'MOTS' 'VTX' 'VTY' 'VTZ' 'VTR' 'VTT' 'VWX' 'VWY' 'VWZ' 'VWT'
+                'VLX' 'VVP' 'VVPQ' 'VVTP' 'VALF' 'VBET'
+          'IVTX' 'IVTY' 'IVTZ' 'IVTR' 'IVTT' 'IVWX' 'IVWY' 'IVWZ' 'IVWT'
+                'IVVP' 'IVPQ' 'IVTP' 'IVAL' 'IVBE' ;
+MOCA = 'MOTS' 'VECT' 'VX  ' 'VY  ' 'VZ  ' 'VXF ' 'VYF ' 'VZF '
+              'V1X ' 'V1Y ' 'V1Z ' 'V2X ' 'V2Y ' 'V2Z ' ;
+
+*  definition de variables locales
+WTAB.'FOR_METALLU' = FAUX;
+*'SI' ( 'EXIS' PRECED 'ECRIT' ) ; list wtab; 'FINS';
+ICERAM = WTAB.'CERAMIQUE' ;
+IDYN   = WTAB.'DYNAMIQUE';
+IELANL = WTAB.'NON_LINEAIRE';
+IENDOM = WTAB.'ENDOMMAGEMENT';
+IFEFP  = WTAB.'FEFP_FORMULATION' ;
+IFEFPUL= WTAB.'UPDATE_LAGRANGIAN';
+IFTOL  = 'NEG' WTAB.'FTOL' 'INCONNU' ;
+IGRD   = WTAB.'GRANDS_DEPLACEMENTS';
+IKSIA  = WTAB.'K_SIGMA';
+IKTAN  = WTAB.'K_TANGENT' ;
+IMPLP  = WTAB.'LIAISON_PERSISTANTE';
+IMTOL  = 'NEG' WTAB.'MTOL' 'INCONNU';
+IPILOT = WTAB.'AUTOMATIQUE';
+IPLAST = WTAB.'PLASTIQUE';
+IPLAVI = WTAB.'IPLAVI';
+IPREDIC = WTAB.'PREDICTEUR';
+IRCON  = WTAB.'RAIDCONST';
+IRAUG  = WTAB.'RAIDAUGM';
+AUTAUG = WTAB.'AUTOAUGM';
+ISOL   = WTAB.'CONSOLIDATION';
+ISSTE  = WTAB.'SUBSTEPPING';
+ITHER  = WTAB.'CHAR_THE' 'OU' WTAB.'FOR_THER';
+IVIEXT = WTAB.'VISCO_EXTERNE';
+IVIDOM = WTAB.'VISCODOMMAGE';
+IVISCO = WTAB.'VISCOPLASTIQUE';
+LNLOC  = WTAB.'NLOC';
+LOGDEF = WTAB.'CHAR_DEFI';
+LOGPRE = WTAB.'CHAR_PRES' ;
+NITMA  = WTAB.'NITERINTER_MAX';
+NSSTE  = WTAB.'NMAXSUBSTEPS';
+POR1   = WTAB.'POR1' ;
+TI     = WTAB.'T_FINAL';
+EKREAC = WTAB.'REAC_GRANDS';
+ZMAXIT = WTAB.'MAXITERATION' ;
+ZNACCE = 2 ;
+XCONV = 0.;
+DEPSTDM = 0.;
+ZNCONS = WTAB.'NITER_KTANGENT'     ;
+ZPREC  = WTAB.'PRECISION'          ;
+ZPREK  = WTAB.'PRECISINTER'        ;
+ZPRECD = WTAB.'PRECDECHARGE'       ;
+ZPRECM = WTAB.'PRECFLEX'           ;
+ZCLIM0 = WTAB.'BLOCAGES_MECANIQUES';
+*-- Autres initialisations en non-local helmhoktz --
+'SI' (LNLOC 'ET' ('EGA' WTAB.'NON_LOCAL' 'HELM'));
+  TAHELM = WTAB.'HELMHOLTZ' ;
+  NHELM =  TAHELM . 'N_VARI_NL' ;
+'FINSI' ;
+*-- On initialise ZCLIM qui va contenir l'ensemble des C.L.
+ZCLIM  = ZCLIM0    ;
+DT     = WTAB.'DT' ;
+TEMPS0=WTAB.'TEMPS0';
+*---  doit on reactualiser la geometrie temp0 ne 0 et grand depl ? ---
+'SI'  WTAB.'RECALCUL'  ;
+    WTAB . 'RECARI'   = VRAI ;
+    WTAB . 'RECADET'  = VRAI ;
+    WTAB . 'REA_GEOM' = VRAI ;
+*   on suppose que l'on est sur la bonne configuration
+    GEOM1 = 'FORM';
+*  'FORM'  GEOM1;
+'SINON';
+    GEOM1 = WTAB.'FOR0' ;
+    WTAB . 'RECARI'  = FAUX ;
+    WTAB . 'RECADET' = FAUX ;
+'FINS';
+
+'SI' ('OU' ('OU' IENDOM  IVIDOM) ICERAM);
+     WTAB.'RECARI'= VRAI;
+'FINS';
+
+'SI' IRAUG;
+   RIG_AUG  = WTAB.'RIGIDITE_AUGMENTEE';
+'FINS';
+
+'SI' IRCON;
+   RIG_CONS = WTAB.'RIGIDITE_CONSTANTE';
+   MAI_CONS ='EXTR' RIG_CONS 'MAIL'    ;
+'FINS';
+
+*---------- chamelem etat estime pour la fin du pas de temps ------
+ ZETAT2 = PAS_ETAT PRECED TI    ;
+ ZMAT22 = PAS_MATE PRECED ZETAT2;
+ ZMATFI = ZMAT22                ;
+
+*----------------------- nouveau chargement ----------------------
+'SI' ('EXIS' (WTAB.'CHARGEMENT') 'MECA');
+      ZFEXT2 = 'TIRE' WTAB.'CHARGEMENT' 'MECA' TI;
+      TYP_2  = 'TYPE' ZFEXT2;
+      'SI' ('NEG' TYP_2 'CHPOINT ');
+ 'MESS' '*** Erreur dans la definition du chargement ( MECA ) ***';
+ 'ERRE' '*** Le type du champ n est pas CHPOINT ***';
+      'FINS';
+'SINON';
+    ZFEXT2= 'VIDE' 'CHPOINT' / 'DISCRET';
+'FINS';
+
+'SI' ('EXIS' (WTAB.'CHARGEMENT') 'FORC');
+      F2_FOR = 'TIRE' WTAB.'CHARGEMENT' 'FORC' TI;
+       TYP_2 = 'TYPE' F2_FOR;
+       'SI' ('NEG' TYP_2 'CHPOINT ');
+ 'MESS' '*** Erreur dans la definition du chargement ( FORC ) ***';
+ 'ERRE' '*** Le type du champ n est pas CHPOINT ***';
+      'FINS';
+       ZFEXT2 = ZFEXT2 '+' F2_FOR ;
+'FINS';
+
+'SI' (LOGPRE 'ET' ('NON' IGRD)) ;
+   MOP   = WTAB.'MOD_PRE' ;
+   ZPEXT ='TIRE' WTAB.'CHARGEMENT' 'PRES' TI ;
+  'SI' ('EXIS' WTAB 'MAT_PRE') ;
+     ZFPEXT = 'BSIG' MOP ZPEXT ('REDU' ZMATFI MOP) ;
+  'SINON' ;
+     ZFPEXT = 'BSIG' MOP ZPEXT ;
+  'FINS' ;
+   ZFEXT2 = ZFEXT2 '+' ZFPEXT ;
+'FINS' ;
+
+
+*--------------- Si il existe des deplacements imposes --------------
+         'SI' ('EXIS' (WTAB.'CHARGEMENT') 'DIMP');
+             F2_DEP = 'TIRE' WTAB.'CHARGEMENT' 'DIMP' TI;
+             ZFEXT2 = ZFEXT2 + F2_DEP;
+         'FINS';
+*---------------- si chargement deformation actualisation DEFOR ------
+         'SI' WTAB.'CHAR_DEFI' ;
+             WTAB.'DEFOR2' = 'TIRE' WTAB.'CHARGEMENT' 'DEFI' TI;
+         'FINS';
+
+*---------- dynamique : preparation du second membre --------------
+         'SI' ( WTAB.'DYNAMIQUE' ) ;
+            'SI'  ('EGA' WTAB.'FREA1' 'INCONNU');
+               'SI' ('EXIS' WTAB.'CHARGEMENT' 'MECA');
+                   F1 = 'TIRE' WTAB.'CHARGEMENT' 'MECA' TEMP0;
+               'FINS';
+               'SI' ('EXIS' WTAB.'CHARGEMENT' 'FORC');
+                  F1F = 'TIRE' WTAB.'CHARGEMENT' 'FORC' TEMP0;
+                'SI' ('EGA' ('TYPE' F1) 'CHPOINT ') ;
+                  F1 = F1 + F1F ;
+                'SINON';
+                  F1 = F1F ;
+                'FINS' ;
+               'FINS';
+
+               'SI' WTAB.'PROCEDURE_CHARMECA';
+                  TFF1 = CHARMECA PRECED TEMPS0 ;
+                 'SI' ('EXIS' TFF1 'ADDI_SECOND');
+                    FF1=TFF1 .'ADDI_SECOND';
+                 'FINS';
+                 'SI' ('EGA' ('TYPE' F1) 'CHPOINT ');
+                    F1=F1 + FF1;
+                 'SINON';
+                    F1 = FF1;
+                 'FINS';
+               'FINS';
+
+               'SI' LOGPRE ;
+                 MOP = WTAB.'MOD_PRE' ;
+                 ZPEXT0 = 'TIRE' WTAB.'CHARGEMENT' 'PRES' TEMPS0 ;
+                 'SI' ('EXIS' WTAB 'MAT_PRE') ;
+                   FF1 = 'BSIG' MOP ZPEXT0 ('REDU' WTAB.'MAT1' MOP) ;
+                 'SINON' ;
+                   FF1 = 'BSIG' MOP ZPEXT0 ;
+                 'FINS' ;
+                 'SI' ('EGA' ('TYPE' F1) 'CHPOINT ');
+                   F1=F1 + FF1;
+                 'SINON';
+                   F1 = FF1;
+                 'FINS';
+               'FINS';
+*
+                 LAF0 = 'BSIG' WTAB.'MO_TOT' conti.'CONTRAINTES' ZMAT22;
+               'SI'  IRCON  ;
+                  LAF0 = LAF0 'ET'
+                  ('REDU' MAI_CONS (RIG_CONS '*' conti.'DEPLACEMENTS'));
+               'FINS';
+               'SI' (('EXIS' WTAB.'CHARGEMENT' 'MECA') 'OU'
+                    ('EXIS' WTAB.'CHARGEMENT' 'FORC') 'OU'
+                   wtab.'PROCEDURE_CHARMECA');
+                  LAF1  = F1  - LAF0 ;
+               'SINON';
+                  LAF1 = -1 * LAF0;
+               'FINS';
+               LAF2 = 'ENLEVER' (ZCLIM0 '*' conti.'DEPLACEMENTS') 'FLX';
+* forces exterieures + reactions - forces interieures au debut du calcul
+* c.a.d. (masse*acceleration initiale)+(amortissement*vitesse initiale)
+                WTAB.'FREA1' = LAF1 - LAF2 ;
+            'FINS';
+            'SI' wtab.'LIAISON_PERSISTANTE' ;
+*  forces d'acceleration au debut du pas
+              'SI' ('NEG' WTAB.'AMORTISSEMENT' 'INCONNU');
+                 FF4 = WTAB.'AMORTISSEMENT'* conti.'VITESSES';
+                 WTAB.'FMAN'= WTAB.'FREA1' - FF4 ;
+              'SINON' ;
+                 WTAB.'FMAN'= WTAB.'FREA1' ;
+              'FINS';
+            'FINS';
+*------------  il faut calculer la matrice de masse tout de suite -------------
+            'SI' ( ('NON' ('EXIS' WTAB MASSE )) 'OU'
+                               WTAB.'GRANDS_DEPLACEMENTS');
+                WTAB.'MASSE' = 'MASS' WTAB.'MO_TOT' ('CHAN' 'MASSE'
+                         ZMAT22 WTAB.'MO_TOT' ) ;
+               'SI' WTAB.'MASSCONST';
+                  WTAB.'MASSE'=WTAB.'MASSE' 'ET' WTAB.'MASSE_CONSTANTE';
+               'FINS';
+            'FINS';
+            FF = WTAB.'MASSE' *conti.'VITESSES';
+            FF4 = 4. / DT * FF; 'DETR' FF;
+* partie du second membre qui ne depend que des informations du pas prec
+            WTAB.'FREA1' = FF4 + WTAB.'FREA1';
+         'FINS';
+*--------- consolidation  : preparation du second membre ---------
+          'SI' WTAB.'CONSOLIDATION' ;
+            FF = BSIGMA WTAB.'MOD_POR' conti.'CONTRAINTES' ;
+            FF4 = 'EXCO'  WTAB.'MOT_POR' FF
+                    WTAB.'MOT_POR' 'NOID' 'NATURE' 'DISCRET' ;
+            'SI' WTAB.'DYNAMIQUE';
+                WTAB.'FREA1' = WTAB.'FREA1' +   FF4   ;
+            'SINON';
+                 WTAB.'FREA1' =  FF4   ;
+            'FINS';
+             ZFEXT2 = ZFEXT2 '+' FF4  ;  'DETR' FF ;
+*           ---- traitement des flux si besoin ----
+            'SI' ( 'EXIS' WTAB.'CHARGEMENT' 'FLUX' ) ;
+               FLUXT0= 'TIRE' WTAB.'CHARGEMENT' 'FLUX' TEMPS0;
+               FLUXTI= 'TIRE' WTAB.'CHARGEMENT' 'FLUX' TI  ;
+               FACFLU =  -1. * WTAB.'DT';
+               FLUXT =   ( FACFLU * (1 - WTAB.'TETA') * FLUXT0 )
+                       + ( FACFLU * WTAB.'TETA' *FLUXTI ) ;
+               ZFEXT2 = ZFEXT2 '+' FLUXT ;
+              'DETR' FLUXT ; 'DETR' FLUXT0; 'DETR' FLUXTI;
+           'FINS' ;
+        'FINS';
+*----------------- non-local type HELM : preparation --------------
+        'SI' (LNLOC 'ET' ('EGA' WTAB.'NON_LOCAL' 'HELM'));
+             PAS_HELM PRECED ;
+        'FINS' ;
+*----------------- calcul de la masse si frequentiel -------------
+        'SI' ( WTAB.'FREQUENTIEL' 'ET' ('NON' ('EXIS' WTAB 'MASSE' )));
+             WTAB.'MASSE' = 'MASS' WTAB.'MO_TOT'('CHAN' 'MASSE'
+                         ZMAT22 WTAB.'MO_TOT' ) ;
+        'FINS';
+
+*-      Second membre
+        ZFCONSTA = ZFEXT2 ;
+
+
+************************************************************************
+*             Parallélisation du GIBIANE via les ASSISTANTS            *
+************************************************************************
+ZMODLI = WTAB.'MO_TOT'     ;
+ZMODLP = WTAB.'MO_TOT_PREC';
+NBPART = WTAB.'NBPART'     ;
+
+PARALLEL = FAUX ;
+PARTLOCA = FAUX ;
+ZMODL  = ZMODLI ;
+'SI' ('EGA' WTAB.'PROCESSEURS' 'COMPORTEMENT') ;
+  PARALLEL = VRAI ;
+  PARTLOCA = VRAI ;
+  MODRELOC = 'PART' 'ARLE' ZMODLI NBPART ;
+'FINS' ;
+'SI' ('EGA' WTAB.'PROCESSEURS' 'AUTOMATIQUE') ;
+  PARALLEL = VRAI ;
+  PARTLOCA = FAUX ;
+  ZMODL = 'PART' 'ARLE' ZMODLI NBPART ;
+  'OPTI' 'PARA' VRAI ;
+'FINS' ;
+
+* Test sur un MODELE qui aurait changé
+'SI' ('NEG' ZMODLI ZMODLP)                                   ;
+   CONTI.'CONTRAINTES'=
+                   ('REDU' CONTI. 'CONTRAINTES' ZMODLI) '+'
+                   ('ZERO' ZMODLI 'CONTRAINTES'       )      ;
+   ESTIM.'CONTRAINTES'=
+                   ('REDU' ESTIM. 'CONTRAINTES' ZMODLI) '+'
+                   ('ZERO' ZMODLI 'CONTRAINTES'       )      ;
+   CONTI.'DEFORMATIONS'=
+                   ('REDU' CONTI.'DEFORMATIONS' ZMODLI) '+'
+                   ('ZERO' ZMODLI 'DEFORMAT'          )      ;
+   ESTIM.'DEFORMATIONS'=
+                   ('REDU' ESTIM.'DEFORMATIONS' ZMODLI) '+'
+                   ('ZERO' ZMODLI 'DEFORMAT'          )      ;
+  'SI' IPLAVI ;
+     CONTI.'DEFORMATIONS_INELASTIQUES'=
+                   ('REDU' CONTI.'DEFORMATIONS_INELASTIQUES' ZMODLI) '+'
+                   ('ZERO' ZMODLI 'DEFINELA'                       ) ;
+     ESTIM.'DEFORMATIONS_INELASTIQUES'=
+                   ('REDU' ESTIM.'DEFORMATIONS_INELASTIQUES' ZMODLI) '+'
+                   ('ZERO' ZMODLI 'DEFINELA'                       ) ;
+     CONTI.'VARIABLES_INTERNES'=
+                   ('REDU' CONTI.'VARIABLES_INTERNES' ZMODLI) '+'
+                   ('ZERO' ZMODLI 'VARINTER'                       ) ;
+     ESTIM.'VARIABLES_INTERNES'=
+                   ('REDU' ESTIM.'VARIABLES_INTERNES' ZMODLI) '+'
+                   ('ZERO' ZMODLI 'VARINTER'                       ) ;
+  'FINS';
+
+   WTAB.'ETAT1' = PAS_ETAT PRECED TEMPS0      ;
+   WTAB.'MAT1'  = PAS_MATE PRECED WTAB.'ETAT1';
+
+  'SI' ITHER ;
+     WTAB.'ETHER1'=('REDU'  WTAB.'ETHER1' ZMODLI) '+'
+                   ('ZERO' ZMODLI 'DEFORMAT'    ) ;
+    'SI' POR1;
+       WTAB.'MSRTHER1'=
+                   ('REDU'  WTAB.'MSRTHER1' ZMODLI) '+'
+                   ('ZERO' ZMODLI 'DEFORMAT'    ) ;
+    'FINS';
+  'FINS';
+
+  'SI' ('EXIS' WTAB 'DEFOR1' );
+     WTAB.'DEFOR1' =
+                   ('REDU'  WTAB.'DEFOR1' ZMODLI) '+'
+                   ('ZERO' ZMODLI 'DEFORMAT'    ) ;
+  'FINS';
+
+  'SI' ('EXIS' WTAB 'DEFOR2' );
+     WTAB.'DEFOR2' =
+                   ('REDU'  WTAB.'DEFOR2' ZMODLI) '+'
+                   ('ZERO' ZMODLI 'DEFORMAT'    ) ;
+  'FINS';
+'FINS';
+
+'SI' ITHER ;
+   WTAB.'ETHER2' WTAB.'MSRTHER2' =PAS_EPTH PRECED WTAB.'MO_TOT'
+                                              WTAB.'MAT1' WTAB.'TET2'  ;
+'FINS';
+
+*-----------materiau au debut du pas ------------------------------
+ZMAT11 = WTAB.'MAT1'        ;
+'SI' ('EGA' WTAB.'PROCESSEURS' 'AUTOMATIQUE') ;
+   ZMAT1 ='REDU' ZMAT11 ZMODL ; COMM 'Version PARALLEL';
+'SINO';
+   ZMAT1 = ZMAT11;
+'FINS';
+ ZMAT1I  = ZMAT1; COMM 'Version Initiale de ZMAT1 pour BONOCONV';
+
+
+************************************************************************
+*                       Quelques initialisations                       *
+************************************************************************
+STAB12             = 'TABL'                    ;
+STAB12.'ZU1'       =  CONTI.'DEPLACEMENTS'     ;
+STAB12.'SIGF'      =  CONTI.'CONTRAINTES'      ;
+STAB12.'DEFF'      =  CONTI.'DEFORMATIONS'     ;
+STAB12.'FNONL'     =  WTAB.'FNONL'             ;
+STAB12.'RESIDU'    =  WTAB.'RESIDU'            ;
+STAB12.'XDENO'     =  WTAB.'XDENO'             ;
+STAB12.'XDENOM'    =  WTAB.'XDENOM'            ;
+'SI' ( 'EXIS' WTAB 'ETAT1' );
+  STAB12.'ETAT1'   = WTAB.'ETAT1';
+'FINS';
+STAB12.'ETAT2'= ZETAT2;
+'SI' ('EXIS' WTAB 'DEFOR1' );
+  STAB12.'DEFOR1'  = WTAB.'DEFOR1'  ;
+  STAB12.'DEFOR2'  = WTAB.'DEFOR2'  ;
+'FINS';
+'SI' ( 'EXIS' WTAB 'FNONL');
+  STAB12.'FNONL'   = WTAB.'FNONL'   ;
+'FINS';
+'SI' ('EXIS' WTAB  'TET1') ;
+  STAB12.'TET1'    = WTAB.'TET1'    ;
+  STAB12.'TET2'    = WTAB.'TET2'    ;
+'FINS';
+* STAB12.'SUCCES' = VRAI ;
+'SI' ('NEG' WTAB.'AUTOCOEF' 'INCONNU') ;
+  STAB12.'AUTOCOEF' = WTAB.'AUTOCOEF' ;
+'FINS' ;
+'SI' ('NEG' WTAB.'AUTOREDU' 'INCONNU') ;
+  STAB12.'AUTOREDU' = WTAB.'AUTOREDU' ;
+'FINS' ;
+'SI' ('NEG' WTAB.'SECOND_MEMBRE' 'INCONNU') ;
+  STAB12.'SECOND_MEMBRE' = WTAB.'SECOND_MEMBRE' ;
+'FINS' ;
+'SI' ('NEG' WTAB.'LASTKTAN' 'INCONNU') ;
+  STAB12.'LASTKTAN' = WTAB.'LASTKTAN' ;
+'FINS' ;
+'SI' ('NEG' WTAB.'AUTORED1' 'INCONNU') ;
+  STAB12.'AUTORED1' = WTAB.'AUTORED1' ;
+'FINS' ;
+'SI' ('NEG' WTAB.'LISEA_M' 'INCONNU') ;
+  STAB12.'LISEA_M' = WTAB.'LISEA_M' ;
+  STAB12.'RIBLO_M' = WTAB.'RIBLO_M' ;
+'FINS' ;
+'SI' ('NEG' WTAB.'INCREMENT' 'INCONNU' );
+  STAB12.'INCREMENT' = WTAB.'INCREMENT';
+  INCRPREC = STAB12.'INCREMENT'        ;
+'FINS';
+STAB12.'FFROT'    = WTAB.'FFROT'    ;
+STAB12.'INITEMPS' = WTAB.'INITEMPS' ;
+STAB12.'DT'       = WTAB.'DT'       ;
+STAB12.'DTPREC'   = WTAB.'DTPREC'   ;
+'SI'  ITHER  ;
+  ETT0            ='REDU' WTAB.'ETHER1' ZMODL;
+  STAB12.'TETA1'  = WTAB.'TET1';
+  STAB12.'TETA2'  = WTAB.'TET2';
+  'SI' POR1;
+    MSRTT0 = 'REDU' WTAB.'MSRTHER1' ZMODL;
+  'FINS';
+'SINON' ;
+  che3 = 'MANU' 'CHML' ZMODL 'T' 20. 'STRESSES' ;
+  che4 = 'MANU' 'CHML' ZMODL 'T' 20. 'STRESSES' ;
+'FINS' ;
+
+ZMATI    = 'REDU' ZMAT22 ZMODLI ;
+ZMAT     = 'REDU' ZMATI  ZMODL  ;
+
+* SP : initialisation DFGRAD en presence d'un modele MECANIQUE
+*      (DFGRAD mis a INCONNU par defaut dans PAS_INIT)
+'SI' ('NEG' WTAB.'MOD_MEC' 'INCONNU') ;
+  'SI' ('EGA' WTAB.'DFGRAD' 'INCONNU') ;
+    STAB12.'DFGRAD' = 'GRAD' ZMODL ZMAT STAB12.'ZU1' ;
+  'SINO';
+    STAB12.'DFGRAD' = 'REDU' WTAB.'DFGRAD' ZMODL;
+  'FINS' ;
+'SINON' ;
+  STAB12.'DFGRAD' = WTAB.'DFGRAD' ;
+'FINS' ;
+
+com_sig  = 'EXTR' ZMODLI  'CONT';
+HPP_EPS  =  FAUX                ;
+EPS_EPS  = 'TEXT' '        '    ;
+EPS_NLIN =  VRAI                ;
+
+'SI' ('EGA' ('VALE' 'EPSI') 'LINEAIRE'); EPS_NLIN = FAUX; 'FINS';
+* Option a n'utiliser que par les utilisateurs avertis
+'SI' ('EXIS' PRECED 'ACCELERATION') ;
+  III = PRECED.'ACCELERATION' ;
+  'SI' ('EGA' ('TYPE' III) 'ENTIER') ; ZNACCE = III ; 'FINS' ;
+'FINS' ;
+* Matrice tangente : non utilisee si IPLAVI a FAUX
+IKTAN  = IKTAN 'ET' IPLAVI ;
+'SI' (WTAB.'K_TANGENT' 'ET' ('NON' IPLAVI)) ;
+  'MESS' 'IPLAVI faux : pas de matrice tangente ->'
+         ' on utilise la rigidite elastique' ;
+'FINS' ;
+* Matrice tangente par perturbation :
+* Option non disponible si non local ou si IPLAVI a FAUX
+IPERT = WTAB.'K_TANGENT_PERT' 'ET' ('NON' LNLOC) 'ET' IPLAVI ;
+ZPERC1 = WTAB.'K_TANG_PERT_C1' ;  ZPERC2 = WTAB.'K_TANG_PERT_C2' ;
+* Matrice tangente : partie symetrique utilisee
+'SI' WTAB.'K_TANGENT_SYME' ;
+  ZKTASYM = 'MOT' 'SYME' ;
+'SINON' ;
+  ZKTASYM = 'TEXTE' '    ' ;
+'FINS';
+* Matrice tangente : pas d'acceleration en cas de modele FEFP ou SSTE
+'SI' IKTAN ;
+  'SI' (IFEFP 'OU' ISSTE) ; ZNACCE = 999 ; 'FINS';
+'FINS' ;
+*
+'SI' IFTOL ;
+    ZFTOL = 'ABS' WTAB.'FTOL' ;
+'FINS';
+'SI'  IMTOL  ;
+    ZMTOL = 'ABS' WTAB.'MTOL' ;
+'FINS';
+ITCAR = ( 'EXIS' ZMATI  'EPAI') 'OU' ('EXIS' ZMATI 'INRY') 'OU'
+        ( 'EXIS' ZMATI  'MODS') 'OU'
+       (( 'EXIS' ZMODLI 'ELEM' 'JOI1') 'ET' ('EXIS' ZMATI 'V1X ')
+                                       'ET' ('EXIS' ZMATI 'V1Y '))  ;
+*
+* CB215821 : Devrait t-on mutualiser ITCAR et WTAB.ITCAR? ==>
+*            Ce ne sont pas tout a fait les memes tests aujourd'hui
+'SI' (ITCAR 'EGA' FAUX);
+   ZMAT2 = ZMATI ;
+   ZMAT2R= ZMAT  ;
+'FINS';
+
+'SI' WTAB.'ITCAR';
+  'SI' ('EGA' WTAB.'CARA' ('MOT' 'INCONNU'));
+     WTAB.'CARA' = ZMAT11 ;
+  'FINS';
+   CARA1 = ZMAT1;
+'FINS';
+
+'SI' ('OU' ('OU' IVISCO IVIDOM) IVIEXT);  ZPREK = 5.E-7 ;  'FINS';
+'SI' IENDOM;                              ZPREK = ZPREC ;  'FINS';
+
+* on fait ici la séparation poreux .. pour l'avoir sur
+*les modèles partitionnes
+'SI' POR1;
+    MO_PORI = 'EXTR' ZMODLI 'FORM' 'POREUX';
+    MO_POR  = 'EXTR' ZMODL  'FORM' 'POREUX';
+
+    MA_POR  = 'REDU' ZMAT22 MO_POR      ;
+** kich ma_por0 intervient si ISOL
+** initialement     MA_POR0= 'REDU' MO_POR (STAB12.'MAT1');
+    MA_POR0 = 'REDU' ZMAT11 MO_POR      ;
+
+    MAI_POR = 'EXTR' MO_POR  'MAILLAGE' ;
+    MAI_PORI= 'EXTR' MO_PORI 'MAILLAGE' ;
+'FINS';
+
+* recuperation de certains champs, si nbpart>1 zmodl est partitionné
+* sinon c'est le modele initial
+*                                                                      *
+DEFT0        = 'REDU' conti.'DEFORMATIONS' ZMODL              ;
+ZSIGF        = 'REDU' STAB12.'SIGF' ZMODL                     ;
+'SI' IPLAVI ;
+     ZDEIF   = 'REDU' CONTI.'DEFORMATIONS_INELASTIQUES' ZMODL ;
+     ZVARF   = 'REDU' CONTI.'VARIABLES_INTERNES'        ZMODL ;
+     com_var = 'EXTR' ZMODLI 'VARI' ;
+     com_dei = 'EXTR' ZMODLI 'DEIN' ;
+     lnom    =  com_var             ;
+    'SI' ISOL  ;
+       com_maa = 'EXTR' ZMODLI 'MATE' ;
+    'FINS' ;
+'FINS' ;
+*
+*   teste t'on les moments  ?
+TSTMOM = ITCAR 'OU' ('EGA' ('VALE' 'MODE') 'PLANGENE') ;
+*   teste t'on les POREUX   ?
+'SI' POR1  ; TSTMOM=VRAI ; 'FINS';
+*
+IKLFFF=VRAI;
+'SI'TSTMOM;    'SI' IFTOL;     'SI' IMTOL;
+       IKLFFF=FAUX;
+'FINS';        'FINS';        'FINS';
+*
+'SI'('NON' TSTMOM); 'SI' IFTOL;
+       IKLFFF=FAUX;
+'FINS';'FINS';
+*
+GEOREF0  = WTAB.'FOR0' ;
+WTAB.'CONV'=VRAI;
+WTAB . 'ISOUSPAS' = 0;
+NSOUSPAS = WTAB . 'MAXSOUSPAS';
+ZCCONV = VRAI ;
+KNOCONV = 0 ;
+
+
+RED_URG = 0;
+   residc = 'VIDE' 'CHPOINT' / 'DISCRET';
+iraug = faux;
+************************************************************************
+****** boucle de non convergence
+************************************************************************
+'REPETER'  BONOCONV NSOUSPAS ;
+'SI' ('EGA' RED_URG 0);
+ 'SI' ((XCONV < ZPREC) 'ET' (DEPSTDM < ZPREC));
+    augmult = 0.60000000;
+    augauto = augmult;
+    augk    = augmult;
+    IRAUG = FAUX;
+    znacce=2  ;
+  'SI' (IFEFP 'OU' ISSTE) ; ZNACCE = 999 ; 'FINS';
+ 'SINON';
+    augmult = augmult / 1.5;
+**  si (augmult < 0.6); augmult = 0.6; finsi;
+ 'FINSI';
+'SINON';
+   augmult = augmult * 1.5;
+   IRAUG = VRAI;
+'FINSI';
+***   wtab.'RECARI' = vrai;
+
+  KNOCONV       = KNOCONV+1                 ;
+  STAB12.'CONV' = FAUX                      ;
+  DT_INIT       = STAB12.'DT'               ;
+  DTINI         = STAB12.'DT'               ;
+
+  ZSIG0         = ZSIGF                     ;
+ 'SI' IPLAVI ;
+    ZEPS0 =  ZDEIF                          ;
+    ZVAR0 =  ZVARF                          ;
+ 'FINS';
+
+  ZU1           = STAB12.'ZU1'   ;
+  ZDETOT = 'ENLE' ZU1 'LX';
+  GR_U_DEB      = STAB12.'DFGRAD';
+  'SI'  ITHER  ;
+     TETA1 = STAB12.'TETA1' ;
+     TETA2 = STAB12.'TETA2' ;
+    DTETD = TETA2 '-' TETA1;
+  'FINS' ;
+
+* materiau au debut du pas en cas de non convergence etat1=etat2
+  'SI' (knoconv > 1) ;
+     ZMAT1 = 'REDU' (PAS_MATE PRECED STAB12.'ETAT1') ZMODL ;
+  'SINON';
+     ZMAT1 = ZMAT1I ;
+  'FINS' ;
+*------ caracteristiques initiales en cas de grands deplacements ------
+  'SI' WTAB.'ITCAR';
+     MECAR1 = 'EXCO'  MOCA  ZMAT1  'NOID'            ;
+     MECAR2 = 'EXCO'  MOCA  CARA1  'NOID'            ;
+     MECAR1 = 'CHAN' 'TYPE' MECAR1 'CARACTERISTIQUES';
+     MECAR2 = 'CHAN' 'TYPE' MECAR2 'CARACTERISTIQUES';
+     ZMAT1  =  ZMAT1 '-' MECAR1 '+' MECAR2           ;
+  'FINS';
+
+*----------- Calcul du champ de materiau a la fin du pas ------------
+  'SI' (knoconv '>' 1) ;
+     MCHC = PAS_ETAT PRECED TI  ;
+     MMMM = PAS_MATE PRECED MCHC;
+  'SINON' ;
+     MMMM = ZMAT22              ;
+  'FINS' ;
+   MMMM = 'REDU' MMMM ZMODL;
+
+*----- Caracteristiques initiales en cas de grands deplacements -----
+  'SI' WTAB.'ITCAR';
+     MECAR1 = 'EXCO'  MOCA  MMMM   'NOID'            ;
+     MECAR2 = 'EXCO'  MOCA  CARA1  'NOID'            ;
+     MECAR1 = 'CHAN' 'TYPE' MECAR1 'CARACTERISTIQUES';
+     MECAR2 = 'CHAN' 'TYPE' MECAR2 'CARACTERISTIQUES';
+     MMMM = MMMM '-' MECAR1 '+' MECAR2               ;
+*   (fdp) on reporte les variations du materiau sur le pas
+*    dans les autres instances du champ materiau
+*   (ZMAT et ZMATI semblent suffirent)
+     MECAR1 = 'EXCO'  MOCA  ZMAT  'NOID'             ;
+     MECAR2 = 'EXCO'  MOCA  MMMM  'NOID'             ;
+     MECAR1 = 'CHAN' 'TYPE' MECAR1 'CARACTERISTIQUES';
+     MECAR2 = 'CHAN' 'TYPE' MECAR2 'CARACTERISTIQUES';
+     ZMAT   =  ZMAT  '-' MECAR1 '+' MECAR2           ;
+     ZMATI  = 'REDU' ZMAT ZMODLI                     ;
+  'FINS';
+
+*------------ Calcul de la rigidite a la fin du pas ----------------
+*  Test ci-dessous est inutile, WTAB.'BLOCAGES_MECANIQUES' et ZCLIM0
+*  correspondent aux memes rigidites ... (cf. ligne 117)
+   AA1 ='EXTR' WTAB.'BLOCAGES_MECANIQUES' 'MAIL'     ;
+   AA2 ='EXTR' ZCLIM0 'MAIL' ;
+   AA3 ='DIFF' AA1 AA2       ;
+   AA4 = NBNO  AA3           ;
+  'SI' ( (WTAB.'RECARI' 'OU' IRAUG      ) 'OU'
+         ('NON' ('EXIS' WTAB 'RRRR')    ) 'OU' ('NEG' AA4 0));
+    'SI' ('OU' ('OU' IENDOM  IVIDOM) ICERAM);
+       HOOKENDO ='HOOK' ZMODL MMMM     ZVAR0;
+       RH       ='RIGI' ZMODL HOOKENDO MMMM ;
+      'DETR' HOOKENDO;
+    'SINON';
+       'SI' (LAG_TOT 'ET' faux);
+          'FORM' GEOREF0;
+          HOOKRH = 'HOOK' ZMODL MMMM;
+          HOOKRH2 = 'PICA' HOOKRH ZMODL ZU1;
+          'FORM' GEOM1;
+          RH = 'RIGI' HOOKRH2 ZMODL MMMM;
+          'DETRUI' HOOKRH;
+          'DETRUI' HOOKRH2;
+       'SINON';
+          RH  = 'RIGI' ZMODL MMMM ;
+       'FINSI';
+    'FINS';
+*   RH peut contenir des CL
+    ZCL = 'EXTR' RH 'RIGI' 'MULT' ;
+    'SI' ('NEG' ('DIME' ZCL) 0) ;
+      ZCLIM = ZCLIM0 'ET' ZCL ;
+    'FINSI' ;
+    RRRR = RH 'ET' ZCLIM0 ;
+*   Prise en compte d'eventuelles RIGIDITE_CONSTANTE
+    'SI' IRCON;
+      RRRR = RRRR 'ET' RIG_CONS;
+    'FINS';
+*
+    'SI' IRAUG;
+*  recalcul masse pour l'augmentation
+      RIG_AUG  = 'MASSE' ZMODL MMMM ;
+      ZRAIDNA = RRRR;
+      RRRR = RRRR 'ET' (RIG_AUG * augauto) 'ET' (RH   * augk);
+    'FINS';
+
+    'SI' ('EGA' ('DIME' ZCL) 0) ;
+*   Stockage de la rigidite pour eviter de la recalculer
+    WTAB.'RRRR'=RRRR;
+    'FINSI';
+*
+  'SINON';
+     RRRR=WTAB.'RRRR';
+  'FINS';
+  ZRAID=RRRR;
+
+*------------ consolidation ou dynamique faut-il recalculer l'operateur?
+* -----: preparation du pas de temps ------------
+    'SI' ( WTAB.'CONSOLIDATION' 'OU' WTAB.'DYNAMIQUE');
+       DT = TI '-' TEMP0;
+      'SI' ( '>' (DELTAN '*' 0.9999) DT) ;
+         WTAB . 'RECAOP' = VRAI;
+      'FINS';
+      'SI' ( '<' (DELTAN '*' 1.0001) DT) ;
+         WTAB . 'RECAOP' = VRAI;
+      'FINS';
+      'SI' WTAB.'MATVAR';
+         WTAB . 'RECAOP' = VRAI;
+      'FINS';
+       DELTAN=WTAB.'DT';
+    'FINS';
+*---------------------- Formation de l operateur -----------------------
+     'SI' ( WTAB.'DYNAMIQUE' 'OU' WTAB.'CONSOLIDATION');
+       'SI' ('NEG' WTAB.'OPERATEUR' 'INCONNU');
+          ZRAID = WTAB.'OPERATEUR';
+         'SI' (WTAB . 'RECAOP') ;
+            ZRAID = RRRR ;
+         'FINS';
+       'FINS';
+     'FINS';
+
+*------------ operateur frequentiel -----------------------
+*------------ operateur amortissement en frequentiel
+     'SI' WTAB.'FREQUENTIEL' ;
+        RRR2 = 'AMOR'  ZMODL ZMAT ;
+        RR2  = 'CHAN' 'INCO' RRR2
+              ('MOTS' 'ALFA' 'BETA') ('MOTS' 'IALF' 'IBET')
+              ('MOTS' 'FALF' 'FBET') ('MOTS' 'FALF' 'FBET') 'QUEL' ;
+        RR3  = 'CHAN' 'INCO' RRR2
+              ('MOTS' 'ALFA' 'BETA') ('MOTS' 'ALFA' 'BETA')
+              ('MOTS' 'FALF' 'FBET') ('MOTS' 'IFAL' 'IFBE') 'QUEL' ;
+        RRR2 = RR2 'ET' RR3 ;
+
+        RR1  = ZRAID ;
+        OMEGI= 2.* PI * TI ;
+        RRR1 = OMEGI * OMEGI * (-1.) * WTAB.'MASSE' ;
+        RR1  = ZRAID 'ET' RRR1 ;
+        RR4  = 'CHAN' 'INCO' (RR1 '*' (-1.D0))
+              ('MOTS' 'ALFA' 'BETA') ('MOTS' 'IALF' 'IBET')
+              ('MOTS' 'FALF' 'FBET') ('MOTS' 'IFAL' 'IFBE') 'QUEL';
+        ZRAID= RR1   'ET' RR4  ;
+        RR5  = OMEGI '*'  RRR2 ;
+        ZRAID= ZRAID 'ET' RR5  ;
+     'FINS' ;
+
+*--------------- et la perméabilité  ----------------------------------
+     'SI' (WTAB.'CONSOLIDATION') ;
+       'SI' (WTAB.'GRANDS_DEPLACEMENTS' 'OU' WTAB.'MATVAR') ;
+          WTAB .'PERMEABILITE'= 'PERM' WTAB.'MOD_POR' MMMM ;
+          WTAB .'RECAOP'      =  VRAI                      ;
+       'FINS';
+     'FINS';
+
+*------------- Cas de la consolidation ou de la dynamique -------------
+*------------- il faut recalculer l'operateur d'iteration -------------
+     'SI' (WTAB . 'RECAOP') ;
+       'SI' ( WTAB.'DYNAMIQUE');
+          ZRAID =  4.D0 '/'( DT ** 2) '*' WTAB.'MASSE'     'ET' ZRAID;
+         'SI' ('NEG' WTAB.'AMORTISSEMENT' 'INCONNU');
+            ZRAID = WTAB.'AMORTISSEMENT' '*' (2.D0 '/' DT) 'ET' ZRAID;
+         'FINS';
+       'FINS' ;
+
+       'SI' ( WTAB.'CONSOLIDATION');
+          ZRAID =-1.* DT* WTAB.'TETA'* WTAB.'PERMEABILITE' 'ET' ZRAID ;
+       'FINS' ;
+        WTAB . 'OPERATEUR'= ZRAID ;
+        WTAB . 'RECAOP'   = FAUX  ;
+     'FINS';
+     ZRAIDNA = ZRAID;
+
+
+*-------------- traitement des contacts frottements automatiques -------
+      CDEP    = STAB12.'ZU1'               ;
+      CDEPSLX ='ENLE' CDEP 'LX'            ;
+
+      BFCONT  = FAUX                       ;
+      BCLIM2  = FAUX                       ;
+     'SI' WTAB.'CONTACT';
+        MODCON= WTAB.'MODCONTA';
+       'SI' ('EXIS' WTAB 'MATCONTA') ;
+          CJEU CRR RFROT='RFCO' MODCON  WTAB.'CONV' WTAB.'MATCONTA' ;
+       'SINON' ;
+          CJEU CRR RFROT='RFCO' MODCON  WTAB.'CONV'                ;
+       'FINS';
+*
+       'SI' ('NEG' 0 CJEU) ;
+         FADHE = 'EXCO' CJEU 'FADH' 'NOID' 'FADH' ;
+         CDAP  = 'EXCO' CJEU 'FLX'  'NOID' 'FLX' ;
+       'FINSI' ;
+
+       'SI' (WTAB . 'MODAL') ;
+          CRR  = 'PJBA' CRR   ZMODL  MMMM  ;
+          MCRR = 'EXTR' CRR  'MAIL' 'MULT' ;
+          MCDAP= 'EXTR' CDAP 'MAIL'        ;
+         'REPETER' BCDA ('NBNO' MCDAP) ;
+            PBCDA ='POIN' MCDAP &BCDA ;
+            PCRR  ='POIN' MCRR  &BCDA ;
+            CHCR  ='MANU' 'CHPO' PCRR 1 'FLX' ('EXTR' CDAP 'FLX' PBCDA)
+                   'NATURE' 'DISCRETE' ;
+           'SI' ('EGA' 1 &BCDA) ;
+              CCDA = CHCR ;
+           'SINON' ;
+              CCDA = CHCR 'ET' CCDA ;
+           'FINS' ;
+         'FIN' BCDA ;
+          CDAP = CCDA ;
+       'FINS' ;
+
+*       ATTENTION : mettre les conditions de frottement en premier pour
+*                   les numeroter en dernier
+        ZCLIM2 = 'VIDE' 'RIGIDITE';
+        ZFCONT  ='VIDE' 'CHPOINT' / 'DISCRET';
+       'SI'  ('NEG' CRR 0);
+          BCLIM2 = VRAI                ;
+          BFCONT = VRAI                ;
+          ZCLIM2 = CRR    'ET' ZCLIM2  ;
+          CCOR   = CRR    '*'  CDEPSLX ;
+          ZFCONT = ZFCONT '+'  CCOR    ;
+       'FINS';
+
+       'SI' ( 'NEG' 0 CJEU);
+          BFCONT = VRAI                ;
+          ZFCONT = ZFCONT '+'  CDAP    ;
+       'FINS';
+
+       'SI' ('NEG' 0 RFROT);
+          BCLIM2 = VRAI                ;
+          BFCONT = VRAI                ;
+          ZCLIM2 = RFROT  'ET' ZCLIM2  ;
+          CCOR   = RFROT  '*'  CDEPSLX ;
+          ZFCONT = ZFCONT '+'  CCOR    ;
+       'FINS';
+*
+*      Mise a jour de ZCLIM et ZFCONSTA si necessaire
+       'SI' BCLIM2;
+         ZCLIM  = ZCLIM2 'ET' ZCLIM ;
+         ZRAID  = ZCLIM2 'ET' ZRAID;
+       'FINS';
+*
+       'SI' BFCONT;
+         ZFCONSTA = ZFEXT2 '+' ZFCONT ;
+       'FINS';
+     'FINS';
+*
+      ZFCONST1 = ZFCONSTA;
+
+* ---------------  pilotage automatique ********************************
+     ISNPB = FAUX ;
+     AL1 = 1. ;COEPI = 1.d0; COEINC=0.d0;COEPI0=1.d0;DAL1=100.D0;
+     CORPREC = 1. ;
+*    CORPREC = 10.;
+     'SI' (('EGA' ipredic  'HPP') 'ET' WTAB.'CONV');
+          EPS_EPS = 'TEXTE' 'LINEAIRE';
+          HPP_EPS = VRAI;
+     'FINS';
+*
+     'SI' IPILOT ;
+          'SI' ( WTAB.'AUTODEUX' ) ;
+                COEPI = 'ABS' ( STAB12.'AUTOCOEF');
+                COEPI = COEPI / (1.-COEPI);
+                'SI' (COEPI > 1.D0) ; COEPI=1.D0;'FINS';
+                COEPI0=COEPI;STAB12.'AUTOCOEF'=COEPI;
+           'SINON';
+                STAB12.'AUTOCOEF' = 1.D0;
+           'FINS' ;
+           RED1 = 1. ;
+           RED2 = 0 ;
+           'SI' ('NEG' WTAB.'AUTORED1' 'INCONNU') ;
+                'SI' (STAB12.'AUTORED1' > 0);
+                     STAB12.'AUTORED1' = STAB12.'AUTORED1' - 1;
+                     'SI' (STAB12.'AUTORED1' 'EGA' 0) ;
+                           COEPI = 3 *  COEPI ;
+                           STAB12.'AUTOREDU' = STAB12.'AUTOREDU' / 3.;
+                           'SI' (STAB12.'AUTOREDU' > 1.1 );
+*                      on travaille encore avec un critere reduit
+                                STAB12.'AUTORED1' = 4 ;
+                                RED1 = 3. ;
+                           'FINS';
+                     'MESS' 'On multiplie le critere de pilotage par 3';
+                     'FINS';
+                'FINS';
+           'FINS';
+           'SI' (COEPI > 1d0);
+                 RED1 = RED1 / COEPI ;COEPI =1d0;
+           'FINS';
+           'SI' ( 'NEG' WTAB.'NBPLAS' 'INCONNU') ;
+                 'SI' ( WTAB.'NBPLAS' 'EGA' 0) ;
+                    'SI' (COEPI < 0.) ;COEPI = COEPI * -2.;'FINS';
+                 'FINS';
+           'FINS';
+           COEPI = 'ABS' COEPI ;
+           COEPI0 = COEPI;
+*    sans pilotage
+     'SINON';
+           STAB12.'AUTOCOEF'= 1.D0;
+     'FINS';
+
+************************************************************************
+*-------------    quelques initialisations  pour la boucle ETIQ ********
+************************************************************************
+     URG    = FAUX; RED_URG = 0 ; IT = 0 ; c_zdepr = faux;ITACC = 0;
+     ZICONV = VRAI; MMC     = 0 ; MMCMAX = 0 ; EPSM = 0.; DPSMAX = 0. ;
+     DEPSTDM  = 0. ;  DEKREAC1 = 0. ;XCONVNOR = 0. ; ITNORM1  = 0 ;
+     DEPSTREF = 100. * (WTAB . 'MAXDEFOR') ;ZDEPL=0;
+     GR_U_K   = GR_U_DEB ;
+     DITNORM1 = 0  ;NBCYCLE1 = 0  ;zdept = zu1 * 0.; zdeptq = zdept; zdeptp = zdept;
+     zprecnc=1e-5;FTHE = 0. ;  FDEF = 0. ; ITNV = -5 ;
+     TABCONV = 'TABL';
+     'SI' IFEFPUL;
+        XUPDA = 1;
+     'FINS';
+
+     DEPST0=0;
+***********   en cas de materiaux variables ****************************
+     'SI' (WTAB.'MATVAR');
+       'SI' ('OU' ('OU' IENDOM IVIDOM) ICERAM);
+          XXX3 = 'ELAS' ZMODL ZSIG0 ZMAT  ZVAR0;
+          XXX4 = 'ELAS' ZMODL ZSIG0 ZMAT1 ZVAR0;
+       'SINON';
+          XXX3 = 'ELAS' ZMODL ZSIG0 ZMAT       ;
+          XXX4 = 'ELAS' ZMODL ZSIG0 ZMAT1      ;
+       'FINS';
+        DDEF0 = XXX4 - XXX3;
+       'DETR' XXX3;
+       'DETR' XXX4;
+        DEPST0=-1.* DDEF0;
+     'FINS';
+
+***** En cas de chargement thermiques *********************************
+     'SI'  ITHER   ;
+          'SI' (WTAB.'MATVAR' 'ET' IPILOT);
+                'MESS' 'Le pilotage n est pas possible avec un'
+              ' materiau qui depend de la temperature' ;
+              'ERREUR' 19 ;
+          'FINS' ;
+
+        ETT MSRTT = PAS_EPTH PRECED ZMODL ZMAT TETA2  ;
+        DTT       = ETT '-' ETT0 ;
+*--------- Cas du milieu poreux avec chargement thermique ----------
+*          cas isotrope seulement pour le moment
+*          et on  ne s'occupe pas du alpha-reference !!
+           'SI' POR1 ;
+              DMSRT0 = MSRTT '-' MSRTT0                   ;
+       'FINS' ;
+
+       'SI' ('EGA' DEPST0 0);
+          DEPST0 = DTT;
+       'SINON';
+          DEPST0 = DTT '+' DEPST0 ;
+           'FINS' ;
+     'FINS';
+
+* calcul de dsig0 et fthe en cas de chargement si necessaire ***********
+     'SI' ( ITHER 'OU' WTAB.'MATVAR');
+           'SI' ('OU' ('OU' IENDOM IVIDOM) ICERAM);
+              DSIGT0 = 'ELAS' ZMODL DEPST0 ZMAT ZVAR0;
+           'SINON';
+              DSIGT0 = 'ELAS' ZMODL DEPST0 ZMAT      ;
+           'FINS';
+
+           'SI' (POR1 'ET' ITHER);
+              DSIGT0 = DSIGT0 '+'  DMSRT0;
+           'FINS';
+           FTHE = 'BSIGMA' ZMODL DSIGT0 ZMAT ;
+     'FINS';
+
+*-------------- deformations imposes **********************************
+     'SI' LOGDEF;
+           DDEFOR0 ='REDU' (STAB12.'DEFOR2' - STAB12.'DEFOR1') ZMODL;
+          'SI' ('OU' ('OU' IENDOM IVIDOM) ICERAM);
+             DSI1 = 'ELAS' ZMODL DDEFOR0 ZMAT ZVAR0;
+          'SINON';
+             DSI1 = 'ELAS' ZMODL DDEFOR0 ZMAT      ;
+          'FINS';
+           FDEF = 'BSIGMA' ZMODL DSI1 ZMAT ;
+     'FINS';
+
+*-------------- pression imposee et grands deplacements ?***************
+     'SI' (LOGPRE 'ET' IGRD) ;
+       MOP = WTAB.'MOD_PRE' ;
+       ZPEXT0 = 'TIRE' WTAB.'CHARGEMENT' 'PRES' TEMPS0 ;
+       ZPEXTF = 'TIRE' WTAB.'CHARGEMENT' 'PRES' TI     ;
+*
+       'SI' ('EXIS' WTAB 'MAT_PRE') ;
+          ZFPEXT0 = 'BSIG' MOP ZPEXT0 ('REDU' ZMAT11 MOP) ;
+          ZFPEXTF = 'BSIG' MOP ZPEXTF ('REDU' ZMAT22 MOP) ;
+       'SINON' ;
+          ZFPEXT0 = 'BSIG' MOP ZPEXT0 ;
+          ZFPEXTF = 'BSIG' MOP ZPEXTF ;
+       'FINS' ;
+       ZFP0F = 'COPIER' ZFPEXTF ; COEFP=1.D0;
+     'FINS';
+
+* ---------  ktangent et fefp******************************************
+     'SI' IKTAN ;
+           'SI' IFEFP ;
+                IKT_SAUV = VRAI ;
+                'SI' ('NEG' WTAB.'LASTKTAN' 'INCONNU') ;
+                       'MESS' 'FEFP: Start with LASTKTAN' ;
+                     ZRIKTA = STAB12.'LASTKTAN' ;
+                     ZRAID = ZCLIM 'ET' ZRIKTA ;
+                'SINON' ;
+                     'MESS' 'FEFP: Previous KTAN not available' ;
+                     ZRAID = ZRAID 'ET' ('KSIGMA' ZMODL ZSIG0 ZMAT) ;
+                'FINS' ;
+           'SINON' ;
+                'SI' ('NEG' WTAB.'LASTKTAN' 'INCONNU') ;
+                     IKT_SAUV = VRAI ;
+                     'SI' IPERT ;
+                         'MESS' 'Matrice tangente par perturbation - '
+                         'Demarrage avec KTAN = LASTKTAN' ;
+                     'SINON' ;
+                         'MESS' 'Matrice tangente "coherente" - '
+                         'Demarrage avec KTAN = LASTKTAN' ;
+                     'FINS' ;
+                      ZRIKTA = STAB12.'LASTKTAN' ;
+                      ZRAID = ZCLIM 'ET' ZRIKTA ;
+                'SINON' ;
+                     'SI' IPERT ;
+                          IKT_SAUV='NEG' WTAB.'K_TANGENT_ITER0'
+                                   'MAT_ELASTIQUE';
+                         'MESS' 'Matrice tangente par perturbation - '
+                         'Demarrage avec KTAN = rigidite elastique' ;
+                     'SINON' ;
+               IKT_SAUV = ('NEG' WTAB.'K_TANGENT_ITER0' 'MAT_ELASTIQUE')
+               'ET' ('NEG' WTAB.'K_TANGENT_ITER0' 'MAT_TANGENTE') ;
+                         'SI' ('EGA' WTAB.'K_TANGENT_ITER0'
+                              'MAT_ELASTIQUE') ;
+                               'MESS' 'Matrice tangente "coherente" - '
+                            'Demarrage avec KTAN = rigidite elastique' ;
+                         'SINON' ;
+                               'MESS' 'Matrice tangente "coherente" - '
+                               'Demarrage avec KTAN (DTTAN = 0.)' ;
+                               DTTAN = 0. ;
+                               ZRIKTA = 'KTAN' ZMODL ZSIG0 ZVAR0 ZMAT
+                                    'PREC' ZPREK 'DT  ' DTTAN ZKTASYM ;
+                               ZRAID = ZCLIM 'ET' ZRIKTA ;
+                         'FINS' ;
+                     'FINS' ;
+                'FINS' ;
+           'FINS' ;
+     'FINS' ;
+
+*--------  en grands deplacements option K_SIGMA ***********************
+*
+     'SI' (IGRD 'ET' ('NON' HPP_EPS));
+       'SI' (IKSIA 'ET' ('NON' IFEFP)) ;
+          KSI1    ='KSIGMA' ZMODL ZSIG0 ZMAT;
+          ZRAIDINI= ZRAID           ;
+          ZRAID   = ZRAID 'ET' KSI1 ;
+       'FINS' ;
+     'FINS' ;
+
+* Y a-t-il des forces non conservatives ( forces suiveuses)? ***********
+      ADDISEC0 = FAUX;
+      ADDISEC2 = FAUX;
+     'SI' WTAB.'PROCEDURE_CHARMECA';
+*       on ajoute l indice ADDI_MATRICE pour signaler a charmeca qu on
+*       souhaite aussi l operateur linearisé des Forces NL de charmeca
+        PRECED . 'ADDI_MATRICE' = vrai;
+        TFP22  = CHARMECA  PRECED   WTAB.'T_FINAL';
+        PRECED . 'ADDI_MATRICE' = faux;
+*   FP22 = F^suiv_n+1
+         DMZPRES = 0.D0 ;
+       'SI' ('EXIS' TFP22 'ADDI_SECOND') ;
+          FP22    = TFP22.'ADDI_SECOND'  ;
+          FP022   = 'COPIER' FP22        ;
+          MZPRES  = 'MAXI' 'ABS' FP22    ;
+          DMZPRES = MZPRES               ;
+          ADDISEC2= VRAI                 ;
+       'FINS';
+       'SI' ('EXIS' TFP22 'ADDI_MATRICE');
+          ZRAID = ZRAID 'ET' TFP22.'ADDI_MATRICE';
+       'FINS';
+
+*  FP0 = F^suiv_n
+        TFP0 = CHARMECA  PRECED   TEMPS0 ;
+       'SI'('EXIS' TFP0 'ADDI_SECOND')   ;
+          FP0     = TFP0.'ADDI_SECOND'   ;
+          MZPRES0 = 'MAXI' 'ABS' FP0     ;
+          DMZPRES = DMZPRES '-' MZPRES0  ;
+          ADDISEC0= VRAI                 ;
+       'FINS';
+*      'SI' ('EXIS' TFP0 'ADDI_MATRICE');
+*         ZRAID = ZRAID 'ET' TFP0.'ADDI_MATRICE';
+*      'FINS';
+        COEFP   = 1.D0              ;
+     'FINS';
+
+
+* -----------calcul de la partie constante du second membre  **********
+*                          en consolidation
+*     ZFP1 est cense contenir : - B0*SIG0 et
+*                                 DT*(1-TETA)*FI0 + DT*H*P
+*
+*     dans ZFCONSTA on met le second membre de u ***********************
+
+*  en dynamique ********************************************************
+* ZFP1 est cense contenir : F0 + 4/DT*M*V0 - B0*SIG0
+     'SI' IDYN  ;
+        UNSURH  = 1.D0 '/' STAB12.'DT'    ;
+        ZFP1    = WTAB.'FREA1'            ;
+        ZDYFEXT = ZFCONSTA 'ENLEVER' 'FLX';
+        ZFCONSTA= ZFCONSTA '+' ZFP1       ;
+     'FINS';
+      ZFEXT     = ZFCONSTA 'ENLEVER' 'FLX';
+
+*---------deplacement (ou jeu) e imposer e la fin du pas *************
+* on separe les efforts ZFEXT (=F^ext_n+1)   ***************************
+* et deplacement (ou jeu) ZFLX1 (u^imp_n+1) a imposer a la fin du pas
+     ZFLX1 = 'EXCO' ZFCONSTA 'FLX' 'NOID' 'FLX' 'NATURE' 'DISCRET';
+     'SI' ('NEG' STAB12.'FFROT' 'INCONNU'); FFROT = STAB12.'FFROT';
+     'SINON' ; FFROT=ZFEXT * 0; 'FINS';
+     FFROTP = FFROT;
+
+*   calcul des forces externes deja equilibrees au debut du pas ********
+*   par B*SIGMA : ZF1 = F^int_n = B*sigma_n + K^cst*u_n
+     ZF1 = 'BSIGMA' ZMODL ZSIG0 ZMAT ;
+     'SI' IRCON;
+           ZF1 = ZF1 '+' ('REDU' MAI_CONS (RIG_CONS '*' ZU1));
+     'FINS';
+     'SI'  IDYN  ;  FFDYN = 'COPIER' ZF1; 'FINS';
+     'SI' ISOL ;
+           GRAP0= 'GRAD' MO_POR ZU1 MA_POR0 'CONS' ;
+           XXX1 = 'GRAD' MO_POR ZU1 MA_POR  'CONS' ;
+           XXXS =((1.- WTAB. 'TETA' )*GRAP0)+ (WTAB. 'TETA' * XXX1);
+           XXX2 = STAB12.'DT' * ('GNFL' MO_POR XXXS) ;
+           XXX3 = ZF1  ;
+           ZF1  = XXX3 - XXX2;'DETR' XXX3;
+           'DETR' XXX2 ;
+     'FINS';
+
+* initialisation des variables forces et deplacement*******************
+* zzd est le deplacement au pas precedent   (=u_n)  et ZLX=lambda_n
+     ZZD ='ENLE' ZU1 'LX';
+     ZLX = ZU1 'EXCO' 'LX' 'NOID' 'LX' 'NATURE' 'DIFFUS';
+* ---------  flxini est la partie des FLX deja realisee au debut du pas
+     FLXINI= ZZD '*' ZCLIM;
+* FREAP  : -1*reactions du pas precedent    (=F^reac_n) transportees sur les nou
+     FREAP = ZLX '*' ZCLIM;
+     FEXT0 = ZF1 '+' FREAP;
+* FEXT0 est le chargement externe (sans reactions vu par la
+* structure le pas d'avant)   = F^ext_n = F^int_n - F^reac_n
+*
+*  on va calculer le premier residu c'est a dire le desequilibre *******
+*  entre les forces externes et le calcul B*SIGMA.
+*  le sigma qui sert est celui qui existerait si le champ de
+*  deplacement ne changeait pas (ZU1). faire attention aux FLX
+*  En pilotage on reprend ce residu que l'on multiplie par COEPI
+*  XXX1 = [F^ext_n+1 ; Du^imp]
+*  DFEXT0 = increment des forces et des FLX a imposer (le residu
+*  du pas precedent) = [DF^ext ; Du^imp]
+     XXX1   = ZFCONSTA '-' FLXINI ;
+     DFEXT0 = XXX1     '-' FEXT0  ;
+
+* si pression suiveuse dfext0 contient en plus l'increment des forces
+* de pression du uniquement a la reactualisation de la geometrie (sans
+* augmentation du module)
+* mais comme F^int_n equilibre deja F^ext_n + F^suiv_n +... et qu'on est
+* toujours sur config_n, on doit avoir : DFEXT0= [DF^ext ; Du^imp]
+* avec DF^ext qui ne contient pas de forces suiveuses (...a vérifier)
+    'SI' ADDISEC0;
+       DFEXT0 = DFEXT0 '+' FP0     ;
+    'FINS';
+    'SI' (LOGPRE 'ET' IGRD) ;
+       DFEXT0 = DFEXT0 '+' ZFPEXT0 ;
+    'FINS' ;
+     DFEXT0F = DFEXT0 'ENLEVER' 'FLX';
+     DFEXT0L = DFEXT0 'EXCO' 'FLX' 'NOID' 'FLX';
+
+*    DFEXT0 = [DFEXT0F ; DFEXT0L]
+*           = [F^ext_n+1 - (F^int_n - F^reac_n - F^suiv_n) ; Du^imp]
+*    RESIDU = forces exterieures sans reactions
+*            (avec des termes supplementaires le cas echeant p.ex. en
+*             dynamique ou en poreux) - forces interieures
+*    et increment des relations imposees
+*             ---> la resolution fournira dU et dR
+
+*     RESIDU = [F^ext_n+1 + F^ther_n+1 + F^defi_n+1 - F^int_n ; Du^imp]
+      RESIDU =  XXX1     '+'FTHE      '+'FDEF      '-'ZF1;
+      ZDFINI ='COPIER' DFEXT0          ;
+      ZFPLO  = ZF1 '-' FTHE '-' FDEF   ;
+     'SI' (ITHER 'OU' WTAB.'MATVAR');
+        ZDFINI=ZDFINI '+' FTHE;
+     'FINS';
+     'SI' LOGDEF;
+        ZDFINI= ZDFINI '+' FDEF;
+     'FINS';
+     'SI' (LOGPRE 'ET' IGRD) ;
+        RESIDU = RESIDU '+' ZFPEXTF ;
+        ZDFINI = ZDFINI '+' ZFPEXTF '-' ZFPEXT0 ;
+     'FINS';
+
+     'SI' ADDISEC0 ;
+        ZDFINI = ZDFINI '-' FP0 ;
+     'FINS';
+
+     'SI' ADDISEC2 ;
+*       mess ' fp22 ' ; list resu fp22;
+        RESIDU = RESIDU '+' FP22 ;
+*       on tient compte de l'increment des forces suiveuses en direction
+*       et en module
+        ZDFINI = ZDFINI '+' FP22 ;
+     'FINS';
+
+* ici, on a :
+* RESIDU = [F^ext_n+1 + F^ther_n+1 + F^defi_n+1 + F^suiv_n+1
+*           - F^int_n  ;  Du^imp]
+*        = [ DF^tot ; Du^imp]
+* ZDFINI = [F^ext_n+1 + F^ther_n+1 + F^defi_n+1 + F^suiv_n+1
+*           - (F^int_n - F^reac_n)  ;  Du^imp]
+*
+      IMPO12= FAUX;
+      XXX1  ='EXTR' ZCLIM 'MAIL' 'UNIL';
+     'SI' (('NBEL' XXX1) '>' 0);
+        IMPO12 = VRAI;
+        DIMPO12='REDU' DFEXT0L XXX1 ;
+        DIMPOV = DFEXT0L '-' DIMPO12;
+     'FINS';
+      stab12.'SECOND_MEMBRE' = RESIDU '*' 1.D0;
+
+
+************************************************************************
+***               1ERE RESOLUTION                                    ***
+************************************************************************
+     FEXCI = 'VIDE' 'CHPOINT' / 'DISCRET' ;
+     'SI' (WTAB.'ADHERENCE') ;
+       'SI' ('EXIS' WTAB 'MAIL_BLOM') ;
+         FADRE = 'REDU' FADHE WTAB.'MAIL_BLOM' ;
+       'SINON' ;
+         FADRE = FADHE ;
+       'FINSI' ;
+       FEXCI = FEXCI 'ET' FADRE ;
+     'FINSI' ;
+*
+     'SI' (WTAB.'CAFROTTE') ;
+       FEXCI = FEXCI 'ET' FFROT ;
+     'FINSI' ;
+*
+     'SI' ('EXIS' STAB12 'RIBLO_M' ) ;
+         'SI' ((WTAB.'CAFROTTE' 'OU' WTAB.'ADHERENCE') 'ET' IMPO12);
+            ZDEP1 BID BID BID BID = 'RESO' ZRAID RESIDU 'INIB'
+                                            STAB12.'RIBLO_M'
+                                            STAB12.'LISEA_M' FEXCI ;
+         'SINON';
+            ZDEP1 BID BID BID     = 'RESO' ZRAID RESIDU 'INIB'
+                                            STAB12.'RIBLO_M'
+                                            STAB12.'LISEA_M'      ;
+         'FINS';
+         'OUBLIER' STAB12.'RIBLO_M';
+     'SINON';
+         'SI' ((WTAB.'CAFROTTE' 'OU' WTAB.'ADHERENCE') 'ET' IMPO12);
+               ZDEP1 = 'RESO' ZRAID RESIDU FEXCI ;
+         'SINON';
+               ZDEP1 = 'RESO' ZRAID RESIDU;
+         'FINS';
+     'FINS';
+
+      ZRAID_T = 'EXTR' ZRAID 'CONT';
+
+     'SI'  IDYN;
+        STAB12.'ZRAIDV'= ZRAID;
+     'FINS';
+
+     'SI' ('EXIS' ZRAID_T 'NITER');
+          STAB12.'RIBLO_M' = ZRAID_T. 7 ;
+          STAB12.'LISEA_M' = ZRAID_T. 6 ;
+     'FINS';
+*  pour eventuel calcul de augauto
+ zdep1d = zdep1 'ENLE' 'LX';
+* RENORMALISATION de du (ajout bp le 28/11/2012) ****************
+     'SI' (exis WTAB 'RENORMALISATION');
+          'SI' (WTAB . 'RENORMALISATION');
+* juste apres le resou,
+* on calcule et on limite ZDEP1 de l iteration
+* en limitant DEPS1 par MAXDEFOR
+             coefmul = 1.;
+             DEPS1 = EPSI 'LINE' ZMODL ZDEP1 ZMAT;
+             DPS1MAX = MAXI 'ABS' DEPS1 'AVEC' MLDEFOR ;
+             'SI' (DPS1MAX > WTAB . 'MAXDEFOR');
+                 coefmul = WTAB . 'MAXDEFOR' / DPS1MAX;
+                ZDEP1 = coefmul * ZDEP1;
+    mess 'MAXDEFOR dépassé : Renormalisation initiale par ' coefmul;
+             'FINS';
+          'FINS';
+     'FINS';
+* On sauve le deplacement initial pour la convergence forcee ***********
+     'SI' ('EXIS' WTAB 'DEPI');
+        zdeptini = WTAB.'DEPI';
+     'SINON';
+        zdeptini = zdep1;
+     'FINS';
+*
+*        calcul d'une norme pour la convergence**************************
+*
+      XXX1= ZFEXT;
+     'SI' ADDISEC2;
+       XXX1=ZFEXT + FP22;
+     'FINS';
+     'SI' (LOGPRE 'ET' IGRD) ;
+       XXX1 = ZFEXT + ZFPEXTF ;
+     'FINS';
+
+     ZDEP1P50 = ZDEP1       ;
+     XDENO='XTY' ZDEP1P50  ( XXX1 -( RESIDU  'EXCO'
+        'FLX' 'NOID' 'FLX' 'NATURE' 'DISCRET')) MLPRIM MLDUAL;
+     MZDEP1M = 'MAXI' ZDEP1P50 'ABS' 'AVEC' MLDEPL;
+     MZFM = 'MAXI' (FTHE + FDEF + ZF1) 'ABS' 'AVEC' MLDUAL;
+     XDENO1 = 'ABS' XDENO  + (MZFM * MZDEP1M);
+     MZDEP1M = MZDEP1M + XPETIT;
+     XDENO=XDENO1/MZDEP1M;
+     XDENO = XDENO + MZFM;
+     XDENO = XDENO + XPETIT       ;
+     XDENOM=XDENO;
+     'SI' TSTMOM ;
+        ZDEP1P50 = ZDEP1 + XPETIT;          ;
+        XDENOM = XDENO1/('MAXI' ZDEP1P50 'ABS' 'AVEC' MLROTA);
+     XDENOM = XDENOM + XPETIT       ;
+     'FINS' ;
+     'SI' IPILOT ;
+           'SI' ( WTAB.'AUTODEUX' ) ;
+              XDENO = STAB12.'XDENO';
+              XDENOM = STAB12.'XDENOM';
+           'FINS';
+     'FINS';
+     'SI' ('NON' WTAB.'CONV');
+*        'MESS' 'non convergence on garde xdeno xdenom ' xdeno xdenom;
+**          'SI' (XDENO < STAB12.'XDENO'); XDENO = STAB12.'XDENO'; 'FINSI';
+**          'SI' (XDENOM < STAB12.'XDENOM'); XDENOM = STAB12.'XDENOM'; 'FINSI';
+     'FINS';
+
+     IAFAIR=FAUX;
+     'SI'  WTAB.'CONV';
+     STAB12.'INCREMENT' = 'COPIER' ZDFINI ; 'FINS';
+     RESIDNOR = 'COPIER' RESIDU ;
+     'SI' IPILOT;
+            XXX3=DFEXT0F * ( 1-COEPI) ;
+            XXX2 = ZFEXT - XXX3;'DETR' XXX3;
+           'DETR' ZFEXT; ;ZFEXT = XXX2;
+            XXX1 = RESIDU * COEPI; 'DETR' RESIDU;
+            XXX2 = 1.D0 -COEPI * FREAP;RESIDU = XXX1 + XXX2;
+           'SI' IMPO12;
+                RESIDU = 1.D0 - COEPI * DIMPO12 + RESIDU;
+           'FINS';
+           IAFAIR=VRAI;
+     'FINS';
+*
+*  petite correction du residu pour esperer gagner du temps ************
+*
+     INIT = FAUX ;
+     'SI'(('NEG' STAB12.'FNONL' 'INCONNU') 'ET'
+           (WTAB.'INITIALISATION'));
+        'SI' IPILOT;
+              'SI' ( WTAB.'AUTODEUX' 'ET' (COEPI 'NEG' 1.D0)) ;
+              'MESS' 'Initialisation a partir du pas precedent '  COEPI;
+                    IAFAIR=VRAI; INIT = VRAI;
+                     XXX1= RED1 * STAB12.'FNONL';
+                     XXX2= XXX1 + RESIDU ;
+                    'DETR' RESIDU ;'DETR' XXX1 ;RESIDU =XXX2;
+               'FINS' ;
+        'SINON';
+* on fait la correction si le pas precedent a converge
+            'SI' WTAB.'CONV';
+* on fait la correction si le pas precedent etait non lineaire.
+              'SI' (('MAXI' 'ABS' STAB12.'FNONL') > (ZPREC * XDENO)) ;
+* on enleve le residu du pas precedent pour recuperer l'increment
+* nominal du second membre e imposer f1.
+* f2 et l'increment du second membre du pas precedent
+                STAB12.'INCREMENT'=STAB12.'INCREMENT' - STAB12.'RESIDU';
+                    zdeps = WTAB.'ZDEP1' + zdep1;
+                    FFNO= 'XTY' STAB12.'FNONL' zdeps  MLDUAL MLPRIM;
+                    F1 = STAB12.'INCREMENT' ;
+                    F2 = INCRPREC ;
+                    f12 = 'XTY' f1 zdeps MLDUAL MLPRIM;
+                    f22 = 'XTY' f2 zdeps MLDUAL MLPRIM;
+                    AMPL = f12/(f22 + XPETIT);
+                    DTPREC=1E30; AMPLT = 0;
+                    'SI' ('NEG' STAB12.'DTPREC' 'INCONNU');
+                         DTPREC = STAB12.'DTPREC';
+                         'SI' (DTPREC > XPETIT);
+                             AMPLT=WTAB.'DT_INIT' /DTPREC;
+                         'FINS';
+                     'FINS';
+*  Le chargement n'est il pas de fluage ou de thermique ?';
+                    XDCOMP = ('XTY' ZDEP1 F1 MLPRIM MLDUAL) ;
+                   'SI' (('ABS' XDCOMP) < (ZPREC * XDENO * mzdep1m)
+                        'OU' (('ABS' FFNO) > (('ABS' F22) * 2.e2   )));
+                        DTPREC = STAB12.'DTPREC';
+                        AMPL=AMPLT;
+* la decharge est-elle significative
+                      'SI'((F12/(f22 + XPETIT)) < -0.05);ampl=0.;'FINS';
+                        STAB12.'INITEMPS'=VRAI;LOGTEMP=FAUX;;
+                        'MESS'
+'Pas d increment de charge, initialisation calculee avec le temps';
+                   'SINON';
+                        AMPL = F12 / (F22 + XPETIT);
+                        LOGTEMP=STAB12.'INITEMPS';
+                        STAB12.'INITEMPS'=FAUX;
+                   'FINS';
+* changement de modele on n'initialise pas
+                   'SI' ('NEG' ZMODLI ZMODLP);  AMPL = 0; 'FINSI';
+
+                    AMPL = MINI (prog AMPL AMPLT);
+                   'SI' ((AMPL > 0) 'ET' (AMPL < 2e1)) ;
+      'MESS' 'Initialisation a partir de la solution precedente Coeff'
+                         AMPL;
+                         XXX1 = AMPL * STAB12.'FNONL';
+                         XXX2 =RESIDU+ XXX1;
+                         'DETR' XXX1;'DETR' RESIDU;
+                         RESIDU = XXX2;
+                         IAFAIR=VRAI; INIT = VRAI;
+                   'FINS';
+              'FINS';
+            'FINS';
+        'FINS';
+     'FINS';
+     WTAB.'ZDEP1'=zdep1;
+*
+*  initialisation en plastique *****************************************
+*
+     'SI' IPLAVI ;
+          'SI' ('NEG' WTAB.'MOVA' 'RIEN') ;
+                  ACC0 = 'EXCO' (WTAB.'MOVA') ZVAR0 ;
+          'FINS' ;
+     'FINS' ;
+*
+*    debut des iterations internes boucle etiquette ********************
+*
+     IKT =  FAUX ;
+     IPREM =  VRAI ; RECA_K = FAUX; RECA_N = 0;
+     DEPSTP = 'ZERO' ZMODL 'DEFORMATIONS' ;
+     DEPSTK = DEPSTP ;
+*
+*       initialisation acceleration de convergence ********************
+*
+     iafair = vrai;
+     PASTEST = FAUX;
+     ZITAC= 0 ;
+*     on peut mettre n'importe quoi c'est pour
+*     ne pas faire de tests dans la boucle
+     ACFP1  = 'COPIER' ZFEXT2 *0. ;
+     ACFP2  = ACFP1 ;
+     ZDEPLD = ACFP1 ;
+     ACFP3  = ACFP1 ;
+     ACFEP1 = ACFP1 ;
+     ACFEP2 = ACFP1 ;
+     FCORF  = 'COPIER' FREAP;
+* initialisation du meilleur critere
+     XCONVMIN = 1e20;
+     DPSMREF  = 0  ;
+     XCONV    = 0. ;
+     XCONVP   = 1. ;
+     NSOINCR  = 1  ;
+     'SI' ('NEG' WTAB.'SOUS_INCREMENT'  'INCONNU') ;
+         NSOINCR = WTAB.'SOUS_INCREMENT' ;
+     'FINS';
+     NONCONV = FAUX;
+     CORREC=0;
+     PASREINI=VRAI;
+     coefmt=1.;
+*
+* initialisation des messages pour l'iteration en cours ****************
+*
+     'SI' IKLFFF ;
+          'MESSAGE'
+' Iter   Nplas     Critere        Deps.max       Eps.max      Crit.flex'
+;
+     'SINON';
+         'MESSAGE'
+' Iter   Nplas     Fresidu        Deps.max       Eps.max      Mresidu  '
+;
+     'FINS';
+ INSTAB = FAUX;
+RESIDIN = RESIDU * 1.;
+**SI AUTAUG;
+** IRAUG = FAUX;
+**'FINSI';
+ zclimp = zclim;
+hpp_exit = faux; 'SI' hpp_eps; hpp_exit=vrai; 'FINSI';
+
+*=======================================================================
+*======= DEBUT DE LA BOUCLE DE CONVERGENCE                       =======
+*=======================================================================
+**trac cach v1 nclk;
+dpsmaxp = 0;
+resmul = 1;
+'REPETER'  ETIQ ;
+nconvr = faux;
+*IT est le compteur de ETIQ, ITACC doit etre =< 0 pour qu'on accelere
+IT= IT + 1 ;
+ITACC = ITACC - 1;
+ZITAC = ZITAC + 1 ;
+*
+*---------------------------------------------------------------------
+*           La force motrice de l'iteration est fixee: RESIDU
+*           on va calculer un nouveau champ de deplacement
+*
+*   calcul de l'increment de l'increment de deplacement zdep1
+*   par resolution lineaire
+*-----------------------------------------------------------------------
+*
+*  petits travaux pour acceleration de convergence
+*
+CORRECP = CORREC;
+CORREC = 0;
+PASTEST=FAUX;
+ACFP0 = (RESIDU  - FCORF) 'ENLE' FLX ;
+ACFEP0 = ACFP0;
+ACFEP0 = ACFEP0 - CORRECP ;
+'SI' IGRD ;
+  'FORM' GEOM1;
+*  rem : 0.1 est la valeur par defaut de EKREAC (= . 'REAC_GRANDS')
+  'SI' ((DEKREAC1  > EKREAC) 'OU' URG 'OU' (ITACC > 4) 'OU' INSTAB 'OU'
+  ((ITACC < ITRCLC) 'ET' ('NON' HPP_EPS)));
+URG = FAUX;
+ 'SI' AUTAUG;
+*      IRAUG = FAUX;
+*     'OUBL'  STAB12.'RIBLO_M';
+ 'FINSI';
+*  'SI' ((DEKREAC1 >  EKREAC) 'OU' INSTAB 'ET' WTAB.'RAIDAUGM');
+*pv   'SI'  WTAB.'RAIDAUGM';
+
+    'SI' ((DEKREAC1 >  EKREAC) 'ET' WTAB.'RAIDAUGM');
+        RESIDU = RESIDIN * 1.;
+        'SI' (IT > 1);
+**  on ne peut pas faire exco car le resultat ne plait pas a form
+           XXX1  = ZDEPT 'ENLEVER' 'LX' ;
+           ZDEPT = ZDEPT '-' XXX1 ;
+**       ZDEPT = ZDEPT 'EXCO' 'LX' 'LX';
+        'FINSI';
+        FFROT = ZFEXT * 0.;
+        FFROTP = ZFEXT * 0.;
+        DPSMAX = 0.;
+    'FINSI';
+      dekreac1 = 0;
+      INSTAB = FAUX;
+      ITACC=4;
+      URG=FAUX;
+        PASREINI=FAUX;
+*  pour avoir une matrice coherente avec les deformation quadratique, on l'evalue a mis pas
+*  sauf en sortie de hpp
+*
+      ZDEPTH = (ZDEPT + ZDEPTP) * 0.5;
+**    ZDEPTH = (ZDEPT         ) * 0.5;
+**    ZDEPTH = ZDEPT ;
+      GEOR ZMATTEMP = 'FORM' ZDEPTH  ZMODLI  ZMATI ;
+      sigttcca=  zsigf ;
+     sigttcca ='PICA' ZMODL ZSIGF ZDEPTH ;
+*     A cause de FORM, ZMATTEMP n'est plus parallele...
+      ZMATTEMP = 'REDU' ZMATTEMP ZMODL;
+      zdepr = zdept;
+      c_zdepr = faux;
+      RECA_K = VRAI;
+      RECA_N = RECA_N + 1;
+
+     'SI' (RECA_N > 20) ;
+        nonconv = vrai;
+     'FINS';
+
+      txt_k ='CHAI' ' Recalcul de K (= K^el';
+       'SOUC' 0;
+       'SI' (LAG_TOT 'ET' faux);
+          'FORM' GEOREF0;
+          HOOKRH = 'HOOK' ZMODL ZMATI;
+          HOOKRH2 = 'PICA' HOOKRH ZMODL (ZU1 + ZDEPTH);
+          'FORM' GEOR;
+          RITC = 'RIGI' HOOKRH2 ZMODL zmattemp 'NOER';
+          'DETRUI' HOOKRH;
+          'DETRUI' HOOKRH2;
+          'FORM' GEOM1;
+       'SINON';
+         ritc  ='RIGI'   zmodl zmattemp 'NOER' ;
+       'FINSI';
+      PASOK = 'SOUCI';
+      'SI' PASOK;
+         'MESS' 'rigi rate. on reessaye avec la configuration geom1';
+         'FORM' GEOM1;
+         ritc  ='RIGI'   zmodl zmatI ;
+      'FINSI';
+
+
+
+      ZMATTEMP = 0 ;
+
+*     RH peut contenir des CL
+      ZRI = 'EXTR' RITC 'RIGI' 'NOMU' ;
+      ZCL = 'EXTR' RITC 'RIGI' 'MULT' ;
+      'SI' ('NEG' ('DIME' ZCL) 0) ;
+        ZCLIM = ZCLIM0 'ET' ZCL ;
+      'SINON' ;
+        ZCLIM = ZCLIM0 ;
+      'FINSI' ;
+
+      BFCONT  = FAUX                       ;
+      BCLIM2  = FAUX                       ;
+     'SI' WTAB.'CONTACT';
+*       recalcul raideur de contact et jeu
+*   Maintenant, on veut la configuration finale pour les directions et les jeux
+  'FORM' GEOM1;
+  'FORM' ZDEPT ;
+        MODCON  = wtab.'MODCONTA';
+       'SI' ('EXIS' WTAB 'MATCONTA');
+          CJEU CRR RFROT='RFCO' MODCON  WTAB.'CONV'  WTAB.'MATCONTA';
+       'SINON' ;
+          CJEU CRR RFROT='RFCO' MODCON  WTAB.'CONV'                ;
+       'FINS' ;
+
+       'SI' ('NEG' 0 CJEU) ;
+         FADHE = 'EXCO' CJEU 'FADH' 'NOID' 'FADH' ;
+         CDAP  = 'EXCO' CJEU 'FLX'  'NOID' 'FLX' ;
+       'FINSI' ;
+
+       'SI' (WTAB . 'MODAL') ;
+          CRR  = 'PJBA' CRR  ZMODL MMMM ;
+          MCRR = 'EXTR' CRR 'MAIL' 'MULT' ;
+          MCDAP = 'EXTR' CDAP 'MAIL' ;
+
+         'REPETER' BCDA ('NBNO' MCDAP) ;
+            PBCDA = MCDAP 'POINT' &BCDA ;
+            PCRR  ='POINT' MCRR &BCDA   ;
+            CHCR  ='MANU' 'CHPO' PCRR 1 'FLX' ('EXTR' CDAP 'FLX' PBCDA)
+                   'NATURE' 'DISCRETE' ;
+           'SI' ('EGA' 1 &BCDA) ;
+              CCDA = CHCR ;
+           'SINON' ;
+              CCDA = CCDA 'ET' CHCR ;
+           'FINS' ;
+         'FIN' BCDA ;
+
+          CDAP = CCDA ;
+       'FINS' ;
+
+*       ATTENTION : mettre les conditions de frottement en premier pour
+*                   les numeroter en dernier
+        ZCLIM2 ='VIDE' 'RIGIDITE'           ;
+        ZFCONT ='VIDE' 'CHPOINT' / 'DISCRET';
+       'SI'  ('NEG' CRR 0);
+          BCLIM2 = VRAI                ;
+          BFCONT = VRAI                ;
+          ZCLIM2 = CRR    'ET' ZCLIM2  ;
+          CCOR   = CRR '*' ((zdept '+' zu1) 'ENLE' 'LX');
+          ZFCONT = ZFCONT '+'  CCOR    ;
+       'FINS';
+
+       'SI' ( 'NEG' 0 CJEU);
+          BFCONT = VRAI                ;
+          ZFCONT = ZFCONT '+'  CDAP    ;
+       'FINS';
+
+       'SI' ('NEG' 0 RFROT);
+          BCLIM2 = VRAI                ;
+          BFCONT = VRAI                ;
+          ZCLIM2 = RFROT  'ET' ZCLIM2  ;
+          CCOR   = RFROT  '*'  CDEPSLX ;
+          ZFCONT = ZFCONT '+'  CCOR    ;
+       'FINS';
+
+*      Mise a jour de ZCLIM, ZFCONSTA et RESIDU si necessaire
+       'SI' BCLIM2;
+         ZCLIM  = ZCLIM2 'ET' ZCLIM             ;
+
+*        Calcul des reactions totales AVANT
+         freacav= ZCLIMP  '*' zdetot 'ENLE' 'FLX';
+*        Calcul des reactions totales APRES
+         freacap= ZCLIM  '*' zdetot 'ENLE' 'FLX';
+       'SI'  ('NON' iprem);
+         RESIDU = RESIDU '+' freacav '-' freacap;
+       'FINS';
+       'FINS';
+
+     'FINS';
+
+     'SI' BFCONT;
+        ZFCONSTA = ZFEXT2 '+' ZFCONT;
+     'SINO';
+        ZFCONSTA = ZFEXT2           ;
+     'FINS';
+      ZFCONST1 = ZFCONSTA;
+
+     'SI' IDYN;
+        ZFCONSTA = ZFCONSTA '+' ZFP1  ;
+     'FINS';
+
+      ZFLX1 = 'EXCO' ZFCONSTA 'FLX' 'NOID' 'FLX' 'NATURE' 'DISCRET';
+      ZRAID =  ZCLIM 'ET' ZRI;
+*  repasser sur la configuration de calcul des raideurs
+     'FORM' geor;
+     'SI' iksia ;
+        ksigtc= 'KSIGM' sigttcca zmodl zmat;
+        ZRAID= ZRAID 'ET' ksigtc;
+     'FINS';
+     'SI' IRCON;
+        ZRAID = ZRAID 'ET' RIG_CONS;
+        txt_k = 'CHAI' txt_k ' + K^cst';
+     'FINS';
+*  remise a jour impo12
+      IMPO12= FAUX;
+      XXX1  ='EXTR' ZCLIM 'MAIL' 'UNIL';
+     'SI' (('NBEL' XXX1) '>' 0);
+        IMPO12 = VRAI;
+        DIMPO12='REDU' DFEXT0L XXX1 ;
+        DIMPOV = DFEXT0L '-' DIMPO12;
+     'FINS';
+     'DETR' GEOR;
+* pv
+     'SI' IRAUG;
+*zdep1d = (zdept +  zdep1) 'ENLE' 'LX';
+  xkx = xty zdep1d (rh * zdep1dp) mlprim mldual + xpetit;
+ xmx = xty zdep1d (rig_aug  * zdep1dp) mlprim mldual + xpetit;
+  xktx = xty zdep1d residc mlprim mldual;
+ xksx = xty zdep1d (ksigtc * zdep1dp) mlprim mldual;
+ xksx1 = xkx - xktx;
+ 'SI' (xksx1 > xksx); xksx = xksx1 ; 'FINSI';
+ 'SI' (('VERI' xksx) 'ET' ('VERI' xkx) 'ET' ('VERI' xmx) 'NON');
+   xkx = xty zu1 (rh * zu1) mlprim mldual + xpetit;
+   xmx = xty zu1 (rig_aug  * zu1) mlprim mldual + xpetit;
+   xksx = xty zu1 (ksigtc * zu1) mlprim mldual;
+ 'FINSI';
+* si les coef sont negatif, c'est qu'on n'est pas instable sur ce mode
+'SI' ((abs xksx) > xpetit );
+   augauto = xksx / xmx / -2. ;
+   augk= xksx /xkx / -2. ;
+'SINON';
+*mess ' abs xksx ' (abs xksx) ' max zdep1d ' (max (abs zdep1d));
+
+
+'FINSI';
+* 'SI' (augauto < 0.); mess 'pb signe augauto ' augauto; augauto = 0.;  'FINSI';
+* 'SI' (augk < 0.); mess 'pb signe augk ' augk; augk = 0.; 'FINSI';
+      augauto = abs augauto;
+      augk = abs augk;
+
+      augmult = augmult * 1.1;
+
+      augauto = augauto * augmult ;
+      augk = augk * augmult;
+**    augmuk = augmult; si (augmuk < 3d-1); augmuk = 3d-1; finsi;
+**    augk = augk * augmuk;
+
+
+
+mess 'multiplicateur d augmentation masse' augauto 'raideur' augk;
+        ZRAIDNA=  ZRAID ;
+        ZRAID = ZRAID 'ET' (RIG_AUG * augauto) 'ET' (RH * augk);
+        txt_k = 'CHAI' txt_k ' + K^aug';
+        ZNACCE = 999;
+
+    'SINON';
+      augmult = augmult * 0.55 ;
+mess 'nouveau augauto augmult' augauto augmult;
+    'FINSI';
+***     'FINS';
+
+     'SI' WTAB.'PROCEDURE_CHARMECA';
+        PRECED . 'ADDI_MATRICE' = vrai;
+        TFP22= CHARMECA  PRECED   WTAB.'T_FINAL';
+        PRECED . 'ADDI_MATRICE' = faux;
+       'SI' (EXIS TFP22 'ADDI_MATRICE');
+          zraid = zraid 'ET' TFP22.'ADDI_MATRICE';
+          txt_k = 'CHAI' txt_k ' + K^cent';
+       'FINS';
+     'FINS';
+
+     'SI' IDYN;
+*      bp : en toute rigueur, il faudrait aussi recalculer la MASSE ...
+*           et ajouter l'amortissement le cas échéant ...
+        MMA  = WTAB.'MASSE' '*' ( 4.D0 '/' WTAB.'DT' '/' WTAB.'DT');
+        ZRAID= ZRAID 'ET' MMA;
+      'FINS';
+      'MESS' ( 'CHAI' txt_k ' ) dans config deformee ' DEKREAC1 );
+      'FORM' GEOM1;
+*      on impose le recalcul de K a la prochaine iteration si it=2
+      'SI' (IT 'EGA' 2) ;
+         ITACC = 5 ;
+      'SINO' ;
+         ITACC = 3 ;
+      'FINS' ;
+       GR_U_K  = GR_U_FIN ;
+       zdeptm = zdept ;
+  'FINS';
+'FINS';
+
+*
+*  acceleration de convergence effective ------------------------------
+*
+'SI' ( ('MULT' IT ZNACCE) 'ET' ('NON' IRAUG)
+                      'ET' (ITACC '<EG' 0) 'ET' (IT '>' 3) );
+   CORREC = 'ACT3' ACFEP2  ACFEP1 ACFEP0
+                   ACFP3   ACFP2  ACFP1  ACFP0 ;
+   RESIDU = RESIDU '-' CORREC;
+'FINS';
+ ACFP3  = ACFP2  ;
+ ACFP2  = ACFP1  ;
+ ACFP1  = ACFP0  ;
+ ACFEP2 = ACFEP1 ;
+ ACFEP1 = ACFEP0 ;
+*
+* Resolution ---------------------------------------------------------
+* on obtient ZDEP1 = [ du ; Dlx ]
+residu = residu * resmul;
+'SI' IAFAIR;
+  FEXCI = 'VIDE' 'CHPOINT' / 'DISCRET' ;
+  'SI' (WTAB.'ADHERENCE') ;
+    'SI' ('EXIS' WTAB 'MAIL_BLOM') ;
+      FADRE = 'REDU' FADHE WTAB.'MAIL_BLOM' ;
+    'SINON' ;
+      FADRE = FADHE ;
+    'FINSI' ;
+    FEXCI = FEXCI 'ET' FADRE ;
+  'FINSI' ;
+*
+  'SI' (WTAB.'CAFROTTE') ;
+    FEXCI = FEXCI 'ET' FFROT ;
+  'FINSI' ;
+*
+  'SI' ( ('EXIS' STAB12 'RIBLO_M') 'ET' (IPREM 'OU' RECA_K) ) ;
+    'SI' ((WTAB.'CAFROTTE' 'OU' WTAB.'ADHERENCE') 'ET' IMPO12);
+       ZDEP1 BID BID BID BID = 'RESO' ZRAID RESIDU 'INIB'
+                              STAB12.'RIBLO_M'   STAB12.'LISEA_M'
+                              FEXCI ;
+    'SINON';
+       ZDEP1 BID BID BID     = 'RESO' ZRAID RESIDU 'INIB'
+                              STAB12.'RIBLO_M'   STAB12.'LISEA_M' ;
+    'FINS';
+
+  'SINON';
+    'SI' ((WTAB.'CAFROTTE' 'OU' WTAB.'ADHERENCE') 'ET' IMPO12);
+      ZDEP1 = 'RESO' ZRAID RESIDU FEXCI ;
+    'SINON';
+      ZDEP1 = 'RESO' ZRAID RESIDU;
+      'SI' (WTAB.'MAN' 'ET' IPREM);
+          ORDRE      = WTAB.'ORDRE' ;
+          ZDEP2 IOUT = CORMAN ZRAIDINI ZMODL ZMAT  ORDRE
+                       ZU1 ZSIG0      RESIDNOR  WTAB ;
+          'SI' (IOUT 'EGA' 1) ;
+             ZDEP1=ZDEP2;
+          'FINS';
+      'FINS';
+    'FINS';
+  'FINS';
+***rere= zraid * zdep1 - residu;
+***mess 'residu' (maxi abs (rere enle 'FLX')) (maxi abs (residu enle 'FLX'));
+** 'SI' (wtab.isouspas > 1) ; ZDEP1 = ((ZDEP1 enle 'LX') * 0.5) 'ET' (ZDEP1 exco 'LX' 'LX');FINSI;
+**  sauver zdep1 pour eventuel calcul de augauto   ??
+   zdep1dp = zdep1d ;
+   zdep1d = zdep1 'ENLE' 'LX';
+
+
+  ZRAID_T = 'EXTR' ZRAID 'CONT';
+  'SI' ('EXIS' ZRAID_T 'NITER');
+       'SI' IDYN ; STAB12.'ZRAIDV'= ZRAID; 'FINS';
+        STAB12.'RIBLO_M' = ZRAID_T.7;
+        STAB12.'LISEA_M' = ZRAID_T.6;
+        'SI' ('NEG' ('DIME' ZRAID_T.7) 0) ;
+          WTAB.'MAIL_BLOM' = 'EXTR' ZRAID_T.7 'MAIL' 'MULT' ;
+        'SINON' ;
+          WTAB.'MAIL_BLOM' = 'VIDE' 'MAILLAGE' ;
+        'FINSI' ;
+  'FINS';
+'FINS';
+RECA_K = FAUX;
+* RENORMALISATION de du (ajout bp le 28/11/2012) ***********************
+'SI' ('EXIS' WTAB 'RENORMALISATION');
+    'SI' (WTAB . 'RENORMALISATION');
+* juste apres le resou,
+* on calcule et on limite ZDEP1 de l iteration
+* en limitant DEPS1 par MAXDEFOR
+        coefmul = 1.;
+        DEPS1 = EPSI 'LINE' ZMODL ZDEP1 ZMAT;
+        DPS1MAX = MAXI 'ABS' DEPS1 'AVEC' MLDEFOR ;
+        'SI' (DPS1MAX > WTAB . 'MAXDEFOR');
+            coefmul = WTAB . 'MAXDEFOR' / DPS1MAX;
+            'SI' IPREM;
+                ZDEP1 = coefmul * ZDEP1 ;
+            'SINO';
+                ZDLX0 = ZDEPTP 'EXCO' 'LX' 'NOID' 'LX';
+                ZDEP1 = (coefmul * ZDEP1) + ((1.-coefmul) * ZDLX0);
+                'DETR' ZDLX0;
+            'FINS';
+         'MESS' 'MAXDEFOR dépassé : Renormalisation de l iteration par '
+            coefmul;
+        'FINS';
+    'FINS';
+'FINS';
+'REPETER' bzdept2 7;
+*
+*  verif sens ----------------------------------------------------------
+*
+'SI' WTAB.'STABILITE';
+     sens = xty ((residu enle 'FLX') +
+     (-1 * residu exco 'FLX' 'NOID' 'FLX'))  zdep1  MLDUAL MLPRIM;
+     nbneg = diagn zraid;
+*    'SI' (( nbneg > 0) 'ET' (sens < 0));
+     'SI' ( nbneg > 0);
+** on met un zdep1 petit car il est utilise dans le calcul de augauto
+*pv  ZDEP1  = (zdep1 enle lx) * -1.   et (zdep1 exco 'LX' 'NOID' 'LX') ;
+     'MESS' 'instabilite detectee' nbneg sens;
+     'SI' ('EGA' nbneg 1234);
+       ZDEP1  = (zdep1 enle lx) * 1d-4  et (zdep1 exco 'LX' 'NOID' 'LX') ;
+     'FINSI';
+     HPP_EPS = FAUX;
+     pastest = vrai;
+     instab = vrai;
+     urg = vrai;
+     iraug = vrai;
+     tabconv . it = 1;
+     'FINS';
+'FINS';
+*
+* 1ere iteration ------------------------------------------------------
+'SI'   IPREM  ;
+          ZDEPT  = 'COPIER' ZDEP1 ;
+          ZDEPTM = ZDEPT ;
+*         ZDEPf  = ZDEPT ;
+          ZDELA  =   'COPIER' ZDEPT ;
+          'SI' (WTAB . 'MODAL') ;
+             'SI' ('EXIS' WTAB 'MODCONTA') ;
+                mamoco1 = 'EXTR' (ZDEPT 'ENLEVER' 'LX') 'MAIL' ;
+             'FINS';
+          'FINS' ;
+*   iprem est faux: on est apres la premiere operation---------------
+*
+'SINON';
+*     zdept est l'increment de deplacement total avec les lagrangiens
+*     de la solution complete
+        XXX1   = ZDEPT 'ENLEVER' 'LX' ;
+*       ZDEPf  = (ZDEPT + ZDEPTP) * 0.5;
+        zsigfp = zsigf ;
+        fcorfp = fcorf ;
+        zclimp = zclim ;
+*       on cumule les deplacements mais pas les lx
+*       Du^(i)  = Du^(i-1) + du   ;   Dlx^(i) = 0 + Dlx
+
+        ZDEPT  = XXX1 '+' ZDEP1 ;
+       'DETR' XXX1 ;
+'FINS' ;
+*
+'SI' (WTAB . 'MODAL') ;
+     'SI' ('EXIS' WTAB 'MODCONTA') ;
+* mettre les point materiels dans zdept
+         zdeptu1 =  'REDU' zdept   mamoco1      ;
+         ch_dco  =  'RECO' zdeptu1 ZMODL ZMATFI ;
+         ZDEPT   = ('EXCO' zdept 'LX' 'LX') 'ET' zdeptu1 'ET' ch_dco ;
+     'FINS';
+'FINS' ;
+*  boucle de reduction de zdept si necessaire
+
+ ACC_Q = FAUX;
+ ACC_R = VRAI;
+'REPETER' bzdept 40;
+*
+*--- CAS 1 ------------------------------------------------------------*
+* Limitation du maximum d'increment de deformation (DPSMAX) :          *
+* En non-convergence, on limite l'increment de deformation pour faci-  *
+* -liter l'integration du comportement.                                *
+* En convergence normale, on limite l'increment de deformation max.    *
+* entre 2 iterations pour tenter d'eviter de partir dans le decors     *
+* en grands deplacement (Jacobien negatifs, etc...)                    *
+* nul si mouvement corps rigide (contact...) :                         *
+'SI' ((IT '>' 50) 'ET' (DPSMAX '>' 0.) 'ET' (&BZDEPT 'EGA' 1)) ;
+  coefmul = WTAB.maxdefor / (DPSMAX + XPETIT) ;
+* cas ou le residu augmente...
+ 'SI' (XCONV '>' TABCONV.(IT '-' 2) ) ;
+*  on n'a pas convergé ET DPSMAX trop grand : MAXDEFOR/zprec < DPSMAX
+*                             ou trop petit : DPSMAX < 1E-4*zprec
+  'SI' ((NONCONV 'ET' ((coefmul '<' zprec) 'OU' (dpsmax*1D4 < zprec))));
+    coefmul = coefmul '*' 1D-1;
+     ZDEPT = zdept '*' coefmul ;
+     'SI' ((RED_URG '>' 1) 'ET' NONCONV);
+       zflx1 = flxini '+' ((zflx1 '-' flxini) '*' 0.5  );
+     'FINS';
+      RED_URG = RED_URG '+' 1;
+      ZNACCE = 999;
+     'MESS' ' Renormalisation de l increment de deplacement'
+      dpsmax coefmul;
+     'SI' (DEPSTDM '>' DEPSTREF) ;
+        DEPSTREF = 2. * DEPSTDM ;
+     'FINS' ;
+* Est-ce qu'on cycle des renormalisations en Non-convergence ?         *
+* On regarde le nombre d'iterations entre 2 renormalisations           *
+* & la valeur de XCONV.                                                *
+    'SI' NONCONV ;
+      'SI' (ITNORM1 'EGA' 0) ;
+        ITNORM1  = IT ;
+      'SINO' ;
+        'SI' (DITNORM1 'EGA' 0) ;
+          XCONVNOR = 2.D0 '*' XCONV ;
+          DITNORM1 = IT '-' ITNORM1 ;
+          ITNORM1  = IT ;
+        'SINO' ;
+          'SI' (XCONV '<EG' XCONVNOR) ;
+            XCONVNOR = 2.D0 '*' XCONV ;
+            'SI' ((IT - ITNORM1) 'EGA' DITNORM1) ;
+              NBCYCLE1 = NBCYCLE1 '+' 1 ;
+              'SI' (NBCYCLE1 'EGA' 2) ;
+                'MESS'
+            ' Renormalisation cyclique en non-convergence detectee ' ;
+              'FINS' ;
+            'FINS' ;
+            DITNORM1 = IT '-' ITNORM1 ;
+            ITNORM1  = IT ;
+          'FINS' ;
+        'FINS' ;
+      'FINS' ;
+    'FINS' ;
+*    'SI' (coefmtt < 1.);
+**pv  zflx1 = flxini + ((zflx1 - flxini) * coefmul);
+*      coefmt=coefmtt;
+*    'FINS';
+  'FINS' ;
+ 'FINS' ;
+* fin du cas ou le residu augmente...
+'FINS';
+
+*
+*--- CAS 2 ------------------------------------------------------------*
+*  si on part dans les decors on redemarre a 0
+'SI' ((XCONV > 1E8) 'ET' PASREINI 'ET' ('NON' IPILOT)) ;
+        'MESS' 'Reinitialisation du schema';
+        XXX1  = ZDEPT 'ENLEVER' 'LX' ;
+        ZDEPT = ZDEPT '-' XXX1 ;
+        PASREINI=FAUX;
+        ITACC=3;
+'FINS';
+
+*
+*--- CAS 3 ------------------------------------------------------------*
+'SI' (('MULT' IT ZNACCE)  'ET' (ITACC '<EG' 0)) ;
+
+*   pilotage automatique
+    'SI' IPILOT;
+              RED1 = STAB12.'AUTOREDU' ;
+
+*       reduction du critere de pilotage red2 sert d'incateur si
+*       pas accelere tous les 2 pas
+
+* MODIFICATION CB215821 : 18/06/2015
+           'SI' (RED2 < (IT '/' 20));
+                STAB12.'AUTOREDU' = STAB12.'AUTOREDU' '*' 3.D0 ;
+                RED2 = RED2 '+' 1 ;
+                ITACC= 3;
+           'FINS';
+
+            RED1 = RED1 '/' (STAB12.'AUTOREDU') ;
+            'SI' (RED1 '<' 0.9) ;  STAB12.AUTORED1 = 10 ; 'FINS' ;
+
+            'SI' ( STAB12.'AUTOREDU' '>' 1.D0 ) ;
+               'MESS' 'On divise le critere de pilotage par '
+                STAB12.'AUTOREDU';
+            'FINS' ;
+
+*      test si snap back et si refus de l'acceleration
+            'SI' IPLAVI ;
+                  XXX2 = 'EXCO' ZDEPT  'LX' 'NOID' 'LX' ;
+                  XXX1 = 2.D0  '*' XXX2;
+                  XXX3 = ZDEPT '-' XXX1;
+            'SINON' ;
+                  XXX1 = COEPI '*' ZDELA;
+                  XXX3 = ZDEPT '-' XXX1 ;
+                  XXX2 = 'EXCO' XXX3 'LX' 'NOID' 'LX';
+                  XXX1 = XXX2  '*' 2.D0 ;
+                  XXX4 = COEPI '*' ZDELA;
+                  XXX3 = ZDEPT '-' XXX4 '-' XXX1;
+           'FINS' ;
+            SRE  = 'XTY' ZDFINI XXX3 MLDUAL MLPRIM ;
+
+           'DETR' XXX2 ;'DETR' XXX1; 'DETR' XXX3;
+            XXX1 ='EXCO' ZDEPT 'LX' 'NOID' 'LX' ;
+            XXX2 = XXX1 '*' 2.D0 ;
+            XXX3 = ZDEPT '-' XXX2;
+            SRT  = 'XTY' ZDFINI XXX3 MLDUAL MLPRIM;
+           'DETR' XXX1 ;  'DETR' XXX2; 'DETR' XXX3;
+
+            ISNPB = FAUX;
+           'SI'  (SRT '<' 0) ;
+                ISNPB = VRAI ;
+           'FINS';
+
+            OO = WTAB.AUTOCRIT ;
+            OO = OO '/' STAB12.'AUTOREDU' ;
+            U1MA = AUTOPILO ZDEPT (COEPI'*'ZDELA) ZMODLI ZMATFI WTAB;
+            AL1 = OO '/' U1MA ;
+*        al1 est le coefficient de normalisation
+           'SI' (( al1 '>EG' 1.d0) 'ET' (coepi '>EG' 1.d0)) ;
+*     pour eviter d'aller au dela de alpha=1 on ignore le critere
+                 AL1 = 1.d0 ;
+           'FINS' ;
+            'SI'((AL1 '>' 1.D0) 'ET' (COEPI '>' 0.D0));
+              'SI' ( AL1 '>' (1.D0 '/' COEPI));
+                   AL1 = 1.D0 '/' COEPI;
+              'FINS';
+            'FINS';
+*  normalisation
+
+              PASTEST=VRAI;
+              XXX1   = ZLX   '*' ( 1.d0 '-' AL1);
+              XXX3   = ZDEPT '*' AL1 ;
+              ZDEPT   = XXX3  '+' XXX1;
+             'DETR' XXX3;
+    'FINS';
+'SINON';
+      'SI' IPILOT ;
+**
+*   le calcul d'al1 est fait pour eviter la convergence
+*   s'il est  externe a l'interval 0.5 --- 2.
+            OO = WTAB.'AUTOCRIT' ;
+            OO = OO '/' STAB12.'AUTOREDU' ;
+            U1MA = AUTOPILO ZDEPT (COEPI'*'ZDELA) ZMODLI ZMATFI WTAB;
+            AL1 = OO '/' U1MA ;
+           'SI' (( AL1 '>EG' 1.d0) 'ET' (COEPI '>EG' 1.d0)) ;
+                 AL1 = 1.d0 ;
+           'FINS' ;
+      'FINS' ;
+'FINS';
+*
+*  garder les reactions pour le test de convergence
+*
+ZDEPLP = ZDEPL                         ;
+ZDEPL  = ZDEPT 'EXCO' 'LX' 'NOID' 'LX' ;
+
+*----------------------------------------------------------------------
+*     le nouveau champ est fixe on va tester l'equilibre(convergence)
+*     et calculer la force motrice pour l'iteration suivante
+*----------------------------------------------------------------------
+*
+*  calcul de  fcorf = lambda * m   force de reaction -----------------
+*             fcoru = m * u     depimp (flx)
+
+'DETRUIRE' FCORF;
+*       calcul du deplacement total u
+zdetotp = zdetot;
+ZDETOT = ZZD   '+' ZDEPT ;
+XXX1   = ZCLIM '*' ZDETOT;
+* -1*reactions a l'iteration it
+FCORF = 'ENLEVER'  XXX1 'FLX';
+* valeur des relations imposees a l'iteration it
+FCORU = 'EXCO'  XXX1 'FLX'  'NOID' 'FLX';
+'DETR' XXX1 ;
+*
+*  dans le cas des modeles endommageables de Lemaitre, on ecoule
+*  en tenant compte, dans les iterations internes, de la variation du
+*  materiau avec la temperature
+*
+ZMATT = ZMAT    ;
+'SI' ('ET' ('ET' ITHER ('OU' IENDOM IVIDOM ) ) WTAB.'MATVAR')  ;
+* on recupere certain materiau avec les parametres fct de la temperatue
+* voir PAS_mate  (il ne faut que la dependance thermique)
+      ZMATT = 'REDU' WTAB.'MA_COMP' ZMODL;
+'FINS';
+
+'SI' IFEFP;
+* Update or total lagrangian -----------------------------------------
+  'SI' IFEFPUL;
+*  mess ' update lagrangian ZRIKTA';
+    GEOM2 = 'FORM' ZDEPT ;
+    ZRIKTA ZSIGF ZVARF ZDEIF = 'ECFEFP'
+         ZMODL ZEPS0 ZVAR0 ZDEPT ZMAT ZPREK NITMA XUPDA;
+  'SINON';
+*  mess ' total lagrangian ZRIKTA';
+    chp_z = ZDEPT + ZU1 ;
+    GEOM2 = 'FORM' chp_z ;
+    ZRIKTA ZSIGF ZVARF ZDEIF = 'ECFEFP'
+         ZMODL ZEPS0 ZVAR0 chp_z ZMAT ZPREK NITMA ;
+    chp_z = 1 ;
+  'FINS';
+  FEQU2 = 'BSIGMA' ZMODL ZSIGF ZMAT ;
+  ZRAID = ZRIKTA 'ET' ZCLIM ;
+   'FORM' GEOM1 ;
+**
+  XXX1 = 'EXCO' (WTAB.'MOVA') ZVARF ;
+  EPSM = 'MAXI' XXX1 'AVEC' MLDEFOR ;
+  ACC  = 'ABS' ( XXX1 - ACC0 ) ;
+*'DETR' XXX1 ;
+  MMC = 'MASQUE' ACC 'SUPERIEUR' 1.D-10 'SOMME' ;
+  'SI' (MMC '>' MMCMAX) ; MMCMAX = MMC ; 'FINS' ;
+  DPSMAX  = 'MAXI' ACC 'AVEC'  MLDEFOR ;
+  DEPST   = 'CHAN' 'TYPE' ZDEIF 'DEFORMATIONS' ;
+
+  GR_U_FIN= 'MOT' 'INCONNU';
+
+'SINON';
+* cas standard --------------------------------------------------------
+  ZMAT05=ZMAT;
+   'SI' IGRD;
+     'FORM' GEOM1 ;
+   'FINS';
+*
+*     calcul de l'increment de deformation elast totale  DEPST--------
+*
+    'SI' (EPS_NLIN 'ET' IGRD);
+* (fdp) s'il y a des caracteristiques a mettre a jour, on le fait aussi
+*       sur les config intermediaires
+       zdepm  = zdept '*' 0.5;
+       'SOUC' 0;
+      'SI' ITCAR;
+         GEOMIL  ZMATTEMP = 'FORM' ZDEPM ZMODLI (ETG ZMAT05) ;
+*        A cause de FORM, ZMATTEMP n'est plus parallele...
+         ZMATTEMP         = 'REDU' ZMATTEMP ZMODL ;
+         DEPST            = 'EPSI' 'LINE' 'NOER' ZMODL ZDEPT ZMATTEMP ;
+         ZMATTEMP = 0 ;
+      'SINON';
+         GEOMIL           = 'FORM' ZDEPM    ;
+         DEPST            = 'EPSI' 'LINE' 'NOER' ZMODL ZDEPT ZMAT05   ;
+      'FINS';
+       PASOK = 'SOUCI';
+
+      'SI' ('NON' PASOK);
+        'FORM'  geom1;
+         depst = 'CAPI' depst ZMODL zdepm;
+        'SI' ('MAXI' 'ABS' DEPST '>' 2);
+           PASOK = VRAI;
+        'FINS';
+      'FINS';
+
+    'SINON';
+        PASOK = vrai;
+    'FINS';
+
+** on n'a pas calculé DEPST : on utilise les deformations lineaires
+      'SI' PASOK;
+* mess 'deformation lineaire';
+         'SI' IGRD;
+           'FORM' GEOM1 ;
+         'FINS';
+          DEPST='EPSI' 'LINE' ZMODL ZDEPT ZMAT05  ;
+      'FINS';
+
+* calcul des increments de deformation et contrainte sur la configuration initia
+* en lagrangien total
+    'SI' IGRD;
+     'SI' LAG_TOT;
+*  passage de depst et sig0 sur for0
+      form georef0;
+      depst = 'CAPI' depst ZMODL zu1 ;
+      zsig0 = 'CAPI' zsig0 ZMODL zu1 ;
+     'FINS';
+    'FINS';
+*  ICI depst et zsig0 sont sur la configuration initiale en lagrangien total et
+*      il faut soustraire les parties thermique et deformations imposees
+      'SI' IPLAVI;
+        'SI' ('OU' ('OU' IENDOM IVIDOM)  ICERAM);
+           HOOKENDO = 'HOOK'          ZMODL ZMAT05 ZVAR0          ;
+        'SI' IGRD;
+           DEPST    = 'EPSI' 'II'   ZMODL ZDEPT  HOOKENDO ZMAT05;
+        'SINON';
+          DEPST    = 'EPSI' 'LINE'   ZMODL ZDEPT  HOOKENDO ZMAT05;
+        'FINS';
+        'FINS';
+
+*        si thermoplastique on enleve e alpha *dt et d'autres termes
+*        si le materiau depend de la temperature
+        'SI' (ITHER 'OU' WTAB.'MATVAR') ;
+           XXX1  = DEPST0 '*' COEPI;
+           XXX2  = DEPST  '-' XXX1 ;
+*         'DETR' DEPST ; 'DETR' XXX1;
+           DEPST = XXX2 ;
+        'FINS' ;
+
+        'SI' LOGDEF  ;
+           XXX1 = DDEFOR0 '*' COEPI;
+           XXX2 = DEPST   '-' XXX1 ;
+*         'DETR' DEPST ; 'DETR' XXX1;
+           DEPST = XXX2 ;
+        'FINS' ;
+
+      'SINON';
+*      en elasticite, on a directement l'increment de contrainte
+       DSIGT= 'ELAS'  ZMODL DEPST ZMAT05 ;
+        'SI' (('NON' ITHER) 'ET' WTAB.'MATVAR') ;
+           XXXXX3 = 'ELAS' ZMODL ZSIG0 ZMAT05 ;
+           XXXXX4 = 'ELAS' ZMODL ZSIG0 ZMAT1  ;
+           XXDEFO = XXXXX4 '-' XXXXX3 ;
+           DSIGTV = 'ELAS' ZMODL XXDEFO ZMAT05 ;
+           DSIGT  =  DSIGT '+' DSIGTV ;
+*         'DETR' XXXXX3 ; 'DETR' XXXXX4 ;
+*         'DETR' XXDEFO ; 'DETR' DSIGTV ;
+        'FINS' ;
+*          si thermoplastique on enleve e alpha *dt et d'autres termes
+*          si le materiau depend de la temperature
+        'SI' ITHER  ;
+           XXX1 = DSIGT0 '*' COEPI;
+           XXX2 = DSIGT  '-' XXX1;
+          'DETR' DSIGT ; 'DETR' XXX1;
+           DSIGT =  XXX2  ;
+        'FINS';
+
+        'SI' LOGDEF  ;
+           XXX1 = DSI1  '*' COEPI;
+           XXX2 = DSIGT '-' XXX1;
+*         'DETR' DSIGT ; 'DETR' XXX1;
+           DSIGT =  XXX2 ;
+        'FINS';
+      'FINS';
+*
+*  Calcul du gradient des deplacements (total) a la fin du pas de ------
+*  temps par rapport a la configuration de reference GEOREF0 (initiale)
+*  rappel : On a : ZDETOT = ZZD + ZDEPT ;
+'SI' ('NEG' GR_U_DEB 'INCONNU');
+  'SI' ('NON' LAG_TOT); 'FORM' WTAB.FOR0; 'FINS' ;
+   GR_U_FIN = 'GRAD' ZMODL ZMAT ZDETOT ;
+   D_GR_U   =  GR_U_FIN '-' GR_U_DEB   ;
+  'SI' ('NON' LAG_TOT); 'FORM' GEOM1 ; 'FINS';
+'SINON';
+   GR_U_FIN = 'MOT' 'INCONNU';
+'FINS';
+*
+  'SI' ZCCONV ;
+    STAB12.'DT' = DTINI '*' COEPI ;
+  'SINON' ;
+    STAB12.'DT' = 0. ;
+  'FINS' ;
+*
+*  si on est plastique ou viscoplastique on ecoule pour avoir-----------
+*  le nouveau champ de contraintes
+*
+MMC = 0 ;
+'SI'  IPLAVI ;
+
+*...cas SSTE...
+   'SI' ISSTE;
+      ZRIKTA ZSIGF ZVARF ZDEIF =
+                        'SSTE' ZMODL ZSIG0 ZVAR0 DEPST ZMATT
+                               ZPREK NSSTE NITMA;
+      zvar0 = ('EXCO' zvar0 ('ENLE' lnom ('DIME' lnom))) 'ET'
+              ('EXCO' zvarf ssii);
+      zvar0 = 'CHANGER' 'TYPE' zvar0 'VARIABLES INTERNES';
+
+*...cas non SSTE...
+   'SINON';
+      ZSIG01=ZSIG0;
+      ZVAR01=ZVAR0;
+      ZEPS01=ZEPS0;
+**     defineto = DEPIN0 ; TABCONT='TABLE';
+      CHASANST= WTAB.'CHARGEMENT' 'ENLE' 'T';
+
+     'SI' (nsoincr 'NEG' 1);
+        ZSIGM=ZSIG0 '/' 2;
+     'FINS';
+
+     'REPETER'  sousinc nsoincr;
+
+       tsodeb='FLOT' stab12 .'DT'/nsoincr*( &sousinc - 1)+conti.'TEMPS';
+       tsofin='FLOT' stab12 .'DT'/nsoincr*  &sousinc     +conti.'TEMPS';
+      'SI' ('NON' ZCCONV) ;
+         tsodeb = tsofin ;
+      'FINS' ;
+
+       che1= 'ADET' 'NOUV' ZMODL CHASANST tsodeb 'TEMP' tsodeb;
+       che2= 'ADET' 'NOUV' ZMODL CHASANST tsofin 'TEMP' tsofin;
+
+       'SI' ('EXIS' WTAB 'MOD_LIA') ;
+          vite1 =  'CHAN' 'COMP' conti.'VITESSES' MLPRIM MVPRIM ;
+          che1  = che1
+            'ET' ('CHAN' 'CHAM' ZMODL vite1                'STRESSES')
+            'ET' ('CHAN' 'CHAM' ZMODL conti.'DEPLACEMENTS' 'STRESSES');
+          che2  = che2
+            'ET' ('CHAN' 'CHAM' ZMODL  ZDETOT              'STRESSES')
+            'ET' ('CHAN' 'CHAM' ZMODL  ZFCONST1            'STRESSES');
+       'FINS';
+
+       'SI' ither ;
+         TETDE=STAB12.'TET1' + (DTETD *('FLOT' (&sousinc - 1)/nsoincr));
+         TETDF=STAB12.'TET1' + (DTETD *('FLOT'  &sousinc     /nsoincr));
+         che3 = 'CHAN' 'CHAM' ZMODL TETDE 'STRESSES' ;
+         che4 = 'CHAN' 'CHAM' ZMODL TETDF 'STRESSES' ;
+       'FINS' ;
+
+       che1 = che1 'ET' che3 ;
+       che2 = che2 'ET' che4 ;
+       aa5  = DEPST '*' ( (&sousinc '-' 1.) '/' nsoincr);
+       che5 = DEFT0 '+'   aa5;
+       cc5  = DEPST '*' ('FLOT' &sousinc '/' nsoincr);
+       che6 = DEFT0 '+'  CC5;
+*On met les deformations en tete des champs pour COMP ('KTAN' 'PERT')
+       che1 = che5 'ET' che1 ;
+       che2 = che6 'ET' che2 ;
+* pour les materiaux on garde toujours la valeur a la fin du pas
+* et au debut du pas
+*       'SI' ('NEG'  ZMAT1 'INCONNU') ;
+          che1 = che1 'ET' ZMAT1 ;
+*       'FINS' ;
+*
+*  Modele NON LINEAIRE UTILISATEUR + GRANDES DEFORMATIONS
+*  On ajoute les gradients de deplacements qui seront transformes en
+*  gradients de transformation avant appel a UMAT (dans WKUMA1.ESO)
+       'SI' ( 'NEG' GR_U_DEB 'INCONNU') ;
+         gru1 = GR_U_DEB + ( D_GR_U * ('FLOT' (&sousinc-1) / nsoincr));
+         che1 = che1 'ET' gru1 ;
+         gru2 = GR_U_DEB + ( D_GR_U * ('FLOT'  &sousinc    / nsoincr));
+         che2 = che2 'ET' gru2 ;
+       'FINS';
+
+       'SI' LNLOC ;
+          CHE1A = che1 ;
+          CHE2A = che2 ;
+
+          ISTEP = 1 ;
+          chm_z = 'ADET' 'NOUV' ZMODL CHASANST tsodeb 'STEP' ISTEP ;
+          che11 = CHE1A 'ET' chm_z ;
+          che11 = che11 'ET' ZSIG01 'ET' ZVAR01 'ET' ZEPS01 ;
+
+          chm_z = 'ADET' 'NOUV' ZMODL CHASANST tsofin 'STEP' ISTEP ;
+          che22 = CHE2A 'ET' chm_z ;
+          che22 = che22 'ET' ZMATT ;
+
+          'SI' PARTLOCA ;
+            cha11 = 'ASSIS' 'TOUS' 'REDU' MODRELOC che11 ;
+            cha22 = 'ASSIS' 'TOUS' 'REDU' MODRELOC che22 ;
+            cho22 = 'ASSIS' 'TOUS' 'COMP' MODRELOC cha11 cha22 ;
+            cho2  = 'REDU' ZMODL ('ETG' cho22) ;
+            cha11 = 0 ; cha22 = 0 ; cho22 = 0 ;
+          'SINON';
+             cho2  = 'COMP' ZMODL che11 che22 ;
+          'FINS' ;
+
+          ZVARF = 'CHANGER' ('EXCO' cho2 com_var 'NOID')
+                            'TYPE' 'VARIABLES INTERNES' ;
+* NLOC ne traitant pas des champs //, on reduit tout au modele initial.
+          'SI' (PARALLEL 'ET' ('NON' PARTLOCA)) ;
+            ZVARF = 'REDU'  ZVARF ZMODLI ;
+          'FINS' ;
+*   cas non-local MOYE ou SB
+          'SI' ('NEG'  WTAB.'NON_LOCAL' 'HELM');
+            'SI' ('EGA' WTAB.'NON_LOCAL' 'SB') ;
+               MOD_SB =  WTAB.'NLOC_MODL' ;
+               CONTP = 'PRIN' ('REDU' ZSIG01 MOD_SB) MOD_SB ;
+               ZVARF = ZVARF '+' CONTP '+' WTAB.'NLOC_SB_REGU' ;
+            'FINS' ;
+            ZVARN = 'NLOC'  ZVARF  WTAB.'CONN'  ;
+            ZVARN = 'CHANGER' ('EXCO' ZVARN com_var)
+                          'TYPE' 'VARIABLES INTERNES' ;
+          'SINON' ;
+*   cas non-local HELM
+            MOD_HELM =  WTAB.'NLOC_MODL' ;
+            ZVARN = 'COPI' ZVARF ;
+            ZVARF1 = 'REDU' ZVARN MOD_HELM ;
+            LICOHELM = 'EXTR' ZVARF1 'COMP' ;
+            'REPE' BH NHELM ;
+              LEMO = TAHELM . &BH. 'NOM' ;
+              MOPRE = 'EXTR' LEMO 1 3 ;
+              ZVAUX = 'EXCO' ZVARF1 LEMO 'SCAL';
+              ZVAUX2 = 'CHAN' 'NOEUD' MOD_HELM ZVAUX;
+              ZVAUX2 = 'PROI' TAHELM . &BH . 'H_MODELE'  ZVAUX2 'MINI';
+              FSOUR = 'SOUR' TAHELM . &BH . 'H_MODELE' ZVAUX2 ;
+              ZVNEW = 'RESO' TAHELM . &BH . 'H_OPER' FSOUR ;
+              ZVNEW = 'NOMC' ZVNEW 'SCAL' ;
+              ZVNEW = 'CHAN' 'CHAM' ZVNEW MOD_HELM 'STRESSES'
+                                             'VARIABLES INTERNES';
+              DZVN = ZVNEW '-' ZVAUX ;
+              DZVN = 'NOMC' DZVN LEMO ;
+              ZVARN = ZVARN '+' DZVN ;
+
+*             cas particulier SMAX
+              'SI' (('EXIS' LICOHELM 'SMAX') 'ET' ('NEG' MOPRE 'ERF'));
+                ZSMAX = 'EXCO' ZVARF1 'SMAX' 'SMAX' ;
+                ZSMAN = 'MANU' 'CHML' MOD_HELM 'SMAX' ('MAXI' ZSMAX)
+                    'TYPE' 'VARIABLES INTERNES' 'STRESSES' ;
+                ZVARN = ZVARN '+' ZSMAN '-' ZSMAX ;
+              'FINS' ;
+            'FIN' BH ;
+          'FINS' ;
+* On rend ZVARN // si besoin :
+          'SI' (PARALLEL 'ET' ('NON' PARTLOCA)) ;
+            ZVARN = 'REDU' ZVARN ZMODL ;
+          'FINS' ;
+
+          ISTEP = 2 ;
+          chm_z = 'ADET' 'NOUV' ZMODL CHASANST tsodeb 'STEP' ISTEP ;
+          che11 = CHE1A 'ET' chm_z ;
+          che11 = che11 'ET' ZSIG01 'ET' ZVARN 'ET' ZEPS01 ;
+
+          chm_z = 'ADET' 'NOUV' ZMODL CHASANST tsofin 'STEP' ISTEP ;
+          che22 = CHE2A 'ET' chm_z ;
+          che22 = che22 'ET' ZMATT ;
+
+          'SI' PARTLOCA ;
+            cha11 = 'ASSIS' 'TOUS' 'REDU' MODRELOC che11 ;
+            cha22 = 'ASSIS' 'TOUS' 'REDU' MODRELOC che22 ;
+            cho22 = 'ASSIS' 'TOUS' 'COMP' MODRELOC cha11 cha22 ;
+            cho2  = 'REDU' ZMODL ('ETG' cho22) ;
+            cha11 = 0 ; cha22 = 0 ; cho22 = 0 ;
+          'SINON';
+            cho2  = 'COMP' ZMODL che11 che22 ;
+          'FINS' ;
+
+* Un peu de menage
+          CHE1A = 1 ;
+          CHE2A = 1 ;
+          ZVARN = 1 ;
+          ZVARF = 1 ;
+          chm_z = 1 ;
+
+       'SINON' ;
+           che11 = che1 'ET' ZSIG01 'ET' ZVAR01 'ET' ZEPS01 ;
+           che22 = che2 'ET' ZMATT ;
+*           si ( 'EXIST'  PRECED 'ECRIT' ) ;
+*           'FINS';
+           'SI' PARTLOCA;
+               cha11 = 'ASSIS' 'TOUS' 'REDU' MODRELOC che11 ;
+               cha22 = 'ASSIS' 'TOUS' 'REDU' MODRELOC che22 ;
+               cho22 = 'ASSIS' 'TOUS' 'COMP' MODRELOC cha11 cha22 ;
+               cho2  = 'REDU' ZMODL ('ETG' cho22) ;
+               cha11 = 0 ; cha22 = 0 ; cho22 = 0 ;
+           'SINON';
+*          'SI' ( 'EXIS' PRECED 'ECRIT' );
+*          'FINS';
+              cho2  = 'COMP' ZMODL che11 che22 ;
+           'FINS';
+       'FINS' ;
+   ZSIGF = 'CHANGER' ('EXCO' cho2 com_sig 'NOID')
+                     'TYPE' 'CONTRAINTES' ;
+   ZVARF = 'CHANGER' ('EXCO' cho2 com_var 'NOID')
+                     'TYPE' 'VARIABLES INTERNES' ;
+   ZDEIF = 'CHANGER' ('EXCO' cho2 com_dei 'NOID')
+                     'TYPE' 'DEFORMATIONS INELASTIQUES' ;
+
+       'SI' ('EXIS' WTAB 'MOD_LIA') ;
+         ZFLIA = 'EXCO' cho2 'FLIA' 'NOID';
+       'FINS' ;
+       'SI' (nsoincr 'NEG' 1);
+         'SI' (&sousinc 'EGA' nsoincr);
+           aaa1=zsigf/2;
+           aaa2=aaa1+ zsigm;
+           'DETR' aaa1; 'DETR' zsigm;
+           zsigm=aaa2;
+         'SINON';
+           aaa2=zsigf+ zsigm;
+           'DETR' zsigm;
+           zsigm=aaa2;
+         'FINS';
+       'FINS';
+       zsig01 = zsigf ;
+       ZVAR01 = ZVARF ;
+       ZEPS01 = ZDEIF ;
+**       defineTO=ZDEIF+defineTO;
+     'FIN' sousinc;
+*
+* Matrice tangente par perturbation evaluee pour la derniere iteration calculee
+* A voir : cas grand deplacement ZSIGF et ZMAT, cas poreux et thermique ZSIGF
+     'SI' (IKTAN 'ET' IPERT) ;
+       Z1COMP = che11 ;
+       Z2COMP = che22 'ET' ZSIGF ;
+     'FINS' ;
+*
+     'SI' (nsoincr 'NEG' 1);
+* pour tenir compte de ce que le travail de la correction est 1/2 FU,
+* on la multiplie par 2
+          CONT  =(ZSIGF + ZSIG0)          ;
+          ZSIGM = ZSIGM*(2. /nsoincr)     ;
+          ZSIGM = ZSIGM - CONT            ;
+          BZSIGM='BSIGMA' ZMODL ZSIGM ZMAT;
+**        ZDEPSPL=defineTO - ZEPS0 ;
+     'FINS';
+* on enleve toutes traces de champs inutiles
+     zsig01=1;ZVAR01=1;ZEPS01=1;
+**     defineTO=1; tabcont =1;
+
+*     le fin d'en dessous est le fin de "si isste ... sinon ... finsi"
+*     on est encore dans "si iplavi ... finsi"
+   'FINS';
+*...fin du si ISSTE sinon ...
+*
+*        cas particulier poreux et thermique
+*
+   'SI' ITHER;
+     'SI' POR1 ;
+        ZSIGF = ZSIGF - ( COEPI * DMSRT0 ) ;
+     'FINS';
+   'FINS';
+*
+*  max de epse pendant l'iteration
+*  nbre de points qui ont une evolution non lineaire
+*
+   'SI' ('EGA' WTAB.'MOVA' 'RIEN') ;
+**    EPSM = 0.; DPSMAX=0.;
+      MMC=0;
+   'SINON';
+      XXX1 = 'EXCO' (WTAB.'MOVA') ZVARF ;
+**    EPSM = 'MAXI' XXX1 ;
+      ACC = 'ABS' ( XXX1 - ACC0 ) ;
+**    'DETR' XXX1 ;
+      MMC = 'MASQUE' ACC 'SUPERIEUR' 1.D-10 'SOMME' ;
+      'SI' (MMC > MMCMAX) ; MMCMAX = MMC ; 'FINS' ;
+**    DPSMAX = 'MAXI' ACC ;
+   'FINS';
+*
+*  dans le cas SANS  plasticite,viscoplas,endommagement
+*  on calcule directement le nouveau champ de contrainte
+*
+'SINON' ;
+    ZSIGF = ZSIG0 + DSIGT ;
+'FINS';
+* si il y a lieu transport sur configuration debut de pas
+    'SI' IGRD ;
+      'SI' LAG_TOT;
+       zsig0 =  pica zsig0 zmodl zu1;
+       zsigf =  pica zsigf zmodl zu1;
+       depst =  pica depst zmodl zu1;
+       form geom1;
+      'FINS';
+    'FINS';
+*
+DPSMAX = 'MAXI' 'ABS' DEPST 'AVEC' MLDEFOR ;
+'SI' IGRD ; 'FORM' georef0; 'FINSI';
+  EPSM   = 'MAXI' 'ABS' (ZDETOT 'EPSI' ZMAT ZMODL) 'AVEC' MLDEFOR ;
+'SI' IGRD ; 'FORM' geom1; 'FINSI';
+*
+*--- CAS 4 -------------------------------------------------------------
+*  on  determine les forces resultantes de l'increment------------------
+*
+*   en grand deplacements on transforme pi en sigma
+*   on met a jour les coordonnees
+*
+ ZMAT2=ZMAT;
+
+'SI' (IGRD 'ET' (('NON' HPP_EPS) 'OU' (IT > 14)));
+
+  DEKMAX   = 'MAXI' 'ABS' ('GRAD' ZMODL ZMAT ZDEPT) ;
+* dekmax = dekmax * 0.01;
+* mess 'dekmax ' dekmax;
+  coefmul = 1.d0 / (DPSMAX + XPETIT);
+* coefmulr = -1;
+  ref = 75;
+ 'SI' ((&bzdept > 1) 'ET' ACC_Q 'ET' ACC_R   );
+**     ref = 200 ;
+ 'FINS';
+
+* 'SI' ((coefmul   < ref) 'ET' WTAB.'LINESEARCH');
+  'SI' ((coefmul   < ref) 'ET' IRAUG);
+*   il faut reduire d'urgence les deplacements ;
+    zdeptlx = zdept 'EXCO' 'LX' 'LX';
+    ACC_Q = VRAI;
+    coefmul = 0.0;
+    'SI' ((red_urg > 6) 'OU' (instab 'ET' (&bzdept < 48))); resmul = resmul * 0.5;
+        list (maxi abs residu); 'FINSI';
+
+      'SI' (&bzdept > 10) ; coefmul = 0.; zdeptp = zdeptp - (0.5 * (zdeptp enle 'LX')); 'FINSI';
+
+**    mess '&bzdept dekmax coefmul hpp_eps'  &bzdept dekmax coefmul hpp_eps;
+*    dekmax = dekmax * coefmul;
+    'SI' ((&bzdept 'EGA' 1) 'ET' (RED_URG < 10));
+      augmult = augmult * 1.5;
+      urg = vrai;
+      iraug = vrai;
+    'FINS';
+*    mess 'reduction de zdept';
+*  DEKMAXP   = 'MAXI' 'ABS' ('GRAD' ZMODL ZMAT ZDEPTP) ;
+*     mess 'dekmaxp' dekmaxp;
+     ZDEPT = zdeptp +( coefmul  * (ZDEPT -zdeptp)) ;
+*  DEKMAX   = 'MAXI' 'ABS' ('GRAD' ZMODL ZMAT ZDEPT) ;
+*     mess 'nouveau dekmax' dekmax;
+     zdep1 = zdept - zdeptp;
+
+     'SI' ((dpsmaxp < 5e-4) 'OU' (dpsmaxp > 2e-2 )) ;
+         PASTEST=VRAI;
+     'SINON';
+'SI' (red_urg > 6);   nconvr = vrai; 'FINSI';
+         tabconv . it = 1;
+     'FINSI';
+    'SI' (RED_URG > 2 )  ;
+     'SI' ('NON' nonconv);  'MESS' ' non convergence detectee 1' ;
+      ZMAXIT =     IT+5;
+     'FINS';
+     nonconv = vrai;
+    'FINS';
+    'SI' (&bzdept 'EGA' 1);
+      'MESS' 'reduction d urgence des deplacements';
+      hpp_eps=faux; RED_URG = RED_URG + 1;
+     'FINS';
+     SI (RED_URG > 6 ); ZMAXIT = IT; 'FINS';
+
+**   instab = vrai;
+**   'ITERER' etiq  ;
+     'ITERER' bzdept;
+    'FINS';
+  'FINS';
+
+'FINS';
+
+*  au dessus le finsi du si  fefp sinon(Update or total lagrangian) ----
+*
+* linesearch -----------------------------------------------------------
+*
+   'SI' ('NON' WTAB.'LINESEARCH'); 'QUITTER' bzdept; 'FINS';
+   'SI' IPREM   ; 'QUITTER' bzdept; 'FINS';
+   'SI' ('MULT' IT ZNACCE); 'QUITTER' bzdept; 'FINS';
+   'SI' (HPP_EPS); 'QUITTER' bzdept; 'FINS';
+   'SI' INSTAB   ; 'QUITTER' bzdept; 'FINS';
+   'SI' URG      ; 'QUITTER' bzdept; 'FINS';
+   'SI' ACC_Q ; 'QUITTER' bzdept; 'FINS';
+    ACC_Q = VRAI;
+    ACC_R = FAUX;
+
+    r1 = residc '*' -1. 'ENLE' 'FLX';
+
+    zdeptdif = (zdept '-' zdeptp)                   ;
+    krr = (zclim '*' zdept) '-' (zclimp '*' zdeptp) 'ENLE' 'FLX';
+   'FORM' geom1  ;
+    GEOTEMP='FORM' zdeptp;
+    k1 = bsigma (sigma zdeptdif zmodl zmat) zmodl zmat;
+    k1 = k1 '-' krr ;
+   'FORM' geom1  ;
+   'DETR' GEOTEMP;
+
+    GEOTEMP='FORM' zdept ;
+    k2 = bsigma (sigma zdeptdif zmodl zmat) zmodl zmat;
+    k2 = k2 '-' krr;
+
+   'FORM' geom1  ;
+   'DETR' GEOTEMP;
+
+    alpha = k2 '-' k1 ;
+    beta  = k1        ;
+
+*  nouvelle acceleration de convergence pour les grands deplacements
+    a0 = xty beta r1 mldual mldual ;
+    a1 =(xty beta beta mldual mldual) '+'(xty alpha r1 mldual mldual);
+    a2 =(3./2.) * (xty alpha beta mldual mldual);
+    a3 =(1./2.) * (xty alpha alpha mldual mldual);
+
+    xr1 = racpol  a0 a1 a2 a3;
+    lambd = extr xr1 1;
+
+   'SI' WTAB.'STABILITE' ;
+     'SI' (lambd < 0);lambd = 0.2;'FINS';
+   'FINS';
+
+   'SI' ((dime xr1) > 1 );
+      lambd2 = extr xr1 2;
+      lambd3 = extr xr1 3;
+
+     'SI' WTAB.'STABILITE' ;
+       'SI' (lambd2 < 0);  lambd2 = 0.2; 'FINS';
+       'SI' (lambd3 < 0);  lambd3 = 0.2; 'FINS';
+     'FINS';
+
+     'SI' ((lambd2 '-' 1.5 'ABS') '<' (lambd '-' 1.5 'ABS'));
+        lambd = lambd2;
+     'FINS';
+
+     'SI' ((lambd3 '-' 1.5 'ABS') '<' (lambd '-' 1.5 'ABS'));
+        lambd = lambd3;
+     'FINS';
+   'FINS';
+
+    lambdav=lambd;
+   'SI' ('NON' (lambd < 4)    ); lambd =  4  ;  'FINS';
+   'SI' (('ABS' lambd < 1e-4) 'ET' (itacc 'NEG' 3) 'ET'
+         (dpsmax > zprecnc));
+      lambd = 0.1 ; urg = vrai; znacce = 999; itacc=4;
+   'FINS';
+     'SI' ((lambd < 0) 'ET' (WTAB.'STABILITE' 'OU' IRAUG)); lambd = 0.3 ; 'FINS';
+     'SI' ('ABS' lambd < 1e-3 );               lambd = 1e-3; 'FINS';
+   'SI' ( lambd < -3 ); lambd =-3. ; 'FINS';
+   'SI' ((lambd < 0) 'ET' (itacc 'NEG' 3)) ; znacce = 999;'FINS';
+*
+*  verif sens
+*
+**'SI' WTAB.'STABILITE' ;
+**     'SI' (lambd < 0);  lambd = 0.3; finsi;
+**     znacce = 999;
+**'FINS';
+*      zdeptm = (zdep1 'ENLE' 'LX') * (lambd - 1);
+       zdeptmm = zdep1 'EXTRAI' 'MAIL';
+       zdeptm = (zdep1 - ((zdeptp 'EXCO' 'LX' 'LX') 'REDU' zdeptmm))
+                                                        * (lambd - 1);
+       zdept = zdept   + zdeptm ;
+
+*  pour l(autre acceleration de convergence
+               'SI' ('NEG' ('TYPE' ZRAIDNA) 'RIGIDITE'); ZRAIDNA = ZRAID; 'FINSI';
+       correc = correc - (ZRAIDNA * zdeptm);
+
+fin bzdept;
+dpsmaxp = dpsmax;
+*  fin de boucle de reduction de zdept
+*---------------------------------------------------------------------
+
+'SI' ('NON' IFEFP);
+  'SI' (IGRD 'ET' ('NON' HPP_EPS));
+* 'SI'  IGRD ;
+  zdepf = zdept ;
+* si (hpp_eps); zdepf = zdept * 0; finsi;
+* si (hpp_eps et (it > 1)); zdepf =zdeptp * 0.5; finsi;
+*    grands deplacements -----------------------------------------------
+
+*    ZSIGF ='PICA' ZMODL ZSIGF ZDEPF ;
+     ZSIGF ='PICA' ZMODL ZSIGF ZDEPT ;
+
+    'SOUC' 0;
+    'SI' ITCAR ;
+       GEOM2 ZMAT2 ='FORM' ZDEPF ZMODLI ZMATI;
+       ZMAT2       ='REDU' ZMAT2 ZMODL       ;
+    'SINON';
+       GEOM2 = 'FORM' ZDEPF ;
+    'FINS';
+     FEQU2 = 'BSIGMA' 'NOER' ZMODL ZSIGF  ZMAT2  ;
+     PASOK = 'SOUCI';
+      'SI' PASOK;
+           dekreac1 = 1e30;
+           instab = vrai;
+           TABCONV.IT=1;
+           'FORM' geom1;
+           'MESS' 'BSIGMA imposible';
+           'SI' AUTAUG; 'ITERER' etiq; 'FINSI';
+      'FINS';
+
+    'SI' IRCON;
+       FEQU2 = FEQU2 '+'('REDU' MAI_CONS (RIG_CONS '*' ZDETOT));
+    'FINS';
+    'SI' LOGPRE ;
+      ZDFINI = ZDFINI - ZFPEXTF ;
+      'DETR' ZFPEXTF ;
+      ZPEXTF = 'TIRE' WTAB.'CHARGEMENT' 'PRES' TI ;
+      'SI' ('EXIS' WTAB 'MAT_PRE') ;
+        ZFPEXTF = 'BSIG' MOP ZPEXTF ('REDU' ZMATFI MOP) ;
+      'SINON' ;
+        ZFPEXTF = 'BSIG' MOP ZPEXTF ;
+      'FINS' ;
+      ZDFINI = ZDFINI + ZFPEXTF ;
+    'FINS' ;
+
+    'SI' ADDISEC2;
+       ZDFINI   = ZDFINI '-' FP22 ;
+    'FINS';
+    'SI' WTAB.'PROCEDURE_CHARMECA';
+       TFP22    = CHARMECA PRECED WTAB.'T_FINAL' ;
+       ADDISEC2 = FAUX;
+      'SI' ('EXIS'  TFP22 'ADDI_SECOND') ;
+         FP22     = TFP22.'ADDI_SECOND'  ;
+         ZDFINI   = ZDFINI + FP22        ;
+         ADDISEC2 = VRAI                 ;
+      'FINS';
+      'SI' IPILOT ;
+         COEFP =(COEPI*DMZPRES+ MZPRES0)/(MZPRES+XPETIT);
+      'FINS' ;
+    'FINS' ;
+    'FORM' GEOM1 ;
+*
+*  dans les autres  que IGRD cas on calcule fequ2(desequilibre)---------
+*
+  'SINON';
+     FEQU2 = 'BSIGMA' ZMODL ZSIGF ZMAT ;
+    'SI' IRCON;
+        FEQU2 = FEQU2 '+' ('REDU' MAI_CONS (RIG_CONS '*' ZDETOT));
+    'FINS';
+    'SI' ADDISEC2;
+       ZDFINI = ZDFINI '-' FP22 ;
+    'FINS';
+    'SI' WTAB.'PROCEDURE_CHARMECA';
+       TFP22  = CHARMECA PRECED WTAB.'T_FINAL' ;
+       ADDISEC2 = FAUX;
+      'SI' ('EXIS' TFP22 'ADDI_SECOND');
+         FP22     = TFP22.'ADDI_SECOND';
+         ZDFINI   = ZDFINI '+' FP22    ;
+         ADDISEC2 = VRAI               ;
+      'FINS';
+      'SI' IPILOT ;
+         COEFP =(COEPI*DMZPRES+ MZPRES0)/(MZPRES+XPETIT);
+      'FINS' ;
+    'FINS' ;
+  'FINS';
+'FINS';
+* le finsi au dessus est le finsi de si iefefp
+       'SI' ('EXIS' WTAB 'MOD_LIA') ;
+          FLIAI = 0.d0 ;
+         'SI' ('EGA' ('TYPE' ZFLIA) 'MCHAML  ') ;
+            NZLIA = 'EXTR' ZFLIA 'NBZO' ;
+          'SI' (NZLIA > 0) ;
+           'REPETER' BZLIA NZLIA ;
+* un point support par zone - 2010 kich
+        FLIAI= FLIAI +
+  ('EXCO' ('EXTR' ZFLIA 'FLIA' &BZLIA 1 1) MLDUAL 'NOID') ;
+           'FIN' BZLIA ;
+          'FINS' ;
+           FEQU2 = FEQU2 + FLIAI ;
+         'FINS' ;
+       'FINS' ;
+*
+*  calcul des forces correctrices de frottement-------------------------
+*
+'SI' (WTAB.'CAFROTTE' 'ET' IMPO12);
+*  apres non convergence, on maintient les forces de frottement
+   MAINT=FAUX;
+  'SI' ('NON' WTAB.'CONV' 'ET' ('NEG' WTAB.'FFROT' 'INCONNU'));
+     MAINT=VRAI;
+  'FINS';
+   zsigfT = 'REDU' zsigf ZMODLI;
+   MODFRO = 'EXTR' WTAB.'MODCONTA' 'COMP' 'FROTTANT';
+   MATFRO = 'REDU' WTAB.'MATCONTA' WTAB.'MODCONTA';
+  'SI' MAINT;
+     FFROT1 = 'EXCF' ZRAID ZDEPT MODFRO MATFRO WTAB.'FFROT' ZSIGFt ;
+  'SINON';
+     FFROT1 = 'EXCF' ZRAID ZDEPT MODFRO MATFRO              ZSIGFt ;
+  'FINS';
+   FFROT  = (FFROT1 + FFROTP)/2;
+  'DETR' FFROTP;
+   FFROTP = FFROT1;
+'FINS';
+
+
+'SI' ISOL  ;
+        'SI' IPLAVI ;
+           ZMATPF = 'CHANGER' ('EXCO' cho2 com_maa 'NOID')
+           'TYPE' 'CARACTERISTIQUES';
+           MA_POR = 'REDU' ZMATPF MO_POR ;
+        'FINS';
+        XXX1 = 'GRAD' MO_POR ZDETOT MA_POR 'CONS'  ;
+        XXXS = (1. - WTAB.'TETA' )*GRAP0 + (WTAB.'TETA'*XXX1) ;
+        XXX2 = STAB12.'DT' * ('GNFL' MO_POR XXXS) ;
+        XXX3 = FEQU2 ;
+        FEQU2 = XXX3 - XXX2;'DETR' XXX3; 'DETR' XXX2 ;
+*       'DETR' XXX1; 'DETR' XXXS  ;
+'FINS' ;
+
+* si on a fait de la sous incrementation ( a cause du dynamique
+'SI' ( nsoincr > 1);
+  FEQU2 = FEQU2 + BZSIGM ;
+'FINS';
+
+*
+*   forces qui varient en dynamique------------------------------------
+*                       b*sigma + 4/h2*m*dx
+*                               + 2/h *c*dx
+*
+'SI' IDYN;
+   'DETR' FFDYN;
+    FFDYN = 'COPIER' FEQU2 ;
+    XXX1 = WTAB.'MASSE' * ZDEPT;
+    XXX3 = 4. * UNSURH * UNSURH  * XXX1 ;
+   'DETR' XXX1;
+   'SI' ('EXIS' WTAB 'MOD_LIA');
+     'SI' (NZLIA > 0) ;
+        XVIT2 = 0.d0;
+       'REPETER' BZLIA NZLIA ;
+          XVIT2 = XVIT2 +
+  ('EXCO' ('EXTR' ZFLIA 'FLIA' &BZLIA 1 1) MVPRIM MLPRIM 'NOID') ;
+       'FIN' BZLIA ;
+     'FINS' ;
+   'FINS' ;
+   'SI' ( 'NEG' WTAB.'AMORTISSEMENT' 'INCONNU') ;
+      XXX1 = WTAB.'AMORTISSEMENT' * ZDEPT;
+      XXX2 = 2. * UNSURH * XXX1 ;
+      XXX4 = XXX3 + XXX2 ;
+     'DETR'  XXX3 ;
+     'DETR'  XXX1 ;
+     'DETR'  XXX2 ;
+      XXX3 = XXX4 ;
+   'FINS' ;
+    XXX4 = FEQU2 + XXX3;
+   'DETR' XXX3         ;
+   'DETR' FEQU2        ;
+    FEQU2 = XXX4       ;
+*
+*         forces correctrices en cas de liaison persistante :
+*  on veut avoir (forces inertielles + forces visqueuses) compatibles
+*  avec accelerations et vitesses relatives nulles aux points de contact
+*  (pendant le contact). On modifie fequ2 ---> residu et l'iteration sui
+*  fournira les bonnes reactions
+*
+  'SI' IMPLP;
+     VADD XXX3 = VITETFOR ZRAID_T  WTAB  FCORU ;
+     XXX4      = FEQU2 - XXX3;
+    'DETR' XXX3      ;
+    'DETR' FEQU2     ;
+     FEQU2     = XXX4;
+  'FINS' ;
+'FINS';
+      zdeptp = zdept;
+**     mess 'zdept ==> zdeptp  1';
+*     mess ' zdept ';list (resu  zdept);
+*
+*   preparation des tests de convergence.-------------------------------
+*   on calcule la plus grande composante de  f + freac(sans flx)
+* fequi est de plus le second membre que l'on veut equilibrer
+*  ne pas oublier d'y ajouter les forces suiveuses
+*      test de convergence:   equilibre de la structure
+*      il se fait sur residc, on calcule auusi le nouveau second
+* membre qui est residc moins les forces d'appuis, il faut aussi
+* remettre a jour les FLX qui travaillent eux en incremental
+* pour les depl imposes cela revient a imposer un increment nul et
+* pour les rela unilaterales cela revient a mettre a jour le jeu
+*
+ RESIDUP= RESIDU ;
+ XXX1   = ZFEXT  ;
+'SI' ADDISEC2 ;
+   XXX2= XXX1 '+' (FP22 '*' COEFP) ;
+   XXX1= XXX2                  ;
+'FINS';
+
+'SI' (LOGPRE 'ET' IGRD) ;
+  XXX2 = XXX1 '+' (ZFPEXTF '*' COEFP) ;
+  XXX1 = XXX2 ;
+'FINS' ;
+
+* forces exterieures(+ autres termes p.ex. en dynamique ou en poreux)
+* sans reactions
+*  - forces interieures(+ autres termes p.ex. en dynamique ou en poreux)
+
+RESIDU = XXX1 - FEQU2;
+* forces exterieures(+ autres termes p.ex. en dynamique ou en poreux)
+* + reactions
+FEQUI =  XXX1 - FCORF;
+
+* forces exterieures(+ autres termes p.ex. en dynamique ou en poreux)
+* + reactions - forces interieures(+ autres termes p.ex. en dynamique
+* ou en poreux)
+RESIDC=  RESIDU - FCORF;
+
+* relations unilaterales et autres(Reinitialisation)
+*'SI' IMPO12 ;
+       XXX1 = RESIDU +ZFLX1;'DETR' RESIDU;
+       RESIDU = XXX1 - FCORU;'DETR' XXX1;
+      'SI' (IPILOT 'ET' IMPO12);
+               XXX3 =COEPI-1.D0*DIMPOV;
+               XXX1= RESIDU + XXX3;'DETR' RESIDU;RESIDU=XXX1;
+              'DETR' XXX3;
+      'FINS';
+*'FINS';
+XXX1 = FEQUI - ZFPLO;
+ZFAU1 = 'ABS'  XXX1  ;'DETR' XXX1;
+XAUXF = 'MAXI' ZFAU1 'ABS' 'SANS' MXMFLX;
+'SI' TSTMOM ;
+   XAUXM = 'MAXI' ZFAU1 'ABS' 'AVEC' MXMYMZ;
+'FINS';
+'DETR' ZFAU1;
+**'DETR' ZDETOT ;
+COEINC = 0.D0;
+*
+* Calcul du nouveau alpha pour le pilotage -----------------------------
+*
+'SI' (IPILOT 'ET' PASTEST) ;
+*   seulement si on a accelere
+*
+       'SI' (WTAB.'VISCOPLASTIQUE' 'OU' WTAB.'VISCODOMMAGE'
+       'OU' ITHER 'OU' LOGDEF );
+             'MESS' 'ALPHA calcule avec la norme de l increment' ;
+              COEPI0 = COEPI;
+              COEPI = 'MINI' ('PROG' 1. (STAB12.'AUTOCOEF' * al1) );
+*           les acceleration auront lieu toutes les 4 pas
+              COEINC =COEPI0 - COEPI ;
+*              ITACC=3 ;
+      'SINON' ;
+*          les multiplicateurs sont affectes d'un signe -
+              XXX1 = 'EXCO' ZDEPT 'LX' 'NOID' 'LX';
+              XXX2=2.D0 * XXX1;'DETR' XXX1;
+              XXX4=ZDEPT - XXX2;'DETR' XXX2;
+              XXX3=DFEXT0L *(  COEPI * ( 1 - AL1 ));
+              XXX2 = XXX3 + RESIDC;'DETR' XXX3;XXX5=RESIDNOR* 1.D0;
+             'SI' IMPO12 ;
+                   XXX1= COEPI * ( 1 - AL1 ) * DIMPO12;
+                   XXX3= XXX2  - XXX1;'DETR' XXX1;'DETR' XXX2;
+                   XXX2 = XXX3;XXX1 = XXX5 - DIMPO12;
+                  'DETR' XXX5; XXX5=XXX1;
+             'FINS';
+             'SI' ADDISEC2;
+                  XXX7  = XXX5 '+' FP22 ;
+                  CORFR = XXX7 '-' FP022;
+             'FINS';
+
+              XX3 ='XTY' RESIDNOR XXX4 MLDUAL MLPRIM;
+              XX1 ='XTY' XXX2     XXX4 MLDUAL MLPRIM;
+              XX2 ='XTY' XXX5     XXX4 MLDUAL MLPRIM;
+              COEINC =  XX1 '/' XX2;
+             'DETR' XXX4;'DETR' XXX2;'DETR' XXX5;
+              COEPI0 = COEPI;
+              COEPI = 'MINI' ('PROG' (COEPI0 - COEINC) 1.d0 ) ;
+             'SI' ((COEPI0 'EGA' 1d0) 'ET' (AL1 'EGA' 1D0));
+                   COEPI = 1d0;
+             'FINS';
+              COEINC = COEPI0 - COEPI;
+             'SI' ((COEPI 'EGA' 1d0) 'ET' (COEPI0 'NEG' 1d0));ITACC=3;
+             'FINS';
+     'FINS' ;
+* mise a jour de ZFEXT en fonction de coepi on ne met a jour
+* de maniere definitive que les forces, les modifs sur les FLX
+* pour reimposer les conditions de deplacements ne
+* sont faites que pour le premier residu attention au cas des jeux
+* sortis de IMPO qu'il ne faut pas toucher
+       XXX3 = DFEXT0F '*' COEINC ;
+       XXX2 = ZFEXT '-' XXX3;'DETR' XXX3;
+      'DETR' ZFEXT; ;ZFEXT = XXX2;
+      'SI' ADDISEC2;
+         MZPRES2=COEPI   '*' DMZPRES '+' MZPRES0;
+         COEFP  =MZPRES2 '/'(MZPRES  '+' XPETIT);
+         XXX3 = FP22  '*' COEFP;
+         XXX2 = ZFEXT '+' XXX3;
+        'DETR' XXX3;
+      'FINS';
+       XXX1= XXX2 - FEQU2;
+      'DETR' RESIDU;XXX3=COEPI * DFEXT0L; XXX4= XXX3 + FLXINI;
+      'DETR' XXX3; XXX3 = XXX4 - FCORU;'DETR' XXX4;
+       RESIDU = XXX1 + XXX3;'DETR' XXX3;
+       'SI' IMPO12;
+              XXX3= 1.D0 - COEPI * DIMPO12;
+              XXX2= RESIDU + XXX3; 'DETR' RESIDU;
+              RESIDU = XXX2; 'DETR' XXX3;
+      'FINS';
+      'SI' (ITHER  'OU' WTAB.'MATVAR') ;
+              XXX3 = FTHE * COEINC;
+              XXX2= RESIDU + XXX3; 'DETR' RESIDU;
+              RESIDU = XXX2; 'DETR' XXX3;
+      'FINS';
+      'SI' LOGDEF ;
+              XXX3 = FDEF * COEINC;
+              XXX2= RESIDU + XXX3; 'DETR' RESIDU;
+              RESIDU = XXX2; 'DETR' XXX3;
+      'FINS';
+
+       STAB12.'AUTOCOEF'= COEPI ;
+*
+*       mise a jour des termes force de l'acceleration de convergence
+      'SI' WTAB.'PROCEDURE_CHARMECA';
+            XXX1= COEINC * CORFR;'DETR' CORFR;
+      'SINON';
+            XXX1=(COEINC * RESIDNOR) 'ENLE' FLX;
+      'FINS';
+
+       XXX3 = ACFEP2 - XXX1 ;
+       XXX4 = ACFEP1 - XXX1 ;
+      'DETR' ACFEP2; ACFEP2= XXX3;
+      'DETR' ACFEP1; ACFEP1= XXX4;
+      'DETR' XXX1;
+
+*      test si on est sur une branche descendante
+*            corprec est la correction de precision
+       CORPREC = 1. ;
+      'SI' (COEPI < 0) ;
+           CORPREC = ZPRECD / ZPREC;
+          'MESS' 'Chargement decroissant. Critere divise par ' CORPREC;
+      'FINS';
+      'SI' ISNPB ;
+          'SI' ( COEPI > 0) ;
+                ISNPB = FAUX ;
+          'FINS' ;
+      'FINS' ;
+      'MESS' 'nouvelle valeur de ALPHA' COEPI;
+'FINS' ;
+*
+'DETR' FCORU;
+
+XNUMF = 'MAXI' RESIDC 'ABS' 'SANS' MXMFLX;
+XNUMG = 'MAXI' ((ZDEPL '-' ZDEPLP) '*' ZCLIM) 'ABS';
+XNUMF = 'MAXI' ('PROG' XNUMF XNUMG);
+*
+'SI' TSTMOM ;
+       XNUMM= 'MAXI' RESIDC 'ABS' 'AVEC' MXMYMZ;
+'FINS';
+*
+'SI' IFTOL;
+       ZPREC =  ZFTOL ;
+       XDENO  = 1.;
+'FINS';
+'SI' IMTOL;
+      ZPRECM = ZMTOL ;
+      XDENOM = 1.;
+'FINS';
+*
+XCONV = XNUMF/ XDENO ;
+XCONVM = XCONV ;
+*
+'SI' TSTMOM ;
+      'SI' ( '<'   XAUXM  XPETIT ) ;
+             XCONVM=0.;
+      'SINON';
+            'SI' ( <   (XAUXF / XAUXM)  1.D-12 ) ;
+                  XCONV=0.;
+            'FINS';
+             XCONVM =XNUMM/ XDENOM ;
+      'FINS';
+'FINS' ;
+
+* Increment de deformation entre 2 reactualisations de K :
+'SI' (IGRD 'ET' ('NON' HPP_EPS))  ;
+  DGR_U_K  =  GR_U_FIN - GR_U_K   ;
+  DEKREAC1 = 'MAXI' 'ABS' DGR_U_K ;
+  DETR DGR_U_K ;
+'FINS' ;
+*
+*---------------------------------------------------------------------
+*                resume de l'iteration
+*---------------------------------------------------------------------
+*
+           'MESS'  IT MMC  XCONV  DPSMAX EPSM XCONVM  ;
+
+* Faut-il reactualiser K ? -----------------------
+* Faut-il detruire RESIDUP ?
+DETRRES = vrai;
+
+* en grand deplacement, on teste la decroissance du residu
+'SI' (IGRD 'ET' WTAB.'CONVERGENCE_MONOTONE');
+'SI' (XCONV > XCONVP);
+  txtres = 'CHAI' ' Croissance du residu detectee';
+  'SI' (RECA_K);
+    txtres = 'CHAI' txtres ': reduction de du^i';
+    coefmul=0.2**(&bzdept2);
+    'SI' (IPREM);
+      ZDEP1 = coefmul * ZDEP1;
+    'SINO';
+      URG = VRAI;
+      ZDEPL = ZDEPLP; ZDEPT = ZDEPTP;
+      si(ega &bzdept2 1); ZDEP1P= ZDEP1;    'FINS';
+      ZDLX0 = ZDEPTP 'EXCO' 'LX' 'NOID' 'LX';
+      ZDEP1 = (coefmul * ZDEP1P) + ((1.-coefmul) * ZDLX0);
+      'DETR' ZDLX0;
+   'FINS';
+    'ITER' bzdept2;
+  'SINO';
+    txtres = chai txtres ': refus de la participation de l itéré';
+    URG = VRAI;
+    ZDEPL = ZDEPLP; ZDEPT = ZDEPTP;
+    RESIDU = RESIDUP; DETRRES = faux;
+  'FINS';
+*si le residu croit, un traitement préventif pour les prochains pas sera
+*d'utiliser un EKREAC + petit. pb:il faudrait aussi pouvoir l'augementer
+*   'SI' (DEKREAC1 < EKREAC et ...option?...);
+*     EKREAC = DEKREAC1;
+*     ETAB12 . 'REAC_GRANDS' = EKREAC;
+*     txtres = chai txtres ' ' EKREAC;
+*   'FINS';
+  'MESS' txtres;
+'FINS';
+'FINS';
+'SI' (DETRRES); 'DETR' RESIDUP; 'FINS';
+* on quitte si tout s'est bien passé ...
+    'QUIT' bzdept2;
+
+'FIN'  bzdept2;
+********************************************************************
+*
+*  on sauve le deplacement si le critere est bon au cas ou il y ait une
+*  non conv
+*
+   'SI'(xconv < xconvp);  zdeptm = zdept ; xconvp = xconv ; 'FINS';
+
+*---------------------------------------------------------------------
+*                 test de convergence
+*---------------------------------------------------------------------
+*
+'SI' nconvr;
+   'MESS' 'non convergence due a une reduction d urgence ';
+   ZICONV = FAUX;
+    'QUITTER' etiq;
+'FINSI';
+TABCONV.IT=XCONV;
+'SI' IPILOT;'SI' ((MMC 'EGA' 0) 'ET' (MMCMAX > 0.) 'ET' (COEPI < 0.));
+*  on refuse de converger si on est elastique et en decharge
+    COEPI = 'ABS' COEPI;PASTEST = VRAI;
+'FINS'; 'FINS';
+*  on refuse de converger a la premiere iteration si frottement
+  'SI' (WTAB .'CAFROTTE' 'ET' IMPO12 'ET' (IT < 2 ));
+    PASTEST=VRAI;
+  'FINS';
+   PASUNIL = FAUX;
+   'SI' ('EXIS' ZRAID_T 'OK');
+           'SI' ( 'NON' ZRAID_T.'OK');
+                 PASUNIL= VRAI;
+           'FINS';
+   'FINS';
+
+'SI' (('NON' PASTEST) 'ET'
+     (('NON' IRAUG) 'OU' ((it > 2) 'OU' (DPSMAX > 1e-3))));
+* variation de Despi entre 2 itérés
+DEPSTD  = DEPST - DEPSTP ;
+DEPSTDM = 'MAXI' 'ABS' DEPSTD 'AVEC' MLDEFOR;
+DEPSTP  = DEPST;
+*'DETR' DEPSTP; 'DETR' DEPSTD;
+*  on  ne peut pas tester la convergence apres une acceleration
+* ni apres une initialisation a partir de la solution precedente
+*OF Le SI ci-dessous est forcement verifie !!!
+*OF'SI' ('NON' (IPILOT 'ET' FAUX
+*OF                                        'ET' ( COEPI < 1.)));
+   'SI' ( ( IT > 1) 'OU' ('NON' INIT) ) ;
+*PVPV   'SI' (RED_URG <EG 2);
+*   si les criteres (deplacements + moments) sont < precision
+*   et la variation sur Depsi est < precision souhaitee : on a convergé!
+
+        'SI' ( XCONV   < (ZPREC  * CORPREC )) ;
+        'SI' ( XCONVM  < (ZPRECM * CORPREC )) ;
+        'SI' ( DEPSTDM < (ZPREC  * CORPREC )) ;
+        'SI' PASUNIL;
+      'MESS' ' ****** NON CONVERGENCE DE CONTACT A L ITERATION ' IT ;
+       ZICONV = FAUX;
+       hpp_eps = faux;
+      'SI' IDYN  ;
+                        VITI = UNSURH * 2. * ZDEPT -
+                               conti. 'VITESSES';
+                        VITI = 'ENLE' VITI 'LX' ;
+*DMODI_NB
+                        ZVITET = VITI - conti. 'VITESSES';
+                        ACCEI = UNSURH * 2. * ZVITET -
+                               conti. 'ACCELERATIONS';
+                        ACCEI = 'ENLE' ACCEI 'LX' ;
+*FMODI_NB
+                        ZFPU = ZDYFEXT - FFDYN;
+* forces exterieures + reactions - forces interieures a la fin du pas
+* c.a.d. (masse*acceleration ) + (amortissement*vitesse ) + (residu = qu
+                        ZFP  = ZFPU - FCORF;
+                       'DETR' ZFPU;'DETR' FFDYN;'DETR' ZDYFEXT;
+      'FINS';
+
+
+
+
+
+      'QUITTER' ETIQ;
+        'FINS';
+      'SI' (IRAUG 'ET' AUTAUG 'ET' ((DPSMAX > ZPREC) 'OU' (augk > 1e-15)));
+      'MESS' ' ****** NON CONVERGENCE DUE A L AUGMENTATION L ITERATION ' IT ;
+       ZICONV = FAUX;
+      'QUITTER' ETIQ;
+      'FINS';
+        'SI' ('NON' HPP_EPS) ;
+
+*      la precision est satisfaisante
+               'MESS' ' ****** CONVERGENCE A L ITERATION ' IT
+                          '  SOUS-PAS ' WTAB . 'ISOUSPAS';
+               'MESS' ' ';
+*  on sauve le nombre de points plastique
+               STAB12.'NBPLAS'= MMC ;
+              'SI' IDYN  ;
+                        VITI = UNSURH * 2. * ZDEPT -
+                           conti. 'VITESSES' ;
+                        VITI = 'ENLE' VITI 'LX' ;
+                        ZFPU = ZDYFEXT - FFDYN;
+* forces exterieures + reactions - forces interieures a la fin du pas
+* c.a.d. (masse*acceleration ) + (amortissement*vitesse ) + (residu = qu
+                        ZFP  = ZFPU - FCORF;
+                       'DETR' ZFPU;'DETR' FFDYN;'DETR' ZDYFEXT;
+
+      'SI' ('EXIS' WTAB 'MOD_LIA');
+       'SI' ('EXIS' WTAB.'MOD_LIA' 'MATE' 'NEWMARK') ;
+         'SI' ('EGA' 'CHPOINT  ' ('TYPE' FLIAI) ) ;
+          MODNEW = 'EXTR' WTAB.'MOD_LIA' 'MATE' 'NEWMARK' ;
+          MAUNEW = 'EXTR' MODNEW 'MAIL' ;
+          'SI' ('EXIS' ZFLIA MODNEW) ;
+             ZFLIANEW = 'REDU' ZFLIA MODNEW ;
+             NZNEW = 'EXTR' ZFLIANEW 'NBZO' ;
+            ZFPNW = 0. ; XVITW = 0. ;
+           'REPETER' BZLIAW NZNEW ;
+* un point support par zone - 2010 kich
+         ZFPNW = ZFPNW +
+  ('EXCO' ('EXTR' ZFLIANEW 'FLIA' &BZLIAW 1 1) MLDUAL 'NOID') ;
+              XVITW = XVITW +
+  ('EXCO' ('EXTR' ZFLIANEW 'FLIA' &BZLIAW 1 1) MVPRIM MLPRIM 'NOID') ;
+           'FIN' BZLIAW ;
+
+            ZFP = ZFP +  ZFPNW ;
+          'FINS' ;
+         'FINS' ;
+       'FINS' ;
+
+       'SI' (NZLIA > 0) ;
+            XVIT2 = 0.d0;
+
+           'REPETER' BZLIA NZLIA ;
+             XVIT2 = XVIT2 +
+  ('EXCO' ('EXTR' ZFLIA 'FLIA' &BZLIA 1 1) MVPRIM MLPRIM 'NOID') ;
+           'FIN' BZLIA ;
+        'SI' ('EGA' ('TYPE' XVIT2) 'CHPOINT  ') ;
+          MAAUT2 = 'DIFF' ('EXTR' VITI 'MAIL') ('EXTR' XVIT2 'MAIL') ;
+          VITI = ('REDU' VITI MAAUT2) + XVIT2 ; 'DETR' XVIT2 ;
+          'SI' ('EGA' ('TYPE' XVITW) 'CHPOINT  ') ;
+            MAAUT3 = 'DIFF' ('EXTR' VITI 'MAIL') ('EXTR' XVITW 'MAIL');
+          VITI = ('REDU' VITI MAAUT3) + XVITW ; 'DETR' XVITW ;
+          'FINS' ;
+        'FINS' ;
+         'DETR' FLIAI ;'DETR' ZFLIA ;
+       'FINS' ;
+      'FINS' ;
+
+*DMODI_NB
+                        ZVITET = VITI - conti. 'VITESSES';
+                        ACCEI = UNSURH * 2. * ZVITET -
+                               conti. 'ACCELERATIONS';
+                        ACCEI = 'ENLE' ACCEI 'LX' ;
+*FMODI_NB
+              'FINS' ;
+               STAB12.'NOMBRE_ITERATIONS' = IT;
+              'QUITTE' ETIQ ;
+       'SINON';
+
+         CORPREC=1; ITACC=5;
+         EPS_EPS = TEXTE '        '; HPP_EPS = FAUX;
+         xconvp = 1;
+         XCONVMIN = 1e20;
+         DPSMREF  = 0   ;
+         'REPETER' tabraz it;
+          tabconv.&tabraz = 1;
+         'FIN' tabraz;
+
+       PASTEST=VRAI;
+       'MESS' ' passage en grands deplacements';
+        iraug = faux;
+       hppeexit = vrai;
+       ITACC = 3;
+       URG = VRAI;
+       'FINS';
+       'FINS';
+       'FINS';
+       'FINS';
+*PV       'FINS';
+   'FINS' ;
+*OF 'SINON'; mess 'refus de convergence  al1 ' al1;
+*OF 'FINS';
+'FINS' ;
+*
+*
+* test de non convergence --------------------------------------------
+*
+XCONVREF=1E50;
+'SI' (IT > WTAB.'DELTAITER');
+     XCONVREF=TABCONV.(IT-WTAB.'DELTAITER') * 0.99;
+'FINS';
+'SI' (('NON' PASTEST) 'ET' (XCONV < XCONVMIN));
+XCONVMIN = XCONV; DPSMREF=DPSMAX/10;
+'SI' (XCONVMIN < ZPREC); XCONVMIN=ZPREC; 'FINS';
+'FINS';
+*   si on a depasse le nombre max d'iterations  ou si le residu augmente
+*   ou si on aurait du converger et que cela n'est pas le cas :
+*   => non convergence detectee !
+'SI'(IT '>EG' ZMAXIT 'OU' (XCONV > XCONVREF) 'OU'
+((XCONV < ZPREC) 'ET' ( XCONVM < ZPREC) 'ET' (DEPSTDM < ZPREC))
+     'ET' ('NON' PASTEST) 'ET' ('NON' NONCONV) 'ET' ( IT > 1)
+     'ET' ('NON' IPILOT) 'ET' ('NON' PASUNIL));
+      'MESS' ' non convergence detectee 2' ;ZMAXIT = 3 * IT;
+      'SI' hpp_eps; DEKREAC1=1e30;
+        zdeptp = zdeptp * 0; zdep1 = zdep1 * 0; zdept = zdept * 0;
+        mess 'remise a 0 zdept';
+          'FINSI';
+      HPP_EPS=FAUX;
+      URG = VRAI;
+      COEPI = WTAB.'RELAXATION_NONCONV';
+      STAB12.'AUTOCOEF'= COEPI ;
+      'SI' (dpsmax < (zprec * 1e3));
+       zdept = zdept *coepi;
+      'SINON';
+        zdept = zdeptm *coepi;
+      'FINS';
+      NONCONV = VRAI;
+      itacc=4;
+      'SI' (COEPI < 0.99999); ZICONV = FAUX;  'FINS';
+      ITNV=IT;
+'FINS';
+* changement de la precision en non convergence
+'SI' nonconv ;'SI' (it > (zmaxit *2 /3)); zprecnc=zprecnc*1.4;
+'FINS';'FINS';
+'SI' ('NON' PASTEST 'ET' (dpsmax < zprecnc));
+'SI' ((IT '>EG' ZMAXIT)
+  'OU' ((NBCYCLE1 '>EG' 3) 'ET' (IT 'EGA' (ITNORM1 + DITNORM1 - 1)))
+  'OU' (NONCONV 'ET' ('NON' PASTEST)
+       'ET' (XCONV '>' XCONVREF) 'ET' (DPSMAX '>EG'  DPSMREF)
+       'ET' (ITNV 'NEG' IT))
+  'ET' ('NON' IPREM) );
+
+      'MESS' ' ****** NON CONVERGENCE A L ITERATION ' IT ' /' ZMAXIT
+       '  SOUS-PAS ' WTAB . 'ISOUSPAS';;
+       ZICONV = FAUX;
+      'SI' IDYN  ;
+                        VITI = UNSURH * 2. * ZDEPT -
+                               conti. 'VITESSES';
+                        VITI = 'ENLE' VITI 'LX' ;
+*DMODI_NB
+                        ZVITET = VITI - conti. 'VITESSES';
+                        ACCEI = UNSURH * 2. * ZVITET -
+                               conti. 'ACCELERATIONS';
+                        ACCEI = 'ENLE' ACCEI 'LX' ;
+*FMODI_NB
+                        ZFPU = ZDYFEXT - FFDYN;
+* forces exterieures + reactions - forces interieures a la fin du pas
+* c.a.d. (masse*acceleration ) + (amortissement*vitesse ) + residu=qu
+                        ZFP  = ZFPU - FCORF;
+                       'DETR' ZFPU;'DETR' FFDYN;'DETR' ZDYFEXT;
+      'FINS';
+      'QUITTER' ETIQ;
+'FINS' ;
+'FINS' ;
+*
+'DETR' FEQU2;
+'SI' IDYN ;
+  'SI' (ADDISEC2 'OU' LOGPRE);
+     XXX1=ZFCONSTA '-' ZFP1;
+    'SI' ADDISEC2 ;
+       XXX1=XXX1 '+' FP22   ;
+    'FINS';
+    'SI' LOGPRE ;
+       XXX1=XXX1 '+' ZFPEXTF;
+    'FINS';
+     ZDYFEXT = XXX1 'ENLEVER' 'FLX';'DETR' XXX1;
+  'FINS';
+'FINS' ;
+*
+*KTAN*DEBUT*************************************************************
+* EVALUATION DE LA MATRICE TANGENTE SI DEMANDEE
+'SI' IKTAN ;
+  'SI' ('NON' IFEFP) ;
+    'SI' ('MULT' ZITAC ZNCONS) ;
+*     'SI' IKT ;
+*       'DETR' ZRIKTA 'ELEM' ;  'DETR' ZRAID ;
+*     'FINS' ;
+      'SI' (IGRD 'ET' ('NON' HPP_EPS));
+        'FORM' GEOM2 ;
+        ZMATloc = ZMAT2 ;
+      'SINON' ;
+        ZMATloc = ZMAT ;
+      'FINS' ;
+
+      'SI' ('NON' ISSTE) ;
+        'SI' IPERT ;
+          'SI' PARTLOCA ;
+            cha1 = 'ASSIS' 'TOUS' 'REDU' MODRELOC Z1COMP ;
+            cha2 = 'ASSIS' 'TOUS' 'REDU' MODRELOC Z2COMP ;
+            zktap = 'ASSIS' 'TOUS' 'KTAN' 'PERT' MODRELOC cha1 cha2
+                                          'C1' ZPERC1 'C2' ZPERC2
+                                          ZKTASYM ;
+            ZRIKTA = 'ET' zktap ;
+          'SINON';
+            ZRIKTA = 'KTAN' 'PERT' ZMODL Z1COMP Z2COMP
+                            'C1' ZPERC1 'C2' ZPERC2 ZKTASYM ;
+          'FINS';
+* Attention au ZMAT et ZSIGF a utiliser en IGRD !!
+        'SINON' ;
+          'SI' ('ET' ('NON' IVISCO) ('NON' IVIDOM)) ;
+            DTTAN = 0. ;
+          'SINON' ;
+            DTTAN = STAB12.'DT' ;
+          'FINS' ;
+          ZRIKTA = 'KTAN' ZMODL ZSIGF ZVARF ZMATloc
+                                'PREC' ZPREK 'DT  ' DTTAN ZKTASYM ;
+        'FINS' ;
+      'FINS' ;
+
+      'SI' IKSIA ;
+        KSIG = 'KSIGMA' ZMODL ZSIGF ZMATloc ;
+        ZRIKTA = ZRIKTA 'ET' KSIG ;
+      'FINS' ;
+
+      ZRAID = ZRIKTA 'ET' ZCLIM ;
+
+      'SI' IGRD ;  'FORM' GEOM1 ;  'FINS' ;
+
+      IKT = VRAI ; ZMATloc = 1. ;
+
+    'FINS' ;
+  'FINS' ;
+'FINS' ;
+*KTAN*FIN***************************************************************
+*
+'SI' (IGRD 'ET' ('NON' HPP_EPS));
+'SI' ('EGA' ('TYPE' GEOM2) 'CONFIGUR');
+     'DETR' GEOM2 ;
+'FINS';
+*     'SI' ITCAR ;  'DETR' ZMAT2R ;  'FINS';
+'FINS' ;
+*
+*'SI' IPLAVI ;
+*     'DETR' ZSIGF ;  'DETR' ZVARF ;  'DETR' ZDEIF ;
+*'FINS' ;
+
+'SI' IFEFP ; 'DETR' ZRIKTA ; 'DETR' GEOM2;  'FINS' ;
+*
+IPREM = FAUX;      IAFAIR=VRAI; RECA_K = FAUX;
+*
+'FIN' ETIQ ;
+ 'FORM' geom1;
+ augmult = augmult * 0.55 ;
+**  si (augmult < 0.6); augmult = 0.6; finsi;
+ zdep1dp = zdep1d ;
+ zdep1d = zdept;
+
+*=======================================================================
+*===== FIN DE LA BOUCLE DE CONVERGENCE                             =====
+*=======================================================================
+*
+*
+*  on sauve les pseudo forces de frottement pour initialiser
+*  l'iteration suivante
+'SI' (WTAB. 'CAFROTTE' 'ET' IMPO12);
+     STAB12.'FFROT'= 'COPIER' FFROT;
+'FINS';
+**  ON cherche a sauver la partie Forces nonlineaires trouvee pendant
+*  ce pas pour s'en servir pour l'estimation  de l'initialisation du pas
+*  DFNL = K*DU  - DF  - residu
+*  Ktot*dutot ne contient pas les forces de reactions mais les forces
+* internes dues a un champ de deformation initiales ( thermique)
+* donc  enlever ZDFINI au lieu de DFEXT0
+* pour les forces suiveuses on fait delta FP
+* pour etre plus precis on fait  aussi intervenir le residu
+*
+               STAB12.'RESIDU' = RESIDC;
+***            'SI' ('NEG' ('TYPE' ZRAIDNA) 'RIGIDITE'); ZRAIDNA = ZRAID; 'FINSI';
+            zraidna = zraid;
+               XXX1 = ZRAIDNA * ZDEPT;
+               XXX3 = ZDFINI * COEPI;
+               XXX4 = XXX1 - XXX3;
+               XXX3 = XXX4 + RESIDC;
+               XXX1 = XXX3 - FREAP ;
+               XXX5 = XXX1 'ENLEVER' 'FLX ' ;
+               'DETR' XXX1 ; 'DETR' XXX3 ; 'DETR' XXX4 ;
+* en cas de non convergence on cumule les forces non lineaires
+           'SI' WTAB.'CONV';
+               STAB12.'FNONL' = XXX5 ;
+           'SINON';
+               STAB12.'FNONL' = XXX5 + STAB12.'FNONL';
+               'DETR' XXX5 ;
+           'FINS';
+*fba verifier                WTAB.'ITERPREC' =IT;
+               STAB12.'DTPREC'= WTAB.'DT_INIT';
+**             STAB12.'DTPREC'= STAB12.'DT' ;
+*
+* On garde la derniere matrice KTAN calculee dans ETIQ si necessaire
+'SI' IKTAN ;
+  'SI' IFEFP ;
+*  'MESS' 'FEFP: Last KTAN is kept for next increment' ;
+    STAB12.'LASTKTAN' = ZRIKTA ;
+  'SINON' ;
+    'SI' (IKT_SAUV 'ET' IKT) ;
+*     'MESS' 'KTAN : La matrice est conservee pour le pas suivant' ;
+      STAB12.'LASTKTAN' = ZRIKTA ;
+    'FINS' ;
+  'FINS' ;
+'FINS' ;
+*
+*  quelques destructions supplementaires
+*
+'SI' IPLAVI ;
+      'SI' ('NEG' WTAB.'MOVA' 'RIEN') ;
+*             'DETR' ACC0;  'DETR' ACC;
+       'FINS' ;
+**        'DETR' DEPIN0 ;
+'FINS' ;
+'DETR' ZFEXT ; 'DETR' FREAP ;
+'SI' IPILOT;
+          'SI' ITHER ;
+            'DETR' FTHE ;
+             XXX1= (TETA2 - TETA1) * COEPI + TETA1;
+             STAB12.'TET2' = XXX1;
+             ETT MSRTT = PAS_EPTH PRECED ZMODL ZMAT XXX1;
+          'FINS';
+          'SI' LOGDEF ;
+             XXX1 = 'REDU' (DDEFOR0 '*' COEPI) ZMODLI;
+             STAB12.'DEFOR2' = STAB12.'DEFOR1' '+' XXX1    ;
+            'DETR' XXX1;'DETR' FDEF ;
+          'FINS';
+'FINS';
+
+'SI'  IDYN  ;
+           STAB12.'FOPL' = ZFP ;
+           STAB12.'VITI' = VITI;
+           STAB12.'ACCEI' = ACCEI;
+           'SI' IMPLP; STAB12.'VAUX' = VADD; 'FINS';
+'FINS' ;
+'SI' IGRD;
+* SP : en lagrangien total, on exprime l'increment sur la configuration
+*      de reference (debut de calcul) :
+  'SI' LAG_TOT;
+    form georef0;
+    DEPST = 'CAPI' zu1  depst zmodl;
+    form geom1      ;
+  'FINS';
+  depstp = depst;
+'FINS';
+
+DEPS0  = DEFT0 '+' DEPST;
+STAB12.'DEFF' = 'REDU' DEPS0 ZMODLI;
+'SI'  IPLAVI ;
+   STAB12.'VARF' = 'REDU' ZVARF ZMODLI ;
+   STAB12.'DFPF' = 'REDU' ZDEIF ZMODLI;
+  'SI' IFEFPUL;
+     STAB12.'FOR'  = GEOM2 ;
+  'FINS';
+'FINS';
+
+STAB12.'DEPT' = ZDEPT ;
+STAB12.'ZU1'  = ('ENLE' ZU1 'LX' ) '+'  ZDEPT ;
+*
+'SI' WTAB.'CAFROTTE' ;
+  ZZZR = STAB12.'ZU1' * ZCLIM ;
+  ZFLX = ZZZR - FLXINI ;
+  WTAB.'DFLX' = 'EXCO' ZFLX 'FLX' 'NOID' 'FLX' ;
+'FINSI' ;
+*
+STAB12.'SIGF' ='REDU' ZSIGF ZMODLI;
+STAB12.'CONV' = ZICONV ;
+'SI' ZICONV;
+   STAB12.'XDENO'  = XDENO;
+   STAB12.'XDENOM' = XDENOM;
+'SINON';
+   STAB12.'XDENO'  = 'MAXI'  ('PROG' STAB12.'XDENO'  XDENO  );
+   STAB12.'XDENOM' = 'MAXI'  ('PROG' STAB12.'XDENOM' XDENOM );
+'FINS';
+
+ STAB12.'DFGRAD' = GR_U_FIN ;
+
+'SI' IGRD;
+   'SI' ('EGA' GEOM2 'GEOM2');
+     'SI' ITCAR ;
+        GEOM2 ZMAT2 ='FORM' ZDEPT ZMODLI ZMATI;
+        ZMAT2       ='REDU' ZMAT2 ZMODL       ;
+     'SINON';
+        GEOM2 = 'FORM' ZDEPT ;
+     'FINS';
+   'FINS';
+
+   STAB12.'FOR' = GEOM2 ;
+   'SI'  (&BONOCONV 'NEG' 1);
+     'DETR' GEOM1;
+   'FINS';
+    GEOM1=GEOM2;
+   'FORM' GEOM1;
+   'SI' WTAB.'ITCAR';
+      CARA1 = ZMAT2 ;
+   'FINS';
+'FINS' ;
+
+'SI' LOGDEF;
+   STAB12.'DEFOR1'=STAB12.'DEFOR2';
+'FINS';
+
+STAB12.'ETAT1'= REDU STAB12.'ETAT2' ZMODLI ;
+'SI' ('EXIS' WTAB 'MOD_CHA') ;
+  ETAZ = 'REDU' STAB12.'ETAT2' WTAB.'MOD_CHA' ;
+  STAB12.'ETAT1' = STAB12.'ETAT1' 'ET' ETAZ ;
+  ETAZ = 1. ;
+'FINS' ;
+'SI' ('NEG' WTAB.'DT' STAB12.'DT');
+   STAB12.'DT'= WTAB.'DT' - STAB12.'DT'    ;
+'FINS';
+TEMPS0 = TI;
+
+  ZCCONV = ZICONV ;
+  'SI' ('NON' ZICONV) ;
+    DEFT0 = DEPS0 ;
+    'SI' ('EXIS' STAB12 'LISEA_M') ;
+      WTAB.'LISEA_M' = STAB12.'LISEA_M' ;
+    'FINS' ;
+    'SI' ('EXIS' STAB12 'RIBLO_M') ;
+      WTAB.'RIBLO_M' = STAB12.'RIBLO_M' ;
+    'FINS' ;
+    'SI' ('EXIS' STAB12 'TET2') ;
+      STAB12.'TET1'  = STAB12.'TET2'  ;
+    'FINS' ;
+    'SI' ITHER ;
+      STAB12.'TETA1' = STAB12.'TETA2' ;
+    'FINS' ;
+  'FINS' ;
+
+'SI' (ZICONV 'OU' ('NON' WTAB.'CONVERGENCE_FORCEE')) ;
+  'QUITTER'  BONOCONV;
+'FINS';
+WTAB.'CONV'=STAB12.'CONV';
+* Convergence forcee -> on reinitialise ZCLIM
+ZCLIM = ZCLIM0 ;
+
+*Nombre maximum de sous-pas atteint? si oui, arret de pasapas
+WTAB.'ISOUSPAS' = WTAB.'ISOUSPAS' + 1;
+'SI' (WTAB.'ISOUSPAS' >EG WTAB.'MAXSOUSPAS');
+     'ERREUR' 996 ;
+'FINS';
+'FIN' BONOCONV;
+************************************************************************
+* fin de la boucle de non convergence
+************************************************************************
+
+STAB12.'MAT1' = 'REDU' ZMAT2 ZMODLI ;
+
+'SI' WTAB.'ITCAR';
+   STAB12.'CARA' = STAB12.'MAT1';
+'FINS';
+
+'SI' ITHER;
+   STAB12.'ETHER2'    ='REDU' ETT ZMODLI  ;
+   STAB12.'ETHER1'    = STAB12.'ETHER2'   ;
+  'SI'  POR1 ;
+     STAB12.'MSRTHER2'='REDU' MSRTT ZMODLI;
+  'FINS';
+'FINS';
+
+'SI' ('NEG' GR_U_FIN 'INCONNU') ;
+  STAB12.'DFGRAD' = 'REDU' GR_U_FIN ZMODLI ;
+'SINON' ;
+  STAB12.'DFGRAD' = 'MOT' 'INCONNU' ;
+'FINS';
+WTAB.'DFGRAD' = STAB12.'DFGRAD' ;
+
+ conti.'TEMPS' = conti.'TEMPS' + DT_INIT ;
+WTAB.'MAT1' = STAB12.'MAT1';
+'SI' ('EXIS' WTAB 'MOD_CHA') ;
+   MODZ = 'REDU' ZMAT22 WTAB.'MOD_CHA' ;
+   WTAB.'MAT1' = WTAB.'MAT1' 'ET' MODZ ;
+   MODZ = 1.D0 ;
+'FINS' ;
+* mise a jour des conditions aux limites avec les contacts/frottements actifs
+WTAB.'CLIM' = ZCLIM;
+
+* Enregistrement du MODELE
+STAB12.'MO_TOT_PREC' = ZMODLI;
+
+'OPTI' 'PARA' FAUX;
+*
+'FINPROC' STAB12;
+$$$$
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

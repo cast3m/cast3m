@@ -1,0 +1,288 @@
+C FLAMH     SOURCE    SERRE     16/07/19    21:15:01     9018
+      SUBROUTINE FLAMH(YH2e,YO2e,YN2e,YH2Oe,YHEe,YCO2e,YCOe,
+     &              PRESe,TEMPe,
+     &              TEMPSOR,TEMPPLA,Q,
+     &              YH2SOR,YO2SOR,YN2SOR,YH2OSOR,YHESOR,YCO2SOR,YCOSOR,
+     &              DDT,iKA,iMOD,iCST,IHI)
+C------------------------------------------------------------------------
+C Modélisation d'un recombineur thermique par une approche 0D.
+*------------------------------------------------------------------------
+C
+C---------------------------
+C Parametres Entree/Sortie :
+C---------------------------
+C
+C E/  YH2e    : flottant : Fraction massique moyenne de H2 (PAR inlet)
+C E/  YO2e    : flottant : Fraction massique moyenne de O2 (PAR inlet)
+C E/  YN2e    : flottant : Fraction massique moyenne de N2 (PAR inlet)
+C E/  YH2Oe   : flottant : Fraction massique moyenne de H2O (PAR inlet)
+C E/  YHEe    : flottant : Fraction massique moyenne de HE (PAR inlet)
+C E/  YCO2e   : flottant : Fraction massique moyenne de CO2 (PAR inlet)
+C E/  YCOe    : flottant : Fraction massique moyenne de CO (PAR inlet)
+C E/  PRESe   : flottant : Pression moyenne autour du PAR (Pa)
+C E/  TEMPe   : flottant : Température moyenne du gaz (PAR inlet, K)
+C  /S TEMPSOR : flottant : Température moyenne du gaz (PAR outlet, K)
+C E/S TEMPPLA : flottant : Température moyenne des plaques du PAR (K)
+C  /S Q       : flottant : Débit dans le PAR (kg/s)
+C  /S YH2SOR  : flottant : Fraction massique moyenne de H2 (PAR outlet)
+C  /S YO2SOR  : flottant : Fraction massique moyenne de O2 (PAR outlet)
+C  /S YN2SOR  : flottant : Fraction massique moyenne de N2 (PAR outlet)
+C  /S YH2OSOR : flottant : Fraction massique moyenne de H2O (PAR outlet)
+C  /S YHESOR  : flottant : Fraction massique moyenne de HE (PAR outlet)
+C  /S YCO2SOR : flottant : Fraction massique moyenne de CO2 (PAR outlet)
+C  /S YCOSOR  : flottant : Fraction massique moyenne de CO (PAR outlet)
+C E/  DDT     : flottant : Pas de temps (s)
+C E/  IKA     : entier   : Flag pour correction du coefficient d'échange
+C                          comme dans RALOC (voir fla009.eso)
+C E/  IMOD    : entier   : Modélisation du PAR (1=SIEMENS, 2=HEATER)
+C E/  ICST    : entier   : Pointeur de LISTREEL, paramètres du modèle
+C  /S IHI     : entier   : Flag de convergence et gestion des erreurs
+C
+C------------------------------------------------------------------------
+C
+C Langage : ESOPE + FORTRAN 77
+C
+C----------------
+C Modifications :
+C----------------
+C
+C 2012 : F. Dabbene  - mise en oeuvre du modele HEATER sur la base du
+C                      modèle SIEMENS
+C
+C------------------------------------------------------------------------
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+-INC SMLREEL
+C
+C===============================================================
+C Ordre des espèces : 1 N2, 2 O2, 3 H2, 4 H2O, 5 HE, 6 CO2, 7 CO
+C===============================================================
+C
+      real*8 xi(7),om(7)
+C
+C Description du segment de travail TRAV (initialisé ici, il est
+C transmis à tous les .eso du modèle (de fla001.eso à fla019.eso).
+C Les valeurs numériques sont celles du recombineur SIEMENS FR/1-150
+C   Hauteur totale du recombineur = 1 m
+C   Longueur du recombineur (Lgr) = 0.15 m
+C   Profondeur du recombineur (W) = 0.15 m
+C   Nombre de plaques (n)         = 14
+C
+C IKALP   : Flag pour correction RALOC du coefficient d'échange (=IKA)
+C IMODEL  : Modélisation du PAR (1=SIEMENS, 2=AUTRE) (=IMOD)
+C E       : Distance entre deux plaques (= 0.01 m)
+C           (Lgr/(n+1), W=largeur et n=nombre de plaques)
+C L       : Hauteur des plaques (= 0.15 m)
+C LCH     : Hauteur de la cheminée (= 0.85 m)
+C DH      : Diamètre hydraulique entre les plaques (= 0.01875 m)
+C           (2EW/(E+W))
+C S       : Surface des plaques (= 0.675 m2)
+C           (2n*LW, n=nombre de plaques)
+C SP      : Section de passage entrée/sortie fluide du PAR (= 0.0225 m2)
+C           (Lgr*W)
+C CK      : Demi somme des coefficients de perte de charge à l'entrée et à
+C           la sortie du PAR (= 3/2)
+C MC      : Masse des plaques (= 0.133 kg)
+C CPC     : Chaleur spécifique des plaques (= 132.6 J/kg/K)
+C G       : Gravité (=9.81 m/s2)
+C R       : Constante des gaz (= 8.314 J/mol/K)
+C DELTAH  : Energie libérée par la combustion d'un kg d'H2 (= 120 MJ/kg)
+C M(7)    : Masse molaire des constituants du mélange (kg/mol)
+C ncst    : Nombre de constantes du modèle (= longueur du listreel ICST)
+C CSTMOD  : Constantes du modèle  (= contenu de ICST)
+C CPI(7)  : Chaleurs massiques des constituants (J/kg/K)
+C AL      : Cste fonction de CP(i)
+C EPS_MH2 : Seuil en deça duquel on suppose que la consommation d'H2 max
+C           est mise à 0. (kg/s)
+C EPS_DT  : Ecart entre la température des plaques et la température du
+C           gaz (Tc-T) en deça duquel on suppose qu'il n'y a pas
+C           d'échange convectif (K)
+C EPS_CON : Critère de convergence
+C U       : Vitesse minimale dans le PAR (= 0.01 m/s)
+C
+      segment trav
+           integer iKALP,iMODEL
+           real*8 e,L,Lch,Dh,S,sp,Ck
+           real*8 mc,Cpc
+           real*8 g,R,deltah
+           real*8 M(nbesp),cstmod(ncst)
+           real*8 Cpi(nbesp),al
+           real*8 eps_mh2,eps_dt,eps_con,u
+           real*8 XH2MOY,XO2MOY,XN2MOY,XH2OMOY,PRESSION,TEMPENT
+           real*8 XHEMOY,XCO2MOY,XCOMOY
+      endsegment
+C
+      IHI = 0
+      MLREEL = ICST
+      SEGACT MLREEL
+      NCST = PROG(/1)
+      NBESP = 7
+      SEGINI TRAV
+C
+C------------------------------------ Remplissage du segment TRAV
+C
+C Gestion du HEATER
+      DO 10 I1=1,NCST
+         CSTMOD(I1) = PROG(I1)
+ 10   CONTINUE
+      SEGDES MLREEL
+C
+C Paramètres dépendant de la géométrie
+C (à changer si le PAR n'est pas un FR/1-150)
+      IMODEL = IMOD
+      e   = 0.01D0
+      L   = 0.15D0
+      Lch = 0.85D0
+      Dh  = 0.01875D0
+      S   = 0.675D0
+      sp  = 0.0225D0
+      Ck  = 3.D0
+C
+C Paramètres physico-chimiques
+C-> La capacité thermique des plaques du PAR est corrigée par CSTMOD(4).
+C-> Comme on ne se sert que de mc*cpc on fait porter la correction sur mc
+C-> (mc=5.D0 et Cpc=480.D0 soit cstmod(4)=136.0868234 ont permis de
+C-> valider le modele sur la base de la maquette du heater pour ERCOSAM)
+      mc  = 0.133D0 * cstmod(4)
+      Cpc = 132.6D0
+      g      = 9.81D0
+      R      = 8.3144621D0
+      deltah = 1.2D8
+      M(1) = 2.D0 * 0.0140067D0
+      M(2) = 2.D0 * 0.0159994D0
+      M(3) = 2.D0 * 0.00100794D0
+      M(4) = 2.D0 * 0.00100794D0 + 0.0159994D0
+      M(5) = 0.004002602D0
+      M(6) = 2.D0 * 0.0159994D0 + 0.0120107D0
+      M(7) = 0.0120107D0 + 0.0159994D0
+C
+      Cpi(1) = 1046.D0
+      Cpi(2) = 942.D0
+      Cpi(3) = 14490.D0
+      Cpi(4) = 2014.D0
+      Cpi(5) = 5192.D0
+      Cpi(6) = 1117.D0
+      Cpi(7) = 1042.D0
+C
+C Absence de réaction chimique
+      al = 0.D0
+C
+C Transformation des fractions massiques en fractions molaires
+      OM(1) = YN2e
+      OM(2) = YO2e
+      OM(3) = YH2e
+      OM(4) = YH2Oe
+      OM(5) = YHEe
+      OM(6) = YCO2e
+      OM(7) = YCOe
+      CALL FLA013(xi,om,trav)
+C
+C Fractions molaires, pression et température à l'entrée du HEATER
+      XN2MOY   = xi(1)
+      XO2MOY   = xi(2)
+      XH2MOY   = xi(3)
+      XH2OMOY  = xi(4)
+      XHEMOY   = xi(5)
+      XCO2MOY  = xi(6)
+      XCOMOY   = xi(7)
+      PRESSION = PRESe
+      TEMPENT  = TEMPe
+C
+      iKALP    = iKA
+C
+C Critère de convergence et vitesse minimale dans le PAR
+      eps_mh2 = 1.D-10
+      eps_dt  = 1.D-3
+      eps_con = 1.D-8
+      u       = 0.01D0
+C
+C-------------------------------- Fin Remplissage du segment TRAV
+C
+C
+C Limitation du pas de temps à 0.5s
+C (Découpage du pas de temps en sous pas de temps si trop grand)
+      t = 0.D0
+      HEASTOT = 0.D0
+      HEAFTOT = 0.D0
+C      I = 1
+      TMAX = DDT
+      Tc   = TEMPPLA
+      dt = 0.5D0
+      IF (ddt .LT. dt) THEN
+         dt = ddt
+      ENDIF
+ 20   CONTINUE
+      IF (.NOT.(t.lt.tmax)) GOTO 30
+C
+C Calcul de la temperature des plaques au temps t+dt
+         IF ((t+dt) .GE. tmax) THEN
+            dt = tmax - t
+         ENDIF
+         call HEA011(TC1,HEAS,HEAF,T,DT,TC,TRAV)
+         IF (TC1 .LT. 0.D0) THEN
+            IHI = -100
+            RETURN
+         ENDIF
+C
+C Cumul de l'énergie transmise au fluide
+         t  = t + dt
+         Tc = Tc1
+         HEASTOT = HEASTOT + HEAS*dt
+         HEAFTOT = HEAFTOT + HEAF*dt
+         GOTO 20
+ 30   CONTINUE
+C
+C Sortie lorsque le temps final est atteint
+      HEASTOT = HEASTOT / ddt
+      HEAFTOT = HEAFTOT / ddt
+C
+C Calcul du débit et des conditions de sortie
+C au temps t+dt pour la nouvelle temperature de plaques Tc
+C (si pb de débit négatif on sort en erreur)
+      xmh2 = 0.D0
+      deb  = FLA015(T,TC,XMH2,TRAV)
+C
+C Température en sortie du PAR (bilan d'énergie du gaz)
+C (si pb de température négative on sort en erreur)
+      IF ((TC-TEMPe).LT.EPS_DT) THEN
+         Tgaz = TEMPe
+      ELSE
+         CPE  = FLA003(OM,TRAV)
+         Tgaz = TEMPe - heaftot/(cpe*deb)
+      ENDIF
+C
+      ROE = FLA001(PRESe,TEMPe,Xi,TRAV)
+      ROS = FLA001(PRESe,Tgaz,Xi,TRAV)
+      velocin  = deb / (roe * sp)
+      velocout = deb / (ros * sp)
+      IF ((DEB .LT. 0.D0) .OR. (Tgaz .LT. 0.D0)) THEN
+         IHI = -999
+         RETURN
+      ENDIF
+C
+      YN2SOR  = YN2e
+      YO2SOR  = YO2e
+      YH2SOR  = YH2e
+      YH2OSOR = YH2Oe
+      YHESOR  = YHEe
+      YCO2SOR = YCO2e
+      YCOSOR  = YCOe
+      TEMPPLA = Tc
+      Q       = deb
+      TEMPSOR = Tgaz
+C
+      SEGSUP trav
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+

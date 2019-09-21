@@ -1,0 +1,926 @@
+C ISOVA2    SOURCE    BP208322  16/11/18    21:17:54     9177
+      SUBROUTINE ISOVA2(MELEME,MCHAML,XISO,XTOL,IOPT,NEWNOD,ELEMS,ITYPL)
+      IMPLICIT REAL*8 (A-H,O-Z)
+      IMPLICIT INTEGER (I-N)
+C***********************************************************************
+C NOM         : ISOVA2
+C DESCRIPTION : Construit le maillage d'une isovaleur d'un champ par
+C               éléments
+C
+C
+C
+C
+C
+C LANGAGE     : ESOPE
+C AUTEUR      : Stéphane GOUNAND (CEA/DEN/DM2S/SFME/LTMF)
+C               mél : gounand@semt2.smts.cea.fr
+C***********************************************************************
+C VERSION    : v1, 17/12/2008, version initiale
+C HISTORIQUE : v1, 17/12/2008, création
+C HISTORIQUE : 19/12/2011, bp : ajout cub8
+C HISTORIQUE : 10/09/2014, refonte + ajout du traitement 'EGSUP'
+C                          'EGINF'  sauf cub8
+C HISTORIQUE :
+C***********************************************************************
+-INC CCOPTIO
+-INC CCGEOME
+-INC SMCOORD
+-INC SMELEME
+-INC SMCHAML
+-INC SMLENTI
+*
+* Segments ajustables contenant les noeuds des éléments créés ainsi que
+*      leur couleur
+* ELEM(1) contient des POI1
+* ELEM(2) contient des SEG2
+* ELEM(3) contient des TRI3
+* ELEM(4) contient des TET4
+* ELEM(5) contient des PYR5
+* ELEM(6) contient des PRI6
+* ELEM(7) contient des QUA4
+*
+      PARAMETER (NTYEL=7)
+      SEGMENT ELEMS
+      POINTEUR ELEM(NTYEL).MLENTI
+      ENDSEGMENT
+* Défini dans isova1
+      INTEGER ITYPL(NTYEL)
+* Pile des nouveaux noeuds
+      SEGMENT NEWNOD
+      INTEGER NNOD
+      INTEGER NOEINF(MAXNOD)
+      INTEGER NOESUP(MAXNOD)
+      REAL*8  COEINF(MAXNOD)
+      ENDSEGMENT
+*
+      LOGICAL LEGISO,LOKISO
+      LOGICAL LPAIR
+      PARAMETER (NMAXNO=8)
+      REAL*8 VAL(NMAXNO),VALP(NMAXNO)
+      LOGICAL LVALP(NMAXNO),LTRI
+      INTEGER IPERM(NMAXNO),NUMP(NMAXNO)
+      CHARACTER*8 MCHA
+      INTEGER IMPR,IRET
+
+*     tableaux descriptifs des cas et des aretes
+*     pour le Marching Cubes (CUB8)
+      PARAMETER (NMAXPT=16,NMAXCA=256,npt2=2,NMAXAR=12)
+      INTEGER MATCAS(NMAXPT,NMAXCA),MATARE(npt2,NMAXAR)
+*     tableaux descriptifs des cas
+*     pour les éléments POI1, SEG2, TRI3, TET4
+*
+*  ikas                       pile elem
+* *************************** Commun à tous ********************
+*  1 : rien                      0
+*  2 : élément total            9999
+* ***************************** POI1 ***************************
+*  3 : noeud 1                   1,  1,0
+* ***************************** SEG2 ***************************
+*= 3 : noeud 1                   1,  1,0
+*  4 : noeud 2                   1,  2,0
+*  5 : noeud (1,2)               1,  1,2
+*  6 : segment [1, k5]           2,  1,0, 5,5,
+*  7 : segment [k5, 2]           2,  5,5, 2,0,
+* ***************************** TRI3 ***************************
+*
+*                 3                            3
+*               .                            .
+*              / \                          / \
+*             /   \                        /   \
+*            /     \                      /     \
+*     (1,3) /       \              (1,3) /       \ (2,3)
+*          .-        \                  .---------.
+*         /  \--      \                / \         \
+*        /      \-     \              /   \         \
+*       /         \--   \            /     \         \
+*      /             \-- \          /       \         \
+*   1 /                 \-\ 2    1 /         \         \ 2
+*    .--------------------\.      .-----------.---------.
+*                                           (1,2)
+*
+*= 3 : noeud 1                   1,  1,0
+*  8 : noeud 3                   1,  3,0
+*  9 : segment [1,2]             2,  1,0,   2,0
+* 10 : segment [3,2]             2,  3,0,   2,0
+* 11 : segment [(1,3),2]         2,  1,3,   2,0
+* 12 : triangle [1, k11]         3,  1,0,   2,0,  1,3,
+* 13 : triangle [ik11, 3]        3,  1,3,   2,0,  3,0,
+* 14 : segment [(1,3),(1,2)]     2,  1,3,   1,2
+* 15 : triangle [1, ik14]        3,  1,0,   1,2,  1,3,
+* 16 : quadrangle [k14, 2,3]     7,  1,3,   1,2,  2,0,  3,0,
+* 17 : segment [(1,3),(2,3)]     2,  1,3,   2,3
+* 18 : triangle [k17, 3]         3,  1,3,   2,3,  3,0,
+* 19 : quadrangle [1,2,ik17]     7,  1,0,   2,0,  2,3,  1,3,
+* ***************************** TET4 ***************************
+*   Dur de faire des graphiques ASCII clairs en 3D.
+*
+*                 4  .-
+*                  /-| \--
+*                 /   \   \--
+*               /-    |      \---
+*              /       \         \--
+*            /-        |            \--
+*           /           \           ---\. 2
+*         /-            |   -------/   /
+*        /         ------\-/          /
+*      /-  -------/      |           /
+*   3 .---/              |          /
+*        \---             \       /-
+*            \---         |      /
+*                \--       \    /
+*                   \---   |   /
+*                       \---\ /
+*                            . 1
+*
+*= 3 : noeud 1                   1,  1,0
+* 20 : noeud 4                   1,  4,0,
+*= 9 : segment [1,2]             2,  1,0,   2,0
+* 21 : segment [4,3]             2,  4,0,   3,0
+* 22 : triangle [1,2,3]          3,  1,0,   2,0,   3,0,
+* 23 : triangle [4,2,3]          3,  4,0,   2,0,   3,0,
+* 24 : triangle [(1,4),2,3]      3,  1,4,   2,0,   3,0,
+* 25 : tétra    [1, k24]         4,  1,0,   2,0,   3,0,  1,4,
+* 26 : tétra    [k24, 4]         4,  1,4,   2,0,   3,0,  4,0,
+******************************
+* 27 : triangle [(1,4),2,(1,3)]  3,  1,4,   2,0,   1,3,
+* 28 : tétra    [1,k27]          4,  1,0,   2,0,   1,3,   1,4,
+* 29 : pyra     [4,3,k27]        5,  1,4,   1,3,   3,0,   4,0,   2,0,
+* 30 : triangle [(1,4),(2,4),3]  3,  1,4,   2,4,   3,0,
+* 31 : tétra    [k30,4]          4,  1,4,   2,4,   3,0,   4,0,
+* 32 : pyra     [1,2,k30]        5,  1,4,   2,4,   2,0,   1,0,   3,0,
+***************************************
+* 33 : triangle [(1,2),(1,3),(1,4)]  3,   1,2,   1,3,   1,4,
+* 34 : tétra    [1,k33]
+* 35 : prisme   [k33,2,3,4]
+* 36 : triangle [(1,4),(2,4),(3,4)]
+* 37 : tétra    [k36,4]
+* 38 : prisme   [1,2,3,k36]
+* 39 : quadrangle [(1,4),(2,4),(2,3),(1,3)]
+* 40 : prisme   [(1,3),(2,3),3,(1,4),(2,4),4]
+* 41 : prisme   [1,(1,3),(1,4),2,(2,3),(2,4)]
+      PARAMETER (NLI1=7,NLI2=12,NLI3=7,NLI4=15)
+      PARAMETER (NLI1P=NLI1+1,NLI2P=NLI1+NLI2+1,NLI3P=NLI1+NLI2+NLI3+1)
+      PARAMETER (NCOMAX=1+(2*6),NLIMAX=NLI1+NLI2+NLI3+NLI4)
+      INTEGER TABDES(NCOMAX,NLIMAX)
+      INTEGER TABDE1(NCOMAX,NLI1)
+      INTEGER TABDE2(NCOMAX,NLI2)
+      INTEGER TABDE3(NCOMAX,NLI3)
+      INTEGER TABDE4(NCOMAX,NLI4)
+      EQUIVALENCE (TABDES(1,1),TABDE1(1,1)),
+     $     (TABDES(1,NLI1P),TABDE2(1,1)),
+     $     (TABDES(1,NLI2P),TABDE3(1,1)),
+     $     (TABDES(1,NLI3P),TABDE4(1,1))
+*
+      DATA TABDE1/
+     $     0,   0,0,   0,0,   0,0,   0,0,   0,0,   0,0,
+     $     9999,   0,0,   0,0,   0,0,   0,0,   0,0,   0,0,
+     $     1,   1,0,   0,0,   0,0,   0,0,   0,0,   0,0,
+     $     1,   2,0,   0,0,   0,0,   0,0,   0,0,   0,0,
+     $     1,   1,2,   0,0,   0,0,   0,0,   0,0,   0,0,
+     $     2,   1,0,   1,2,   0,0,   0,0,   0,0,   0,0,
+     $     2,   1,2,   2,0,   0,0,   0,0,   0,0,   0,0/
+      DATA TABDE2/
+     $     1,   3,0,   0,0,   0,0,   0,0,   0,0,   0,0,
+     $     2,   1,0,   2,0,   0,0,   0,0,   0,0,   0,0,
+     $     2,   3,0,   2,0,   0,0,   0,0,   0,0,   0,0,
+     $     2,   1,3,   2,0,   0,0,   0,0,   0,0,   0,0,
+     $     3,   1,0,   2,0,   1,3,   0,0,   0,0,   0,0,
+     $     3,   1,3,   2,0,   3,0,   0,0,   0,0,   0,0,
+     $     2,   1,3,   1,2,   0,0,   0,0,   0,0,   0,0,
+     $     3,   1,0,   1,2,   1,3,   0,0,   0,0,   0,0,
+     $     7,   1,3,   1,2,   2,0,   3,0,   0,0,   0,0,
+     $     2,   1,3,   2,3,   0,0,   0,0,   0,0,   0,0,
+     $     3,   1,3,   2,3,   3,0,   0,0,   0,0,   0,0,
+     $     7,   1,0,   2,0,   2,3,   1,3,   0,0,   0,0/
+      DATA TABDE3/
+     $     1,   4,0,   0,0,   0,0,   0,0,   0,0,   0,0,
+     $     2,   4,0,   3,0,   0,0,   0,0,   0,0,   0,0,
+     $     3,   1,0,   2,0,   3,0,   0,0,   0,0,   0,0,
+     $     3,   4,0,   2,0,   3,0,   0,0,   0,0,   0,0,
+     $     3,   1,4,   2,0,   3,0,   0,0,   0,0,   0,0,
+     $     4,   1,0,   2,0,   3,0,   1,4,   0,0,   0,0,
+     $     4,   1,4,   2,0,   3,0,   4,0,   0,0,   0,0/
+      DATA TABDE4/
+     $     3,   1,4,   2,0,   1,3,   0,0,   0,0,   0,0,
+     $     4,   1,0,   2,0,   1,3,   1,4,   0,0,   0,0,
+     $     5,   1,4,   1,3,   3,0,   4,0,   2,0,   0,0,
+     $     3,   1,4,   2,4,   3,0,   0,0,   0,0,   0,0,
+     $     4,   1,4,   2,4,   3,0,   4,0,   0,0,   0,0,
+     $     5,   1,4,   2,4,   2,0,   1,0,   3,0,   0,0,
+     $     3,   1,2,   1,3,   1,4,   0,0,   0,0,   0,0,
+     $     4,   1,0,   1,2,   1,3,   1,4,   0,0,   0,0,
+     $     6,   1,2,   1,3,   1,4,   2,0,   3,0,   4,0,
+     $     3,   1,4,   2,4,   3,4,   0,0,   0,0,   0,0,
+     $     4,   1,4,   2,4,   3,4,   4,0,   0,0,   0,0,
+     $     6,   1,0,   2,0,   3,0,   1,4,   2,4,   3,4,
+     $     7,   1,4,   2,4,   2,3,   1,3,   0,0,   0,0,
+     $     6,   1,3,   2,3,   3,0,   1,4,   2,4,   4,0,
+     $     6,   1,0,   1,3,   1,4,   2,0,   2,3,   2,4/
+*
+* Fonctions locales
+*
+* Cette fonction dit si on est sur une isovaleur
+* Cette fonction dit ok si on vérifie .GT.XISO si IOPT=1
+*                                ou   .LT.XISO si IOPT différent de 1
+*                                              (typiquement -1)
+      LEGISO(X)=(ABS(X-XISO).LT.XTOL)
+* Suite à un bug du traducteur Esope, on ne peut déclarer
+* deux statement functions dans une subroutine. On remplace
+* donc celle-ci par sa valeur :
+*      LOKISO(X)=((X.GT.XISO).EQV.(IOPT.EQ.1))
+*
+* Executable statements
+*
+      IMPR=0
+      IF (IMPR.GT.2) WRITE(IOIMP,*) 'Entrée dans isova2.eso'
+*
+C***********************************************************************
+c     Boucle sur les zones elementaires
+C***********************************************************************
+c
+      NNO=NUM(/1)
+      NEL=NUM(/2)
+      N2=IELVAL(/1)
+      DO I2=1,N2
+
+         MELVAL=IELVAL(I2)
+         SEGACT MELVAL
+
+* Vérification de la cohérence entre la champ et la géométrie
+         N1PTEL=VELCHE(/1)
+         N1EL=VELCHE(/2)
+         IF ((N1PTEL.NE.1.AND.N1PTEL.NE.NNO).OR.
+     $        (N1EL.NE.1.AND.N1EL.NE.NEL)) THEN
+* 148 2
+*Le champ par élément et l'objet géométrique correspondant n'ont pas le
+* 148 2
+*même nombre de points par élément : contacter votre support
+            CALL ERREUR(148)
+            RETURN
+         ENDIF
+* Au maximum, on va créer quatre nouveaux noeuds par élément
+         MAXNOC=NOEINF(/1)
+         MAXNOD=NNOD+4*NEL
+         IF (MAXNOD.GT.MAXNOC) SEGADJ NEWNOD
+C
+c******* Aiguillage selon type d element *******************************
+c
+         CALL PLACE2(ITYPL,NTYEL,ITYLOC,ITYPEL)
+*dbg         WRITE(IOIMP,*) 'ITYLOC=',ITYLOC
+         IF (ITYLOC.GE.1.AND.ITYLOC.LE.4) GOTO 101
+*         IF(ITYPEL.eq.1)  GOTO 101
+*         IF(ITYPEL.eq.2)  GOTO 102
+*         IF(ITYPEL.eq.4)  GOTO 104
+* Cub8
+         if(ITYPEL.eq.14)  goto 114
+*         if(ITYPEL.eq.23)  goto 123
+
+******** Cas non traité *********************************************
+         MOTERR(1:4)=NOMS(ITYPEL)
+*  44 2
+*Type d'élément inconnu %m1:4
+         CALL ERREUR(44)
+         RETURN
+******** Cas des POI1, SEG2, TRI3 et TET4
+ 101     CONTINUE
+         NNODEL=NBNNE(ITYPEL)
+*dbg         WRITE(IOIMP,*) 'NNODEL=',NNODEL
+         DO IEL=1,NEL
+* Par defaut, il n'y a pas d'isovaleur a construire
+* et l'orientation est bonne
+            IKAS=1
+            LPAIR=.TRUE.
+* Remplissage du tableau VAL, calcul du min et de max
+            DO INODEL=1,NNODEL
+               VAL(INODEL)=VELCHE(MIN(N1PTEL,INODEL),MIN(N1EL,IEL))
+            ENDDO
+            VMIN=VAL(1)
+            VMAX=VAL(1)
+            DO INODEL=2,NNODEL
+               VMIN=MIN(VMIN,VAL(INODEL))
+               VMAX=MAX(VMAX,VAL(INODEL))
+            ENDDO
+*            WRITE(IOIMP,*) 'XISO=',XISO,' VMIN=',VMIN
+*     $           ,' VMAX=',VMAX
+*     Y a-t-il une isovaleur ?
+            IF (((VMIN-XISO).LE.XTOL).AND.((VMAX-XISO).GE.-XTOL))
+     $           THEN
+* Permutation permettant d'avoir VAL en ordre croissant
+* VAL(IPERM(1)).LE.VAL(IPERM(2)).LE.VAL(IPERM(3))
+* On garde la parité de la permutation car on va essayer d'avoir une
+* orientation consistante des éléments crées :
+* - Conserver l'orientation des éléments volumiques
+* - Normale aux éléments surfaciques dans le sens du gradient
+*
+*obs  On ne permute pas dans le cas des SEG2 car on souhaite garder
+*obs  l'orientation. Pour les éléments de dimension plus haute, on
+*obs  ne garde pas l'orientation (sinon cela semble multiplier le nombre de
+*obs  cas).
+               DO INODEL=1,NNODEL
+                  IPERM(INODEL)=INODEL
+               ENDDO
+*               IF (ITYLOC.NE.2) THEN
+               CALL ISHELR(NNODEL,IPERM,NNODEL,VAL,NINV,IMPR,IRET)
+               LPAIR=(MOD(NINV,2).EQ.0)
+*               ENDIF
+*               Write(ioimp,*) 'Iperm=',(IPERM(I),I=1,NNODEL)
+*               Write(ioimp,*) 'Ninv=',ninv
+*
+* Nombre de points de l'élément ayant "exactement" la valeur XISO
+* demandee
+               NPEQ1=0
+               DO INODEL=1,NNODEL
+                  VALP(INODEL)=VAL(IPERM(INODEL))
+                  NUMP(INODEL)=NUM(IPERM(INODEL),IEL)
+                  LVALP(INODEL)=(LEGISO(VALP(INODEL)))
+                  IF (LVALP(INODEL)) THEN
+                     NPEQ1=NPEQ1+1
+                  ENDIF
+               ENDDO
+*dbg               WRITE(IOIMP,*) 'NPEQ1=',NPEQ1,' XISO=',XISO,' XTOL=',XTOL
+************************************************************************
+**************                                                 *********
+**************    Calcul du IKAS pour chaque type d'élément    *********
+**************                                                 *********
+************************************************************************
+**************                                                 *********
+**************                 POI1                            *********
+               IF (ITYLOC.EQ.1) THEN
+                  IF (NPEQ1.EQ.1) THEN
+                     IKAS=2
+                  ENDIF
+**************                                                 *********
+**************                                                 *********
+**************                 SEG2                            *********
+**************                                                 *********
+               ELSEIF (ITYLOC.EQ.2) THEN
+                  IF (NPEQ1.EQ.2) THEN
+* Le segment entier
+                     IKAS=2
+                  ELSEIF (NPEQ1.EQ.1) THEN
+* Une des extrémités
+                     IF (LVALP(1)) THEN
+* Le premier point
+* ou le segment entier (IOPT.EQ.1)  ET (VALP(2).GT.XISO)
+*                   ou (IOPT.EQ.-1) ET (VALP(2).LT.XISO)
+*                        IF (LOKISO(VALP(2))) THEN
+                        IF ((IOPT.NE.0).AND.
+     $                       ((VALP(2).GT.XISO).EQV.(IOPT.EQ.1))) THEN
+                           IKAS=2
+                        ELSE
+                           IKAS=3
+                        ENDIF
+                     ELSE
+* Le deuxième point
+* ou le segment entier (IOPT.EQ.1)  ET (VALP(1).GT.XISO)
+*                   ou (IOPT.EQ.-1) ET (VALP(1).LT.XISO)
+*                        IF (LOKISO(VALP(1))) THEN
+                        IF ((IOPT.NE.0).AND.
+     $                       ((VALP(1).GT.XISO).EQV.(IOPT.EQ.1))) THEN
+                           IKAS=2
+                        ELSE
+                           IKAS=4
+                        ENDIF
+                     ENDIF
+                  ELSE
+* Un point milieu (IOPT=0)
+* ou un bout de segment (IOPT.NE.0)
+                     IF (IOPT.EQ.0) THEN
+                        IKAS=5
+                     ELSE
+*     On garde l'orientation du segment
+*                     IF (LOKISO(VALP(1))) THEN
+                        IF ((VALP(1).GT.XISO).EQV.(IOPT.EQ.1)) THEN
+                           IKAS=6
+                        ELSE
+                           IKAS=7
+                        ENDIF
+                     ENDIF
+                  ENDIF
+**************                                                 *********
+**************                 TRI3                            *********
+**************                                                 *********
+               ELSEIF (ITYLOC.EQ.3) THEN
+                  IF (NPEQ1.EQ.3) THEN
+* Le triangle entier
+                     IKAS=2
+                  ELSEIF (NPEQ1.EQ.2) THEN
+* Un des côtés
+* ou le triangle entier (IOPT.EQ.1)  ET (VALP(3 ou 1).GT.XISO)
+*                       (IOPT.EQ.-1) ET (VALP(3 ou 1).LT.XISO)
+                     IF (LVALP(1)) THEN
+                        IF ((IOPT.NE.0).AND.
+     $                       ((VALP(3).GT.XISO).EQV.(IOPT.EQ.1))) THEN
+* Le triangle entier
+                           IKAS=2
+                        ELSE
+* Le segment [1,2]
+                           IKAS=9
+                        ENDIF
+                     ELSE
+                        IF ((IOPT.NE.0).AND.
+     $                       ((VALP(1).GT.XISO).EQV.(IOPT.EQ.1))) THEN
+* Le triangle entier
+                           IKAS=2
+                        ELSE
+* Le segment [2,3]
+                           IKAS=10
+                        ENDIF
+                     ENDIF
+                  ELSEIF (NPEQ1.EQ.1) THEN
+*     Un des points                  ou un segment
+* ou  un des points ou le triangle   ou un triangle contenant le segment
+
+                     IF (LVALP(1)) THEN
+*  Le point P1
+*  ou le triangle entier
+                        IF ((IOPT.NE.0).AND.
+     $                       ((VALP(2).GT.XISO).EQV.(IOPT.EQ.1))) THEN
+*  Le triangle entier
+                           IKAS=2
+                        ELSE
+*  3 : noeud 1
+                           IKAS=3
+                        ENDIF
+                     ELSEIF (LVALP(2)) THEN
+* Un segment reliant P2 à l'intersection sur (P1, P3)
+* ou un triangle contenant ce segment (IOPT.NE.0)
+                        IF (IOPT.EQ.0) THEN
+* 11 : segment [2,(1,3)]
+                           IKAS=11
+                        ELSE
+                           IF ((VALP(1).GT.XISO).EQV.(IOPT.EQ.1)) THEN
+* 12 : triangle [1, k11]
+                              IKAS=12
+                           ELSE
+* 13 : triangle [k11, 3]
+                              IKAS=13
+                           ENDIF
+                        ENDIF
+                     ELSE
+*  Le point P3
+*  ou le triangle entier
+                        IF ((IOPT.NE.0).AND.
+     $                       ((VALP(2).GT.XISO).EQV.(IOPT.EQ.1))) THEN
+*  Le triangle entier
+                           IKAS=2
+                        ELSE
+*  8 : noeud 3
+                           IKAS=8
+                        ENDIF
+                     ENDIF
+                  ELSE
+* Un segment reliant (P1,P2) à (P1,P3)
+*                 ou (P2,P3) à (P1,P3)
+* ou un triangle ou un quadrangle contenant ces segments
+                     IF (IOPT.EQ.0) THEN
+                        MLENTI=ELEM(2)
+                        IF (VALP(2).GT.XISO) THEN
+* Un segment reliant (P1,P2) à (P1,P3)
+* 14 : segment [(1,2),(1,3)]
+                           IKAS=14
+                        ELSE
+* Un segment reliant (P2,P3) à (P1,P3)
+* 17 : segment [(2,3),(1,3)]
+                           IKAS=17
+                        ENDIF
+                     ELSE
+* Un triangle ou un quadrangle s'appuyant sur le
+* segment reliant (P1,P2) à (P1,P3)
+                        IF (VALP(2).GT.XISO) THEN
+                           IF ((VALP(1).GT.XISO).EQV.(IOPT.EQ.1)) THEN
+* 15 : triangle [1, k14]
+                              IKAS=15
+                           ELSE
+* 16 : quadrangle [k14, 3,2]
+                              IKAS=16
+                           ENDIF
+                        ELSE
+* Un triangle ou un quadrangle s'appuyant sur le
+* segment reliant (P2,P3) à (P1,P3)
+                           IF ((VALP(3).GT.XISO).EQV.(IOPT.EQ.1)) THEN
+* 18 : triangle [3, k17]
+                              IKAS=18
+                           ELSE
+* 19 : quadrangle [1,2,k17]
+                              IKAS=19
+                           ENDIF
+                        ENDIF
+                     ENDIF
+                  ENDIF
+**************                                                 *********
+**************                 TET4                            *********
+**************                                                 *********
+               ELSEIF (ITYLOC.EQ.4) THEN
+               IF (NPEQ1.EQ.4) THEN
+*  Isovaleur = tetrahedre
+                  IKAS=2
+               ELSEIF (NPEQ1.EQ.3) THEN
+*  Isovaleur = 1 face du tetrahedre
+* ou le tetraedre entier (IOPT.EQ.1)  ET (VALP(4 ou 1).GT.XISO)
+*                        (IOPT.EQ.-1) ET (VALP(4 ou 1).LT.XISO)
+                  IF (LVALP(1)) THEN
+                     IF ((IOPT.NE.0).AND.
+     $                    ((VALP(4).GT.XISO).EQV.(IOPT.EQ.1))) THEN
+* le tetraedre entier
+                        IKAS=2
+                     ELSE
+* 22 : triangle [1,2,3]
+                        IKAS=22
+                     ENDIF
+                  ELSE
+                     IF ((IOPT.NE.0).AND.
+     $                    ((VALP(1).GT.XISO).EQV.(IOPT.EQ.1))) THEN
+* le tetraedre entier
+                        IKAS=2
+                     ELSE
+* 23 : triangle [2,3,4]
+                        IKAS=23
+                     ENDIF
+                  ENDIF
+               ELSEIF (NPEQ1.EQ.2) THEN
+*  Isovaleur = 1 segment (P1,P2) ou (P3,P4) ou 1 triangle
+*        appuye sur 2 points du tetrahedre (P2,P3)
+*  ou (IOPT.NE.0)  le segment ou le tétra complet
+*                  ou un tétra appuye sur le triangle appuye sur (P2,P3)
+*                  IF (LVALP(1).OR.LVALP(4)) THEN
+*  Isovaleur = 1 segment  (P1,P2) ou (P3,P4)
+*  ou le tétra complet
+                  IF (LVALP(1)) THEN
+                     IF ((IOPT.NE.0).AND.
+     $                    ((VALP(3).GT.XISO).EQV.(IOPT.EQ.1))) THEN
+* le tetraedre entier
+                        IKAS=2
+                     ELSE
+*  9 : segment [1,2]
+                        IKAS=9
+                     ENDIF
+                  ELSEIF (LVALP(4)) THEN
+                     IF ((IOPT.NE.0).AND.
+     $                    ((VALP(2).GT.XISO).EQV.(IOPT.EQ.1))) THEN
+* le tetraedre entier
+                        IKAS=2
+                     ELSE
+* 21 : segment [3,4]
+                        IKAS=21
+                     ENDIF
+                  ELSE
+*  Isovaleur = 1 triangle appuye sur 2 points tetra (P2,P3)
+* ou un tétra contenant ce triangle (IOPT.NE.0)
+                     IF (IOPT.EQ.0) THEN
+* 24 : triangle [2,3,(1,4)]
+                        IKAS=24
+                     ELSE
+                        IF ((VALP(1).GT.XISO).EQV.(IOPT.EQ.1)) THEN
+* 25 : tétra    [1, k24]
+                           IKAS=25
+                        ELSE
+* 26 : tétra    [k24, 4]
+                           IKAS=26
+                        ENDIF
+                     ENDIF
+                  ENDIF
+               ELSEIF (NPEQ1.EQ.1) THEN
+*  Isovaleur = 1 point ou 1 triangle appuye sur 1 point du tetrahedre
+*  ou (IOPT.NE.0) 1 point ou le tétraèdre
+*                 ou  1 tétra ou 1 pyra
+*                  IF (LVALP(1).OR.LVALP(4)) THEN
+*  Isovaleur = 1 point ou le tétraèdre
+                  IF (LVALP(1)) THEN
+                     IF ((IOPT.NE.0).AND.
+     $                    ((VALP(2).GT.XISO).EQV.(IOPT.EQ.1))) THEN
+* le tetraedre entier
+                        IKAS=2
+                     ELSE
+*  3 : noeud 1
+                        IKAS=3
+                     ENDIF
+                  ELSEIF (LVALP(4)) THEN
+                     IF ((IOPT.NE.0).AND.
+     $                    ((VALP(3).GT.XISO).EQV.(IOPT.EQ.1))) THEN
+* le tetraedre entier
+                        IKAS=2
+                     ELSE
+* 20 : noeud 4
+                        IKAS=20
+                     ENDIF
+                  ELSE
+*  Isosurface = 1 triangle appuye sur 1 point du tetrahedre
+*      ou 1 tétra ou 1 pyra
+                     IF (LVALP(2)) THEN
+*  Le point appuye est P2
+*  les autres points intersection (P1,P3) et (P1,P4)
+                        IF (IOPT.EQ.0) THEN
+* 27 : triangle [(1,3),(1,4),2]
+                           IKAS=27
+                        ELSE
+*   tétra contenant le triangle précédent et P1
+                           IF ((VALP(1).GT.XISO).EQV.(IOPT.EQ.1)) THEN
+* 28 : tétra    [1,k27]
+                              IKAS=28
+                           ELSE
+*   pyra contenant le triangle précédent et (P3,P4) (sommet P2)
+* 29 : pyra     [4,3,k27]
+                              IKAS=29
+                           ENDIF
+                        ENDIF
+                     ELSE
+*  Le point appuye est P3
+*  les autres points intersection (P2,P4) et (P1,P4)
+                        IF (IOPT.EQ.0) THEN
+* 30 : triangle [(1,4),(2,4),3]
+                           IKAS=30
+                        ELSE
+*   tétra contenant le triangle précédent et P4
+                           IF ((VALP(4).GT.XISO).EQV.(IOPT.EQ.1)) THEN
+* 31 : tétra    [k30,4]
+                              IKAS=31
+                           ELSE
+*   pyra contenant le triangle précédent et (P1,P2) (sommet P3)
+* 32 : pyra     [1,2,k30]
+                              IKAS=32
+                           ENDIF
+                        ENDIF
+                     ENDIF
+                  ENDIF
+               ELSE
+*  Cas général : pas de point du tétra
+*  Isosurface = 1 triangle quelconque section
+*   du tetrahedre ou un quadrangle   (= 2 triangles)
+*  ou (IOPT.NE.0)  1 tétra ou 1 prisme s'appuyant sur le triangle
+*              ou  1 prisme s'appuyant sur le quadrangle
+*
+*  Il y toujours un point intersection
+*  entre P1 et P4
+                  IF (VALP(2).GT.XISO) THEN
+*  Isosurface entre V1 et V2
+*  Points intersection (P1,P2) (P1,P3) (P1,P4)
+*  Un seul triangle
+                     IF (IOPT.EQ.0) THEN
+* 33 : triangle [(1,2),(1,3),(1,4)]
+                        IKAS=33
+                     ELSE
+* 1 tétra sommet P1 base (P1,P2) (P1,P3) (P1,P4)
+                        IF ((VALP(1).GT.XISO).EQV.(IOPT.EQ.1)) THEN
+* 34 : tétra    [k33,1]
+                           IKAS=34
+                        ELSE
+* 1 prisme base (P1,P2) (P1,P3) (P1,P4) et P2 P3 P4
+* 35 : prisme   [k33,2,3,4]
+                           IKAS=35
+                        ENDIF
+                     ENDIF
+                  ELSEIF (VALP(3).LT.XISO) THEN
+*  Isosurface entre V3 et V4
+*  Points intersection (P3,P4) (P2,P4) (P1,P4)
+*  Un seul triangle
+                     IF (IOPT.EQ.0) THEN
+* 36 : triangle [(1,4),(2,4),(3,4)]
+                        IKAS=36
+                     ELSE
+* 1 tétra sommet P4 base (P3,P4) (P2,P4) (P1,P4)
+                        IF ((VALP(4).GT.XISO).EQV.(IOPT.EQ.1)) THEN
+* 37 : tétra    [k36,4]
+                           IKAS=37
+                        ELSE
+* 1 prisme base (P3,P4) (P2,P4) (P1,P4) et P3 P2 P1
+* 38 : prisme   [k36,1,2,3]
+                           IKAS=38
+                        ENDIF
+                     ENDIF
+                  ELSE
+*  Isosurface entre V2 et V3 ;
+*  Points intersection (P1,P3) (P2,P3) (P2,P4) (P1,P4)
+*  Un quadrangle = 2 triangles
+                     IF (IOPT.EQ.0) THEN
+* 39 : quadrangle [(1,4),(2,4),(2,3),(1,3)]
+                        IKAS=39
+                     ELSE
+* 1 prisme base P4 (P1,P4) (P2,P4) et P3 (P1,P3) (P2,P3)
+                        IF ((VALP(4).GT.XISO).EQV.(IOPT.EQ.1)) THEN
+* 40 : prisme   [4,(1,4),(2,4),3,(1,3),(2,3)]
+                           IKAS=40
+                        ELSE
+* 1 prisme base P1 (P1,P3) (P1,P4) et P2 (P2,P3) (P2,P4)
+* 41 : prisme   [1,(1,3),(1,4),2,(2,3),(2,4)]
+                           IKAS=41
+                        ENDIF
+                     ENDIF
+                  ENDIF
+               ENDIF
+**************                                                 *********
+**************             Element inconnu                     *********
+**************                                                 *********
+               ELSE
+                  WRITE(IOIMP,*) 'ITYLOC=',ITYLOC
+                  GOTO 9999
+               ENDIF
+*
+* Doit-on garder quand même l'élément entier ?
+*            ELSEIF (IOPT.NE.0.AND.LOKISO(VAL(1))) THEN
+            ELSEIF (IOPT.NE.0.AND.((VAL(1).GT.XISO).EQV.(IOPT.EQ.1)))
+     $              THEN
+               IKAS=2
+            ENDIF
+
+**************************************************************************
+*
+*           Décodage du cas (IKAS) et création des éléments voulus
+*
+**************************************************************************
+*dbg            WRITE(IOIMP,*) 'IKAS=',IKAS
+*         type d'élément à créer
+            ITYL=TABDES(1,IKAS)
+*dbg            WRITE(IOIMP,*) '  IEL=',IEL,' ITYL=',ITYL
+* Rien à faire
+            IF (ITYL.EQ.0) THEN
+* L'élément entier, on garde la même description (orientation...)
+* que l'element initial (utilisation de NUM et non NUMP)
+            ELSEIF (ITYL.EQ.9999) THEN
+               CALL PLACE2(ITYPL,NTYEL,ITYL2,ITYPEL)
+               IF (ITYL2.GE.1.AND.ITYL2.LE.NTYEL) THEN
+*                  WRITE(IOIMP,*) '  ITYPEL=',ITYPEL,' ITYL2=',ITYL2
+                  MLENTI=ELEM(ITYL2)
+                  DO INOD=1,nbnne(itypel)
+*                     WRITE(IOIMP,*) '    INOD=',INOD,
+*     $                    ' NUM=',NUM(INOD,IEL)
+                     LECT(**)=NUM(INOD,IEL)
+                  ENDDO
+                  LECT(**)=ICOLOR(IEL)
+               ELSE
+                  GOTO 9999
+               ENDIF
+* Ce qu'il est dit de faire dans le tableau TABDES
+* On utilise la description permutée (VALP, NUMP) qui a servi a calculer
+* IKAS
+* Si la permutation avait changé l'orientation LPAIR=.FALSE.,
+* on change l'orientation de l'élément résultant
+            ELSEIF (ITYL.GE.1.AND.ITYL.LE.NTYEL) THEN
+               MLENTI=ELEM(ITYL)
+               IDX=1
+               ITYPG=ITYPL(ITYL)
+               NNO=NBNNE(ITYPG)
+*dbg               write(ioimp,*) 'Element ',noms(itypg),' nb no=',nno
+               DO INOD=1,NNO
+                  IDX=IDX+1
+                  INO1=TABDES(IDX,IKAS)
+                  IDX=IDX+1
+                  INO2=TABDES(IDX,IKAS)
+*dbg                  WRITE(IOIMP,*) '    INOD=',INOD,' INO1=',INO1,
+*dbg     $                 ' INO2=',INO2
+                  IF (INO2.EQ.0) THEN
+                     LECT(**)=NUMP(INO1)
+                  ELSE
+                     VAL1=VALP(INO1)
+                     VAL2=VALP(INO2)
+                     NUM1=NUMP(INO1)
+                     NUM2=NUMP(INO2)
+*dbg                     WRITE(IOIMP,*) '    NUM1=',NUM1,' NUM2=',NUM2
+*dbg                    WRITE(IOIMP,*) '    VAL1=',VAL1,' VAL2=',VAL2
+                     CALL ISOVA3(XISO,VAL1,VAL2,NUM1,NUM2,MLENTI,NEWNOD)
+                     IF (IERR.NE.0) RETURN
+                  ENDIF
+               ENDDO
+               LECT(**)=ICOLOR(IEL)
+*dbg               WRITE(IOIMP,*) 'LPAIR=',LPAIR
+               IF (.NOT.LPAIR) THEN
+*dbg                  write(ioimp,*) 'lect avant =',(lect(i),i=1,lect(/1))
+* Pour les éléments simplex ou qua4, il suffit d'inverser le sens de parcours
+                  IF ((ITYL.GE.2.AND.ITYL.LE.4).OR.(ITYL.EQ.7)) THEN
+                     idfin=lect(/1)-1
+                     iddeb=idfin-nno+1
+                     do iswap=1,nno/2
+                        idf=idfin-(iswap-1)
+                        idd=iddeb+(iswap-1)
+                        itmp=lect(idf)
+                        lect(idf)=lect(idd)
+                        lect(idd)=itmp
+                     enddo
+* Pour la pyramide, il suffit d'inverser le sens de parcours de la base carrée
+                  ELSEIF (ITYL.EQ.5) THEN
+                     idfin=lect(/1)-1-1
+                     iddeb=idfin-(nno-1)+1
+                     do iswap=1,(nno-1)/2
+                        idf=idfin-(iswap-1)
+                        idd=iddeb+(iswap-1)
+                        itmp=lect(idf)
+                        lect(idf)=lect(idd)
+                        lect(idd)=itmp
+                     enddo
+* Pour le prisme, il faut inverser le sens de parcours des deux bases
+                  ELSEIF (ITYL.EQ.6) THEN
+                     idf2=lect(/1)-1
+                     idd2=idf2-2
+                     idf1=idd2-1
+                     idd1=idf1-2
+                     itmp=lect(idf2)
+                     lect(idf2)=lect(idd2)
+                     lect(idd2)=itmp
+                     itmp=lect(idf1)
+                     lect(idf1)=lect(idd1)
+                     lect(idd1)=itmp
+                  ENDIF
+*dbg                  write(ioimp,*) 'lect apres =',(lect(i),i=1,lect(/1))
+               ENDIF
+            ELSE
+               GOTO 9999
+            ENDIF
+         ENDDO
+         goto 900
+
+******** Cas des CUB8 ***********************************************
+ 114     CONTINUE
+         IF (IOPT.NE.0) THEN
+*  16 2
+* Type d'élément incorrect
+            CALL ERREUR(16)
+            RETURN
+         ENDIF
+
+*   On remplit les tableaux MATCAS et MATARE decrivant les cas et aretes
+c          write(6,*) 'ISOVA2: cub8: appel a ISOVA4'
+         CALL ISOVA4(ITYPEL,MATCAS,NMAXCA,NMAXPT,MATARE,2,NMAXAR)
+c          write(6,*) 'ISOVA2: MATARE=',(MATARE(iou,1),iou=1,2)
+c          write(6,*) '               ',(MATARE(iou,2),iou=1,2)
+c          write(6,*) '                ...'
+c          write(6,*) 'ISOVA2: MATCAS=',(MATCAS(iou,1),iou=1,16)
+c          write(6,*) '               ',(MATCAS(iou,2),iou=1,16)
+c          write(6,*) '                ...'
+c          write(6,*) '               ',(MATCAS(iou,255),iou=1,16)
+c          write(6,*) '               ',(MATCAS(iou,256),iou=1,16)
+
+* REM (BP) :
+* - on ne fait pas de test avec la tolerance (cf LEGISO autres itypel) et
+*   on espere que VAL(IVAL).le.XISO au lieu de VAL(IVAL).lt.XISO suffira.
+C ..
+* - on ne construit que des triangles TRI3 en se basant sur l algo :
+*   "the marching cubes algorithm" (domaine public)
+         DO 214 IEL=1,NEL
+            ICAS = 1
+            DO IVAL=1,8
+               VAL(IVAL)=VELCHE(MIN(N1PTEL,IVAL),MIN(N1EL,IEL))
+c                if(VAL(IVAL).le.XISO) ICAS=ICAS+(2**(IVAL-1))
+            ENDDO
+c           on teste les noeuds (attention: numerotation cub8 cast3m
+c           differente de celle du marching cubes algorithm)
+            if(VAL(1).le.XISO) ICAS=ICAS+1
+            if(VAL(4).le.XISO) ICAS=ICAS+2
+            if(VAL(3).le.XISO) ICAS=ICAS+4
+            if(VAL(2).le.XISO) ICAS=ICAS+8
+            if(VAL(5).le.XISO) ICAS=ICAS+16
+            if(VAL(8).le.XISO) ICAS=ICAS+32
+            if(VAL(7).le.XISO) ICAS=ICAS+64
+            if(VAL(6).le.XISO) ICAS=ICAS+128
+c             write(6,*) 'ICAS=',ICAS
+c             write(6,*) 'MATCAS=',(MATCAS(iou,ICAS),iou=1,16)
+*           Y a-t-il une isovaleur ?
+            IF (ICAS.gt.1.or.ICAS.lt.256) THEN
+               MLENTI=ELEM(3)
+               do iar1=1,15
+                  NUMAR1=MATCAS(iar1,ICAS)
+c                   write(6,*) 'iar1,NUMAR1=',iar1,NUMAR1
+                  if(NUMAR1.eq.0) goto 214
+                  ipoin1 = MATARE(1,NUMAR1)
+                  ipoin2 = MATARE(2,NUMAR1)
+                  VAL1=VAL(ipoin1)
+                  VAL2=VAL(ipoin2)
+                  NUM1=NUM(ipoin1,IEL)
+                  NUM2=NUM(ipoin2,IEL)
+c                   write(6,*) '  ipoin1 et 2 =',ipoin1,ipoin2,NUM1,NUM2
+                  CALL ISOVA3(XISO,VAL1,VAL2,NUM1,NUM2,MLENTI,NEWNOD)
+                  IF (IERR.NE.0) RETURN
+c                   write(6,*) '  VAL1 et 2=',VAL1,VAL2
+                  if(mod(iar1,3).eq.0) LECT(**)=ICOLOR(IEL)
+               enddo
+            ENDIF
+ 214     CONTINUE
+c          write(6,*) '=> LECT=',(LECT(iou),iou=1,LECT(/1))
+         goto 900
+
+******** on termine proprement **************************************
+ 900     CONTINUE
+         SEGDES MELVAL
+
+      ENDDO
+c     fin de Boucle sur les zones elementaires
+C***********************************************************************
+
+      RETURN
+* Erreur grave
+ 9999 CONTINUE
+      MOTERR(1:8)='ISOVA2  '
+      CALL ERREUR(1039)
+      RETURN
+*
+* End of subroutine ISOVA2
+*
+      END
+
+
+
+
+
+
+
+
+

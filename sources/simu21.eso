@@ -1,0 +1,214 @@
+C SIMU21    SOURCE    FANDEUR   10/12/14    21:19:41     6806
+
+       SUBROUTINE SIMU21(IPLA,IPLB,iplc,NMOD,CONV,nbonve,numv1,
+     $                   iplval,iphi,IPERM,XPREC21)
+
+*********************************************************************
+*
+*                             S I M U 2 1
+*                             -----------
+*
+* FONCTION:
+* ---------
+*       Passage au petit probleme (calcul de T et de D),
+*       Resolution du petit probleme [T-(1/lambda)D]*Phi=0
+*       Test de convergence
+*
+* PARAMETRES :   (E)=ENTREE   (S)=SORTIE
+* -----------
+*     IPLA    LISTREEL  (E)  alpha
+*     IPLB    LISTREEL  (E)  beta
+*     iplc    LISTREEL  (E)  sign(d)
+*     NMOD    ENTIER    (E)  nombre de modes demandés pour ce cycle
+*     CONV    LOGIQUE   (S)  = vrai si on a trouvé nbonve > NMOD
+*     nbonve  ENTIER    (S)  nombre de modes ayant convergés
+*     numv1   ENTIER    (E)  dimension du probleme reduit
+*     iplval  ENTIER    (S)  POINTEUR VERS LES VALEURS PROPRES CONVERGEES
+*     iphi    ENTIER    (S)  POINTEUR VERS LES VECTEURS PROPRES CONVERGES
+*     IPERM   ENTIER    (S)  POINTEUR VERS LE TABLEAU DES PERMUTATIONS SI
+*                            LES MODES (iplval et iphi) SONT RANGES DANS
+*                            UN ORDRE DIFFERENT DE 1 2 3 ... nbonve
+*     XPREC21 FLOTTANT  (E)  PRECISION SUR LES VALEURS PROPRES
+*
+*********************************************************************
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+-INC SMLREEL
+-INC SMLENTI
+-INC SMLCHPO
+
+*=======================================================*
+* TYPE MATRIX et DECLARATIONS
+*=======================================================*
+
+      SEGMENT MATRIX
+       REAL*8 A(N,N)
+      ENDSEGMENT
+
+      POINTEUR IPRIG1.MATRIX, IPMAS1.MATRIX, IPHI.MATRIX
+      POINTEUR IPLVAL.MLREEL ,IPLERR.MLREEL
+      POINTEUR IPLA.MLREEL,IPLB.MLREEL,iplc.mlreel
+      POINTEUR IPERM.MLENTI
+      LOGICAL  CONV,CONV2
+      REAL*8   XPREC21
+
+      mlree1=ipla
+      mlree2=iplb
+      ildim=numv1
+      JG=ILDIM
+      SEGINI,IPLERR,IPERM
+      N=ILDIM
+      SEGINI,iprig1,ipmas1
+      do ibr=1,ildim
+        iprig1.a(ibr,ibr)=iplc.prog(ibr)
+      enddo
+      do ibr=1,ildim-1
+        ipmas1.a(ibr,ibr)=ipla.prog(ibr)
+        ipmas1.a(ibr,ibr+1)=iplb.prog(ibr)
+        ipmas1.a(ibr+1,ibr)=iplb.prog(ibr)
+      enddo
+      ipmas1.a(ildim,ildim)=ipla.prog(ildim)
+*
+c       write(6,*) 'simu21: appel sespa3 pour resoudre [T-(1/l)D]Phi=0'
+c         write(6,*) ' D=',(iplc.prog(iuy),iuy=1,ildim)
+c         write(6,*) ' alpha=',(ipla.prog(iuy),iuy=1,ildim)
+c         write(6,*) ' beta=',(iplb.prog(iuy),iuy=1,ildim)
+
+*=======================================================*
+* Resolution du systeme reduit tridiagonal
+*=======================================================*
+      CALL SESPA3 ( IPMAS1, IPRIG1, IPHI, IPLVAL)
+      IF(IERR .NE. 0) RETURN
+
+
+*=======================================================*
+* Test d'arret basé sur un estimateur du residu qui est egalement lié
+* a l'erreur relative des valeurs propres
+*=======================================================*
+*
+* REMARQUE IMPORTANTE :
+* bp 25/10/2010 : on ne parvient pas a demontrer (ni analytiquement et
+* ni numeriquement) ce lien avec l algo de Lanczo.eso tel quil est ecrit
+* (utilisation de la K-norme) alors qu il est evident avec la M-norme
+* cclusion : il faudrait passer a la M-norme un jour...
+* pour l instant, on se contente d etre + severe sur la precision demandee
+      XPREC0 = XPREC21
+      XPREC21 = XPREC21**1.5
+
+      XBETA=IPLB.PROG(ILDIM)
+      DO 100 IB100 = 1 , ILDIM
+        XLAMB=IPLVAL.PROG(IB100)
+        XPHIN= IPHI.A( ILDIM, IB100 )
+*       erreur absolue
+*        XERR = ABS( ( XBETA * XPHIN  )  )
+*       erreur relative (sur XLAMB=1/lambda)
+        XERR = ABS( ( XBETA * XPHIN )/ XLAMB  )
+        IPLERR.PROG( IB100 ) = XERR
+100   CONTINUE
+
+*     lambda = 1 / (1/ lambda)
+      DO 200 IB200=1,ILDIM
+        iplval.prog(ib200)=1.D0/IPLVAL.PROG(IB200)
+ 200  CONTINUE
+c        if (iimpi.ge.6) then
+c          write(6,*) 'simu21: iplval=',(iplval.prog(iou),iou=1,ILDIM)
+c          write(6,*) 'simu21: IPLERR=',(IPLERR.prog(iou),iou=1,ILDIM)
+c        endif
+
+
+*=========================================================*
+* On regarde si les NMODs premieres valeurs ont convergé
+*=========================================================*
+
+       jg=ildim
+       segini,mlree1,mlree2
+
+c----- Stratégie 1 : On trie par module croissant ---------
+         call trifla(iplval.prog(1),mlree1.prog(1),iplerr.prog(1),
+     $               mlree2.prog(1),jg,IPERM.lect(1))
+
+
+c----- Stratégie 2 : On trie par erreur croissante ---------
+c      Possible car tri des vp fait par simul7 + tard
+c      On obtient + de modes par cycle au prix d un + grand nombre de trous
+c      => implique une modification de strate(gie) pour aller moins loin
+c         et pour controler le spectre qui est tres diffus...
+c          call trifla(iplerr.prog(1),mlree2.prog(1),
+c      $               iplval.prog(1),mlree1.prog(1),jg,IPERM.lect(1))
+cbp 10/2010: finalement abandonné car difficile a mettre en oeuvre...
+
+       segsup,mlree1,mlree2
+       IF (IERR .NE. 0) RETURN
+       if (iimpi.ge.6) then
+         write(6,*) 'simu21: iplval=',(iplval.prog(iou),iou=1,ILDIM)
+         write(6,*) 'simu21: IPLERR=',(IPLERR.prog(iou),iou=1,ILDIM)
+       endif
+
+c      convergence sur l'erreur relative
+       CONV = .TRUE.
+       nbonve0=nbonve
+       nbonve=NMOD
+
+
+c------boucle sur les valeur propres
+       DO 300 IB300 = 1,ildim
+
+c       -erreur relative < tolerance?
+         EPS1 = IPLERR.PROG( IB300 )
+         EPS=ABS(EPS1)
+         IF ( EPS .GT. XPREC21 ) THEN
+           if (IB300.eq.1) then
+             nbonve=ib300-1
+             if(ib300.le.NMOD+1) CONV=.FALSE.
+             GOTO 310
+           endif
+c          pour eviter de redemarrer a cause d un mode multiple,
+c          puisque cet estimateur d erreur est assez mechant,
+c          on va tolerer une erreur relative plus grande
+           EVP1 = (iplval.prog(IB300)) / (iplval.prog(IB300-1))
+           EVP1 = ABS (EVP1 - 1.D0)
+           if (EVP1.LT.XPREC21.AND.EPS.LT.(2.D2*XPREC21)) then
+             if (iimpi.ge.6) then
+                write(6,108) IB300,EPS
+ 108            FORMAT(2X,'on sauve le candidat',I5,
+     $          ' car mode multiple et erreur acceptable=',E10.5)
+             endif
+           elseif(EVP1.LT.(2.D2*XPREC21).AND.IB300.gt.2) then
+             if (iimpi.ge.6) then
+                write(6,109) IB300,EPS
+ 109            FORMAT(2X,'on annule le candidat',I5,' car ',
+     $          'probable mode multiple et erreur inacceptable=',E10.5)
+             endif
+             nbonve=ib300-2
+             if(ib300.le.NMOD+1) CONV=.FALSE.
+             GOTO 310
+           else
+*          a priori ce n est pas un mode multiple et erreur inacceptable
+             nbonve=ib300-1
+             if(ib300.le.NMOD+1) CONV=.FALSE.
+             GOTO 310
+           endif
+         ENDIF
+300    CONTINUE
+c------fin de boucle sur les valeur propres
+310    CONTINUE
+
+*     on remet la valeur initiale
+      XPREC21 = XPREC0
+*=========================================================*
+* destruction des objets de travail
+*=========================================================*
+      mlreel=IPLERR
+      segsup,mlreel
+      mlree1=iplval
+      mlree2=IPERM
+      SEGDES,mlree1,mlree2
+      SEGSUP,IPRIG1,IPMAS1
+
+      RETURN
+      END
+
+

@@ -1,0 +1,884 @@
+C HOTANP    SOURCE    AM        16/04/12    21:16:06     8903
+      SUBROUTINE HOTANP(IPMODL,IPCHE1,IPCHE2,IPCHE3,XPREC,
+     &                                    DTPS,IPCHOT,IRET)
+*_______________________________________________________________________
+*
+*  ENTREES :
+*  ---------
+*
+*    IPCHE1  pointeur sur le MCHAML de sous type CONTRAINTES
+*    IPCHE2  pointeur sur le MCHAML de sous type VARIABLES INTERNES
+*    IPCHE3  pointeur sur le MCHAML de sous type CARACTERISTIQUES
+*    IPMODL  pointeur sur l'objet de type MMODEL
+*    XPREC   flottant (par defaut 1.D-3)
+*    DTPS    flottant increment de temps pour les modèles visqueux
+*
+*  SORTIES :
+*  ---------
+*
+*    IPCHOT  pointeur sur le MCHAML de sous type MATRICE de HOOKE
+*            TANGENTE
+*     IRET   1 ou 0 suivant succes ou pas
+*
+*  Passage aux nouveaux CHAMELEM par JM CAMPENON le 05/91
+*
+*_______________________________________________________________________
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*
+-INC CCOPTIO
+-INC CCHAMP
+-INC SMCHAML
+-INC SMELEME
+-INC SMCOORD
+-INC SMMODEL
+-INC SMINTE
+-INC SMLREEL
+*
+*- Nombre de points maximal pour stocker une courbe de traction
+      PARAMETER (LTRAC=2*75)
+*
+      SEGMENT WRK1
+         REAL*8 DDHOOK(NSTRS,NSTRS)
+         REAL*8 DDHOMU(NSTRS,NSTRS)
+      ENDSEGMENT
+*
+      SEGMENT MIDON1
+         REAL*8 XMAT(NCXMAT)
+      ENDSEGMENT
+*
+      SEGMENT MIDON2
+         REAL*8 VAR(NVART)
+      ENDSEGMENT
+*
+      SEGMENT MIDON3
+         REAL*8 XCAR(NCART)
+      ENDSEGMENT
+*
+      DIMENSION TRAC(LTRAC)
+*
+      SEGMENT NOTYPE
+        CHARACTER*16 TYPE(NBTYPE)
+      ENDSEGMENT
+*
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS)    ,NSOF(NS)
+        INTEGER      IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+*
+      CHARACTER*8 CMATE
+      CHARACTER*(NCONCH) CONM
+      PARAMETER ( NINF=3 )
+      INTEGER INFOS(NINF)
+      LOGICAL lsupva,lsupco
+*
+      IRET = 0
+*
+      NHRM=NIFOUR
+      KERRE=0
+      KPE  =0
+*
+*     Verification du lieu support du MCHAML de contraintes
+*
+      CALL  QUESUP(IPMODL,IPCHE1,3,0,ISUPCO,IRETCO)
+      IF (ISUPCO.GT.1) RETURN
+*
+*     Verification du lieu support du MCHAML de variables internes
+*
+      CALL  QUESUP(IPMODL,IPCHE2,3,0,ISUPVA,IRETVA)
+      IF (ISUPVA.GT.1) RETURN
+*
+*     Verification du lieu support du MCHAML de materiau
+*
+      CALL  QUESUP(IPMODL,IPCHE3,3,0,ISUPMA,IRETMA)
+      IF (ISUPMA.GT.1) RETURN
+*
+*     Activation du MMODEL
+*
+      MMODEL=IPMODL
+      SEGACT MMODEL
+      NSOUS=KMODEL(/1)
+*
+*     Creation du MCHELM de MATRICE DE HOOKE TANGENTE
+*
+      N1=NSOUS
+      L1=16
+      N3=6
+      SEGINI MCHELM
+      IPCHOT=MCHELM
+      TITCHE='MATRICE DE HOOKE'
+      IFOCHE=IFOUR
+*
+*     Boucle sur les sous zones du maillage
+*
+      DO 100 ISOUS=1,NSOUS
+*
+*        Traitement du modele
+*
+         IPMOD1=KMODEL(ISOUS)
+         IMODEL=IPMOD1
+         SEGACT IMODEL
+         IPMAIL=IMAMOD
+         CONM  =CONMOD
+         IMACHE(ISOUS) = IPMAIL
+         CONCHE(ISOUS) = CONMOD
+*
+         MELE=NEFMOD
+         MELEME=IMAMOD
+         SEGACT MELEME
+         NBNN=NUM(/1)
+         NBELEM=NUM(/2)
+         NFOR=FORMOD(/2)
+         NMAT=MATMOD(/2)
+C
+C   COQUE INTEGREE OU PAS ?
+C
+      IF(INFMOD(/1).NE.0)THEN
+          NPINT=INFMOD(1)
+      ELSE
+          NPINT=0
+      ENDIF
+*
+*        Nature du materiau
+*
+         CALL NOMATE(FORMOD,NFOR,MATMOD,NMAT,CMATE,MATE,MAPL)
+         IF (CMATE.EQ.' ') THEN
+           CALL ERREUR(251)
+           SEGSUP MCHELM
+           SEGDES MMODEL,IMODEL
+           RETURN
+         ENDIF
+*
+*        Information sur l'element fini
+*
+*         CALL ELQUOI(MELE,0,3,IPINF,IMODEL)
+*         IF (IERR.NE.0) THEN
+*           SEGDES IMODEL,MMODEL
+*           SEGSUP MCHELM
+*           RETURN
+*         ENDIF
+         MELE =INFELE(1)
+         MFR  =INFELE(13)
+         IPPORE=0
+         IF(MFR.EQ.33) IPPORE=NBNN
+         NBG  =INFELE(6)
+         NBGS =INFELE(4)
+         NSTRS=INFELE(16)
+         LW   =INFELE(7)
+         LHOOK=INFELE(10)
+         LHOO2=LHOOK*LHOOK
+         ICARA=INFELE(5)
+*         MINTE=INFELE(11)
+         MINTE=INFMOD(5)
+         IPMIN1=MINTE
+*
+*        Creation du tableau INFOS ( contraintes et variables internes )
+*
+         CALL IDENT(IPMAIL,CONM,IPCHE2,IPCHE1,INFOS,IRTD)
+         IF (IRTD.EQ.0) THEN
+           SEGDES IMODEL,MMODEL
+           SEGSUP MCHELM
+           RETURN
+         ENDIF
+C
+         INFCHE(ISOUS,1)=0
+         INFCHE(ISOUS,2)=0
+         INFCHE(ISOUS,3)=NHRM
+         INFCHE(ISOUS,4)=MINTE
+         INFCHE(ISOUS,5)=0
+         INFCHE(ISOUS,6)=3
+*
+*        Creation du MCHAML de HOOKE TANGENTE
+*
+         N2=1
+         SEGINI MCHAML
+         ICHAML(ISOUS)=MCHAML
+         NOMCHE(1)='MAHO'
+         TYPCHE(1)='POINTEURLISTREEL'
+*
+         IVAHOO=0
+         WRK1=0
+         MOCARA=0
+         NCARA=0
+         NCARF=0
+         MOMATR=0
+         NMATR=0
+         NMATF=0
+         MOVARI=0
+         NVARI=0
+         NVARF=0
+         IVACAR=0
+         IVAMAT=0
+         IVARI=0
+         IVACON=0
+C
+         SEGACT,MINTE
+*
+*        Traitement des champ de CONTRAINTES
+*
+         if(lnomid(4).ne.0) then
+          nomid=lnomid(4)
+          segact nomid
+          mocont=nomid
+          nstrs=lesobl(/2)
+          nfac=lesfac(/2)
+          lsupco=.false.
+         else
+          lsupco=.true.
+          CALL IDCONT(IMODEL,IFOUR,MOCONT,NSTRS,NFAC)
+         endif
+         IF (MOCONT.EQ.0) THEN
+            MOTERR(1:4)='CONT'
+            MOTERR(5:8)=NOMTP(MELE)
+            CALL ERREUR (76)
+            GOTO 9990
+         ENDIF
+*
+         NBTYPE=1
+         SEGINI NOTYPE
+         MOTYPE=NOTYPE
+         TYPE(1)='REAL*8'
+         CALL KOMCHA(IPCHE1,IPMAIL,CONM,MOCONT,MOTYPE,1,INFOS,3,IVACON)
+         SEGSUP NOTYPE
+         IF (IERR.NE.0) GOTO 9990
+*
+         IF (ISUPCO.EQ.1) THEN
+           CALL VALCHE(IVACON,NSTRS,IPMIN1,IPPORE,MOCONT,MELE)
+        ENDIF
+*
+*        Traitement des champ de VARIABLES INTERNES
+*
+         if(lnomid(10).ne.0) then
+          nomid=lnomid(10)
+          segact nomid
+          movari=nomid
+          nvari=lesobl(/2)
+          nvarf=lesfac(/2)
+          lsupva=.false.
+         else
+          lsupva=.true.
+          CALL IDVARI(MFR,IPMOD1,MOVARI,NVARI,NVARF)
+         endif
+         IF (MOVARI.EQ.0) THEN
+            MOTERR(1:4)='VARI'
+            MOTERR(5:8)=NOMTP(MELE)
+            CALL ERREUR (76)
+            GOTO 9990
+         ENDIF
+         NVART=NVARI+NVARF
+*
+         NBTYPE=1
+         SEGINI NOTYPE
+         MOTYPE=NOTYPE
+         TYPE(1)='REAL*8'
+         CALL KOMCHA(IPCHE2,IPMAIL,CONM,MOVARI,MOTYPE,1,INFOS,3,IVARI)
+         SEGSUP NOTYPE
+         IF (IERR.NE.0) GOTO 9990
+*
+         IF (ISUPVA.EQ.1) THEN
+           CALL VALCHE(IVARI,NVART,IPMIN1,IPPORE,MOVARI,MELE)
+        ENDIF
+*
+*        Creation du tableau INFOS (variables internes,caracteristiques)
+*
+         CALL IDENT(IPMAIL,CONM,IPCHE2,IPCHE3,INFOS,IRTE)
+         IF (IRTE.EQ.0) GOTO 9990
+*
+*        Traitement des champs de materiaux
+*
+         NBROBL=0
+         NBRFAC=0
+         IF (CMATE.EQ.'ISOTROPE') THEN
+            IF (MAPL.EQ.1) THEN
+               NBROBL=3
+               SEGINI NOMID
+               MOMATR=NOMID
+               LESOBL(1)='YOUN'
+               LESOBL(2)='NU  '
+               LESOBL(3)='SIGY'
+*
+               NBTYPE=1
+               SEGINI NOTYPE
+               MOTYPE=NOTYPE
+               TYPE(1)='REAL*8'
+            ELSE IF (MAPL.EQ.3) THEN
+               NBROBL=4
+               SEGINI NOMID
+               MOMATR=NOMID
+               LESOBL(1)='YOUN'
+               LESOBL(2)='NU  '
+               LESOBL(3)='LTR '
+               LESOBL(4)='LCS '
+*
+               NBTYPE=1
+               SEGINI NOTYPE
+               MOTYPE=NOTYPE
+               TYPE(1)='REAL*8'
+            ELSE IF (MAPL.EQ.15) THEN
+               NBROBL=11
+               SEGINI NOMID
+               MOMATR=NOMID
+               LESOBL(1)='YOUN'
+               LESOBL(2)='NU  '
+               LESOBL(3)='ETA '
+               LESOBL(4)='MU  '
+               LESOBL(5)='KL  '
+               LESOBL(6)='GAMM'
+               LESOBL(7)='DELT'
+               LESOBL(8)='ALFA'
+               LESOBL(9)='BETA'
+               LESOBL(10)='K   '
+               LESOBL(11)='H   '
+*
+               NBTYPE=1
+               SEGINI NOTYPE
+               MOTYPE=NOTYPE
+               TYPE(1)='REAL*8'
+            ELSE IF (MAPL.EQ.4) THEN
+               NBROBL=4
+               SEGINI NOMID
+               MOMATR=NOMID
+               LESOBL(1)='YOUN'
+               LESOBL(2)='NU  '
+               LESOBL(3)='SIGY'
+               LESOBL(4)='H   '
+*
+               NBTYPE=1
+               SEGINI NOTYPE
+               MOTYPE=NOTYPE
+               TYPE(1)='REAL*8'
+            ELSE IF (MAPL.EQ.5) THEN
+               NBROBL=3
+               SEGINI NOMID
+               MOMATR=NOMID
+               LESOBL(1)='YOUN'
+               LESOBL(2)='NU  '
+               LESOBL(3)='TRAC'
+*
+               NBTYPE=3
+               SEGINI NOTYPE
+               MOTYPE=NOTYPE
+               TYPE(1)='REAL*8'
+               TYPE(2)='REAL*8'
+               TYPE(3)='POINTEUREVOLUTIO'
+            ELSE IF (MAPL.EQ.26) THEN
+               NBROBL=3
+               SEGINI NOMID
+               MOMATR=NOMID
+               LESOBL(1)='YOUN'
+               LESOBL(2)='NU  '
+               LESOBL(3)='DC  '
+*
+               NBTYPE=1
+               SEGINI NOTYPE
+               MOTYPE=NOTYPE
+               TYPE(1)='REAL*8'
+            ELSE IF (MAPL.EQ.38) THEN
+*               pour le modele de gurson l'option est indisponible
+                  CALL ERREUR (251)
+                  GOTO 9990
+*
+            ELSE IF (MAPL.EQ.43) THEN
+*      modele visco-plastique parfait
+              NBROBL=5
+              SEGINI NOMID
+              MOMATR=NOMID
+              LESOBL(1)='YOUN'
+              LESOBL(2)='NU  '
+              LESOBL(3)='SIGY'
+              LESOBL(4)='N   '
+              LESOBL(5)='K   '
+*
+              NBTYPE=1
+              SEGINI NOTYPE
+              MOTYPE=NOTYPE
+              TYPE(1)='REAL*8'
+            ELSE
+               NBROBL=2
+               SEGINI NOMID
+               MOMATR=NOMID
+               LESOBL(1)='YOUN'
+               LESOBL(2)='NU  '
+*
+               NBTYPE=1
+               SEGINI NOTYPE
+               MOTYPE=NOTYPE
+               TYPE(1)='REAL*8'
+            ENDIF
+         ELSE
+            MOTERR(1:8)=NOMAT(MATE)
+            MOTERR(9:12)=NOMAC(MAPL)
+            MOTERR(13:20)=NOMFR(MFR)
+            INTERR(1)=IFOUR
+            CALL ERREUR(328)
+            GOTO 9990
+         ENDIF
+*
+         CALL KOMCHA(IPCHE3,IPMAIL,CONM,MOMATR,MOTYPE,1,INFOS,3,IVAMAT)
+         SEGSUP NOTYPE
+         IF (IERR.NE.0) GOTO 9990
+         NMATR=NBROBL
+         NMATF=NBRFAC
+         NMATT=NMATR+NMATF
+         IF(ISUPMA.EQ.1)THEN
+            CALL VALCHE(IVAMAT,NMATT,IPMIN1,IPPORE,MOMATR,MELE)
+            IF(IERR.NE.0)THEN
+              ISUPMA=0
+              GOTO 9990
+            ENDIF
+         ENDIF
+*
+         NCXMAT=NMATT
+         IF(MAPL.EQ.3) NCXMAT=NMATT+7
+*
+*        Traitement des champs de caracteristiques
+*
+         MOCARA = 0
+         NBROBL = 0
+         NBRFAC = 0
+         IVECT  = 0
+*
+*        Cas des coques
+*
+         IF (MFR.EQ.3) THEN
+            IF(IFOCHE.GE.-2.OR.IFOCHE.LE.2) THEN
+               NBROBL=2
+               SEGINI NOMID
+               MOCARA=NOMID
+               LESOBL(1)='EPAI'
+               LESOBL(2)='CALF'
+*
+               NBTYPE=1
+               SEGINI NOTYPE
+               MOTYPE=NOTYPE
+               TYPE(1)='REAL*8'
+            ENDIF
+         ENDIF
+*
+         NCARA=NBROBL
+         NCARF=NBRFAC
+         NCART=NCARA+NCARF
+         IF (MOCARA.NE.0) THEN
+         CALL KOMCHA(IPCHE3,IPMAIL,CONM,MOCARA,MOTYPE,1,INFOS,3,IVACAR)
+         SEGSUP,NOTYPE
+           IF (IERR.NE.0) GOTO 9990
+*
+         IF(ISUPMA.EQ.1)THEN
+            CALL VALCHE(IVACAR,NCART,IPMIN1,IPPORE,MOCARA,MELE)
+            IF(IERR.NE.0)THEN
+              ISUPMA=0
+              GOTO 9990
+            ENDIF
+         ENDIF
+           SEGDES NOMID
+         ENDIF
+*
+*        Recherche de la taille des MELVALs a allouer
+*
+         N2PTEL=NBG
+         N2EL=NBELEM
+         NEL=N2EL
+         NBPTEL=N2PTEL
+*
+         N1PTEL=0
+         N1EL=0
+         SEGINI MELVAL
+         IVAHOO=MELVAL
+         IELVAL(1)=MELVAL
+*
+*        On met la courbe de traction a zero
+*
+         SEGINI WRK1
+         CALL  ZDANUL(TRAC,LTRAC)
+*
+*      DANS LE CAS DE COQUES INTEGREES ,ON LES TRAITE COMMME LE
+*      MASSIF CONTRAINTE PLANE
+*
+        IF(NPINT.NE.0)THEN
+         IF(MELE.EQ.28)THEN
+            IFOURB=-2
+            MFR1=1
+         ENDIF
+        ELSE
+           MFR1=MFR
+           IFOURB=IFOUR
+        ENDIF
+*
+*        En cas de materiau endommageable
+*
+         IF (MAPL.EQ.26.OR.MAPL.EQ.29) GOTO 555
+*
+* MFR=        MASS    COQU  RAYL  POUT CISTR  LIQU  TUYA  LISP
+         GOTO(1000,66,3000,66,66,66,66,66,66,66,66,66,66,66,66,
+*             TUFI    RAMA    RACO    SURF                 ICQ
+     &        66,66,66,66,66,66,66,66,66,66,66,66,66,66,66,1000),MFR1
+ 66      CONTINUE
+         MOTERR(1:8)=NOMFR(MFR)
+         CALL ERREUR(193)
+         GOTO 9990
+*_______________________________________________________________________
+*
+*        Formulation MASSIVE
+*_______________________________________________________________________
+*
+ 1000 CONTINUE
+      DO 1001 IB=1,NEL
+         DO 1001 IGAU=1,NBPTEL
+*
+            IF(MAPL.EQ.5) THEN
+               MPTVAL=IVAMAT
+               MELVAL=IVAL(1)
+               IBMN=MIN(IB  ,VELCHE(/2))
+               IGMN=MIN(IGAU,VELCHE(/1))
+               YYYY=VELCHE(IGMN,IBMN)
+*
+               MELVAL=IVAL(3)
+               IBMN=MIN(IB  ,IELCHE(/2))
+               IGMN=MIN(IGAU,IELCHE(/1))
+               IMMM=IELCHE(IGMN,IBMN)
+*
+               CALL COTRA1(IMMM,YYYY,LTRAC,TRAC,NTRAC,KERRE)
+               IF(KERRE.NE.0) THEN
+                  KERIB=IB
+                  KERIG=IGAU
+               ENDIF
+            ENDIF
+*
+            CALL DOHOT1(IVAMAT,NMATT,IVACON,NSTRS,IVARI,NVART,TRAC,
+     &       LTRAC,IGAU,IB,MATE,MAPL,XPREC,DTPS,
+     &                      IFOURB,LHOOK,DDHOOK,IRTD)
+*
+            IF(IRTD.EQ.-1) THEN
+               KPE=-1
+               KPEIB=IB
+               KPEIG=IGAU
+            ENDIF
+C
+            JG=LHOO2
+            SEGINI MLREEL
+            MELVAL=IVAHOO
+            IELCHE(IGAU,IB)=MLREEL
+            KO=0
+            DO 1005 IO=1,LHOOK
+               DO 1005 JO=1,LHOOK
+                  KO=KO+1
+                  PROG(KO)=DDHOOK(IO,JO)
+ 1005       CONTINUE
+C*//        SEGDES MLREEL
+ 1001 CONTINUE
+      GOTO 510
+*_______________________________________________________________________
+*
+*        Cas des coques minces
+*_______________________________________________________________________
+*
+ 3000 CONTINUE
+      DO 3001 IB=1,NEL
+         DO 3001 IGAU=1,NBPTEL
+*
+            IF(MAPL.EQ.5) THEN
+               MPTVAL=IVAMAT
+*
+               MELVAL=IVAL(1)
+               IBMN=MIN(IB  ,VELCHE(/2))
+               IGMN=MIN(IGAU,VELCHE(/1))
+               YYYY=VELCHE(IGMN,IBMN)
+*
+               MELVAL=IVAL(3)
+               IBMN=MIN(IB  ,IELCHE(/2))
+               IGMN=MIN(IGAU,IELCHE(/1))
+               IMMM=IELCHE(IGMN,IBMN)
+*
+               CALL COTRA1(IMMM,YYYY,LTRAC,TRAC,NTRAC,KERRE)
+               IF(KERRE.NE.0) THEN
+                  KERIB=IB
+                  KERIG=IGAU
+               ENDIF
+            ENDIF
+*
+            MPTVAL=IVACAR
+            MELVAL=IVAL(1)
+            IBMN=MIN(IB  ,VELCHE(/2))
+            IGMN=MIN(IGAU,VELCHE(/1))
+            EPAIST=VELCHE(IGMN,IBMN)
+*
+            MELVAL=IVAL(2)
+            IBMN=MIN(IB  ,VELCHE(/2))
+            IGMN=MIN(IGAU,VELCHE(/1))
+            ALPHA=VELCHE(IGMN,IBMN)
+*
+* DOHOT3 se chargera de convertir les efforts generalises (IVACON)
+* et les variables internes generalisees (IVARI) en contraintes et
+* variables internes "locales"
+*
+           CALL DOHOT3(IVAMAT,NMATT,IVACON,NSTRS,IVARI,NVART,
+     &                 TRAC,LTRAC,ALPHA,EPAIST,IGAU,IB,MATE,MAPL,
+     &                 XPREC,DTPS,IFOURB,LHOOK,DDHOOK,IRTD)
+*
+           IF(IRTD.EQ.-1) THEN
+              KPE=-1
+              KPEIB=IB
+              KPEIG=IGAU
+           ENDIF
+C
+           JG=LHOO2
+           SEGINI MLREEL
+           MELVAL=IVAHOO
+           IELCHE(IGAU,IB)=MLREEL
+           KO=0
+           DO 3014 IO=1,LHOOK
+              DO 3014 JO=1,LHOOK
+                 KO=KO+1
+                 PROG(KO)=DDHOOK(IO,JO)
+ 3014      CONTINUE
+C*//       SEGDES MLREEL
+ 3001   CONTINUE
+        GOTO 510
+*_______________________________________________________________________
+*
+*        Cas des materiaux endommageables
+*_______________________________________________________________________
+*
+  555 CONTINUE
+      IF(MAPL.EQ.26) NMATT=NMATT+4
+      NCXMAT=NMATT
+      SEGINI MIDON1
+      SEGINI MIDON2
+      SEGINI MIDON3
+      DO 2001 IB=1,NEL
+         DO 2001 IGAU=1,NBPTEL
+*
+*           On recupere les Cts du mat.,les var. int. et les carac.
+*
+            MPTVAL=IVAMAT
+            DO 2010 ICOMP=1,2
+               MELVAL=IVAL(ICOMP)
+               IBMN=MIN(IB  ,VELCHE(/2))
+               IGMN=MIN(IGAU,VELCHE(/1))
+               XMAT(ICOMP)=VELCHE(IGMN,IBMN)
+ 2010      CONTINUE
+C
+           IF(MAPL.EQ.29) GOTO 2015
+C
+            DO 2011 ICOMP=3,6
+               XMAT(ICOMP)=0.D0
+ 2011      CONTINUE
+           MELVAL=IVAL(3)
+           IBMN=MIN(IB  ,VELCHE(/2))
+           IGMN=MIN(IGAU,VELCHE(/1))
+           XMAT(7)=VELCHE(IGMN,IBMN)
+*
+ 2015      MPTVAL=IVARI
+           DO 2020 ICOMP=1,NVART
+              MELVAL=IVAL(ICOMP)
+              IBMN=MIN(IB  ,VELCHE(/2))
+              IGMN=MIN(IGAU,VELCHE(/1))
+              VAR(ICOMP)=VELCHE(IGMN,IBMN)
+ 2020      CONTINUE
+*
+           IF(MOCARA.NE.0) THEN
+              MPTVAL=IVACAR
+              DO 2030 ICOMP=1,NCART
+                 MELVAL=IVAL(ICOMP)
+                 IBMN=MIN(IB  ,VELCHE(/2))
+                 IGMN=MIN(IGAU,VELCHE(/1))
+                 XCAR(ICOMP)=VELCHE(IGMN,IBMN)
+ 2030         CONTINUE
+           ENDIF
+*
+*          Selon le modele de materiau endommageable
+*
+           ZERO=0.D0
+           IF (MAPL.EQ.26) CALL ELAST1(1,IFOURB,VAR,NVART,XMAT,NCXMAT,
+     &ZERO,ZERO,XCAR,NCART,MFR1,NSTRS,DDHOOK,DDHOMU,KERRE,-1,0)
+           IF (MAPL.EQ.29) CALL ELAST1(1,IFOURB,VAR,NVART,XMAT,NCXMAT,
+     &ZERO,ZERO,XCAR,NCART,MFR1,NSTRS,DDHOOK,DDHOMU,KERRE,-2,0)
+           IF (KERRE.NE.0) GOTO 66
+*
+*
+           JG=LHOO2
+           SEGINI MLREEL
+           MELVAL=IVAHOO
+           IELCHE(IGAU,IB)=MLREEL
+           KO=0
+           IF(NPINT.NE.0.AND.MFR.EQ.3)THEN
+            DDHOOK(1,3)=DDHOOK(1,4)
+            DDHOOK(2,3)=DDHOOK(2,4)
+            DDHOOK(3,1)=DDHOOK(1,3)
+            DDHOOK(3,2)=DDHOOK(2,3)
+            DDHOOK(3,3)=DDHOOK(4,4)
+            DO 2041 IO=1,LHOOK/2
+              IO1=LHOOK*(IO-1)
+              IO2=LHOOK*(2+IO)
+              DO 2041 JO=1,LHOOK/2
+                 JO1=IO1+JO
+                 JO2=IO2+JO
+                 PROG(JO1)=DDHOOK(IO,JO)
+                 PROG(JO2+3)=DDHOOK(IO,JO)
+ 2041       CONTINUE
+           ELSE
+            DO 2040 IO=1,LHOOK
+              DO 2040 JO=1,LHOOK
+                 KO=KO+1
+                 PROG(KO)=DDHOOK(IO,JO)
+ 2040       CONTINUE
+           ENDIF
+C*//       SEGDES MLREEL
+ 2001 CONTINUE
+*
+      SEGSUP MIDON1
+      SEGSUP MIDON2
+      SEGSUP MIDON3
+      IF(MAPL.EQ.26) NMATT=NMATT-4
+
+      GOTO 510
+*____________________________________________________________________*
+*                                                                    *
+*     DESACTIVATION DES SEGMENTS PROPRES A LA ZONE GEOMETRIQUE ISOUS *
+*____________________________________________________________________*
+*                                                                    *
+  510 CONTINUE
+*
+      IF(MAPL.EQ.26.OR.MAPL.EQ.29) GOTO 110
+*
+*     ERREUR le materiau n'est pas encore implente pour la
+*            formulation MFR et l'option IFOUR
+*
+      IF(IRTD.EQ.0) THEN
+         MOTERR(1:8)=NOMAT(MATE)
+         MOTERR(9:12)=NOMAC(MAPL)
+         MOTERR(13:20)=NOMFR(MFR)
+         INTERR(1)=IFOUR
+         CALL ERREUR(328)
+         GOTO 9990
+      ENDIF
+*
+*      Contraintes en dehors de la courbe de traction
+*
+      IF(KPE.EQ.-1) THEN
+         INTERR(1)=KPEIB
+         INTERR(2)=KPEIG
+         MOTERR(1:4)=NOMTP(MELE)
+         CALL ERREUR(275)
+         GOTO 9990
+      ENDIF
+*
+*     Probleme courbe de traction
+*
+      IF(KERRE.NE.0) THEN
+         INTERR(1)=KERIB
+         INTERR(2)=KERIG
+         MOTERR(1:4)=NOMTP(MELE)
+         CALL ERREUR(KERRE)
+         GOTO 9990
+      ENDIF
+*
+ 110  CONTINUE
+      SEGDES MCHAML
+      IF (IVAHOO.NE.0) THEN
+         MELVAL=IVAHOO
+         SEGDES MELVAL
+      ENDIF
+*
+      IF (ISUPMA.EQ.1) THEN
+        CALL DTMVAL(IVAMAT,3)
+      ELSE
+        CALL DTMVAL(IVAMAT,1)
+      ENDIF
+      NOMID=MOMATR
+      SEGSUP,NOMID
+*
+      IF (ISUPMA.EQ.1) THEN
+        CALL DTMVAL(IVACAR,3)
+      ELSE
+        CALL DTMVAL(IVACAR,1)
+      ENDIF
+      NOMID=MOCARA
+      IF (MOCARA.NE.0) SEGSUP,NOMID
+*
+      IF (ISUPVA.EQ.1) THEN
+        CALL DTMVAL(IVARI,3)
+      ELSE
+        CALL DTMVAL(IVARI,1)
+      ENDIF
+      NOMID=MOVARI
+      IF (lsupva) SEGSUP,NOMID
+*
+      IF (ISUPCO.EQ.1) THEN
+        CALL DTMVAL(IVACON,3)
+      ELSE
+        CALL DTMVAL(IVACON,1)
+      ENDIF
+      NOMID=MOCONT
+      IF (lsupco) SEGSUP,NOMID
+*
+       SEGDES,MINTE
+       SEGDES IMODEL
+C*//   SEGDES MELEME
+       SEGSUP WRK1
+  100  CONTINUE
+       IRET = 1
+       SEGDES MMODEL,MCHELM
+       RETURN
+*
+ 9990 CONTINUE
+*_______________________________________________________________________
+*
+*           ERREUR DANS UNE SOUS ZONE, DESACTIVATION ET RETOUR
+*_______________________________________________________________________
+*
+      IRET = 0
+*
+      IF (ISUPMA.EQ.1) THEN
+        CALL DTMVAL(IVAMAT,3)
+      ELSE
+        CALL DTMVAL(IVAMAT,1)
+      ENDIF
+      NOMID=MOMATR
+      SEGSUP,NOMID
+*
+      IF (ISUPMA.EQ.1) THEN
+        CALL DTMVAL(IVACAR,3)
+      ELSE
+        CALL DTMVAL(IVACAR,1)
+      ENDIF
+      NOMID=MOCARA
+      IF (MOCARA.NE.0) SEGSUP,NOMID
+*
+      IF (ISUPVA.EQ.1) THEN
+        CALL DTMVAL(IVARI,3)
+      ELSE
+        CALL DTMVAL(IVARI,1)
+      ENDIF
+      NOMID=MOVARI
+      IF (lsupva.AND.MOVARI.NE.0) SEGSUP,NOMID
+*
+      IF (ISUPCO.EQ.1) THEN
+        CALL DTMVAL(IVACON,3)
+      ELSE
+        CALL DTMVAL(IVACON,1)
+      ENDIF
+      NOMID=MOCONT
+      IF (lsupco.AND.MOCONT.NE.0) SEGSUP,NOMID
+*
+      IF (IVAHOO.NE.0) THEN
+         MELVAL=IVAHOO
+         SEGSUP MELVAL
+      ENDIF
+      IF (WRK1.NE.0) SEGSUP WRK1
+      SEGDES,MINTE
+      SEGDES MELEME
+      SEGDES IMODEL
+      SEGSUP MCHAML
+*
+      SEGDES MMODEL
+      SEGSUP MCHELM
+
+      RETURN
+      END
+
+
+
+
+

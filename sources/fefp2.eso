@@ -1,0 +1,426 @@
+C FEFP2     SOURCE    CB215821  16/04/21    21:16:49     8920
+
+*******************************************************************
+      SUBROUTINE FEFP2(MATE,INPLAS,MELE,MELEME,MINTE,xMATRI,
+     .     NBELEM,NBPTEL,NBNN,LRE,MFR,
+     .     IVADESP,IVADPI,IVARI,IVAMAT,
+     .     IVASTF,IVARIF,IVADPF,LHOOK,IRIGE7,
+     .     NDEP,NDEF,NSTRS,NVARI,NMATT,PRECIS,NITMAX,NUPDATE,
+     .     KERRE)
+*******************************************************************
+*
+* entrees :
+*  mate   = numero de material elastico
+*  inplas = numero de material inelastico
+*  mele   = numero de elemento finito
+*  meleme = puntero a la malla
+*  minte  = puntero valores integracion
+*  xmatri = puntero de matrices elementares
+*  nbelem = numero de elementos
+*  nbptel = nombre de puntos por elemento
+*  nbnn   =
+*  lre    =
+*  mfr    =
+*  ivadesp= puntero a un segmento mptval de desplazamientos
+*  ivadpi = puntero a un segmento mptval de deformaciones inelasticas
+*  ivari  = puntero a un segmento mptval de variables internas
+*  ivamat = puntero a un segmento mptval de material
+*  lhook  = dimensiones de la matriz de hook
+*  irige7 = simetria de la matriz tangente
+*  ndep   = numero de componentes de desplazamientos
+*  ndef   = numero de componentes de deformaciones inelasticas
+*  nstrs  = numero de componentes de tensiones
+*  nvari  = numero de componentes de variables internas
+*  nmatt  = numero de componentes de propiedades materiales
+*  precis = precision de las iteraciones internas
+*  nitmax = numero maximo de iteraciones
+*  nupdate = total (0) / update (1) lagrangian formulation
+*
+* sorties :
+*  ivastf = puntero a un segmento mptval de tensiones
+*  ivarif = puntero a un segmento mptval de variables internas
+*  ivadpf = puntero a un segmento mptval de deformaciones inelasticas
+*  kerre  = indicador de error
+*
+************************************************************************
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+
+-INC CCOPTIO
+-INC SMCHAML
+-INC SMELEME
+-INC SMCOORD
+-INC SMMODEL
+-INC SMINTE
+-INC SMRIGID
+
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS),NSOF(NS),IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+cc    hay +4 en XMAT para compatibilidad con feap
+      SEGMENT WRK0
+        REAL*8 XMAT(NMATT+6)
+        REAL*8 DDHOOK(LHOOK,LHOOK),DEFPINI(NDEF),DEFPFIN(NDEF)
+        REAL*8 SIGF(NSTRS),VAR0(NVARI),VARF(NVARI),BE(NDEF)
+        REAL*8 REL(LRE,LRE),REL2(LRE,LRE),SHPWRK(6,NBNN)
+        REAL*8 BGENE(NSTRS,LRE)
+        REAL*8 XENEW(3,NBNN),XEOLD(3,NBNN),XMOVI(3,NBNN)
+        REAL*8 FFI(3,3),FF(3,3),FFIv(9),FFv(9)
+      ENDSEGMENT
+
+      SEGINI WRK0
+
+******************
+      nescri   =0
+      nues     =199
+c numerical differentiation parameters
+      nnumer   =0
+      deltax   =0.D0
+c line-search parameters
+      level    =1
+      kmax     =3
+      iaugla   =0
+      caugla   =0.D0
+c number of internal variable 'relative dendity'
+      nvardet  =4
+c model number
+      if      (inplas.eq.114) then
+         nmodel   =8
+      else if (inplas.eq.115) then
+         nmodel   =2
+      else if (inplas.eq.116) then
+         nmodel   =5
+c        DO NOT USE LINE-SEARCH
+         kmax     =0
+      else if (inplas.eq.117) then
+         nmodel   =6
+      else
+        write(nues,*)'  Model not defined',inplas
+      endif
+c*****************************************************************
+c     INICIO bucle elementos
+c*****************************************************************
+      DO 1000 IB=1,NBELEM
+c*****************************************************************
+
+      CALL ZERO(REL,LRE,LRE)
+      CALL ZERO(REL2,LRE,LRE)
+
+c coord del elemento ib (en t_(n+1) por el form)
+      CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XENEW)
+
+c desplazamientos impuestos y coordenadas en t_n
+      MPTVAL=IVADESP
+      DO INO=1,NBNN
+      DO ID=1,IDIM
+         MELVAL=IVAL(ID)
+         IBMN=MIN(IB,VELCHE(/2))
+         INMN=MIN(INO,VELCHE(/1))
+         XMOVI(ID,INO)=VELCHE(INMN,IBMN)
+         XEOLD(ID,INO)=XENEW(ID,INO)-XMOVI(ID,INO)
+      ENDDO
+      ENDDO
+cc
+c*****************************************************************
+c     INICIO bucle puntos de gauss
+c*****************************************************************
+      DO 1100 IGAU=1,NBPTEL
+c*****************************************************************
+
+*  var0 = variables internas iniciales
+         MPTVAL=IVARI
+         DO IC=1,NVARI
+            MELVAL=IVAL(IC)
+            IBMN=MIN(IB,VELCHE(/2))
+            IGMN=MIN(IGAU,VELCHE(/1))
+            VAR0(IC)=VELCHE(IGMN,IBMN)
+         enddo
+
+*  defplini = deformacion inelastica inicial
+         MPTVAL=IVADPI
+         DO IC=1,NDEF
+            MELVAL=IVAL(IC)
+            IBMN=MIN(IB,VELCHE(/2))
+            IGMN=MIN(IGAU,VELCHE(/1))
+            DEFPINI(IC)=VELCHE(IGMN,IBMN)
+         enddo
+
+*  xmat = caracteristicas materiales
+         MPTVAL=IVAMAT
+         DO IC=1,NMATT-3
+            MELVAL=IVAL(IC)
+            IGMN=MIN(IGAU,VELCHE(/1))
+            IBMN=MIN(IB  ,VELCHE(/2))
+            XMAT(IC+2)=VELCHE(IGMN,IBMN)
+         ENDDO
+         XMAT(1)=XMAT(3)
+         XMAT(2)=XMAT(4)
+         XMAT(3)=0.D0
+         XMAT(4)=0.D0
+c  compatibilidad con feap, ogden model
+         if (nmodel.eq.8) then
+            XMAT(10)=XMAT(9)
+            XMAT(9) =0.D0
+            XMAT(13)=-1.D0
+         endif
+
+****************************************
+* integrar
+****************************************
+
+         CALL HPRIME(XENEW,NBNN,IDIM,SHPTOT,IGAU,SHPWRK,DJAC)
+
+C Matriz Finv (d x_old / d x_new)
+         CALL ZERO(FFI,3,3)
+         DO ID=1,NBNN
+          DO IE=1,IDIM
+          DO IF=1,IDIM
+            FFI(IE,IF)=FFI(IE,IF)-SHPWRK(IF+1,ID)*XMOVI(IE,ID)
+          ENDDO
+          ENDDO
+         ENDDO
+         FFI(1,1)=1.D0+FFI(1,1)
+         FFI(2,2)=1.D0+FFI(2,2)
+         FFI(3,3)=1.D0+FFI(3,3)
+         IF (IDIM.EQ.2) THEN
+           FFI(3,3)=1.D0
+           IF (IFOUR.EQ.0) THEN
+c          Cas axisim
+             R1=0.D0
+             R2=0.D0
+             DO ID=1,NBNN
+               R1=R1+SHPWRK(1,ID)*XENEW(1,ID)
+               R2=R2+SHPWRK(1,ID)*XEOLD(1,ID)
+             ENDDO
+             FFI(3,3)=R2/(R1+1.E-20)
+           ENDIF
+         ENDIF
+
+C Matrix F (d x_new / d x_old)
+C*       CALL ZERO(FF ,3,3)
+         DO I=1,3
+         DO J=1,3
+           FF(I,J)=FFI(I,J)
+         ENDDO
+         ENDDO
+         CALL INVALM(FF,3,3,KERRE,1.D-12)
+         IF (KERRE.NE.0) THEN
+            WRITE(*,*) ' MATRICE SINGULIERE'
+            RETURN
+         ENDIF
+
+c Almacenamiento vectorial
+         DO i = 1,3
+           FFv(i) =FF(i,i)
+           FFIv(i)=FFI(i,i)
+         ENDDO
+         FFv(4) =FF(1,2)
+         FFv(5) =FF(2,1)
+         FFIv(4)=FFI(1,2)
+         FFIv(5)=FFI(2,1)
+         IF (IDIM.EQ.3) THEN
+          write(*,*)' 3D FeFp not available'
+          return
+         ENDIF
+
+C Determinante de Finv
+         IF (IDIM.EQ.2) THEN
+          DETFFI=(FFI(1,1)*FFI(2,2)-FFI(1,2)*FFI(2,1))*FFI(3,3)
+         ELSEIF (IDIM.EQ.3) THEN
+          DETFFI=       FFI(1,1)*(FFI(2,2)*FFI(3,3)-FFI(3,2)*FFI(2,3))
+          DETFFI=DETFFI-FFI(2,1)*(FFI(1,2)*FFI(3,3)-FFI(3,2)*FFI(1,3))
+          DETFFI=DETFFI+FFI(3,1)*(FFI(1,2)*FFI(2,3)-FFI(1,3)*FFI(2,2))
+         ENDIF
+
+********************************
+c Initialize plastic internal variables in first time step
+         aux = abs(DEFPINI(1))+abs(DEFPINI(2))+abs(DEFPINI(3))
+         if (aux.lt.1.d-14) then
+           call zero(DEFPINI,ndef,1)
+           do i = 1,3
+             DEFPINI(i) = 1.d0
+           end do
+         endif
+
+c Inicializar la variable interna 'det(FF_tot)' si es Update_Lagrangian
+         if ((nupdate.eq.1).AND.(VAR0(nvardet).lt.1.D-14))
+     .      VAR0(nvardet) = 1.D0
+
+c Push-Forward plastic internal variables
+         call pushf35(DEFPINI,FFv,BE)
+
+c Copy internal variables to t_n+1
+         do i = 1,NVARI
+            VARF(i) = VAR0(i)
+         end do
+
+c  density dependent plasticity, POWDER & PODERCAP
+        xdensi=-1.D0
+        if (inplas.eq.116.or.inplas.eq.117) then
+         xdensi = VAR0(nvardet) * DETFFI
+        endif
+
+c Compute KIRCHHOFF stress + tangent
+         call apf_driver_fefp(BE,VARF,SIGF,DDHOOK,
+     .                        NDEF,NVARI,NSTRS,LHOOK,
+     .                        XMAT,xdensi,PRECIS,NITMAX,KERRE,
+     .                        nescri,nues,nmodel,nnumer,deltax,
+     .                        level,kmax,iaugla,caugla,ib,igau,izone)
+
+c Total Lagrangian
+         if (nupdate.eq.0) then
+c           Guardar deformaciones elasticas en referencia
+            call pushf35(BE,FFIv,DEFPFIN)
+
+c Update Lagrangian
+         else
+c           Guardar deformaciones elasticas en t_(n+1)
+            call equv(DEFPFIN,BE,NDEF)
+c           Actualizar el determinante de FF^(-1)_(total)
+            VARF(nvardet) = VAR0(nvardet) * DETFFI
+            DETFFI        = VARF(nvardet)
+         endif
+
+c Get CAUCHY stresses and tangent moduli
+         do i = 1,NSTRS
+           SIGF(i) = SIGF(i)*DETFFI
+           do j = 1,NSTRS
+             DDHOOK(i,j) = DDHOOK(i,j)*DETFFI
+           enddo
+         enddo
+
+c add pressure contribution, log model (only deviatoric models)
+c al ser deviatoric models => det(Fe) = det (F)
+c por este motivo se puede calcular con este DETFFI
+c los casos no isocoricos calculan a partir de BE, que solo tiene
+c la parte elastica
+        if (nmodel.eq.8) then
+          if (abs(DETFFI).lt.1.D-14) DETFFI = 1.D-14
+          uppj  = xmat(1)/3.D0/(1.D0-2.D0*xmat(2)) * DETFFI
+          press = uppj * LOG(ABS(1.D0/DETFFI))
+          do i = 1,3
+           SIGF(i) = SIGF(i) + press
+           DDHOOK(i,i) = DDHOOK(i,i) - 2.d0*press + uppj
+          enddo
+          do i = 4,NSTRS
+           DDHOOK(i,i) = DDHOOK(i,i) - press
+          enddo
+          DDHOOK(1,2) = DDHOOK(1,2) + uppj
+          DDHOOK(1,3) = DDHOOK(1,3) + uppj
+          DDHOOK(2,3) = DDHOOK(2,3) + uppj
+        endif
+
+        IF (IRIGE7.EQ.0)THEN
+c compute lower part by symmetry
+          do i = 2,NSTRS
+          do j = 1,i-1
+             DDHOOK(i,j) = DDHOOK(j,i)
+          enddo
+          enddo
+        ENDIF
+****************************************
+* guardar resultados: Remember: Cauchy stresses
+****************************************
+
+*  sigf = tensiones finales
+            MPTVAL=IVASTF
+            DO IC=1,NSTRS
+               MELVAL=MPTVAL.IVAL(IC)
+               MELVAL.VELCHE(IGAU,IB)=SIGF(IC)
+            enddo
+
+*  varf = variables internas finales
+            MPTVAL=IVARIF
+            DO IC=1,NVARI
+               MELVAL=MPTVAL.IVAL(IC)
+               MELVAL.VELCHE(IGAU,IB)=VARF(IC)
+            enddo
+
+*  defpfin = deformations plasticas finales
+            MPTVAL=IVADPF
+            DO IC=1,NDEF
+               MELVAL=MPTVAL.IVAL(IC)
+               MELVAL.VELCHE(IGAU,IB)=DEFPFIN(IC)
+            enddo
+
+****************************************
+c calcula la matriz B = BGENE y el jacobiano DJAC
+****************************************
+         XDPGE = 0.D0
+         YDPGE = 0.D0
+         DIM3  = 1.D0
+         CALL BMATST(IGAU,NBPTEL,POIGAU,QSIGAU,ETAGAU,DZEGAU,
+     .               MELE,MFR,NBNN,LRE,IFOUR,NSTRS,NIFOUR,DIM3,
+     .               XENEW,SHPTOT,SHPWRK,BGENE,DJAC,XDPGE,YDPGE)
+         IF (abs(DJAC).LT.1.E-17) then
+            write(*,*)' Jacobiano cero, en elem', ib,' gauss',igau
+         ELSEIF (DJAC.LT.0.D0) then
+            write(*,*)' Jacobiano negativo, en elem', ib,' gauss',igau
+            return
+         endif
+         DJAC=ABS(DJAC)*MINTE.POIGAU(IGAU)
+c Ktan = BDB
+         IF (IRIGE7.EQ.2)THEN
+            CALL BDBSTS(BGENE,DJAC,DDHOOK,LRE,NSTRS,REL)
+         ELSE
+            CALL BDBST (BGENE,DJAC,DDHOOK,LRE,NSTRS,REL)
+         ENDIF
+c Ksigma
+         DO IA=1,NBNN
+          DO IO=1,6
+            SHPWRK(IO,IA)=SHPTOT(IO,IA,IGAU)
+          ENDDO
+         ENDDO
+         CALL DEVOLU(XENEW,SHPWRK,MFR,NBNN,IFOUR,
+     .               NIFOUR,IDIM,DIM3,RR,DJAC)
+         DJAC=ABS(DJAC)*MINTE.POIGAU(IGAU)
+         IF(IFOUR.EQ.1) THEN
+          IF(NIFOUR.EQ.0) THEN
+            CALL THSIG1(SHPWRK,DJAC,SIGF,NBNN,LRE,REL2,RR)
+          ELSE
+            CALL THSIG2(SHPWRK,DJAC,SIGF,NBNN,LRE,REL2,NIFOUR,RR)
+          ENDIF
+         ELSEIF(IFOUR.EQ.0) THEN
+          CALL THSIG3(SHPWRK,DJAC,SIGF,NBNN,LRE,REL2,RR)
+         ELSE
+          CALL THSIGH(SHPWRK,DJAC,SIGF,NBNN,IDIM,LRE,REL2)
+         ENDIF
+c*****************************************************************
+c     FIN fin bucle puntos de gauss
+1100  continue
+c*****************************************************************
+c guarda la matriz de rigidez elemental REL en XMATRI.RE
+C*       NLIGRP=LRE
+C*       NLIGRD=LRE
+         IF (IRIGE7.EQ.2)THEN
+            DO IA=1,LRE
+            DO IIB=1,IA
+              RE(IA,IIB,ib)=REL(IA,IIB)+REL2(IA,IIB)
+              RE(IIB,IA,ib)=REL(IIB,IA)+REL2(IA,IIB)
+            ENDDO
+            ENDDO
+         ELSE
+            DO IA=1,LRE
+            DO IIB=1,IA
+              RE(IA,IIB,ib)=REL(IA,IIB)+REL2(IA,IIB)
+              RE(IIB,IA,ib)=RE(IA,IIB,ib)
+            ENDDO
+            ENDDO
+         ENDIF
+c*****************************************************************
+c     FIN bucle elementos
+1000  continue
+      segdes xmatri
+c*****************************************************************
+c desactivar segmentos de trabajo
+      SEGSUP WRK0
+
+      RETURN
+      END
+
+
+
+
+

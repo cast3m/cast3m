@@ -1,0 +1,459 @@
+C DYNE15    SOURCE    BP208322  18/01/30    21:15:22     9719
+      SUBROUTINE DYNE15(ITSORT,KPREF,NVA,NP,NINS,ITLIA,KTRES,IPMAIL,
+     &                  REPRIS,ICHAIN,NTVAR,NLIAA,NLIAB,NPLB,
+     &                  IDIMB,MTRA,ITCARA,lmodyn,nmost0)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*--------------------------------------------------------------------*
+*                                                                    *
+*     Operateur DYNE : algorithme de Fu - de Vogelaere               *
+*     ________________________________________________               *
+*                                                                    *
+*     Gestion de la table definissant les resultats attendus,        *
+*     parmi la liste des variables principales et auxilliaires.      *
+*                                                                    *
+*     Parametres:                                                    *
+*                                                                    *
+* e   ITSORT  Table definissant les resultats attendus               *
+* es  KPREF   Segment des points de reference                        *
+* e   NVA     Nombre de valeurs prises par les variables             *
+* e   NP      Nombre de pas de calcul                                *
+* e   NINS    On veut une sortie tous les NINS pas de calcul         *
+* e   ITLIA   Pointeur sur la table de liaisons                      *
+* s   MTRES   Segment de sauvegarde des resultats                    *
+* s   IPMAIL  Maillage de reference pour les CHPOINTs resultats      *
+* e   REPRIS  Vrai si reprise de calcul, faux sinon                  *
+* s   ICHAIN  Segment MLENTI (ACTIF) contenant les adresses des      *
+*             chaines dans la pile des mots de CCNOYAU               *
+* s   NTVAR   Nombre total de variables internes pour les liaisons   *
+* e   NLIAA   Nombre de liaisons en base A                           *
+* s   NLIAB   Nombre de liaisons base B                              *
+* s   IDIMB   Nombre de directions base B                            *
+* e   MTRA    Segment de travail temporaire (indique si liaison POLY)*
+*                                                                    *
+*     Auteur, date de creation:                                      *
+*                                                                    *
+*     Denis ROBERT-MOUGIN, le 2 juin 1989.                           *
+*                                                                    *
+*--------------------------------------------------------------------*
+*
+-INC CCOPTIO
+-INC SMELEME
+*
+*     NRES  : nombre de variables demandees (deplacement, vitesse,
+*             acceleration, ...)
+*             =NRESPO+NRESLI
+*     NVES  : nombre de variables possibles
+*             = 10 (depl...) + nombre liaisons a sortir
+*     NCRES : nombre de valeurs prises par les variables
+*             (= nombre de ddls = nombre de modes)
+*     NPRES : nombre de pas de sortie INT (NP / NINS) + 1
+*     NREP  : nombre de variables necessaires a la reprise de calcul
+*             (pour l'instant NREP = 10)
+*     NLSA  : nombre de demandes de liaison base A en sortie
+*     NLSB  : nombre de demandes de liaison base B en sortie
+*     NVALA : nombre de variables internes par liaison base A
+*     NVALB : nombre de variables internes par liaison base B
+*
+*                   ***  Liste des variables  ***
+*
+*     Les variables principales sont:
+*
+*     1- le deplacement au pas de calcul
+*     2- la vitesse au pas de calcul
+*
+*     Les variables auxilliaires sont:
+*
+*     3- le deplacement au demi-pas precedant le pas de sortie
+*     4- la vitesse au demi-pas precedant le pas de sortie
+*     5- l'acceleration au pas de sortie
+*     6- l'acceleration au demi-pas precedant le pas de sortie
+*     7- le travail des forces exterieures au pas de sortie
+*     8- le travail des forces interieures (raideur et amortissement
+*         et forces de liaison) au pas de sortie
+*
+*     Indique si des liaisons ont ete demandees en sortie
+*
+*     9- les liaisons base A
+*    10- les liaisons base B
+*
+      SEGMENT,MTRES
+         REAL*8 XRES(NRES,NCRES,NPRES),XREP(NREP,NCRES)
+         REAL*8 XRESLA(NLSA,NPRES,NVALA),XRESLB(NLSB,NPRES,NVALB)
+         REAL*8 XMREP(NLIAB,4,IDIMB)
+         INTEGER ICHRES(NVES),IPORES(NRESPO,NPRES),IPOREP(NREP)
+         INTEGER ILIRES(NRESLI,NCRES)
+         INTEGER IPOLA(NLSA),INULA(NLSA),IPLRLA(NLSA,NVALA)
+         INTEGER IPOLB(NLSB),INULB(NLSB),IPLRLB(NLSB,NVALB)
+         INTEGER ILIREA(NLSA,NTVAR),ILIREB(NLSB,NTVAR)
+         INTEGER ILIRNA(NLSA,NTVAR),ILIRNB(NLSB,NTVAR)
+         INTEGER IPOLR(1),IMREP(NLIAB,2),IPPREP(NLIAB,4)
+         INTEGER ILPOLA(NLIAA,2)
+      ENDSEGMENT
+      SEGMENT,MPREF
+         INTEGER IPOREF(NPREF)
+      ENDSEGMENT
+      SEGMENT,MTRAV
+         INTEGER ICHRE2(NBLS),MPOLA(NBLS),MNULA(NBLS)
+         INTEGER MPOLB(NBLS),MNULB(NBLS)
+         INTEGER IVLIAA(NBLS,NTVAR),INLIAA(NBLS,NTVAR)
+         INTEGER IVLIAB(NBLS,NTVAR),INLIAB(NBLS,NTVAR)
+      ENDSEGMENT
+      SEGMENT,MTRA
+         INTEGER IPLA(NTRA)
+      ENDSEGMENT
+* segment chapeau modeles liaisons
+      SEGMENT MOLIAI
+         integer modtla,modtlb
+      ENDSEGMENT
+*
+c *     NBLS : nombre total de liaisons, limite a 2000
+c       PARAMETER ( NBLS = 2010 )
+*     on leve cette limite et on utilise le vrai nombre de liaisons
+      LOGICAL L0,L1,REPRIS,LDEP,LVIT,LACC,LWEXT,LWINT,lmodyn
+      CHARACTER*8 TYPRET,CHARRE,CHJTYP
+      INTEGER JTYP
+*
+*     ECRITURE DES CHAINES UTILISEES COMME INDICES DANS LES TABLES
+*
+      CALL DYNE12(ICHAIN)
+
+*
+*     CREATION DU MAILLAGE A PARTIR DE LA LISTE DE REFERENCE:
+*
+      MPREF = KPREF
+      N1 = IPOREF(/1)
+
+* --- syntaxe table PASAPAS ---
+      IF (lmodyn) THEN
+
+*       creation des supports geometriques de CHAMPOINT
+        NBNN = 1
+        NBELEM = nmost0
+        NBSOUS = 0
+        NBREF = 0
+        IPMMOD = 0
+        if (nmost0.gt.0) then
+          SEGINI IPT2
+          IPMMOD = IPT2
+          IPT2.ITYPEL = 1
+          DO 61  I=1,NBELEM
+             IPT2.NUM(1,I) = IPOREF(I)
+ 61       CONTINUE
+        endif
+        segdes ipt2
+*
+        IPMSTA = 0
+        NBELEM = N1 - nmost0
+        if (NBELEM.gt.0) then
+          SEGINI IPT2
+          IPMSTA = IPT2
+          IPT2.ITYPEL = 1
+          DO 62 I=1,NBELEM
+             IPT2.NUM(1,I) = IPOREF(nmost0+I)
+ 62       CONTINUE
+          segdes ipt2
+          nbnn = 0
+          nbelem = 0
+          nbsous = 2
+          nbref = 0
+          segini meleme
+          lisous(1) = ipmmod
+          lisous(2) = ipmsta
+          ipmail = meleme
+        else
+          ipmail = ipmmod
+        endif
+
+* --- syntaxe tables DYNE normales ---
+      ELSE
+
+        NBNN = 1
+        NBELEM = N1
+        NBSOUS = 0
+        NBREF = 0
+        SEGINI,MELEME
+        IPMAIL = MELEME
+        ITYPEL = 1
+        DO 60 I=1,N1
+           NUM(1,I) = IPOREF(I)
+ 60     CONTINUE
+        SEGDES,MELEME
+
+      ENDIF
+
+*
+*     CREATION DE MTRAV ET REMPLISSAGE
+*
+      IIRES  = 2
+      NVALA  = 0
+      NVALB  = 0
+      NLSA   = 0
+      NLSB   = 0
+      II     = 10
+      ILIAA  = 0
+      ILIAB  = 0
+      ITABV  = 0
+      ITLA   = 0
+      ITLB   = 0
+      NBLS = II + NLIAA + NLIAB
+      SEGINI,MTRAV
+      KTRAV = MTRAV
+*
+*     Option de sortie par defaut:
+      JTYP = 1
+      ICHRE2(1)  = JTYP
+      ICHRE2(2)  = JTYP
+      ICHRE2(3)  = 0
+      ICHRE2(4)  = 0
+      ICHRE2(5)  = 0
+      ICHRE2(6)  = 0
+      ICHRE2(7)  = 0
+      ICHRE2(8)  = 0
+      ICHRE2(9)  = 0
+      ICHRE2(10) = 0
+*
+*     Recup de la table de sortie . 'VARIABLE' --> ITABV
+      IF (ITSORT.NE.0) THEN
+
+       IF (LMODYN) THEN
+         call ecrobj('TABLE',itsort)
+         call indeta
+         call lirobj('TABLE   ',ITAC,1,IRETOU)
+         moliai = itlia
+         segact moliai
+         ITABV = ITSORT
+         typret='TABLE   '
+       ELSE
+         TYPRET=' '
+         CALL ACCTAB(ITSORT,'MOT',I0,X0,'VARIABLE',L0,IP0,
+     &                      TYPRET,I1,X1,CHARRE,L1,ITABV)
+       ENDIF
+
+*        Remplissage de ICHRE2 en fonction de la table fournie ITABV
+         IF (ITABV.NE.0 .AND. TYPRET.EQ.'TABLE   ') THEN
+*           ICHRE2(i) = | 0 si pas de sortie
+*                       | 1 si sortie chpoint
+*                       | 2 si sortie listreel
+            TYPRET=' '
+            CALL ACCTAB(ITABV,'MOT',I0,X0,'TYPE_SORTIE',L0,IP0,
+     &                        TYPRET,I1,X1,CHJTYP,LDEP,IP1)
+            IF (TYPRET.EQ.'MOT     ') THEN
+              IF(CHJTYP.EQ.'CHPOINT') THEN
+                JTYP=1
+              ELSEIF(CHJTYP.EQ.'LISTREEL') THEN
+                JTYP=2
+                if (lmodyn) then
+                  WRITE(IOIMP,*) 'only CHPOINT output is allowed for ',
+     &            'syntax 2 (DYNE with PASAPAS table)'
+                  CALL ERREUR(19)
+                  return
+                endif
+              ELSE
+                WRITE(IOIMP,*) 'TYPE_SORTIE doit etre le mot ',
+     &                         'CHPOINT ou LISTREEL'
+                CALL ERREUR(21)
+                RETURN
+              ENDIF
+            ENDIF
+
+            TYPRET=' '
+            CALL ACCTAB(ITABV,'MOT',I0,X0,'DEPLACEMENT',L0,IP0,
+     &                        TYPRET,I1,X1,CHARRE,LDEP,IP1)
+            IF (TYPRET.EQ.'LOGIQUE ' .AND. .NOT.LDEP) THEN
+               ICHRE2(1) = 0
+               IIRES = IIRES - 1
+            ELSE
+               ICHRE2(1) = JTYP
+            ENDIF
+c           if (lmodyn) then
+c             TYPRET=' '
+c             CALL ACCTAB(ITABV,'MOT',I0,X0,'DEPLACEMENTS',L0,IP0,
+c      &                        TYPRET,I1,X1,CHARRE,LDEP,IP1)
+c             IF (TYPRET.EQ.'LOGIQUE ' .AND. .NOT.LDEP) THEN
+c                ICHRE2(1) = 0
+c                IIRES = IIRES - 1
+c             ELSE
+c                ICHRE2(1) = JTYP
+c             ENDIF
+c           endif
+            TYPRET=' '
+            CALL ACCTAB(ITABV,'MOT',I0,X0,'VITESSE',L0,IP0,
+     &                        TYPRET,I1,X1,CHARRE,LVIT,IP1)
+            IF (TYPRET.EQ.'LOGIQUE ' .AND. .NOT.LVIT) THEN
+               ICHRE2(2) = 0
+               IIRES = IIRES - 1
+            ELSE
+               ICHRE2(2) = JTYP
+            ENDIF
+c           if (lmodyn) then
+c             TYPRET=' '
+c             CALL ACCTAB(ITABV,'MOT',I0,X0,'VITESSES',L0,IP0,
+c      &                        TYPRET,I1,X1,CHARRE,LVIT,IP1)
+c             IF (TYPRET.EQ.'LOGIQUE ' .AND. .NOT.LVIT) THEN
+c                ICHRE2(2) = 0
+c                IIRES = IIRES - 1
+c             ELSE
+c                ICHRE2(2) = JTYP
+c             ENDIF
+c           endif
+            TYPRET=' '
+            CALL ACCTAB(ITABV,'MOT',I0,X0,'DEPLACEMENT_1/2',L0,IP0,
+     &                        TYPRET,I1,X1,CHARRE,LDEP,IP1)
+            IF (TYPRET.EQ.'LOGIQUE ' .AND. LDEP) THEN
+               ICHRE2(3) = JTYP
+               IIRES = IIRES + 1
+            ENDIF
+            TYPRET=' '
+            CALL ACCTAB(ITABV,'MOT',I0,X0,'VITESSE_1/2',L0,IP0,
+     &                        TYPRET,I1,X1,CHARRE,LVIT,IP1)
+            IF (TYPRET.EQ.'LOGIQUE ' .AND. LVIT) THEN
+               ICHRE2(4) = JTYP
+               IIRES = IIRES + 1
+            ENDIF
+            TYPRET=' '
+            CALL ACCTAB(ITABV,'MOT',I0,X0,'ACCELERATION',L0,IP0,
+     &                        TYPRET,I1,X1,CHARRE,LACC,IP1)
+            IF (TYPRET.EQ.'LOGIQUE ' .AND. LACC) THEN
+               ICHRE2(5) = JTYP
+               IIRES = IIRES + 1
+            ENDIF
+            TYPRET=' '
+            CALL ACCTAB(ITABV,'MOT',I0,X0,'ACCELERATION_1/2',L0,IP0,
+     &                        TYPRET,I1,X1,CHARRE,LACC,IP1)
+            IF (TYPRET.EQ.'LOGIQUE ' .AND. LACC) THEN
+               ICHRE2(6) = JTYP
+               IIRES = IIRES + 1
+            ENDIF
+
+*           sorties des travaux
+            TYPRET=' '
+            CALL ACCTAB(ITABV,'MOT',I0,X0,'TRAVAIL_EXTERIEUR',L0,IP0,
+     &                        TYPRET,I1,X1,CHARRE,LWEXT,IP1)
+            IF (TYPRET.EQ.'LOGIQUE ' .AND. LWEXT) THEN
+               ICHRE2(7) = JTYP
+               IIRES = IIRES + 1
+            ENDIF
+            TYPRET=' '
+            CALL ACCTAB(ITABV,'MOT',I0,X0,'TRAVAIL_INTERIEUR',L0,IP0,
+     &                        TYPRET,I1,X1,CHARRE,LWINT,IP1)
+            IF (TYPRET.EQ.'LOGIQUE ' .AND. LWINT) THEN
+               ICHRE2(8) = JTYP
+               IIRES = IIRES + 1
+            ENDIF
+
+         ENDIF
+
+*       Dimensionnement des sorties LIAISON_A
+
+*   --- syntaxe table PASAPAS ---
+        IF (LMODYN) THEN
+          iliaa = modtla
+          if (iliaa.gt.0)
+     &    CALL DYNE74(ITSORT,ITCARA,ITAC,ILIAA,KTRAV,II,NLSA,NVALA)
+*   --- syntaxe tables DYNE normales ---
+        ELSE
+          TYPRET = ' '
+          CALL ACCTAB(ITSORT,'MOT',I0,X0,'LIAISON_A',L0,IP0,
+     &                       TYPRET,I1,X1,CHARRE,L1,ITLA)
+          IF (ITLA.NE.0 .AND. TYPRET.EQ.'TABLE   ') THEN
+             CALL ACCTAB(ITLIA,'MOT',I0,X0,'LIAISON_A',L0,IP0,
+     &                         'TABLE',I1,X1,' ',L1,ILIAA)
+             CALL DYNE24(ITLA,ILIAA,KTRAV,II,NLSA,NVALA)
+          ENDIF
+        ENDIF
+        IF (IERR.NE.0) RETURN
+        IF (NLSA.NE.0) ICHRE2(9) = 1
+
+*       Dimensionnement des sorties LIAISON_B
+
+*   --- syntaxe table PASAPAS ---
+        IF (LMODYN) THEN
+          iliab = modtlb
+          if (iliab.gt.0)
+     &    CALL DYNE77(ITSORT,ITCARA,ITAC,ILIAB,KTRAV,II,NLSB,NVALB,NPLB)
+*   --- syntaxe tables DYNE normales ---
+        ELSE
+          TYPRET = ' '
+          CALL ACCTAB(ITSORT,'MOT',I0,X0,'LIAISON_B',L0,IP0,
+     &                       TYPRET,I1,X1,CHARRE,L1,ITLB)
+          IF (ITLB.NE.0 .AND. TYPRET.EQ.'TABLE   ') THEN
+             CALL ACCTAB(ITLIA,'MOT',I0,X0,'LIAISON_B',L0,IP0,
+     &                         'TABLE',I1,X1,' ',L1,ILIAB)
+             CALL DYNE27(ITLB,ILIAB,KTRAV,II,NLSB,NVALB,NPLB)
+          ENDIF
+        ENDIF
+
+      ENDIF
+c     fin du cas ou une table de sortie a ete fournie
+      IF (IERR.NE.0) RETURN
+      IF (NLSB.NE.0) ICHRE2(10) = 1
+
+*
+*     CREATION ET REMPLISSAGE DE MTRES
+*
+      NRES   = IIRES
+      if(JTYP.eq.1) then
+        NRESPO = IIRES
+        NRESLI = 0
+      else
+        NRESPO = 0
+        NRESLI = IIRES
+      endif
+      NVES   = II
+      NREP   = 10
+      NCRES  = NVA
+      NPRES  = INT(NP/NINS) + 1
+      IF ( REPRIS ) NPRES = NPRES - 1
+      SEGINI,MTRES
+      KTRES = MTRES
+      DO 30 I = 1,NVES
+         ICHRES(I) = ICHRE2(I)
+ 30   CONTINUE
+*
+      DO 40 I = 1,NLSA
+         DO 42 II = 1,NTVAR
+            ILIREA(I,II) = IVLIAA(I,II)
+            ILIRNA(I,II) = INLIAA(I,II)
+ 42      CONTINUE
+         IPOLA(I) = MPOLA(I)
+         INULA(I) = MNULA(I)
+ 40   CONTINUE
+      DO 50 I = 1,NLSB
+         DO 52 II = 1,NTVAR
+            ILIREB(I,II) = IVLIAB(I,II)
+            ILIRNB(I,II) = INLIAB(I,II)
+ 52      CONTINUE
+         IPOLB(I) = MPOLB(I)
+         INULB(I) = MNULB(I)
+ 50   CONTINUE
+      DO 160 I = 1,NLIAA
+         ILPOLA(I,1) = IPLA(I)
+ 160  CONTINUE
+*
+      SEGSUP,MTRAV
+      SEGSUP,MTRA
+*
+*     Boucle d'impression
+*
+      IF (IIMPI.EQ.333) THEN
+         WRITE(IOIMP,*)'DYNE15 : CREATION DU SEGMENT MTRES',KTRES
+         WRITE(IOIMP,*)'DYNE15 : NRES  = ',NRES,'variables a sortir'
+         WRITE(IOIMP,*)'  dont NRESPO  = ',NRESPO,' en chpoint'
+         WRITE(IOIMP,*)'  et   NRESLI  = ',NRESLI,' en listreel'
+         WRITE(IOIMP,*)'  sur  NVES    = ',NVES,'possibles'
+         WRITE(IOIMP,*)'DYNE15 : NLSA  = ',NLSA,'liaison A a sortir'
+         WRITE(IOIMP,*)'  avec NVALA   = ',NVALA,'parametres max'
+         WRITE(IOIMP,*)'DYNE15 : NLSB  = ',NLSB,'liaison B a sortir'
+         WRITE(IOIMP,*)'  avec NVALB   = ',NVALB,'parametres max'
+         WRITE(IOIMP,*)'DYNE15 : NPRES = ',NPRES,'pas a sortir'
+         WRITE(IOIMP,*)'DYNE15 : NCRES = ',NCRES,'ddls(=modes) a sortir'
+         WRITE(IOIMP,*)'DYNE15 : ICHRES(:)=',(ICHRES(I),I=1,NVES)
+      ENDIF
+*
+      RETURN
+      END
+
+
+
+

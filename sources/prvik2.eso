@@ -1,0 +1,331 @@
+C PRVIK2    SOURCE    BP208322  17/03/01    21:18:02     9325
+      SUBROUTINE PRVIK2(SIG0,NSTRS,DEPST,VAR0,XMAT,NCOMAT,XCAR,ICARA,
+     1     NVARI,SIGF,VARF,DEFP,MFR1,DDAUX,CMATE,VALMAT,VALCAR,N2EL,
+     2     N2PTEL,NBPGAU,IFOU,IB,IGAU,EPAIST,MELE,NPINT,NBGMAT,
+     3     NELMAT,SECT,LHOOK,TXR,XLOC,XGLOB,D1HOOK,ROTHOO,DDHOMU,
+     4                                         CRIGI,DSIGT,KERRE,DT)
+comm ******************************************************************
+comm *     execute le calcul annonce au niveau du p_gauss             *
+comm * loi viscoplastique : le comportement anelastique est decrit    *
+comm * par un mecanisme "plastique" (ecrouissage cinematique)         *
+comm * et un mecanisme "visqueux"   (Maxwell)                         *
+comm * en parallele, ce au-dela du seuil de plasticite                *
+comm *                                                                *
+comm * il faut donc gerer 2 jeux de variables cachees tensorielles    *
+comm *                                                                *
+comm * cette loi est derivee des travaux deja realises a propos du    *
+comm * comportement mecanique du polyethylene                         *
+comm * (these Kichenin, Ecole Polytechnique, 1992)                    *
+comm * algorithme Nguyen Quoc Son, mise au point J Frelat             *
+comm * $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$*
+comm * RECOMMANDATION :                                               *
+comm * la chasse au bugs est bienvenue MAIS PAS                       *
+comm * les ameliorations ou nouveaux developpements dans              *
+comm * l inspiration de VISK2 (rapport SEMT/LAMS 98 Kichenin, Charras)*
+comm * Il est preferable d une part de creer une nouvelle loi, d autre*
+comm *  part de RECOPIER dans un AUTRE fichier les lignes voulues     *
+comm * MERCI. JK                                                      *
+comm ******************************************************************
+      IMPLICIT INTEGER(I-N)
+        IMPLICIT REAL*8(A-H,O-Z)
+-INC CCOPTIO
+      DIMENSION SIG0(*),DEPST(*),VAR0(*),XMAT(*),XCAR(*),SIGF(*),
+     &          VARF(*),DEFP(*)
+      DIMENSION RSIG0(6),RDSIGT(6),RDEFP(6),RSIGF(6),DSIGT(*)
+      DIMENSION VALMAT(*),VALCAR(*)
+      DIMENSION TXR(IDIM,*),CRIGI(12)
+      DIMENSION DDAUX(LHOOK,*),DDHOMU(LHOOK,*)
+      DIMENSION XLOC(3,3),XGLOB(3,3)
+      DIMENSION D1HOOK(LHOOK,*),ROTHOO(LHOOK,*)
+      CHARACTER*8 CMATE
+        real*8 lambdav
+        logical plast
+        dimension sigpca(6),sigppa(6),sig2(6)
+c..
+c..      VOIR PB IFOUR IFOURB IFOU
+      IF (IFOUR.NE.-2.AND.IFOUR.NE.-1.AND.IFOUR.NE.-3.AND.IFOUR.NE.0)
+     &  THEN
+         iuv1 = 7
+      ELSE
+         iuv1 = 5
+      ENDIF
+c..
+        if((1.+xmat(2)).eq.0.or.(1-2.*xmat(2)).eq.0) then
+           interr(5)=1
+           kerre = 82
+           return
+        endif
+* suppose fondalement isotropie du comportement
+        x2mu= xmat(1)/(1.+xmat(2))
+        x2muv=xmat(8)/(1.+xmat(2))
+        seuil=xmat(5)/1.73205080757
+        ecrou=xmat(6)
+        if (x2mu.le.0.or.seuil.lt.0.or.ecrou.lt.0) then
+           interr(5) = 4
+           kerre = 82
+           return
+        endif
+c.. initialise ecrouissage mecanisme plastique
+c.. l indice 1 est la deformation plastique equivalente
+        varf(1) = var0(1)
+        varf(2) = var0(2)
+        varf(3) = var0(3)
+        varf(4) = var0(4)
+        varf(5) = var0(5)
+        if (ifour.gt.0) then
+          varf(6) = var0(6)
+          varf(7) = var0(7)
+        endif
+c mecanisme visqueux
+      svxx=var0(iuv1+1)
+      svyy=var0(iuv1+2)
+      svzz=var0(iuv1+3)
+      svxy=var0(iuv1+4)
+      if (ifour.gt.0) then
+        svxz=var0(iuv1+5)
+        svyz=var0(iuv1+6)
+      endif
+c..
+c
+C   CALCUL DE L'INCREMENT DE CONTRAINTES "elastique"
+C
+      CALL CALSIG(DEPST,DDAUX,NSTRS,CMATE,VALMAT,VALCAR,
+     1  N2EL,N2PTEL,MFR1,IFOU,IB,IGAU,EPAIST,NBPGAU,
+     2     MELE,NPINT,NBGMAT,NELMAT,SECT,LHOOK,TXR,XLOC,
+     3        XGLOB,D1HOOK,ROTHOO,DDHOMU,CRIGI,DSIGT,IRTD)
+*
+      IF(IRTD.NE.1) THEN
+         KERRE=69
+         GOTO 1000
+      ENDIF
+
+
+        plast = .false.
+c..  composante plastique + increment elastique : cinematique admissible
+        sigpca(1)= sig0(1) - svxx + DSIGT(1)
+        sigpca(2)= sig0(2) - svyy + DSIGT(2)
+        sigpca(3)= sig0(3) - svzz + DSIGT(3)
+        sigpca(4)= sig0(4) - svxy + DSIGT(4)
+        if (ifour.gt.0)then
+          sigpca(5)= sig0(5) - svxz + DSIGT(5)
+          sigpca(6)= sig0(6) - svyz + DSIGT(6)
+        endif
+        trsigp=0.33333*(sigpca(1)+sigpca(2)+sigpca(3))
+c..
+c.. evalue cette composante (deviateur) dans le convexe definissant l'ecrouissage
+        sig2(1)= sigpca(1)-trsigp-varf(2)
+        sig2(2)= sigpca(2)-trsigp-varf(3)
+        sig2(3)= sigpca(3)-trsigp-varf(4)
+        sig2(4)= sigpca(4)-varf(5)
+        if (ifour.gt.0)then
+          sig2(5)= sigpca(5)-varf(6)
+          sig2(6)= sigpca(6)-varf(7)
+        endif
+c.. calcule la norme de Von Mises
+        fsig2 = sig2(1)*sig2(1) + sig2(2)*sig2(2) + sig2(3)*sig2(3)
+        fsig2 = fsig2 + 2.d0*sig2(4)*sig2(4)
+        if(ifour.gt.0)then
+          fsig2 = fsig2 + 2.d0*sig2(5)*sig2(5) + 2.d0*sig2(6)*sig2(6)
+        endif
+        fsig2 = SQRT(0.5d0*fsig2)
+
+
+c.. tests
+c a l interieur du convexe ou cas pathologique
+        if ((fsig2-seuil).le.0.or.fsig2.eq.0) then
+          plast=.false.
+          coef = 0.
+          defp(1) = 0.
+          defp(2) = 0.
+          defp(3) = 0.
+          defp(4) = 0.
+          if (ifour.gt.0) then
+            defp(5) = 0.
+            defp(6) = 0.
+          endif
+          goto 100
+        endif
+c.. sinon le seuil est franchi
+        plast = .true.
+c.. et il est necessaire de faire un calcul d ecoulement
+      coef=(fsig2-seuil)/(x2mu+ecrou)/fsig2
+c.. increment de la deformation plastique
+      defp(1) = coef * sig2(1)
+      defp(2) = coef * sig2(2)
+      defp(3) = coef * sig2(3)
+      defp(4) = coef * sig2(4) * 2.
+      if (ifour.gt.0) then
+        defp(5) = coef * sig2(5) * 2.
+        defp(6) = coef * sig2(6) * 2.
+      endif
+ 100  continue
+c.. increment de la variable d ecrouissage
+      varf(1) = varf(1) + coef*fsig2*1.414213562
+      varf(2) = varf(2) + ecrou*defp(1)
+      varf(3) = varf(3) + ecrou*defp(2)
+      varf(4) = varf(4) + ecrou*defp(3)
+      varf(5) = varf(5) + ecrou*defp(4) / 2.
+      if (ifour.gt.0) then
+        varf(6) = varf(6) + ecrou*defp(5) / 2.
+        varf(7) = varf(7) + ecrou*defp(6) / 2.
+      endif
+c.. contrainte plastiquement admissible
+      sigppa(1) = sigpca(1) - x2mu*defp(1)
+      sigppa(2) = sigpca(2) - x2mu*defp(2)
+      sigppa(3) = sigpca(3) - x2mu*defp(3)
+      sigppa(4) = sigpca(4) - x2mu*defp(4) / 2.
+      if(ifour.gt.0) then
+        sigppa(5) = sigpca(5) - x2mu*defp(5) / 2.
+        sigppa(6) = sigpca(6) - x2mu*defp(6) / 2.
+      endif
+
+      fsigpa = sigppa(1)*sigppa(1) + sigppa(2)*sigppa(2)
+     & + sigppa(3)*sigppa(3) + 2.d0*sigppa(4)*sigppa(4)
+      if (ifour.gt.0) then
+        fsigpa = fsigpa + 2.d0*sigppa(5)*sigppa(5)
+     & + 2.d0*sigppa(6)*sigppa(6)
+      endif
+      fsigpa = SQRT(0.5d0*fsigpa)
+c..
+
+ 300  CONTINUE
+
+c..
+c.. traite le mecanisme visqueux
+      fsv1 = 0.
+comm *................................................................*
+comm *  viscosite non-lineaire ... si devis est le parametre cache    *
+comm *  increment de deformation-visqueuse, et sigvis le parametre    *
+comm * contrainte-visqueuse initial, la loi de comportement s ecrit   *
+comm *  eta*dev = (sigvis + loiv*(du-dev))*|sigvis+loiv*(du-dev)|**m  *
+comm *  (m = n-1) le mecanisme visqueux etant somme toute secondaire  *
+comm * l approche bricolee consiste a evaluer                         *
+comm *    fsv1 = |sigvis+loiv*du|**m,   dev=0                         *
+comm * puis ecrire sigv-final = (sigvis + loiv*(du-dev)) * coefv            *
+comm * le coefv etant evalue a partir de fsv1 et valant               *
+comm *     coefv = 1./(1+x2muv/eta) quand m=0                         *
+comm *................................................................*
+c.. on suppose le comportement visqueux homogene et isotrope
+        lambdav=xmat(8)*xmat(2)/(1+xmat(2))/(1-2.*xmat(2))
+        x2muv=xmat(8)/(1.+xmat(2))
+        if(x2muv.lt.0) then
+           interr(5)=5
+           kerre = 82
+           return
+        endif
+        m = nint(xmat(9)) - 1
+c.. coefficient applique a la branche visqueuse : mecanisme actif
+c.. au-dela du seuil, inactif sinon
+        if (x2mu.gt.0) then
+          xambda2 = x2muv/x2mu
+        endif
+        if (xambda2.le.0) xambda2 = 0.
+c.. viscosite
+      if (xmat(7).le.0.) then
+c.. mecanisme visqueux inactif,
+        varf(iuv1+1)=0.
+        varf(iuv1+2)=0.
+        varf(iuv1+3)=0.
+        varf(iuv1+4)=0.
+        if (ifour.gt.0)then
+          varf(iuv1+5)=0.
+          varf(iuv1+6)=0.
+        endif
+        goto 400
+      endif
+c.. le mecanisme n'est efficace qu a partir d un pas de temps assez grand
+c.. et si l on est dans le domaine plastique
+      if (dt.gt.1.e-15) then
+        eta=xmat(7)/dt
+        x2muv2=x2muv+eta
+        coedev=1./x2muv2
+        coesph=lambdav/x2muv2/(3.*lambdav+x2muv2)
+c..
+c.. incremente "elastiquement" la contrainte-visqueuse
+        svxx=svxx+x2muv * defp(1)
+        svyy=svyy+x2muv * defp(2)
+        svzz=svzz+x2muv * defp(3)
+        svxy=svxy+x2muv * defp(4)
+        if(ifour.gt.0)then
+          svxz=svxz+x2muv * defp(5)
+          svyz=svyz+x2muv * defp(6)
+        endif
+c..
+c.. deduit l'increment de deformation-visqueuse
+        trsv=svxx+svyy+svzz
+        svxx=eta*(coedev*svxx-coesph*trsv)
+        svyy=eta*(coedev*svyy-coesph*trsv)
+        svzz=eta*(coedev*svzz-coesph*trsv)
+        evxy=eta*coedev*svxy
+        if(ifour.gt.0)then
+          svxz=eta*coedev*svxz
+          svyz=eta*coedev*svyz
+        endif
+c..
+        fsv1 = svxx*svxx + svyy*svyy + svzz*svzz + 2.*svxy*svxy
+        if(ifour.gt.0) then
+          fsv1= fsv1 + 2.*svxz*svxz+2.*svyz*svyz
+          fsv1 = fsv1/eta
+        endif
+c
+c.. coef multiplicateur
+        if (fsv1.gt.0.and.m.gt.0) fsv1 = (SQRT(0.5*fsv1))**m
+        if (fsv1.gt.0.and.m.lt.0) fsv1 = (1./SQRT(0.5*fsv1))**(-1.*m)
+        if (fsv1.gt.0.and.m.eq.0) fsv1 = 1.
+*         if(igau.eq.4) write(6,*) ' fsv1 ', fsv1
+        if (fsv1.eq.0) then
+c.. composante visqueuse nulle
+          varf(iuv1+1) = 0.
+          varf(iuv1+2) = 0.
+          varf(iuv1+3) = 0.
+          varf(iuv1+4) = 0.
+          if (ifour.gt.0) then
+            varf(iuv1+5) = 0.
+            varf(iuv1+6) = 0.
+          endif
+          goto 400
+        endif
+c.. coeff reducteur
+        coefv = fsv1/(1. + (m+1)*x2muv*fsv1/eta)
+        varf(iuv1+1)=svxx*coefv
+        varf(iuv1+2)=svyy*coefv
+        varf(iuv1+3)=svzz*coefv
+        varf(iuv1+4)=svxy*coefv
+        if (ifour.gt.0)then
+          varf(iuv1+5)=svxz*coefv
+          varf(iuv1+6)=svyz*coefv
+        endif
+
+c..  quand le pas de temps est petit la variable cachee est inchangee
+      else
+        varf(iuv1+1)=var0(iuv1+1)
+        varf(iuv1+2)=var0(iuv1+2)
+        varf(iuv1+3)=var0(iuv1+3)
+        varf(iuv1+4)=var0(iuv1+4)
+        if (ifour.gt.0)then
+          varf(iuv1+5)=var0(iuv1+5)
+          varf(iuv1+6)=var0(iuv1+6)
+        endif
+      endif
+comm *................................................................*
+comm *   calcul de la contrainte finale                               *
+comm *................................................................*
+ 400    continue
+        sigf(1) = sigppa(1) + varf(iuv1+1)
+        sigf(2) = sigppa(2) + varf(iuv1+2)
+        sigf(3) = sigppa(3) + varf(iuv1+3)
+        sigf(4) = sigppa(4) + varf(iuv1+4)
+        if(ifour.gt.0)then
+          sigf(5) = sigppa(5) + varf(iuv1+5)
+          sigf(6) = sigppa(6) + varf(iuv1+6)
+        endif
+        return
+
+ 1000  continue
+        end
+
+
+
+
+
+

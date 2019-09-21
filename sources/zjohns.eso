@@ -1,0 +1,1482 @@
+C ZJOHNS    SOURCE    CHAT      05/01/13    04:23:03     5004
+      SUBROUTINE ZJOHNS
+C
+C     VERSION VECTORISEE
+C
+C     Les éléments sont groupés en paquets de LRV éléments, LRV étant
+C     la longueur des registres vectoriels de la machine cible, i.e
+C     64 sur Cray, 128 ou 256 sur IBM 3090VF. On promène une fenêtre
+C     de longueur LRV sur la boucle générale de longueur NEL.
+C
+
+C    KDESIGN n'est pas défini  !!!!!!
+C
+C
+     & (HR,RPG,DRR,LE,NEL,K0,NPTD,IES,NP,IAXI,
+     & IPADL,IKOMP,IKAS,
+     & ALFE,IND1,UN,INDU,NPTU,IPADU,
+     & TN,QE,IKS,
+     & HRN,G,ALT,SGT,
+     & VOLU,COTE,NELZ,
+     & DTM1,DT,DTT1,DTT2,NUEL,DIAEL)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+C***********************************************************************
+C
+C  CE SP DISCRETISE UNE EQUATION GENERALE DE TRANSPORT-DIFFUSION AVEC
+C  SOURCE.
+C    EN 2D SUR LES ELEMENTS QUA4 ET TRI3      PLAN OU AXI
+C    EN 3D SUR LES ELEMENTS CUB8 ET PRI6
+C  LES OPERATEURS SONT "SOUS-INTEGRES"
+C
+C
+C                        APPELE PAR YTSCAL
+C
+C
+C***********************************************************************
+
+-INC CCVQUA4
+-INC CCREEL
+-INC SMCOORD
+-INC CCOPTIO
+
+C
+C Longueur des registres vectoriels de la machine cible
+C On prend 64 pour ne pas augmenter la taille des tableaux
+C nécessaires à la vectorisation.
+C
+      PARAMETER(LRV=64)
+
+      DIMENSION UN(NPTU,IES),HRN(NPTD),TN(NPTD)
+      DIMENSION COTE(NELZ,IES),VOLU(NELZ),QE(*)
+      DIMENSION ALFE(*),ALT(*)
+
+      DIMENSION IPADL(1),LE(NP,1),IPADU(*)
+      DIMENSION HR(NEL,NP,IES),RPG(1),DRR(NP,NEL)
+
+      DIMENSION BF(9,9)
+      DIMENSION QGGT(8,8),Q1(8,8),Q2(8,8),Q3(8,8)
+
+      DIMENSION COEF(LRV),AIRE(LRV)
+      DIMENSION AL2(LRV),AH2(LRV),AP2(LRV)
+      DIMENSION AL(LRV),AH(LRV),AP(LRV)
+      DIMENSION ALFT(LRV),QT(LRV)
+      DIMENSION XMB(LRV),XMH(LRV)
+      DIMENSION CFM(LRV)
+C     DIMENSION CF1(LRV),CF2(LRV),CF3(LRV)
+      DIMENSION DR(LRV,9)
+      DIMENSION UM(LRV),UP(LRV)
+      DIMENSION UIX(LRV,9),UIY(LRV,9),UIZ(LRV,9)
+      DIMENSION TETAC(LRV,9),TETAD(LRV,9),TETA(LRV,9)
+      DIMENSION UMI(LRV,3),UPI(LRV,3)
+      DIMENSION CXT(LRV),CYT(LRV),CXY(LRV)
+      DIMENSION DXT(LRV),DYT(LRV),DXY(LRV)
+      DIMENSION CZT(LRV),CXZ(LRV),CYZ(LRV)
+      DIMENSION DZT(LRV),DXZ(LRV),DYZ(LRV)
+      DIMENSION SBF(LRV,9)
+      DIMENSION GRADT(LRV,3)
+      DIMENSION BM(LRV),BP(LRV)
+
+      DIMENSION BMX(LRV),BMY(LRV),BPX(LRV),BPY(LRV)
+
+      REAL*8    G(1),n(2,4),MMAX(4),lll,Fi
+      REAL*8    b(2),Nm,x(4),y(4),kkk(4),Kchap
+      INTEGER   zz,p,kdesign
+      PARAMETER (zz=1)
+
+      SAVE IPAS,QGGT,Q1,Q2,Q3
+
+      DATA CD/1.D0/
+
+      DATA IPAS/0/
+
+      DATA IDCENN/2/
+C************************************************************************
+C
+C           INITIALISATIONS DIVERSES
+C
+      KDESIGN=0
+      NK=K0
+C                           ********
+C                           *  2D  *
+C                           ********
+
+
+      IF (NP.EQ.3) THEN
+      x(4)=0.d0
+      y(4)=0.d0
+      ENDIF
+
+      IF(IES.EQ.3)GO TO 10
+
+      IAX1=0
+      IAX2=0
+      IF(IAXI.EQ.1)IAX2=1
+      IF(IAXI.EQ.2)IAX1=1
+
+      HMIN = 1.D20
+      HMAX = 0.D0
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+C                           DIFFERENCES TRIANGLE / QUADRANGLE
+      QUA4=0.D0
+      IF(NP.EQ.4)QUA4=1.D0
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+C
+C Calcul du nombre de paquets de LRV éléments
+C
+      NNN=MOD(NEL,LRV)
+      IF(NNN.EQ.0) NPACK=NEL/LRV
+      IF(NNN.NE.0) NPACK=1+(NEL-NNN)/LRV
+      KPACKD=1
+      KPACKF=NPACK
+C
+C ******* BOUCLE SUR LES PAQUETS DE LRV ELEMENTS **********
+C
+      DO 7001 KPACK=KPACKD,KPACKF
+C
+C ======= A L'INTERIEUR DE CHAQUE PAQUET DE LRV ELEMENTS =======
+C
+C 1. Calcul des limites du paquet courant.
+      KDEB=1+(KPACK-1)*LRV
+      KFIN=MIN(NEL,KDEB+LRV-1)
+C
+      DO 7002 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NK=K+K0
+      NK1=(1-IND1)*(NK-1)+1
+      ALFT(KP)=ALFE(NK1)+XPETIT
+      AIRE(KP)=VOLU(NK)
+      AL(KP)=COTE(NK,1)
+      AH(KP)=COTE(NK,2)
+      AL2(KP)=1.D0/AL(KP)/AL(KP)
+      AH2(KP)=1.D0/AH(KP)/AH(KP)
+      XMH(KP)=(AL(KP)+AH(KP))/2.D0
+ 7002 CONTINUE
+
+      IF((IKOMP.EQ.0.AND.IKAS.EQ.5).OR.
+     &(IKOMP.EQ.1.AND.IKAS.EQ.6))THEN
+      DO 7003 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NK=K+K0
+      ALFT(KP)=ALFT(KP)+ALT(NK)/SGT
+ 7003 CONTINUE
+      ENDIF
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+C Initialisation des UMI avant accumulation
+      DO 7005 K=KDEB,KFIN
+      KP=K-KDEB+1
+      UMI(KP,1)=XPETIT
+      UMI(KP,2)=XPETIT
+      UPI(KP,1)=XPETIT
+      UPI(KP,2)=XPETIT
+      GRADT(KP,1)=XPETIT
+      GRADT(KP,2)=XPETIT
+ 7005 CONTINUE
+
+      DO 7006 I=1,NP
+C*IBMDIR* PREFER VECTOR
+      DO 7006 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NF=IPADL(LE(I,K))
+      NFU=IPADU(LE(I,K))
+      NFU=(1-INDU)*(NFU-1)+1
+      DR(KP,I)=DRR(I,K)
+      UIX(KP,I)=UN(NFU,1)
+      UIY(KP,I)=UN(NFU,2)
+      UMI(KP,1)=UMI(KP,1)+UN(NFU,1)*DR(KP,I)
+      UMI(KP,2)=UMI(KP,2)+UN(NFU,2)*DR(KP,I)
+
+      TETAC(KP,I)=HRN(NF)
+      TETAD(KP,I)=TN(NF)
+      GRADT(KP,1)=GRADT(KP,1)+HR(K,I,1)*TETAC(KP,I)
+      GRADT(KP,2)=GRADT(KP,2)+HR(K,I,2)*TETAC(KP,I)
+ 7006 CONTINUE
+
+C
+C Initialisation de la variable d'accumulation SBF au terme source
+C
+C       write(6,*)' IKomp,ias=',IKomp,ikas
+C       write(6,*)' IKS,IND1,INDU=',IKS,IND1,INDU
+
+      IF(IKOMP.EQ.0)THEN
+
+         DO 70021 K=KDEB,KFIN
+         KP=K-KDEB+1
+         NK=K+K0
+         NKS=(1-IKS)*(NK-1)+1
+         QT(KP)=QE(NKS)
+70021    CONTINUE
+
+         DO 70062 I=1,NP
+C*IBMDIR* PREFER VECTOR
+         DO 70062 K=KDEB,KFIN
+         KP=K-KDEB+1
+         SBF(KP,I)=-QT(KP)*DR(KP,I)
+70062    CONTINUE
+
+      ELSEIF(IKOMP.EQ.1)THEN
+
+         DO 70023 K=KDEB,KFIN
+         KP=K-KDEB+1
+         NK=K+K0
+         NKS=(1-IKS)*(NK-1)+1
+         QT(KP)=QE(NKS)
+70023    CONTINUE
+
+         DO 70064 I=1,NP
+C*IBMDIR* PREFER VECTOR
+         DO 70064 K=KDEB,KFIN
+         KP=K-KDEB+1
+         SBF(KP,I)=-QT(KP)*DR(KP,I)
+70064    CONTINUE
+
+      ENDIF
+
+      DO 7007 K=KDEB,KFIN
+      KP=K-KDEB+1
+      UMI(KP,1)=UMI(KP,1)/AIRE(KP)
+      UMI(KP,2)=UMI(KP,2)/AIRE(KP)
+      UM(KP)=UMI(KP,1)*UMI(KP,1)+UMI(KP,2)*UMI(KP,2)
+      UM(KP)=SQRT(UM(KP)) + XPETIT
+
+      A=GRADT(KP,1)*GRADT(KP,1)+GRADT(KP,2)*GRADT(KP,2)
+      A=SQRT(A)+XPETIT
+      GRADT(KP,1)=GRADT(KP,1)/A
+      GRADT(KP,2)=GRADT(KP,2)/A
+      UP(KP)=GRADT(KP,1)*UMI(KP,1)+GRADT(KP,2)*UMI(KP,2)
+      UPI(KP,1)=UP(KP)*GRADT(KP,1)
+      UPI(KP,2)=UP(KP)*GRADT(KP,2)
+      UP(KP) = ABS(UP(KP)) + XPETIT
+ 7007 CONTINUE
+
+*      DO 70074 K=KDEB,KFIN
+*      KP=K-KDEB+1
+*      BMX=UMI(KP,1)/AL(KP)
+*      BMY=UMI(KP,2)/AH(KP)
+*      BM(KP)=BMX*BMX+BMY*BMY
+*      BM(KP)=SQRT(BM(KP))+XPETIT
+*      BPX=UPI(KP,1)/AL(KP)
+*      BPY=UPI(KP,2)/AH(KP)
+*      BP(KP)=BPX*BPX+BPY*BPY
+*      BP(KP)=SQRT(BP(KP))+XPETIT
+*70074 CONTINUE
+
+
+      DO 70074 K=KDEB,KFIN
+      KP=K-KDEB+1
+      BMX(KP)=UMI(KP,1)/AL(KP)
+      BMY(KP)=UMI(KP,2)/AH(KP)
+
+      BM(KP)=BMX(KP)*BMX(KP)+BMY(KP)*BMY(KP)
+      BM(KP)=SQRT(BM(KP))+XPETIT
+      BPX(KP)=UPI(KP,1)/AL(KP)
+      BPY(KP)=UPI(KP,2)/AH(KP)
+      BP(KP)=BPX(KP)*BPX(KP)+BPY(KP)*BPY(KP)
+      BP(KP)=SQRT(BP(KP))+XPETIT
+70074 CONTINUE
+
+
+C
+C     AVANT DECENTREMENT
+C
+
+
+      IF(IKOMP.EQ.0)THEN
+
+C ALFA,AKSI,CCU,CCT utilisées seulement dans la boucle 7008
+      IF(IDCENN.EQ.1)THEN
+      DO 70081 K=KDEB,KFIN
+      KP=K-KDEB+1
+      XMB(KP)=XMH(KP)
+      CXT(KP)=0.D0
+      CYT(KP)=0.D0
+      CXY(KP)=0.D0
+70081 CONTINUE
+
+      ELSEIF(IDCENN.EQ.2)THEN
+
+      DO 7008 K=KDEB,KFIN
+      KP=K-KDEB+1
+
+      HMK=2.D0*UM(KP)/BM(KP)
+      HPK=2.D0*UP(KP)/BP(KP)
+
+      IF (HMK.LT.HMIN) HMIN=HMK
+      IF (HMK.GT.HMAX) HMAX=HMK
+
+      XMB(KP)=HMK
+      ALFA=UM(KP)*HMK/ALFT(KP)/2.D0
+      AKSI=ALFA/3.D0
+      IF(ALFA.GT.3.D0)AKSI=1.D0
+      CCT=AKSI*HMK/2.d0/UM(KP)
+
+      Fi= (GRADT(KP,1)*UMI(KP,1)
+     &+    GRADT(KP,2)*UMI(KP,2))
+
+      Kchap=0.5*(XMB(KP)*abs(Fi))/(sqrt((GRADT(KP,1)**2+
+     &     GRADT(KP,2)**2))+XMB(KP))
+
+      CXT(KP)=(UMI(KP,1)*UMI(KP,1)*CCT+Kchap)
+      CYT(KP)=(UMI(KP,2)*UMI(KP,2)*CCT+Kchap)
+      CXY(KP)=(UMI(KP,1)*UMI(KP,2)*CCT)
+
+7008  CONTINUE
+
+      ELSEIF(IDCENN.EQ.3)THEN
+      DO 7018 K=KDEB,KFIN
+      KP=K-KDEB+1
+C DESIGN TEZDUYAR
+
+      IF (KDESIGN.EQ.1) THEN
+*      IF (NP.NE.3) RETURN
+      S=0.d0
+      do 119 I=1,NP
+119   S=S+abs(UMI(KP,1)*HR(K,I,1)+UMI(KP,2)*HR(K,I,2))/UM(KP)
+      HMK=2.d0/S
+C DESIGN ORIGINAL
+      ELSEIF (KDESIGN.EQ.0) THEN
+      HMK=2.D0*UM(KP)/BM(KP)
+
+
+      ELSEIF (KDESIGN.EQ.2) THEN
+      do 774 i=1,NP
+      x(i)=XCOOR((LE(i,K)-1)*(IES+1)+1)
+774   y(i)=XCOOR((LE(i,K)-1)*(IES+1)+2)
+
+      DJ=(x(2)-x(1)+(x(3)-x(4))*(NP-3))*(y(3)-y(1)+(y(4)-y(2))*(NP-3))
+     *  -(y(2)-y(1)+(y(3)-y(4))*(NP-3))*(x(3)-x(1)+(x(4)-x(2))*(NP-3))
+
+      IF (NP.EQ.3) lll=1.d0
+      IF (NP.EQ.4) lll=4.d0
+      DJ=DJ/(lll**2)
+
+      b(1)=(UMI(KP,1)*(y(3)-y(1)+(y(4)-y(2))*(NP-3))-UMI(KP,2)*(x(3)-
+     * x(1)+(x(4)-x(2))*(NP-3)))/DJ/lll
+      b(2)=(-UMI(KP,1)*(y(2)-y(1)+(y(3)-y(4))*(NP-3))+UMI(KP,2)*(x(2)-
+     * x(1)+(x(3)-x(4))*(NP-3)))/DJ/lll
+
+      p=1
+      s=0.d0
+      do 304 kk=1,2
+304   s=s+(abs(b(kk)))**p
+      Nm=s**(1.d0/p)
+      HMK=2.d0*UM(KP)/Nm
+
+      ELSEIF (KDESIGN.EQ.3) THEN
+      do 775 i=1,NP
+      x(i)=XCOOR((LE(i,K)-1)*(IES+1)+1)
+775   y(i)=XCOOR((LE(i,K)-1)*(IES+1)+2)
+
+      DJ=(x(2)-x(1)+(x(3)-x(4))*(NP-3))*(y(3)-y(1)+(y(4)-y(2))*(NP-3))
+     *  -(y(2)-y(1)+(y(3)-y(4))*(NP-3))*(x(3)-x(1)+(x(4)-x(2))*(NP-3))
+
+      IF (NP.EQ.3) lll=1.d0
+      IF (NP.EQ.4) lll=4.d0
+      DJ=DJ/(lll**2)
+
+      b(1)=(UMI(KP,1)*(y(3)-y(1)+(y(4)-y(2))*(NP-3))-UMI(KP,2)*(x(3)-
+     * x(1)+(x(4)-x(2))*(NP-3)))/DJ/lll
+      b(2)=(-UMI(KP,1)*(y(2)-y(1)+(y(3)-y(4))*(NP-3))+UMI(KP,2)*(x(2)-
+     * x(1)+(x(3)-x(4))*(NP-3)))/DJ/lll
+
+      p=2
+      s=0.d0
+      do 305 kk=1,2
+305   s=s+(abs(b(kk)))**p
+      Nm=s**(1.d0/p)
+      HMK=2.d0*UM(KP)/Nm
+
+      ELSEIF (KDESIGN.EQ.4) THEN
+      do 776 i=1,NP
+      x(i)=XCOOR((LE(i,K)-1)*(IES+1)+1)
+776   y(i)=XCOOR((LE(i,K)-1)*(IES+1)+2)
+
+      do 318 i=1,NP
+318   kkk(i)=Aire(KP)*(UMI(KP,1)*HR(K,i,1)+UMI(KP,2)*HR(K,i,2))
+
+      s0=0.d0
+      s1=0.d0
+      do 319 i=1,NP
+      s0=s0+min(0.d0,kkk(i))
+319   s1=s1+max(0.d0,kkk(i))
+
+      s2=0.d0
+      s3=0.d0
+      do 320 i=1,NP
+      s2=s2-min(0.d0,kkk(i))*x(i)/s0+max(0.d0,kkk(i))*x(i)/s1
+320   s3=s3-min(0.d0,kkk(i))*y(i)/s0+max(0.d0,kkk(i))*y(i)/s1
+      HMK=sqrt(s2**2+s3**2)
+
+      ELSEIF (KDESIGN.EQ.5) THEN
+      do 800 i=1,NP
+      n(1,i)=abs(2.d0*Aire(KP)*HR(K,i,1))
+      n(2,i)=abs(2.d0*Aire(KP)*HR(K,i,2))
+      MMAX(i)=n(1,i)
+800   IF (n(1,i).lt.n(2,i)) MMAX(i)=n(2,i)
+
+      HMK=0.d0
+      do 801 i=1,NP
+801   IF (MMAX(i).gt.HMK) HMK=MMAX(i)
+
+      ENDIF
+
+
+      IF (HMK.LT.HMIN) HMIN=HMK
+      IF (HMK.GT.HMAX) HMAX=HMK
+
+      XMB(KP)=HMK
+      ALFA=UM(KP)*HMK/ALFT(KP)/2.D0
+      AKSI=ALFA/3.D0
+      IF(ALFA.GT.3.D0)AKSI=1.D0
+      CCT=AKSI*HMK/2.d0/UM(KP)
+
+      CXT(KP)=UMI(KP,1)*UMI(KP,1)*CCT
+      CYT(KP)=UMI(KP,2)*UMI(KP,2)*CCT
+      CXY(KP)=UMI(KP,1)*UMI(KP,2)*CCT
+
+7018  CONTINUE
+
+      ELSEIF(IDCENN.EQ.4)THEN
+      DT19=DTM1*0.5D0
+      DO 7009 K=KDEB,KFIN
+      KP=K-KDEB+1
+      XMB(KP)=XMH(KP)
+      CXT(KP)=UMI(KP,1)*UMI(KP,1)*DT19
+      CYT(KP)=UMI(KP,2)*UMI(KP,2)*DT19
+      CXY(KP)=UMI(KP,1)*UMI(KP,2)*DT19
+7009  CONTINUE
+
+
+      ENDIF
+      ELSEIF(IKOMP.EQ.1)THEN
+
+C ALFA,AKSI,CCU,CCT utilisées seulement dans la boucle 7008
+      IF(IDCENN.EQ.1)THEN
+      DO 71081 K=KDEB,KFIN
+      KP=K-KDEB+1
+      XMB(KP)=XMH(KP)
+
+      CXT(KP)=0.D0
+      CYT(KP)=0.D0
+      CXY(KP)=0.D0
+
+      DXT(KP)=0.D0
+      DYT(KP)=0.D0
+      DXY(KP)=0.D0
+
+71081 CONTINUE
+
+      ELSEIF(IDCENN.EQ.2)THEN
+      DO 7108 K=KDEB,KFIN
+      KP=K-KDEB+1
+C DESIGN TEZDUYAR
+      IF (KDESIGN.EQ.1) THEN
+*      IF (NP.NE.3) RETURN
+      S=0.d0
+      do 120 I=1,NP
+120   S=S+abs(UMI(KP,1)*HR(K,I,1)+UMI(KP,2)*HR(K,I,2))/UM(KP)
+      HMK=2.d0/S
+      S=0.d0
+      do 121 I=1,NP
+121   S=S+abs(UPI(KP,1)*HR(K,I,1)+UPI(KP,2)*HR(K,I,2))/UP(KP)
+      HPK=2.d0/S
+C DESIGN ORIGINAL
+      ELSEIF (KDESIGN.EQ.0) THEN
+      HMK=2.D0*UM(KP)/BM(KP)
+      HPK=2.D0*UP(KP)/BP(KP)
+
+      ELSEIF (KDESIGN.EQ.2) THEN
+      do 777 i=1,NP
+      x(i)=XCOOR((LE(i,K)-1)*(IES+1)+1)
+777   y(i)=XCOOR((LE(i,K)-1)*(IES+1)+2)
+
+      DJ=(x(2)-x(1)+(x(3)-x(4))*(NP-3))*(y(3)-y(1)+(y(4)-y(2))*(NP-3))
+     *  -(y(2)-y(1)+(y(3)-y(4))*(NP-3))*(x(3)-x(1)+(x(4)-x(2))*(NP-3))
+
+      IF (NP.EQ.3) lll=1.d0
+      IF (NP.EQ.4) lll=4.d0
+      DJ=DJ/(lll**2)
+
+      b(1)=(UMI(KP,1)*(y(3)-y(1)+(y(4)-y(2))*(NP-3))-UMI(KP,2)*(x(3)-
+     * x(1)+(x(4)-x(2))*(NP-3)))/DJ/lll
+      b(2)=(-UMI(KP,1)*(y(2)-y(1)+(y(3)-y(4))*(NP-3))+UMI(KP,2)*(x(2)-
+     * x(1)+(x(3)-x(4))*(NP-3)))/DJ/lll
+
+      p=1
+      s=0.d0
+      do 306 kk=1,2
+306   s=s+(abs(b(kk)))**p
+      Nm=s**(1.d0/p)
+      HMK=2.d0*UM(KP)/Nm
+C Calcul de HPK:
+
+      b(1)=(UPI(KP,1)*(y(3)-y(1)+(y(4)-y(2))*(NP-3))-UPI(KP,2)*(x(3)-
+     * x(1)+(x(4)-x(2))*(NP-3)))/DJ/lll
+      b(2)=(-UPI(KP,1)*(y(2)-y(1)+(y(3)-y(4))*(NP-3))+UPI(KP,2)*(x(2)-
+     * x(1)+(x(3)-x(4))*(NP-3)))/DJ/lll
+
+      s=0.d0
+      do 308 kk=1,2
+308   s=s+(abs(b(kk)))**p
+      Nm=s**(1.d0/p)
+      HPK=2.d0*UP(KP)/Nm
+
+      ELSEIF (KDESIGN.EQ.3) THEN
+      do 778 i=1,NP
+      x(i)=XCOOR((LE(i,K)-1)*(IES+1)+1)
+778   y(i)=XCOOR((LE(i,K)-1)*(IES+1)+2)
+
+      DJ=(x(2)-x(1)+(x(3)-x(4))*(NP-3))*(y(3)-y(1)+(y(4)-y(2))*(NP-3))
+     *  -(y(2)-y(1)+(y(3)-y(4))*(NP-3))*(x(3)-x(1)+(x(4)-x(2))*(NP-3))
+
+      IF (NP.EQ.3) lll=1.d0
+      IF (NP.EQ.4) lll=4.d0
+      DJ=DJ/(lll**2)
+
+      b(1)=(UMI(KP,1)*(y(3)-y(1)+(y(4)-y(2))*(NP-3))-UMI(KP,2)*(x(3)-
+     * x(1)+(x(4)-x(2))*(NP-3)))/DJ/lll
+      b(2)=(-UMI(KP,1)*(y(2)-y(1)+(y(3)-y(4))*(NP-3))+UMI(KP,2)*(x(2)-
+     * x(1)+(x(3)-x(4))*(NP-3)))/DJ/lll
+
+      p=2
+      s=0.d0
+      do 309 kk=1,2
+309   s=s+(abs(b(kk)))**p
+      Nm=s**(1.d0/p)
+      HMK=2.d0*UM(KP)/Nm
+C Calcul de HPK:
+
+      b(1)=(UPI(KP,1)*(y(3)-y(1)+(y(4)-y(2))*(NP-3))-UPI(KP,2)*(x(3)-
+     * x(1)+(x(4)-x(2))*(NP-3)))/DJ/lll
+      b(2)=(-UPI(KP,1)*(y(2)-y(1)+(y(3)-y(4))*(NP-3))+UPI(KP,2)*(x(2)-
+     * x(1)+(x(3)-x(4))*(NP-3)))/DJ/lll
+
+      s=0.d0
+      do 310 kk=1,2
+310   s=s+(abs(b(kk)))**p
+      Nm=s**(1.d0/p)
+      HPK=2.d0*UP(KP)/Nm
+
+      ELSEIF (KDESIGN.EQ.4) THEN
+      do 779 i=1,NP
+      x(i)=XCOOR((LE(i,K)-1)*(IES+1)+1)
+779   y(i)=XCOOR((LE(i,K)-1)*(IES+1)+2)
+
+* ZZ=1 :HMK=HPK
+* ZZ=2 :HMK<>HPK
+
+      do 321 i=1,NP
+321   kkk(i)=Aire(KP)*(UMI(KP,1)*HR(K,i,1)+UMI(KP,2)*HR(K,i,2))
+
+      s0=0.d0
+      s1=0.d0
+      do 322 i=1,NP
+      s0=s0+min(0.d0,kkk(i))
+322   s1=s1+max(0.d0,kkk(i))
+
+      s2=0.d0
+      s3=0.d0
+      do 323 i=1,NP
+      s2=s2-min(0.d0,kkk(i))*x(i)/s0+max(0.d0,kkk(i))*x(i)/s1
+323   s3=s3-min(0.d0,kkk(i))*y(i)/s0+max(0.d0,kkk(i))*y(i)/s1
+      HMK=sqrt(s2**2+s3**2)
+      HPK=HMK
+
+      IF (zz.eq.2) THEN
+      do 324 i=1,NP
+324   kkk(i)=Aire(KP)*(UPI(KP,1)*HR(K,i,1)+UPI(KP,2)*HR(K,i,2))
+
+      s0=0.d0
+      s1=0.d0
+      do 325 i=1,NP
+      s0=s0+min(0.d0,kkk(i))
+325   s1=s1+max(0.d0,kkk(i))
+
+      s2=0.d0
+      s3=0.d0
+      do 3266 i=1,NP
+      s2=s2-min(0.d0,kkk(i))*x(i)/s0+max(0.d0,kkk(i))*x(i)/s1
+3266  s3=s3-min(0.d0,kkk(i))*y(i)/s0+max(0.d0,kkk(i))*y(i)/s1
+      HPK=sqrt(s2**2+s3**2)
+      ENDIF
+
+      ELSEIF (KDESIGN.EQ.5) THEN
+      do 802 i=1,NP
+      n(1,i)=abs(2.d0*Aire(KP)*HR(K,i,1))
+      n(2,i)=abs(2.d0*Aire(KP)*HR(K,i,2))
+      MMAX(i)=n(1,i)
+802   IF (n(1,i).lt.n(2,i)) MMAX(i)=n(2,i)
+
+      HMK=0.d0
+      do 803 i=1,NP
+803   IF (MMAX(i).gt.HMK) HMK=MMAX(i)
+
+      ENDIF
+
+      IF (HMK.LT.HMIN) HMIN=HMK
+      IF (HMK.GT.HMAX) HMAX=HMK
+
+      XMB(KP)=HMK
+      ALFA=UM(KP)*HMK/ALFT(KP)/2.D0
+      AKSI=ALFA/3.D0
+      IF(ALFA.GT.3.D0)AKSI=1.D0
+      CCT=AKSI*HMK/2.d0/UM(KP)
+
+* si on a le meme h
+      HPK=HMK
+      ALFA=UM(KP)*HPK/ALFT(KP)/2.D0
+      AKSI=ALFA/3.D0
+      IF(ALFA.GT.3.D0)AKSI=1.D0
+      CCP=AKSI*HPK/2.d0/UP(KP)
+      CPT=CCP-CCT
+      CC2=0.D0
+      IF(CPT.GE.0.D0)CC2=CPT
+
+      CXT(KP)=UMI(KP,1)*CCT
+      CYT(KP)=UMI(KP,2)*CCT
+      CXY(KP)=CCT
+
+      DXT(KP)=UPI(KP,1)*UPI(KP,1)*CC2
+      DYT(KP)=UPI(KP,2)*UPI(KP,2)*CC2
+      DXY(KP)=UPI(KP,1)*UPI(KP,2)*CC2
+
+ 7108 CONTINUE
+
+      ELSEIF(IDCENN.EQ.3)THEN
+      DO 71018 K=KDEB,KFIN
+      KP=K-KDEB+1
+C DESIGN TEZDUYAR
+      IF (KDESIGN.EQ.1) THEN
+*      IF (NP.NE.3) RETURN
+      S=0.d0
+      do 122 I=1,NP
+122   S=S+abs(UMI(KP,1)*HR(K,I,1)+UMI(KP,2)*HR(K,I,2))/UM(KP)
+      HMK=2.d0/S
+C DESIGN ORIGINAL
+      ELSEIF (KDESIGN.EQ.0) THEN
+      HMK=2.D0*UM(KP)/BM(KP)
+
+      ELSEIF (KDESIGN.EQ.2) THEN
+      do 780 i=1,NP
+      x(i)=XCOOR((LE(i,K)-1)*(IES+1)+1)
+780   y(i)=XCOOR((LE(i,K)-1)*(IES+1)+2)
+
+      DJ=(x(2)-x(1)+(x(3)-x(4))*(NP-3))*(y(3)-y(1)+(y(4)-y(2))*(NP-3))
+     *  -(y(2)-y(1)+(y(3)-y(4))*(NP-3))*(x(3)-x(1)+(x(4)-x(2))*(NP-3))
+
+      IF (NP.EQ.3) lll=1.d0
+      IF (NP.EQ.4) lll=4.d0
+      DJ=DJ/(lll**2)
+
+      b(1)=(UMI(KP,1)*(y(3)-y(1)+(y(4)-y(2))*(NP-3))-UMI(KP,2)*(x(3)-
+     * x(1)+(x(4)-x(2))*(NP-3)))/DJ/lll
+      b(2)=(-UMI(KP,1)*(y(2)-y(1)+(y(3)-y(4))*(NP-3))+UMI(KP,2)*(x(2)-
+     * x(1)+(x(3)-x(4))*(NP-3)))/DJ/lll
+
+      p=1
+      s=0.d0
+      do 311 kk=1,2
+311   s=s+(abs(b(kk)))**p
+      Nm=s**(1.d0/p)
+      HMK=2.d0*UM(KP)/Nm
+
+
+      ELSEIF (KDESIGN.EQ.3) THEN
+      do 781 i=1,NP
+      x(i)=XCOOR((LE(i,K)-1)*(IES+1)+1)
+781   y(i)=XCOOR((LE(i,K)-1)*(IES+1)+2)
+
+      DJ=(x(2)-x(1)+(x(3)-x(4))*(NP-3))*(y(3)-y(1)+(y(4)-y(2))*(NP-3))
+     *  -(y(2)-y(1)+(y(3)-y(4))*(NP-3))*(x(3)-x(1)+(x(4)-x(2))*(NP-3))
+
+      IF (NP.EQ.3) lll=1.d0
+      IF (NP.EQ.4) lll=4.d0
+      DJ=DJ/(lll**2)
+
+      b(1)=(UMI(KP,1)*(y(3)-y(1)+(y(4)-y(2))*(NP-3))-UMI(KP,2)*(x(3)-
+     * x(1)+(x(4)-x(2))*(NP-3)))/DJ/lll
+      b(2)=(-UMI(KP,1)*(y(2)-y(1)+(y(3)-y(4))*(NP-3))+UMI(KP,2)*(x(2)-
+     * x(1)+(x(3)-x(4))*(NP-3)))/DJ/lll
+
+      p=2
+      s=0.d0
+      do 312 kk=1,2
+312   s=s+(abs(b(kk)))**p
+      Nm=s**(1.d0/p)
+      HMK=2.d0*UM(KP)/Nm
+
+      ELSEIF (KDESIGN.EQ.4) THEN
+      do 782 i=1,NP
+      x(i)=XCOOR((LE(i,K)-1)*(IES+1)+1)
+782   y(i)=XCOOR((LE(i,K)-1)*(IES+1)+2)
+
+      do 326 i=1,NP
+326   kkk(i)=Aire(KP)*(UMI(KP,1)*HR(K,i,1)+UMI(KP,2)*HR(K,i,2))
+
+      s0=0.d0
+      s1=0.d0
+      do 3277 i=1,KP
+      s0=s0+min(0.d0,kkk(i))
+3277  s1=s1+max(0.d0,kkk(i))
+
+      s2=0.d0
+      s3=0.d0
+      do 3288 i=1,KP
+      s2=s2-min(0.d0,kkk(i))*x(i)/s0+max(0.d0,kkk(i))*x(i)/s1
+3288  s3=s3-min(0.d0,kkk(i))*y(i)/s0+max(0.d0,kkk(i))*y(i)/s1
+      HMK=sqrt(s2**2+s3**2)
+
+      ELSEIF (KDESIGN.EQ.5) THEN
+      do 804 i=1,NP
+      n(1,i)=abs(2.d0*Aire(KP)*HR(K,i,1))
+      n(2,i)=abs(2.d0*Aire(KP)*HR(K,i,2))
+      MMAX(i)=n(1,i)
+804   IF (n(1,i).lt.n(2,i)) MMAX(i)=n(2,i)
+
+      HMK=0.d0
+      do 805 i=1,NP
+805   IF (MMAX(i).gt.HMK) HMK=MMAX(i)
+
+      ENDIF
+
+      IF (HMK.LT.HMIN) HMIN=HMK
+      IF (HMK.GT.HMAX) HMAX=HMK
+
+      XMB(KP)=HMK
+      ALFA=UM(KP)*HMK/ALFT(KP)/2.D0
+      AKSI=ALFA/3.D0
+      IF(ALFA.GT.3.D0)AKSI=1.D0
+      CCT=AKSI*HMK/2.d0/UM(KP)
+
+      CXT(KP)=UMI(KP,1)*CCT
+      CYT(KP)=UMI(KP,2)*CCT
+      CXY(KP)=CCT
+
+      DXT(KP)=0.D0
+      DYT(KP)=0.D0
+      DXY(KP)=0.D0
+
+71018 CONTINUE
+
+      ELSEIF(IDCENN.EQ.4)THEN
+      DT19=DTM1*0.5D0
+      DO 71009 K=KDEB,KFIN
+      KP=K-KDEB+1
+      XMB(KP)=XMH(KP)
+      CXT(KP)=UMI(KP,1)*DT19
+      CYT(KP)=UMI(KP,2)*DT19
+      CXY(KP)=DT19
+
+      DXT(KP)=0.D0
+      DYT(KP)=0.D0
+      DXY(KP)=0.D0
+
+71009 CONTINUE
+
+      ENDIF
+
+      ENDIF
+C           ***********************
+C
+C     AVANT CALCUL DT
+C
+      IF(IKOMP.EQ.0)THEN
+
+C*IBMDIR* PREFER SCALAR
+      DO 7010 K=KDEB,KFIN
+      KP=K-KDEB+1
+      DT0=DT
+
+      DT1=2.D0/
+     & ( (UMI(KP,1)*UMI(KP,1))/(ALFT(KP)+CXT(KP))
+     & + (UMI(KP,2)*UMI(KP,2))/(ALFT(KP)+CYT(KP)) )
+
+      DT2=0.5D0/
+     & ( (ALFT(KP)+CXT(KP))*AL2(KP)
+     &  +(ALFT(KP)+CYT(KP))*AH2(KP) )
+
+
+      IF(DT1.LT.DT)DT=DT1
+      IF(DT2.LT.DT)DT=DT2
+C     IF(DT3.LT.DT)DT=DT3
+      IF(DT.NE.DT0) THEN
+         DTT1=DT1
+         DTT2=DT2
+         DTT3=0.D0
+         DIAEL=XMB(KP)
+         NUEL=K
+      END IF
+      CXY(KP)=CXY(KP)*CD
+ 7010 CONTINUE
+
+      ELSEIF(IKOMP.EQ.1)THEN
+
+C*IBMDIR* PREFER SCALAR
+      DO 7110 K=KDEB,KFIN
+      KP=K-KDEB+1
+      DT0=DT
+
+      DT1=2.D0/
+     & ( (UMI(KP,1)*UMI(KP,1))/(ALFT(KP)+CXT(KP)*UMI(KP,1)+DXT(KP))
+     & + (UMI(KP,2)*UMI(KP,2))/(ALFT(KP)+CYT(KP)*UMI(KP,2)+DYT(KP)) )
+
+      DT2=0.5D0/
+     & ( (ALFT(KP)+CXT(KP)*UMI(KP,1)+DXT(KP))*AL2(KP)
+     &  +(ALFT(KP)+CYT(KP)*UMI(KP,2)+DYT(KP))*AH2(KP) )
+
+      IF(DT1.LT.DT)DT=DT1
+      IF(DT2.LT.DT)DT=DT2
+C     IF(DT3.LT.DT)DT=DT3
+      IF(DT.NE.DT0) THEN
+         DTT1=DT1
+         DTT2=DT2
+         DTT3=0.D0
+         DIAEL=XMB(KP)
+         NUEL=K
+      END IF
+      CXY(KP)=CXY(KP)*CD
+ 7110 CONTINUE
+
+      ENDIF
+C Le coeur du calcul ...
+
+      IF(IKOMP.EQ.0)THEN
+
+      DO 7014 I=1,NP
+      DO 7014 J= 1,NP
+C*IBMDIR* PREFER VECTOR
+
+      DO 7014 K=KDEB,KFIN
+      KP=K-KDEB+1
+
+      ZVGG=AIRE(KP)*(
+     &     HR(K,I,1)*HR(K,J,1)*CXT(KP)
+     &+    HR(K,I,1)*HR(K,J,2)*CXY(KP)
+     &+    HR(K,I,2)*HR(K,J,1)*CXY(KP)
+     &+    HR(K,I,2)*HR(K,J,2)*CYT(KP)
+     &+    (CXT(KP)*AL2(KP)+CYT(KP)*AH2(KP))/12.D0
+     &     *VGGT(J,I)*QUA4  )
+
+C    &+    HR(K,I,2)*HR(K,J,2)*CYT(KP) )
+C    &+    (CXT(KP)+CYT(KP))/24.D0*VGGT(J,I)*QUA4
+
+      ZVGT=AIRE(KP)*(
+     &     HR(K,I,1)*HR(K,J,1)*ALFT(KP)
+     &+    HR(K,I,2)*HR(K,J,2)*ALFT(KP)
+     &+    (ALFT(KP)*AL2(KP)+ALFT(KP)*AH2(KP))/12.D0
+     &     *VGGT(J,I)*QUA4  )
+
+C    &+    HR(K,I,2)*HR(K,J,2)*ALFT(KP) )
+C    &+    ALFT(KP)/12.D0*VGGT(J,I)*QUA4
+
+C?    V2=(UIX(KP,I)*HR(K,J,1)+UIY(KP,I)*HR(K,J,2))*DR(KP,I)
+      V2=UMI(KP,1)*DR(KP,I)*HR(K,J,1)+UMI(KP,2)*DR(KP,I)*HR(K,J,2)
+
+      SBF(KP,I)=SBF(KP,I)+TETAC(KP,J)*(ZVGG+V2)+ TETAD(KP,J)*ZVGT
+
+7014  CONTINUE
+      ELSEIF(IKOMP.EQ.1)THEN
+
+      DO 7015 I=1,NP
+      DO 7015 J= 1,NP
+C*IBMDIR* PREFER VECTOR
+      DO 7015 K=KDEB,KFIN
+      KP=K-KDEB+1
+      ZVGG=AIRE(KP)*(
+     &     HR(K,I,1)*HR(K,J,1)*(CXT(KP)*UIX(KP,J)+DXT(KP))
+     &+    HR(K,I,1)*HR(K,J,2)
+     &     *(CXY(KP)*UMI(KP,1)*UIY(KP,J)+DXY(KP))
+     &+    HR(K,I,2)*HR(K,J,1)
+     &     *(CXY(KP)*UMI(KP,2)*UIX(KP,J)+DXY(KP))
+     &+    HR(K,I,2)*HR(K,J,2)*(CYT(KP)*UIY(KP,J)+DYT(KP))
+     &+    ((CXT(KP)*UIX(KP,J)+DXT(KP))*AL2(KP)
+     &      +(CYT(KP)*UIY(KP,J)+DYT(KP))*AH2(KP))/12.D0
+     &     *VGGT(J,I)*QUA4  )
+
+C    &+    HR(K,I,2)*HR(K,J,2)*CYT(KP) )
+C    &+    (CXT(KP)+CYT(KP))/24.D0*VGGT(J,I)*QUA4
+
+      ZVGT=AIRE(KP)*(
+     &     HR(K,I,1)*HR(K,J,1)*ALFT(KP)
+     &+    HR(K,I,2)*HR(K,J,2)*ALFT(KP)
+     &+    (ALFT(KP)*AL2(KP)+ALFT(KP)*AH2(KP))/12.D0
+     &     *VGGT(J,I)*QUA4  )
+
+C    &+    HR(K,I,2)*HR(K,J,2)*ALFT(KP) )
+C    &+    ALFT(KP)/12.D0*VGGT(J,I)*QUA4
+
+      V2=(UIX(KP,J)*HR(K,J,1)+UIY(KP,J)*HR(K,J,2))*DR(KP,I)
+
+      SBF(KP,I)=SBF(KP,I)+TETAC(KP,J)*(ZVGG+V2)+ TETAD(KP,J)*ZVGT
+
+ 7015 CONTINUE
+
+      ENDIF
+C
+C     Fin de l'accumulation dans SBF.
+C     On ajoute ces incréments G.
+C
+      DO 7017 I=1,NP
+C*IBMDIR* PREFER VECTOR
+      DO 7017 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NF=IPADL(LE(I,K))
+      G(NF) = G(NF)+SBF(KP,I)
+ 7017 CONTINUE
+
+ 7001 CONTINUE
+
+C     WRITE(6,*)' G DANS YCTSCL '
+C     WRITE(6,1984)(M,G(M),M=1,NPTD)
+ 1984 FORMAT(7(1X,I4,2X,1PE11.4))
+
+C     CALL ARRET(0)
+      IPAS=1
+C
+C
+C      PRINT *,'HMIN = ', HMIN, 'HMAX = ', HMAX
+C
+      RETURN
+
+C                           ********
+C                           *  3D  *
+C                           ********
+
+ 10   CONTINUE
+
+      IF(IPAS.EQ.0)CALL CALHRH(QGGT,Q1,Q2,Q3,IES)
+      CUB8=0.D0
+      IF(NP.EQ.8)CUB8=1.D0
+
+C
+C Calcul du nombre de paquets de LRV éléments
+C
+      NNN=MOD(NEL,LRV)
+      IF(NNN.EQ.0) NPACK=NEL/LRV
+      IF(NNN.NE.0) NPACK=1+(NEL-NNN)/LRV
+      KPACKD=1
+      KPACKF=NPACK
+C
+C ******* BOUCLE SUR LES PAQUETS DE LRV ELEMENTS **********
+C
+      DO 8001 KPACK=KPACKD,KPACKF
+C
+C ======= A L'INTERIEUR DE CHAQUE PAQUET DE LRV ELEMENTS =======
+C
+C 1. Calcul des limites du paquet courant.
+      KDEB=1+(KPACK-1)*LRV
+      KFIN=MIN(NEL,KDEB+LRV-1)
+C
+      DO 8002 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NK=K+K0
+      NK1=(1-IND1)*(NK-1)+1
+      ALFT(KP)=ALFE(NK1)+XPETIT
+      AIRE(KP)=VOLU(NK)
+      AL(KP)=COTE(NK,1)
+      AH(KP)=COTE(NK,2)
+      AP(KP)=COTE(NK,3)
+      CFM(KP)=AL(KP)*AH(KP)/AP(KP)+AL(KP)*AP(KP)/AH(KP)+
+     &        AP(KP)*AH(KP)/AL(KP)
+C     CF1(KP)=AL(KP)*AH(KP)/AP(KP)
+C     CF2(KP)=AL(KP)*AP(KP)/AH(KP)
+C     CF3(KP)=AP(KP)*AH(KP)/AL(KP)
+      XMH(KP)=(AL(KP)+AH(KP)+AP(KP))/3.D0
+      AL2(KP)=1.D0/AL(KP)/AL(KP)
+      AH2(KP)=1.D0/AH(KP)/AH(KP)
+      AP2(KP)=1.D0/AP(KP)/AP(KP)
+ 8002 CONTINUE
+      IF((IKOMP.EQ.0.AND.IKAS.EQ.5).OR.
+     &(IKOMP.EQ.1.AND.IKAS.EQ.6))THEN
+      DO 8003 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NK=K+K0
+      ALFT(KP)=ALFT(KP)+ALT(NK)/SGT
+ 8003 CONTINUE
+      ENDIF
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+C Initialisation des UMI avant accumulation
+      DO 8005 K=KDEB,KFIN
+      KP=K-KDEB+1
+      UMI(KP,1)=XPETIT
+      UMI(KP,2)=XPETIT
+      UMI(KP,3)=XPETIT
+      UPI(KP,1)=XPETIT
+      UPI(KP,2)=XPETIT
+      UPI(KP,3)=XPETIT
+      GRADT(KP,1)=XPETIT
+      GRADT(KP,2)=XPETIT
+      GRADT(KP,3)=XPETIT
+ 8005 CONTINUE
+
+      DO 8006 I=1,NP
+C*IBMDIR* PREFER VECTOR
+      DO 8006 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NF=IPADL(LE(I,K))
+      NFU=IPADU(LE(I,K))
+      NFU=(1-INDU)*(NFU-1)+1
+      DR(KP,I)=DRR(I,K)
+      UIX(KP,I)=UN(NFU,1)
+      UIY(KP,I)=UN(NFU,2)
+      UIZ(KP,I)=UN(NFU,3)
+      UMI(KP,1)=UMI(KP,1)+UN(NFU,1)*DR(KP,I)
+      UMI(KP,2)=UMI(KP,2)+UN(NFU,2)*DR(KP,I)
+      UMI(KP,3)=UMI(KP,3)+UN(NFU,3)*DR(KP,I)
+
+      TETAC(KP,I)=HRN(NF)
+      TETAD(KP,I)=TN(NF)
+      GRADT(KP,1)=GRADT(KP,1)+HR(K,I,1)*TETAC(KP,I)
+      GRADT(KP,2)=GRADT(KP,2)+HR(K,I,2)*TETAC(KP,I)
+      GRADT(KP,3)=GRADT(KP,3)+HR(K,I,3)*TETAC(KP,I)
+ 8006 CONTINUE
+
+C
+C Initialisation de la variable d'accumulation SBF au terme source
+C                                                                      M
+C       write(6,*)' IKomp,ikas=',IKomp,ikas
+C       write(6,*)' IKS,IND1,INDU=',IKS,IND1,INDU
+
+      IF(IKOMP.EQ.0)THEN
+
+         DO 80021 K=KDEB,KFIN
+         KP=K-KDEB+1
+         NK=K+K0
+         NKS=(1-IKS)*(NK-1)+1
+         QT(KP)=QE(NKS)
+80021    CONTINUE
+
+         DO 80062 I=1,NP
+C*IBMDIR* PREFER VECTOR
+         DO 80062 K=KDEB,KFIN
+         KP=K-KDEB+1
+         SBF(KP,I)=-QT(KP)*DR(KP,I)
+80062    CONTINUE
+
+      ELSEIF(IKOMP.EQ.1)THEN
+
+         DO 80023 K=KDEB,KFIN
+         KP=K-KDEB+1
+         NK=K+K0
+         NKS=(1-IKS)*(NK-1)+1
+         QT(KP)=QE(NKS)
+80023    CONTINUE
+
+         DO 80064 I=1,NP
+C*IBMDIR* PREFER VECTOR
+         DO 80064 K=KDEB,KFIN
+         KP=K-KDEB+1
+         SBF(KP,I)=-QT(KP)*DR(KP,I)
+80064    CONTINUE
+
+      ENDIF
+
+      DO 8007 K=KDEB,KFIN
+      KP=K-KDEB+1
+      UMI(KP,1)=UMI(KP,1)/AIRE(KP)
+      UMI(KP,2)=UMI(KP,2)/AIRE(KP)
+      UMI(KP,3)=UMI(KP,3)/AIRE(KP)
+      UM(KP)=UMI(KP,1)*UMI(KP,1)+UMI(KP,2)*UMI(KP,2)
+     &      +UMI(KP,3)*UMI(KP,3)
+      UM(KP)=SQRT(UM(KP))
+      A=GRADT(KP,1)*GRADT(KP,1)+GRADT(KP,2)*GRADT(KP,2)
+     & +GRADT(KP,3)*GRADT(KP,3)
+      A=SQRT(A)+XPETIT
+      GRADT(KP,1)=GRADT(KP,1)/A
+      GRADT(KP,2)=GRADT(KP,2)/A
+      GRADT(KP,3)=GRADT(KP,3)/A
+      UP(KP)=GRADT(KP,1)*UMI(KP,1)+GRADT(KP,2)*UMI(KP,2)
+     &      +GRADT(KP,3)*UMI(KP,3)
+      UPI(KP,1)=UP(KP)*GRADT(KP,1)
+      UPI(KP,2)=UP(KP)*GRADT(KP,2)
+      UPI(KP,3)=UP(KP)*GRADT(KP,3)
+ 8007 CONTINUE
+
+*      DO 80074 K=KDEB,KFIN
+*      KP=K-KDEB+1
+*      BMX=UMI(KP,1)/AL(KP)
+*      BMY=UMI(KP,2)/AH(KP)
+*      BMZ=UMI(KP,3)/AP(KP)
+*      BM(KP)=BMX*BMX+BMY*BMY+BMZ*BMZ
+*      BM(KP)=SQRT(BM(KP))+XPETIT
+*      BPX=UPI(KP,1)/AL(KP)
+*      BPY=UPI(KP,2)/AH(KP)
+*      BPZ=UPI(KP,3)/AP(KP)
+*      BP(KP)=BPX*BPX+BPY*BPY+BPZ*BPZ
+*      BP(KP)=SQRT(BP(KP))+XPETIT
+*80074 CONTINUE
+
+C
+C     AVANT DECENTREMENT
+C
+
+      IF(IKOMP.EQ.0)THEN
+
+C ALFA,AKSI,CCU,CCT utilisées seulement dans la boucle 8008
+      IF(IDCENN.EQ.1)THEN
+      DO 80081 K=KDEB,KFIN
+      KP=K-KDEB+1
+      XMB(KP)=XMH(KP)
+      CXT(KP)=0.D0
+      CYT(KP)=0.D0
+      CZT(KP)=0.D0
+      CXY(KP)=0.D0
+      CXZ(KP)=0.D0
+      CYZ(KP)=0.D0
+80081 CONTINUE
+
+      ELSEIF(IDCENN.EQ.2)THEN
+      DO 8008 K=KDEB,KFIN
+      KP=K-KDEB+1
+      HMK=2.D0*UM(KP)/BM(KP)
+      XMB(KP)=HMK
+      ALFA=UM(KP)*HMK/ALFT(KP)/2.D0
+      AKSI=ALFA/3.D0
+      IF(ALFA.GT.3.D0)AKSI=1.D0
+      CCT=AKSI/BM(KP)
+
+      HPK=2.D0*UP(KP)/BP(KP)
+      ALFA=UP(KP)*HPK/ALFT(KP)/2.D0
+      AKSI=ALFA/3.D0
+      IF(ALFA.GT.3.D0)AKSI=1.D0
+      CCP=AKSI/BP(KP)
+      CPT=CCP-CCT
+      CC2=0.D0
+      IF(CPT.GE.0.D0)CC2=CPT
+
+      CXT(KP)=(UMI(KP,1)*UMI(KP,1)*CCT+UPI(KP,1)*UPI(KP,1)*CC2)
+      CYT(KP)=(UMI(KP,2)*UMI(KP,2)*CCT+UPI(KP,2)*UPI(KP,2)*CC2)
+      CZT(KP)=(UMI(KP,3)*UMI(KP,3)*CCT+UPI(KP,3)*UPI(KP,3)*CC2)
+      CXY(KP)=(UMI(KP,1)*UMI(KP,2)*CCT+UPI(KP,1)*UPI(KP,2)*CC2)
+      CXZ(KP)=(UMI(KP,1)*UMI(KP,3)*CCT+UPI(KP,1)*UPI(KP,3)*CC2)
+      CYZ(KP)=(UMI(KP,2)*UMI(KP,3)*CCT+UPI(KP,2)*UPI(KP,3)*CC2)
+
+ 8008 CONTINUE
+
+      ELSEIF(IDCENN.EQ.3)THEN
+      DO 8018 K=KDEB,KFIN
+      KP=K-KDEB+1
+      HMK=2.D0*UM(KP)/BM(KP)
+      XMB(KP)=HMK
+      ALFA=UM(KP)*HMK/ALFT(KP)/2.D0
+      AKSI=ALFA/3.D0
+      IF(ALFA.GT.3.D0)AKSI=1.D0
+      CCT=AKSI/BM(KP)
+
+      CXT(KP)=UMI(KP,1)*UMI(KP,1)*CCT
+      CYT(KP)=UMI(KP,2)*UMI(KP,2)*CCT
+      CZT(KP)=UMI(KP,3)*UMI(KP,3)*CCT
+      CXY(KP)=UMI(KP,1)*UMI(KP,2)*CCT
+      CXZ(KP)=UMI(KP,1)*UMI(KP,3)*CCT
+      CYZ(KP)=UMI(KP,2)*UMI(KP,3)*CCT
+
+ 8018 CONTINUE
+
+      ELSEIF(IDCENN.EQ.4)THEN
+      DT19=DTM1*0.5D0
+      DO 8009 K=KDEB,KFIN
+      KP=K-KDEB+1
+      XMB(KP)=XMH(KP)
+      CXT(KP)=UMI(KP,1)*UMI(KP,1)*DT19
+      CYT(KP)=UMI(KP,2)*UMI(KP,2)*DT19
+      CZT(KP)=UMI(KP,3)*UMI(KP,3)*DT19
+      CXY(KP)=UMI(KP,1)*UMI(KP,2)*DT19
+      CXZ(KP)=UMI(KP,1)*UMI(KP,3)*DT19
+      CYZ(KP)=UMI(KP,2)*UMI(KP,3)*DT19
+ 8009 CONTINUE
+
+      ENDIF
+
+      ELSEIF(IKOMP.EQ.1)THEN
+
+C ALFA,AKSI,CCU,CCT utilisées seulement dans la boucle 8008
+      IF(IDCENN.EQ.1)THEN
+      DO 81081 K=KDEB,KFIN
+      KP=K-KDEB+1
+      XMB(KP)=XMH(KP)
+      CXT(KP)=0.D0
+      CYT(KP)=0.D0
+      CZT(KP)=0.D0
+      CXY(KP)=0.D0
+      CXZ(KP)=0.D0
+      CYZ(KP)=0.D0
+
+      DXT(KP)=0.D0
+      DYT(KP)=0.D0
+      DZT(KP)=0.D0
+      DXY(KP)=0.D0
+      DXZ(KP)=0.D0
+      DYZ(KP)=0.D0
+
+81081 CONTINUE
+
+      ELSEIF(IDCENN.EQ.2)THEN
+      DO 81008 K=KDEB,KFIN
+      KP=K-KDEB+1
+      HMK=2.D0*UM(KP)/BM(KP)
+      XMB(KP)=HMK
+      ALFA=UM(KP)*HMK/ALFT(KP)/2.D0
+      AKSI=ALFA/3.D0
+      IF(ALFA.GT.3.D0)AKSI=1.D0
+      CCT=AKSI/BM(KP)
+
+      HPK=2.D0*UP(KP)/BP(KP)
+      ALFA=UP(KP)*HPK/ALFT(KP)/2.D0
+      AKSI=ALFA/3.D0
+      IF(ALFA.GT.3.D0)AKSI=1.D0
+      CCP=AKSI/BP(KP)
+      CPT=CCP-CCT
+      CC2=0.D0
+      IF(CPT.GE.0.D0)CC2=CPT
+      CC2 = CC2*1.3D0
+
+      CXT(KP)=UMI(KP,1)*CCT
+      CYT(KP)=UMI(KP,2)*CCT
+      CZT(KP)=UMI(KP,3)*CCT
+      CXY(KP)=CCT
+      CXZ(KP)=CCT
+      CYZ(KP)=CCT
+
+      DXT(KP)=UPI(KP,1)*UPI(KP,1)*CC2
+      DYT(KP)=UPI(KP,2)*UPI(KP,2)*CC2
+      DZT(KP)=UPI(KP,3)*UPI(KP,3)*CC2
+      DXY(KP)=UPI(KP,1)*UPI(KP,2)*CC2
+      DXZ(KP)=UPI(KP,1)*UPI(KP,3)*CC2
+      DYZ(KP)=UPI(KP,2)*UPI(KP,3)*CC2
+
+81008 CONTINUE
+
+      ELSEIF(IDCENN.EQ.3)THEN
+      DO 81018 K=KDEB,KFIN
+      KP=K-KDEB+1
+      HMK=2.D0*UM(KP)/BM(KP)
+      XMB(KP)=HMK
+      ALFA=UM(KP)*HMK/ALFT(KP)/2.D0
+      AKSI=ALFA/3.D0
+      IF(ALFA.GT.3.D0)AKSI=1.D0
+      CCT=AKSI/BM(KP)
+
+      CXT(KP)=UMI(KP,1)*CCT
+      CYT(KP)=UMI(KP,2)*CCT
+      CZT(KP)=UMI(KP,3)*CCT
+      CXY(KP)=CCT
+      CXZ(KP)=CCT
+      CYZ(KP)=CCT
+
+      DXT(KP)=0.D0
+      DYT(KP)=0.D0
+      DZT(KP)=0.D0
+      DXY(KP)=0.D0
+      DXZ(KP)=0.D0
+      DYZ(KP)=0.D0
+
+81018 CONTINUE
+
+      ELSEIF(IDCENN.EQ.4)THEN
+      DT19=DTM1*0.5D0
+      DO 81009 K=KDEB,KFIN
+      KP=K-KDEB+1
+      XMB(KP)=XMH(KP)
+
+      CXT(KP)=UMI(KP,1)*DT19
+      CYT(KP)=UMI(KP,2)*DT19
+      CZT(KP)=UMI(KP,3)*DT19
+      CXY(KP)=DT19
+      CXZ(KP)=DT19
+      CYZ(KP)=DT19
+
+      DXT(KP)=0.D0
+      DYT(KP)=0.D0
+      DZT(KP)=0.D0
+      DXY(KP)=0.D0
+      DXZ(KP)=0.D0
+      DYZ(KP)=0.D0
+
+81009 CONTINUE
+
+      ENDIF
+
+      ENDIF
+
+C           ***********************
+C
+C     AVANT CALCUL DT
+C
+
+      IF(IKOMP.EQ.0)THEN
+
+C*IBMDIR* PREFER SCALAR
+      DO 8010 K=KDEB,KFIN
+      KP=K-KDEB+1
+      DT0=DT
+
+      DT1=2.D0/
+     & ( (UMI(KP,1)*UMI(KP,1))/(ALFT(KP)+CXT(KP))
+     & + (UMI(KP,2)*UMI(KP,2))/(ALFT(KP)+CYT(KP))
+     & + (UMI(KP,3)*UMI(KP,3))/(ALFT(KP)+CZT(KP)) )
+
+      DT2=0.5/
+     & ( (ALFT(KP)+CXT(KP))*AL2(KP)
+     &  +(ALFT(KP)+CYT(KP))*AH2(KP)
+     &  +(ALFT(KP)+CZT(KP))*AP2(KP) )
+
+      IF(DT1.LT.DT)DT=DT1
+      IF(DT2.LT.DT)DT=DT2
+C     IF(DT3.LT.DT)DT=DT3
+      IF(DT.NE.DT0) THEN
+         DTT1=DT1
+         DTT2=DT2
+         DTT3=0.D0
+         DIAEL=XMB(KP)
+         NUEL=K
+      END IF
+ 8010 CONTINUE
+
+      ELSEIF(IKOMP.EQ.1)THEN
+
+C*IBMDIR* PREFER SCALAR
+      DO 8110 K=KDEB,KFIN
+      KP=K-KDEB+1
+      DT0=DT
+
+      DT1=2.D0/
+     & ( (UMI(KP,1)*UMI(KP,1))/(ALFT(KP)+CXT(KP)*UMI(KP,1)+DXT(KP))
+     & + (UMI(KP,2)*UMI(KP,2))/(ALFT(KP)+CYT(KP)*UMI(KP,2)+DYT(KP))
+     & + (UMI(KP,3)*UMI(KP,3))/(ALFT(KP)+CZT(KP)*UMI(KP,3)+DZT(KP)) )
+
+      DT2=0.5/
+     & ( (ALFT(KP)+CXT(KP)*UMI(KP,1)+DXT(KP))*AL2(KP)
+     &  +(ALFT(KP)+CYT(KP)*UMI(KP,2)+DYT(KP))*AH2(KP)
+     &  +(ALFT(KP)+CZT(KP)*UMI(KP,3)+DZT(KP))*AP2(KP) )
+
+      IF(DT1.LT.DT)DT=DT1
+      IF(DT2.LT.DT)DT=DT2
+C     IF(DT3.LT.DT)DT=DT3
+      IF(DT.NE.DT0) THEN
+         DTT1=DT1
+         DTT2=DT2
+         DTT3=0.D0
+         DIAEL=XMB(KP)
+         NUEL=K
+      ENDIF
+ 8110 CONTINUE
+
+      ENDIF
+
+C Le coeur du calcul ...
+
+      IF(IKOMP.EQ.0)THEN
+
+      DO 8014 I=1,NP
+      DO 8014 J= 1,NP
+C*IBMDIR* PREFER VECTOR
+      DO 8014 K=KDEB,KFIN
+      KP=K-KDEB+1
+C     GEO1=(CF1(KP)*Q1(J,I)+CF2(KP)*Q2(J,I)+CF3(KP)*Q3(J,I))*CUB8
+      GEO1=CFM(KP)*QGGT(J,I)*CUB8
+      ZVGG=AIRE(KP)*(
+     &     HR(K,I,1)*HR(K,J,1)*CXT(KP)
+     &+    HR(K,I,2)*HR(K,J,2)*CYT(KP)
+     &+    HR(K,I,3)*HR(K,J,3)*CZT(KP)
+     &+    HR(K,I,1)*HR(K,J,2)*CXY(KP)
+     &+    HR(K,I,2)*HR(K,J,1)*CXY(KP)
+     &+    HR(K,I,1)*HR(K,J,3)*CXZ(KP)
+     &+    HR(K,I,3)*HR(K,J,1)*CXZ(KP)
+     &+    HR(K,I,2)*HR(K,J,3)*CYZ(KP)
+     &+    HR(K,I,3)*HR(K,J,2)*CYZ(KP) )
+     &+    (CXT(KP)+CYT(KP)+CZT(KP))/3.D0*GEO1
+C    &+    (CXT(KP)+CYT(KP)+CZT(KP))/3.D0*XMH(KP)*QGGT(J,I)*CUB8
+
+      ZVGT=AIRE(KP)*(
+     &     HR(K,I,1)*HR(K,J,1)*ALFT(KP)
+     &+    HR(K,I,2)*HR(K,J,2)*ALFT(KP)
+     &+    HR(K,I,3)*HR(K,J,3)*ALFT(KP) )
+     &+    ALFT(KP)*XMH(KP)*GEO1
+C    &+    ALFT(KP)*XMH(KP)*QGGT(J,I)*CUB8
+
+      V2=UMI(KP,1)*DR(KP,I)*HR(K,J,1)+UMI(KP,2)*DR(KP,I)*HR(K,J,2)
+     &  +UMI(KP,3)*DR(KP,I)*HR(K,J,3)
+
+      SBF(KP,I)=SBF(KP,I)+TETAC(KP,J)*(ZVGG+V2)+ TETAD(KP,J)*ZVGT
+
+ 8014 CONTINUE
+
+      ELSEIF(IKOMP.EQ.1)THEN
+
+      DO 8015 I=1,NP
+      DO 8015 J= 1,NP
+C*IBMDIR* PREFER VECTOR
+      DO 8015 K=KDEB,KFIN
+      KP=K-KDEB+1
+C     GEO1=(CF1(KP)*Q1(J,I)+CF2(KP)*Q2(J,I)+CF3(KP)*Q3(J,I))*CUB8
+      GEO1=CFM(KP)*QGGT(J,I)*CUB8
+      ZVGG=AIRE(KP)*(
+     &     HR(K,I,1)*HR(K,J,1)*(CXT(KP)*UIX(KP,J)+DXT(KP))
+     &+    HR(K,I,2)*HR(K,J,2)*(CYT(KP)*UIY(KP,J)+DYT(KP))
+     &+    HR(K,I,3)*HR(K,J,3)*(CZT(KP)*UIZ(KP,J)+DZT(KP))
+     &+    HR(K,I,1)*HR(K,J,2)*(CXY(KP)*UMI(KP,1)*UIY(KP,J)+DXY(KP))
+     &+    HR(K,I,2)*HR(K,J,1)*(CXY(KP)*UMI(KP,2)*UIX(KP,J)+DXY(KP))
+     &+    HR(K,I,1)*HR(K,J,3)*(CXZ(KP)*UMI(KP,1)*UIZ(KP,J)+DXZ(KP))
+     &+    HR(K,I,3)*HR(K,J,1)*(CXZ(KP)*UMI(KP,3)*UIX(KP,J)+DXZ(KP))
+     &+    HR(K,I,2)*HR(K,J,3)*(CYZ(KP)*UMI(KP,2)*UIZ(KP,J)+DYZ(KP))
+     &+    HR(K,I,3)*HR(K,J,2)*(CYZ(KP)*UMI(KP,3)*UIY(KP,J)+DYZ(KP))
+     &+    (CXT(KP)*UIX(KP,J)+DXT(KP)+CYT(KP)*UIY(KP,J)+DYT(KP)
+     &+     CZT(KP)*UIZ(KP,J)))/3.D0*GEO1
+C    &+    (CXT(KP)+CYT(KP)+CZT(KP))/3.D0*XMH(KP)*QGGT(J,I)*CUB8
+
+      ZVGT=AIRE(KP)*(
+     &     HR(K,I,1)*HR(K,J,1)*ALFT(KP)
+     &+    HR(K,I,2)*HR(K,J,2)*ALFT(KP)
+     &+    HR(K,I,3)*HR(K,J,3)*ALFT(KP) )
+     &+    ALFT(KP)*XMH(KP)*GEO1
+C    &+    ALFT(KP)*XMH(KP)*QGGT(J,I)*CUB8
+
+      V2=(UIX(KP,J)*HR(K,J,1)+UIY(KP,J)*HR(K,J,2)+
+     & UIZ(KP,J)*HR(K,J,3))*DR(KP,I)
+
+      SBF(KP,I)=SBF(KP,I)+TETAC(KP,J)*(ZVGG+V2)+ TETAD(KP,J)*ZVGT
+
+ 8015 CONTINUE
+
+      ENDIF
+
+C
+C     Fin de l'accumulation dans SBF.
+C     On ajoute ces incréments G.
+C
+      DO 8017 I=1,NP
+C*IBMDIR* PREFER VECTOR
+      DO 8017 K=KDEB,KFIN
+      KP=K-KDEB+1
+      NF=IPADL(LE(I,K))
+      G(NF) = G(NF)+SBF(KP,I)
+ 8017 CONTINUE
+
+ 8001 CONTINUE
+
+C     WRITE(6,*)' G DANS YCTSCL '
+C     WRITE(6,1984)(M,G(M),M=1,NPTD)
+
+C     CALL ARRET(0)
+      IPAS=1
+      RETURN
+ 1002 FORMAT(10(1X,1PE11.4))
+      END
+
+
+
+
+
+
+
+

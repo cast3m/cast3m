@@ -1,0 +1,873 @@
+C EPTHP     SOURCE    CB215821  18/09/21    21:15:46     9930
+
+C=======================================================================
+C=                             E P T H P                               =
+C=                             ---------                               =
+C=                                                                     =
+C=  Fonction :                                                         =
+C=  ----------                                                         =
+C=   Calcul des deformations d'origine thermique.                      =
+C=   Sous-programme appele par EPTH (epth.eso).                        =
+C=                                                                     =
+C=  Parametres :  (E)=Entree   (S)=Sortie                              =
+C=  ------------                                                       =
+C=   IPMODL   (E)   Pointeur sur le segment MMODEL                     =
+C=   IPCHE1   (E)   Pointeur sur le segment MCHELM de CARACTERISTIQUES =
+C=   IPCHE2   (E)   Pointeur sur le segment MCHELM de TEMPERATURES     =
+C=   IPEPTH   (S)   Pointeur sur le segment MCHPOI de forces nodales   =
+C=   IRET     (S)   Entier valant 1 en cas de succes, 0 sinon (et un   =
+C=                  message d'erreur est imprime dans ce cas)          =
+C=                                                                     =
+C=  Remarque : Variation parabolique de la temperature dans les COQUES =
+C   ---------- Cas ORTHOTROPE et ANISOTROPE traites pour les MASSIFS   =
+C=======================================================================
+
+      SUBROUTINE EPTHP (IPMODL,IPCHE1,IPCHE2,IPEPTH,IRET)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCREEL
+-INC CCHAMP
+-INC SMCHAML
+-INC SMELEME
+-INC SMINTE
+-INC SMMODEL
+-INC SMCOORD
+
+      SEGMENT NOTYPE
+        CHARACTER*16 TYPE(NBTYPE)
+      ENDSEGMENT
+
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS),NSOF(NS),IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+
+      SEGMENT MVELCH
+        REAL*8 VALMAT(NV1)
+      ENDSEGMENT
+
+      SEGMENT MWRK2
+        REAL*8 XE(3,NBNN)
+        REAL*8 TXR(IDIM,IDIM),XLOC(3,3),XGLOB(3,3)
+        REAL*8 ROTS(NEPTH,NEPTH)
+      ENDSEGMENT
+
+      SEGMENT MWRK3
+        REAL*8 RES(NEPTH)
+      ENDSEGMENT
+
+      PARAMETER (NINF=3)
+      INTEGER INFOS(NINF)
+      DIMENSION CRIGI(12)
+      CHARACTER*8 CMATE,PHAM
+      CHARACTER*(NCONCH) CONM
+      LOGICAL LOGMA,LOGMF,lsupde,lsupma,lsupte
+
+      IRET=0
+
+C  1 - VERIFICATIONS DES DONNEES DE L'OPERATEUR
+C ==============================================
+C  1.1 - Verification du lieu support du MCHAML de caracteristiques
+C =====
+      ISupC=0
+      CALL QUESUP(IPMODL,IPCHE1,5,0,ISupC,iOK)
+      IF (ISupC.GT.1) RETURN
+C =====
+C  1.2 - Verification du lieu support du MCHAML de temperatures
+C =====
+      ISupT=0
+      CALL QUESUP(IPMODL,IPCHE2,5,0,ISupT,iOK)
+      IF (ISupT.GT.1) RETURN
+
+C  2 - QUELQUES INITIALISATIONS
+C ==============================
+C  2.1 - Activation du MMODEL
+C =====
+      MMODEL=IPMODL
+      SEGACT,MMODEL
+      NSOUS=KMODEL(/1)
+C =====
+C  2.2 - Activation du MCHELM associe au champ de deformations
+C =====
+      L1=12
+      N1=NSOUS
+      N3=6
+      SEGINI,MCHELM
+      TITCHE='DEFORMATIONS'
+      IFOCHE=IFOUR
+      IPEPTH=MCHELM
+C =====
+C  2.3 - Initialisation du segment du type des composantes du champ de
+C        temperatures et defini une seule fois (identique sur IPMODL)
+C =====
+      NBTYPE=1
+      SEGINI,NOTYPE
+      TYPE(1)='REAL*8'
+      MOTYTE=NOTYPE
+
+C  3 - BOUCLE SUR LES ZONES ELEMENTAIRES DU MODELE (iSou)
+C ========================================================
+      DO iSou=1,NSOUS
+C =====
+C  3.1 - Quelques initialisations
+C =====
+        lsupma=.true.
+        lsupte=.true.
+        MOTEMP=0
+        IVATEM=0
+        MOMATR=0
+        IVAMAT=0
+        MOCARA=0
+        IVACAR=0
+        MOEPTH=0
+        IVAETH=0
+        MCHAML=0
+        TEMP=XZero
+        THM=XZero
+        THIF=XZero
+        THSU=XZero
+        IPMINT=0
+C =====
+C  3.2 - Activation du sous-modele (iSou)
+C =====
+        IMODEL=KMODEL(iSou)
+        SEGACT,IMODEL
+        MELE=NEFMOD
+        IPMAIL=IMAMOD
+        CONM=CONMOD
+        PHAM=conm(17:24)
+        NPINT=0
+        IF (INFMOD(/1).NE.0) NPINT=INFMOD(1)
+C =====
+C  3.3 - Determination ...
+C =====
+        CALL IDENT(IPMAIL,CONM,IPCHE1,IPCHE2,INFOS,iOK)
+        IF (iOK.EQ.0) GOTO 210
+        iOK=0
+C =====
+C  3.4 - Determination de la nature du materiau et verification
+C =====
+C*      NFOR=FORMOD(/2)
+C*      NMAT=MATMOD(/2)
+C*      CALL NOMATE(FORMOD,NFOR,MATMOD,NMAT,CMATE,MATE,INAT)
+        CMATE = CMATEE
+        MATE  = IMATEE
+        INAT  = INATUU
+C*      IF (CMATE.EQ.' ') THEN
+C*        CALL ERREUR(251)
+C*        GOTO 210
+C*      ENDIF
+        LOGMA = CMATE.EQ.'ORTHOTRO'.OR.CMATE.EQ.'ANISOTRO'.OR.
+     &          CMATE.EQ.'UNIDIREC'
+C =====
+C  3.5 - Recuperation d'informations sur l'element fini du sous-modele
+C        Activation du segment d'integration
+C =====
+*        CALL ELQUOI(MELE,0,5,IPINF,IMODEL)
+*        IF (IERR.NE.0) GOTO 210
+*        INFO=IPINF
+        NBGS=INFELE(4)
+        IPORE=INFELE(8)
+*        IPMINT=INFELE(11)
+        IPMINT=infmod(7)
+        MINTE=IPMINT
+        IF (IPMINT.NE.0) SEGACT,MINTE
+        if (mele.eq.260) then
+          nbpgau=5
+        else
+          NBPGAU=POIGAU(/1)
+        endif
+        MFR=INFELE(13)
+        NEPTH=INFELE(16)
+        LOGMF = MFR.EQ.1.OR.MFR.EQ.31.OR.MFR.EQ.33.OR.MFR.EQ.63
+C =====
+C  3.6 - Recuperation d'informations liees au maillage IPMAIL
+C =====
+        MELEME=IPMAIL
+        SEGACT,MELEME
+        NBNN=NUM(/1)
+        NBELEM=NUM(/2)
+        NBNO=NBNN
+        IPPORE=0
+        IF (MFR.EQ.33) THEN
+          NBNO=IPORE
+          IPPORE=NBNN
+        ENDIF
+        IF (MFR.EQ.63) THEN
+C         NBNO=IPORE
+          IPPORE=NBNN
+        ENDIF
+C =====
+C  3.7 - Recuperation des temperatures associees au sous-modele
+C        Verification de leur presence dans le MCHAML (IPCHE2)
+C =====
+        NFAC=0
+        if(lnomid(8).ne.0) then
+         lsupte=.false.
+         nomid=lnomid(8)
+         segact nomid
+         motemp=nomid
+         ntem=lesobl(/2)
+         nfac=lesfac(/2)
+        else
+         CALL IDTEMP(MFR,IFOUR,NPINT,MOTEMP,NTEM,NFAC)
+        endif
+        CALL KOMCHA(IPCHE2,IPMAIL,CONM,MOTEMP,MOTYTE,1,INFOS,3,IVATEM)
+        IF (IERR.NE.0) GOTO 230
+        IF (ISupT.EQ.1)THEN
+          CALL VALCHE(IVATEM,NTEM,IPMINT,IPPORE,MOTEMP,MELE)
+          IF (IERR.NE.0) THEN
+            ISupT=0
+            GOTO 230
+          ENDIF
+        ENDIF
+C =====
+C  3.8 - Recuperation des noms des caracteristiques MATERIAU
+C        Traitement suivant la formulation MFR et l'element fini MELE
+C        Verification de leur presence dans le MCHAML (IPCHE1)
+C =====
+        NBROBL=0
+        NBRFAC=0
+        NOMID=0
+C= 3.8.1 - Elements POUTRE,BARRE,POI1,TUYAUX...
+        IF (MELE.EQ.29.OR.MELE.EQ. 42.OR.MELE.EQ. 45.OR.MELE.EQ. 46.OR.
+     .      MELE.EQ.95.OR.MELE.EQ.123.OR.MELE.EQ.124) THEN
+          NBROBL=1
+          SEGINI,NOMID
+          LESOBL(1)='ALPH'
+C= 3.8.2 - Materiau isotrope
+        ELSE IF (CMATE.EQ.'ISOTROPE') THEN
+          NBROBL=1
+          SEGINI,NOMID
+          IF (MFR.EQ.35) THEN
+            LESOBL(1)='ALPN'
+          ELSE
+            LESOBL(1)='ALPH'
+          ENDIF
+C= 3.8.3 - Materiau orthotrope
+        ELSE IF (CMATE.EQ.'ORTHOTRO') THEN
+          IF (MFR.EQ.3.OR.MFR.EQ.5.OR.MFR.EQ.9) THEN
+            NBROBL=4
+            SEGINI,NOMID
+            LESOBL(1)='ALP1'
+            LESOBL(2)='ALP2'
+            LESOBL(3)='V1X'
+            LESOBL(4)='V1Y'
+          ELSE IF (MFR.EQ.75) THEN
+            IF (IDIM.EQ.3) THEN
+            NBROBL=6
+            SEGINI,NOMID
+              LESOBL(1)='ALPN'
+              LESOBL(2)='ALP1'
+              LESOBL(3)='ALP2'
+              LESOBL(4)='ALQN'
+              LESOBL(5)='ALQ1'
+              LESOBL(6)='ALQ2'
+            ELSE IF (IDIM.EQ.2) THEN
+            NBROBL=3
+            SEGINI,NOMID
+              LESOBL(1)='ALPN'
+              LESOBL(2)='ALPS'
+              LESOBL(3)='ALQS'
+            ENDIF
+          ELSE IF (MFR.EQ.35) THEN
+            NBROBL=3
+            SEGINI,NOMID
+            LESOBL(1)='ALPN'
+            LESOBL(2)='V1X'
+            LESOBL(3)='V1Y'
+          ELSE IF (MFR.EQ.1.OR.MFR.EQ.31.OR.MFR.EQ.33) THEN
+            IF (IFOUR.EQ.-2) THEN
+              NBROBL=4
+              SEGINI,NOMID
+              LESOBL(1)='ALP1'
+              LESOBL(2)='ALP2'
+              LESOBL(3)='V1X'
+              LESOBL(4)='V1Y'
+            ELSE IF (IFOUR.EQ.-1.OR.IFOUR.EQ.-3.OR.
+     .               IFOUR.EQ.0.OR.IFOUR.EQ.1) THEN
+              NBROBL=5
+              SEGINI,NOMID
+              LESOBL(1)='ALP1'
+              LESOBL(2)='ALP2'
+              LESOBL(3)='ALP3'
+              LESOBL(4)='V1X'
+              LESOBL(5)='V1Y'
+            ELSE IF (IFOUR.EQ.2) THEN
+              NBROBL=9
+              SEGINI,NOMID
+              LESOBL(1)='ALP1'
+              LESOBL(2)='ALP2'
+              LESOBL(3)='ALP3'
+              LESOBL(4)='V1X '
+              LESOBL(5)='V1Y '
+              LESOBL(6)='V1Z '
+              LESOBL(7)='V2X '
+              LESOBL(8)='V2Y '
+              LESOBL(9)='V2Z '
+            ELSE IF (IFOUR.GE.3.AND.IFOUR.LE.15) THEN
+              IF (IFOUR.EQ.6) THEN
+                NBROBL=1
+                SEGINI,NOMID
+                LESOBL(1)='ALP1'
+              ELSE IF (IFOUR.EQ.5.OR.IFOUR.EQ.10) THEN
+                NBROBL=2
+                SEGINI,NOMID
+                LESOBL(1)='ALP1'
+                LESOBL(2)='ALP3'
+              ELSE IF (IFOUR.EQ.4.OR.IFOUR.EQ.8.OR.IFOUR.EQ.13) THEN
+                NBROBL=2
+                SEGINI,NOMID
+                LESOBL(1)='ALP1'
+                LESOBL(2)='ALP2'
+              ELSE
+                NBROBL=3
+                SEGINI,NOMID
+                LESOBL(1)='ALP1'
+                LESOBL(2)='ALP2'
+                LESOBL(3)='ALP3'
+              ENDIF
+            ENDIF
+          ENDIF
+C= 3.8.4 - Materiau anisotrope
+        ELSE IF (CMATE.EQ.'ANISOTRO') THEN
+          IF (MFR.EQ.1.OR.MFR.EQ.31.OR.MFR.EQ.33) THEN
+            IF (IFOUR.EQ.-2) THEN
+              NBROBL=5
+              SEGINI,NOMID
+              LESOBL(1)='ALP1'
+              LESOBL(2)='ALP2'
+              LESOBL(3)='AL12'
+              LESOBL(4)='V1X '
+              LESOBL(5)='V1Y '
+            ELSE IF (IFOUR.EQ.-3.OR.IFOUR.EQ.-1.OR.
+     .               IFOUR.EQ.0.OR.IFOUR.EQ.1) THEN
+              NBROBL=6
+              SEGINI,NOMID
+              LESOBL(1)='ALP1'
+              LESOBL(2)='ALP2'
+              LESOBL(3)='AL12'
+              LESOBL(4)='ALP3'
+              LESOBL(5)='V1X '
+              LESOBL(6)='V1Y '
+            ELSE IF (IFOUR.EQ.2) THEN
+              NBROBL=12
+              SEGINI,NOMID
+              LESOBL(1)='ALP1'
+              LESOBL(2)='ALP2'
+              LESOBL(3)='ALP3'
+              LESOBL(4)='AL12'
+              LESOBL(5)='AL13'
+              LESOBL(6)='AL23'
+              LESOBL(7)='V1X '
+              LESOBL(8)='V1Y '
+              LESOBL(9)='V1Z '
+              LESOBL(10)='V2X '
+              LESOBL(11)='V2Y '
+              LESOBL(12)='V2Z '
+            ENDIF
+          ELSE IF (MFR.EQ.75) THEN
+            IF (IDIM.EQ.3) THEN
+            NBROBL=6
+            SEGINI,NOMID
+              LESOBL(1)='ALP1'
+              LESOBL(2)='ALP2'
+              LESOBL(3)='ALP3'
+              LESOBL(4)='ALQ1'
+              LESOBL(5)='ALQ2'
+              LESOBL(6)='ALQ3'
+            ELSE IF (IDIM.EQ.2) THEN
+            NBROBL=3
+            SEGINI,NOMID
+              LESOBL(1)='ALP1'
+              LESOBL(2)='ALP2'
+              LESOBL(3)='ALQ3'
+            ENDIF
+          ENDIF
+C= 3.8.5 - Materiau unidirectionnel
+        ELSE IF (CMATE.EQ.'UNIDIREC') THEN
+          IF (MFR.EQ.1.AND.IDIM.EQ.3) THEN
+            NBROBL=7
+            SEGINI,NOMID
+            LESOBL(1)='ALPH'
+            LESOBL(2)='V1X '
+            LESOBL(3)='V1Y '
+            LESOBL(4)='V1Z '
+            LESOBL(5)='V2X '
+            LESOBL(6)='V2Y '
+            LESOBL(7)='V2Z '
+          ELSE
+            NBROBL=3
+            SEGINI,NOMID
+            LESOBL(1)='ALPH'
+            LESOBL(2)='V1X '
+            LESOBL(3)='V1Y '
+          ENDIF
+        ELSE
+          if(lnomid(6).ne.0) then
+            lsupma=.false.
+            nomid=lnomid(6)
+            segact nomid
+            momatr=nomid
+            nmatr=lesobl(/2)
+            nmatf=lesfac(/2)
+          else
+            CALL IDMATR(MFR,IMODEL,MOMATR,NMATR,NMATF)
+          endif
+          NOMID=MOMATR
+          NBROBL=NMATR
+          NBRFAC=NMATF
+        ENDIF
+        MOMATR=NOMID
+        NMATR=NBROBL
+        NMATF=NBRFAC
+        NMATT=NMATR+NMATF
+        NBGMAT=0
+        NELMAT=0
+C= 3.8.6 - Verification de la presence des caracteristiques dans IPCHE1
+        IF (MOMATR.NE.0) THEN
+          IF (CMATE.EQ.'SECTION') THEN
+            NBTYPE=3
+            SEGINI,NOTYPE
+            TYPE(1)='POINTEURMMODEL'
+            TYPE(2)='POINTEURMCHAML'
+            TYPE(3)='POINTEURLISTREEL'
+          ELSE
+            NBTYPE=1
+            SEGINI,NOTYPE
+            TYPE(1)='REAL*8'
+          ENDIF
+          MOTYPE=NOTYPE
+          CALL KOMCHA(IPCHE1,IPMAIL,CONM,MOMATR,MOTYPE,1,
+     .                INFOS,3,IVAMAT)
+          SEGSUP,NOTYPE
+          IF (IERR.NE.0) GOTO 240
+          IF (ISupC.EQ.1) THEN
+            CALL VALCHE(IVAMAT,NMATT,IPMINT,IPPORE,MOMATR,MELE)
+            IF (IERR.NE.0)THEN
+               ISupC=0
+               GOTO 240
+            ENDIF
+          ENDIF
+          MPTVAL=IVAMAT
+          MELVAL=IVAL(1)
+          DO i=1,NMATT
+            IF (IVAL(i).NE.0) THEN
+              MELVAL=IVAL(i)
+              IF (CMATE.EQ.'SECTION') THEN
+                NBGMAT=MAX(NBGMAT,IELCHE(/1))
+                NELMAT=MAX(NELMAT,IELCHE(/2))
+              ELSE
+                NBGMAT=MAX(NBGMAT,VELCHE(/1))
+                NELMAT=MAX(NELMAT,VELCHE(/2))
+              ENDIF
+            ENDIF
+          ENDDO
+        ENDIF
+C =====
+C  3.9 - Recuperation des noms des caracteristiques
+C =====
+        NBROBL=0
+        NBRFAC=0
+        IVECT=0
+        NOMID=0
+        NOTYPE=0
+C= 3.9.1 - Elements COQUES : epaisseur
+        IF (MFR.EQ.3.OR.MFR.EQ.9) THEN
+          NBROBL=1
+          SEGINI,NOMID
+          LESOBL(1)='EPAI'
+          NBTYPE=1
+          SEGINI,NOTYPE
+          TYPE(1)='REAL*8'
+C= 3.9.2 - Elements BARREs et CERCEs : section
+        ELSE IF (MFR.EQ.27) THEN
+          NBROBL=1
+          SEGINI,NOMID
+          LESOBL(1)='SECT'
+          NBTYPE=1
+          SEGINI,NOTYPE
+          TYPE(1)='REAL*8'
+C= 3.9.3 - Elements BAEX : section, excentrements et orientation
+        ELSE IF (MFR.EQ.49) THEN
+          NBROBL=6
+          SEGINI,NOMID
+          LESOBL(1)='SECT'
+          LESOBL(2)='EXCZ'
+          LESOBL(3)='EXCY'
+          LESOBL(4)='VX  '
+          LESOBL(5)='VY  '
+          LESOBL(6)='VZ  '
+          NBTYPE=1
+          SEGINI,NOTYPE
+          TYPE(1)='REAL*8'
+C= 3.9.4 - Elements POUTREs
+        ELSE IF (MFR.EQ.7) THEN
+          IF (CMATE.NE.'SECTION') THEN
+            NBROBL=1
+            SEGINI,NOMID
+            LESOBL(1)='SECT'
+            NBTYPE=1
+            SEGINI,NOTYPE
+            TYPE(1)='REAL*8'
+          ENDIF
+C= 3.9.5 - Elements TUYAUx
+        ELSE IF (MFR.EQ.13) THEN
+          NBROBL=2
+          NBRFAC=2
+          SEGINI,NOMID
+          LESOBL(1)='EPAI'
+          LESOBL(2)='RAYO'
+          LESFAC(1)='RACO'
+          LESFAC(2)='VECT'
+          IVECT=1
+          NBTYPE=4
+          SEGINI,NOTYPE
+          TYPE(1)='REAL*8'
+          TYPE(2)='REAL*8'
+          TYPE(3)='REAL*8'
+          TYPE(4)='POINTEURPOINT   '
+        ENDIF
+        MOCARA=NOMID
+        NCARA=NBROBL
+        NCARF=NBRFAC
+        NCARR=NCARA+NCARF
+C= 3.9.6 - Verification de leur presence dans IPCHE1
+        IF (MOCARA.NE.0) THEN
+          MOTYPE=NOTYPE
+          IF (IPCHE1.NE.0) THEN
+            CALL KOMCHA(IPCHE1,IPMAIL,CONM,MOCARA,MOTYPE,1,
+     .                  INFOS,3,IVACAR)
+            SEGSUP,NOTYPE
+            IF (IERR.NE.0) GOTO 250
+            IF (IVECT.EQ.1) THEN
+              MPTVAL=IVACAR
+              IF (IVAL(NCARR).EQ.0) THEN
+                IVECT=2
+                NOMID=MOCARA
+                SEGACT,NOMID
+                NBRFAC=NBRFAC+2
+                SEGADJ,NOMID
+                LESFAC(NBRFAC-2)='VX  '
+                LESFAC(NBRFAC-1)='VY  '
+                LESFAC(NBRFAC)  ='VZ  '
+                MOCARA=NOMID
+                NBTYPE=1
+                SEGINI,NOTYPE
+                TYPE(1)='REAL*8'
+                MOTYPE=NOTYPE
+                CALL KOMCHA(IPCHE1,IPMAIL,CONM,MOCARA,MOTYPE,1,
+     .                      INFOS,3,IVACAR)
+                SEGSUP,NOTYPE
+                IF (IERR.NE.0) GOTO 250
+                NCARA=NBROBL
+                NCARF=NBRFAC
+                NCARR=NCARA+NCARF
+              ENDIF
+            ENDIF
+          ELSE
+            MOTERR(1:4)='CARA'
+            MOTERR(5:8)='CARA'
+            MOTERR(9:12)=NOMTP(MELE)
+            MOTERR(13:20)='EPTH'
+            CALL ERREUR(145)
+            SEGSUP,NOTYPE
+            GOTO 250
+          ENDIF
+          IF (ISupC.EQ.1) THEN
+            CALL VALCHE(IVACAR,NCARR,IPMINT,IPPORE,MOCARA,MELE)
+            IF (IERR.NE.0) THEN
+              ISupC=0
+              GOTO 250
+            ENDIF
+          ENDIF
+        ENDIF
+C ======
+C  3.10 - Recuperation des noms des composantes de deformations
+C ======
+        if(lnomid(5).ne.0) then
+          nomid=lnomid(5)
+          segact nomid
+          moepth=nomid
+          lsupde=.false.
+          nstr=lesobl(/2)
+        else
+         CALL IDDEFO(IMODEL,IFOUR,MOEPTH,NSTR,NFAC)
+         lsupde=.true.
+        endif
+C*OF    Pas de verif. que NSTR=NEPTH ?
+C ======
+C  3.11 - Initialisation du MCHAML des contraintes de Von Mises (MCHAML)
+C         associe au modele elementaire iSou (de maillage IPMAIL)
+C         Remplissage des donnees associees a MCHAML dans MCHELM(global)
+C ======
+C= 3.11.1 - Initialisation de MCHAML
+        N2=NEPTH
+        SEGINI,MCHAML
+C= 3.11.2 - Remplissage de MCHEML(iSou)
+        CONCHE(iSou)=CONM
+        IMACHE(iSou)=IPMAIL
+        ICHAML(iSou)=MCHAML
+        INFCHE(iSou,1)=0
+        INFCHE(iSou,2)=0
+        INFCHE(iSou,3)=NIFOUR
+        INFCHE(iSou,4)=IPMINT
+        INFCHE(iSou,5)=0
+        INFCHE(iSou,6)=5
+C= 3.11.3 - Initialisation des N2 MELVAL associes a MCHAML
+C=          Fin du remplissage de MCHAML
+        N1PTEL=NBGS
+        N1EL=NBELEM
+        IF (MELE.EQ.30.OR.MELE.EQ.43) THEN
+          N1PTEL=1
+          N1EL=1
+        ENDIF
+        N2PTEL=0
+        N2EL=0
+        NS=1
+        NCOSOU=N2
+        SEGINI,MPTVAL
+        IVAETH=MPTVAL
+        NOMID=MOEPTH
+        SEGACT,NOMID
+        DO i=1,N2
+          NOMCHE(i)=LESOBL(i)
+          TYPCHE(i)='REAL*8'
+          SEGINI,MELVAL
+          IELVAL(i)=MELVAL
+          IVAL(i)=MELVAL
+        ENDDO
+C ======
+C  3.12 - Initialisation de quelques segments de travail
+C         Recuperation des fonctions de forme et de leurs derivees au
+C         centre de l'element pour le calcul des axes locaux
+C ======
+        IF (LOGMA) THEN
+          IF (LOGMF) THEN
+            IELE=NUMGEO(MELE)
+            CALL RESHPT(1,NBNO,IELE,MELE,NPINT,IPT1,IRT1)
+            IF (IERR.NE.0) GOTO 260
+            MINTE2=IPT1
+            SEGACT,MINTE2
+          ENDIF
+          SEGINI,MWRK2
+        ENDIF
+        NV1=NMATT
+        SEGINI,MVELCH,MWRK3
+C ======
+C  3.13 - Boucle sur les elements du sous-modele elementaire
+C ======
+        DO iElt=1,NBELEM
+C= 3.13.1 - Cas des elements MASSIFs - materiau a "TROPIE"
+C=          Recuperation des coordonnees des noeuds de l element iElt
+C=          Determination des axes locaux aux noeuds
+          IF (LOGMA.AND.LOGMF) THEN
+            CALL DOXE(XCOOR,IDIM,NBNN,NUM,iElt,XE)
+            NBSH=MINTE2.SHPTOT(/2)
+            CALL RLOCAL(XE,MINTE2.SHPTOT,NBSH,NBNN,TXR)
+            IF (nbsh.EQ.-1) THEN
+              CALL ERREUR(525)
+              GOTO 260
+            ENDIF
+          ENDIF
+C= 3.13.2 - Cas de la poutre TIMO et modele SECTION
+          IF (CMATE.EQ.'SECTION') THEN
+            MPTVAL=IVAMAT
+            MELVAL=IVAL(1)
+            IBMN=MIN(iElt,IELCHE(/2))
+            IPMODL=IELCHE(1,IBMN)
+            MELVAL=IVAL(2)
+            IBMN=MIN(iElt,IELCHE(/2))
+            IPMAT=IELCHE(1,IBMN)
+            CALL FRIGTH(IPMODL,IPMAT,CRIGI,0,0)
+          ENDIF
+C= 3.13.3 - Boucle sur les points de Gauss
+          DO iGau=1,NBPGAU
+C= 3.13.3.1 - Remplissage du tableau des caracteristiques du materiau
+            IF (CMATE.NE.'SECTION') THEN
+              MPTVAL=IVAMAT
+              DO i=1,NMATT
+                MELVAL=IVAL(i)
+                IBMN=MIN(iElt,VELCHE(/2))
+                IGMN=MIN(iGau,VELCHE(/1))
+                VALMAT(i)=VELCHE(IGMN,IBMN)
+              ENDDO
+            ENDIF
+C= 3.13.3.2 - Prise en compte des epaisseur et excentrement dans le cas
+C=            des coques minces avec ou sans cisaillement transverse
+            IF ((CMATE.EQ.'ISOTROPE'.OR.CMATE.EQ.'ORTHOTRO'.
+     $   OR.CMATE.EQ.'UNIDIREC') .AND.(MFR.EQ.3.OR.MFR.EQ.9)) THEN
+              MPTVAL=IVACAR
+              MELVAL=IVAL(1)
+              IF (MELVAL.NE.0) THEN
+                IBMN=MIN(iElt,VELCHE(/2))
+                IGMN=MIN(iGau,VELCHE(/1))
+                EPAIST=VELCHE(IGMN,IBMN)
+              ELSE
+                CALL ERREUR(527)
+                GOTO 260
+              ENDIF
+            ENDIF
+C= 3.13.3.3 - Recuperation des temperatures du point de Gauss iGau
+            MPTVAL=IVATEM
+            MELVAL=IVAL(1)
+            IGMN=MIN(iGau,VELCHE(/1))
+            IBMN=MIN(iElt,VELCHE(/2))
+            TEMP=VELCHE(IGMN,IBMN)
+C           write(6,*) 'EPTHP',ielt,igau,igmn,ibmn,temp
+            IF (((MFR.EQ.3.OR.MFR.EQ.9).AND.(CMATE.EQ.'ISOTROPE'.
+     $       OR.CMATE.EQ.'ORTHOTRO'.OR.CMATE.EQ.'UNIDIREC')).
+     $         OR.(MFR.EQ.5.AND.
+     $          (CMATE.EQ.'ISOTROPE'.OR.CMATE.EQ.'ORTHOTRO'))) THEN
+              IF (NPINT.EQ.0) THEN
+                THIF=TEMP
+                TEMP=XZero
+                MELVAL=IVAL(2)
+                IGMN=MIN(iGau,VELCHE(/1))
+                IBMN=MIN(iElt,VELCHE(/2))
+                THM=VELCHE(IGMN,IBMN)
+                MELVAL=IVAL(3)
+                IGMN=MIN(iGau,VELCHE(/1))
+                IBMN=MIN(iElt,VELCHE(/2))
+                THSU=VELCHE(IGMN,IBMN)
+              ENDIF
+              E3=DZEGAU(iGau)
+            ELSE
+              IF (CMATE.EQ.'SECTION') TEMP=TEMP*CRIGI(1)
+            ENDIF
+C= 3.13.3.4 - Cas ISOTROPE : calcul des deformations thermiques
+            IF (CMATE.EQ.'ISOTROPE') THEN
+              CALL EPTHIS(MFR,MELE,VALMAT,NEPTH,TEMP,THIF,THM,THSU,
+     .                    E3,EPAIST,RES,NPINT,KERRE)
+C= 3.13.3.5 - Cas ORTHOTROPE : calcul des deformations thermiques
+            ELSE IF (CMATE.EQ.'ORTHOTRO') THEN
+              IF (NPINT.EQ.0) THEN
+                CALL EPTHOR(MFR,MELE,VALMAT,NEPTH,TEMP,THIF,THM,THSU,
+     .                      E3,EPAIST,TXR,XLOC,XGLOB,ROTS,RES,KERRE)
+              ELSE
+                KERRE=19
+              ENDIF
+C= 3.13.3.6 - Cas ANISOTROPE : calcul des deformations thermiques
+            ELSE IF (CMATE.EQ.'ANISOTRO') THEN
+              IF (NPINT.EQ.0) THEN
+                CALL EPTHAN(MFR,MELE,VALMAT,NEPTH,TEMP,TXR,XLOC,XGLOB,
+     .                      ROTS,RES,KERRE)
+              ELSE
+                KERRE=19
+              ENDIF
+C= 3.13.3.7 - Cas UNIDIRECTIONNEL : calcul des deformations thermiques
+            ELSE IF (CMATE.EQ.'UNIDIREC') THEN
+              IF (NPINT.EQ.0) THEN
+                CALL EPTHUN(MFR,MELE,VALMAT,NEPTH,TEMP,THIF,THM,THSU,
+     .                      EPAIST,TXR,XLOC,XGLOB,ROTS,RES,KERRE)
+              ELSE
+                KERRE=19
+              ENDIF
+C= 3.13.3.8 - Cas HOMOGENEISE et SECTION : calcul des deformations ther.
+            ELSE IF (CMATE.EQ.'HOMOGENE'.OR.CMATE.EQ.'SECTION') THEN
+              IF (NPINT.EQ.0) THEN
+                CALL EPTHHS(MELE,VALMAT,NEPTH,TEMP,RES,KERRE)
+              ELSE
+                KERRE=19
+              ENDIF
+C= 3.13.3.9 - Cas non prevus et traitement des ERREURS
+            ELSE
+              KERRE=19
+            ENDIF
+            IF (KERRE.EQ.19) THEN
+              CALL ERREUR(19)
+              GOTO 260
+            ELSE IF (KERRE.EQ.86) THEN
+              MOTERR(1:4)=NOMTP(MELE)
+              MOTERR(5:12)='EPTH'
+              CALL ERREUR(86)
+              GOTO 260
+            ENDIF
+C= 3.13.3.10 - Stockage des deformations dans les MELVAL
+            MPTVAL=IVAETH
+            DO i=1,NEPTH
+              MELVAL=IVAL(i)
+              VELCHE(iGau,iElt)=RES(i)
+            ENDDO
+          ENDDO
+        ENDDO
+C ======
+C  3.14 - Desactivation/suppression de segments associes a iSou
+C         Sortie prematuree en cas d'ERREUR (iOK=0)
+C ======
+        IF (IERR.EQ.0) iOK=1
+ 260    SEGSUP,MVELCH,MWRK3
+        IF (MOEPTH.NE.0) THEN
+          NOMID=MOEPTH
+          if(lsupde)SEGSUP,NOMID
+        ENDIF
+        IF (LOGMA) THEN
+          SEGSUP,MWRK2
+          IF (LOGMF) SEGDES,MINTE2
+        ENDIF
+ 250    IF (MOCARA.NE.0) THEN
+          NOMID=MOCARA
+          SEGSUP,NOMID
+          IF (ISupC.EQ.1) THEN
+            CALL DTMVAL(IVACAR,3)
+          ELSE
+            CALL DTMVAL(IVACAR,1)
+          ENDIF
+        ENDIF
+ 240    IF (MOMATR.NE.0) THEN
+          NOMID=MOMATR
+          if(lsupma)SEGSUP,NOMID
+          IF (ISupC.EQ.1) THEN
+            CALL DTMVAL(IVAMAT,3)
+          ELSE
+            CALL DTMVAL(IVAMAT,1)
+          ENDIF
+        ENDIF
+ 230    IF (MOTEMP.NE.0) THEN
+          NOMID=MOTEMP
+          if(lsupte)SEGSUP,NOMID
+        ENDIF
+        IF (ISupT.EQ.1) THEN
+          CALL DTMVAL(IVATEM,3)
+        ELSE
+         CALL DTMVAL(IVATEM,1)
+        ENDIF
+C        SEGDES,MELEME
+ 220    CONTINUE
+        if (IPMINT.NE.0) SEGDES,MINTE
+ 210    CONTINUE
+C        SEGDES,IMODEL
+        IF (iOK.EQ.0) THEN
+          CALL DTMVAL(IVAETH,3)
+          IF (MCHAML.NE.0) SEGSUP,MCHAML
+          SEGSUP,MCHELM
+          GOTO 300
+        ENDIF
+        CALL DTMVAL(IVAETH,1)
+        SEGDES,MCHAML
+      ENDDO
+
+C  4 - MENAGE : DESACTIVATION/DESTRUCTION DE SEGMENTS
+C ====================================================
+      IRET=1
+      SEGACT,MCHELM
+ 300  CONTINUE
+C      SEGDES,MMODEL
+      NOTYPE=MOTYTE
+      SEGSUP,NOTYPE
+
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,590 @@
+C IPLNU1    SOURCE    PV        18/11/19    21:15:11     9995
+      SUBROUTINE IPLNU1(INUA)
+C
+C Fonction
+C     Cette sous routine interpole une fonction de n variables dont
+C     certains couples (x,f(x)) ont ete stockes dans un objet de type
+C     nuage
+C
+C Variables
+C     INUA pointeur sur l'objet de type nuage
+C     NN nombre de composantes du CHPOINT/MCHAML en entree
+C     MM nombre de composantes du CHPOINT/MCHAML a calculer
+C     NNMM nombe de composantes du nuage (= NN + MM)
+C     IADD contient la correspondance entre les numeros des composantes
+C          du CHPOINT/MCHAML et celles du nuage :
+C          - La composante connue I (entre 1 et NN) du champ est a la position
+C            IADD(I) dans le nuage
+C          - La composante a calculer J (entre 1 et MM) est a la position
+C            IADD(J) dans le nuage
+C     MAXV contient les max des composantes du nuage (utilise pour normer
+C          le calcul des distances)
+C
+C Appele par interp qui est le point d'entree de l'operateur IPOL
+C
+C Auteur A De Gayffier
+C Date  05/07/94
+C
+C Evolution 2015 : nouvelle option GRILL, interpolation dans une grille
+C Evolution 2016 : nouvelle option   PID, interpolation par ponderation
+C                                         inverse a la distance
+C
+C Langage esope+fortran 77
+C
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+
+      LOGICAL FLAG
+
+-INC SMNUAGE
+-INC SMCHAML
+-INC CCOPTIO
+-INC SMCHPOI
+-INC CCASSIS
+
+C Introduction d'un COMMON pour la parallelisation
+C  Il est a repercuter aussi dans les sources suivantes :
+C   - ipln2i.eso
+      COMMON/iplnuc/XP1,NBTH1,INUA1,ITR1,IMAX1,IVAL1,N1,NN1,MM1,NNMM1,
+     &              IMPOV1,IMPOV2,
+     &              IMCHA1,IMCHA2,N3EL,N3PTEL,
+     &              ITR2
+
+      EXTERNAL ipln2i
+
+
+      SEGMENT MTR1
+         INTEGER IADD(NNMM)
+      ENDSEGMENT
+
+      SEGMENT MTR2
+        REAL*8  XI(N,NN)
+        REAL*8  YI(N,MM)
+      ENDSEGMENT
+
+
+      SEGMENT MAXI1
+         REAL*8  MAXV(NNMM)
+      ENDSEGMENT
+
+      CHARACTER*5 CLE(4)
+      DATA CLE /'GAUSS','RATIO','PID','GRILL'/
+
+      PARAMETER (TINY=1.D-20)
+
+
+      INUAG  = INUA
+      IMPOV1 = 0
+      IMPOV2 = 0
+      IMCHA1 = 0
+      IMCHA2 = 0
+      N3EL   = 0
+      N3PTEL = 0
+      ITR2   = 0
+
+      ITHRD  = 0
+C
+C   Option pour la fonction de ponderation
+      CALL LIRMOT(CLE,4,IVAL,0)
+      IF (IVAL .EQ. 0) IVAL = 1
+C
+C (FDP 2016) Acquisition d'un flottant/entier pour le mot clef PID
+      XP=1.D0
+      IF (IVAL.EQ.3) THEN
+        CALL LIRREE(XP,0,IRETOU)
+        IF (XP.LT.0.D0) THEN
+          REAERR(1)=REAL(0.D0)
+          REAERR(2)=REAL(XP)
+          CALL ERREUR(191)
+          RETURN
+        ENDIF
+      ENDIF
+C
+C (FDP 2015) Interpolation dans un nuage representant une grille de valeurs
+C            La parallelisation est faite dans IPGRIL !
+      IF (IVAL.EQ.4) THEN
+        CALL IPGRIL(INUA)
+        RETURN
+      ENDIF
+
+C
+      MNUAGE = INUA
+      SEGACT ,MNUAGE
+
+      NNMM = NUANOM(/2)
+      SEGINI ,MAXI1
+
+C    recherche du maximum de chaque parametre
+
+        DO 20 K=1,NNMM
+           MAXV(K) = 0
+           NUAVFL = NUAPOI(K)
+           SEGACT ,NUAVFL
+           NBCOUP = NUAFLO(/1)
+           MAXV(K)=TINY
+           DO 10 J=1,NBCOUP
+              IF(MAXV(K).LT.ABS(NUAFLO(J))) THEN
+                 MAXV(K) = ABS(NUAFLO(J))
+              ENDIF
+  10    CONTINUE
+  20    CONTINUE
+C
+      CALL LIROBJ('CHPOINT',IPOI,0,IRETOU)
+      IF ( IRETOU .EQ. 1 ) GOTO 210
+      CALL LIROBJ('MCHAML',ICHML,0,IRETOU)
+      IF ( IRETOU .EQ. 0 ) THEN
+C   pas d'argument correct trouve: erreur
+        CALL QUETYP(MOTERR(1:8),0,IRETOU)
+        IF(IRETOU.NE.0) THEN
+            CALL ERREUR(39)
+        ELSE
+            CALL ERREUR(533)
+        ENDIF
+        RETURN
+      ENDIF
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C                            Cas d'un MCHAML                           C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+      MCHELM = ICHML
+      SEGACT,MCHELM
+C      creation du chapeau du chamelem resultat
+      SEGINI ,MCHEL1 = MCHELM
+C
+      N1 = ICHAML(/1)
+C
+C boucle sur les chamelems elementaires
+C
+      DO 200 I=1,N1
+        MCHAML = ICHAML(I)
+        SEGACT,MCHAML
+C      calcul des dimensions nn et pp
+        NNMM = 0
+        SEGINI MTR1
+        NN = NOMCHE(/2)
+        MM = NUANOM(/2) - NN
+C      initialisation du nouveau sous chamelem
+        N2 = MM
+        SEGINI ,MCHAM1
+        MCHEL1.ICHAML(I) = MCHAM1
+C
+C        on verifie que les noms des composantes du chamelem sont
+C        dans le nuage et on rempli iadd
+C
+        DO 110 J=1,NOMCHE(/2)
+          IF ( TYPCHE(J) .NE. 'REAL*8' ) THEN
+           MOTERR(1:8) = NOMCHE(J)
+           MOTERR(9:13) = 'CHAMP'
+           CALL ERREUR(681)
+C
+C    'la composante',nomche(j),'du chamelem''n est pas scalaire'*
+           SEGDES MCHAML,MCHELM,MNUAGE
+           SEGSUP MTR1,MCHAM1,MCHEL1
+           RETURN
+          ENDIF
+C
+          DO 100 K=1,NUANOM(/2)
+            IF (NUANOM(K) .EQ. NOMCHE(J)) THEN
+               IADD(**)=K
+               NNMM = IADD(/1)
+             ENDIF
+ 100      CONTINUE
+          IF ( NNMM .NE. J ) THEN
+C        une des composantes du champ n'est pas un composante du nuage
+           CALL ERREUR(682)
+           SEGDES MCHAML,MCHELM,MNUAGE
+           SEGSUP MTR1,MCHAM1,MCHEL1
+C           return
+          ENDIF
+  110     CONTINUE
+C
+C         on recupere les composantes du nuage qui ne sont pas celles
+C         du chamelem
+C
+        DO 130 J=1,NUANOM(/2)
+          IF ( NUATYP(J) .NE. 'FLOTTANT' ) THEN
+            MOTERR(1:8) = NUANOM(J)
+            MOTERR(9:13) = 'NUAGE'
+            CALL ERREUR(681)
+C      'la composante', nuanom(j), 'du nuage', 'n est pas scalaire'
+            SEGDES MCHAML,MCHELM,MNUAGE
+            SEGSUP MTR1,MCHAM1,MCHEL1
+            RETURN
+          ENDIF
+          FLAG = .TRUE.
+          DO 120 K=1,NOMCHE(/2)
+            IF (NUANOM(J) .EQ. NOMCHE(K)) THEN
+               FLAG = .FALSE.
+            ENDIF
+  120     CONTINUE
+          IF (FLAG) THEN
+C          la composante du nuage n'est pas dans le chamelem
+            IADD(**) = J
+            NNMM = IADD(/1)
+           ENDIF
+  130   CONTINUE
+        IF ( NNMM .NE. NUANOM(/2)) THEN
+          CALL ERREUR(682)
+C        'incoherence entre les composantes du nuage et du champ'
+          SEGDES MCHAML,MCHELM,MNUAGE
+          SEGSUP MTR1,MCHAM1,MCHEL1
+          RETURN
+        ENDIF
+C
+C       Remplissage des types et du nom du nouveau MCHAML
+        DO 135 J=1,MM
+          MCHAM1.TYPCHE(J)='REAL*8'
+          MCHAM1.NOMCHE(J)=NUANOM(IADD(NN+J))
+  135   CONTINUE
+C
+C       Activation de tous les MELVAL
+        DO 136 J=1,NN
+          MELVAL = MCHAML.IELVAL(J)
+          SEGACT,MELVAL
+          PRINT *,'IPLNU1 1:',MCHAML.IELVAL(J),MELVAL.VELCHE(1,1)
+  136   CONTINUE
+C
+C    on recupere le nombre d'element et le nombre de points par element
+C
+        N1PTEL = VELCHE(/1)
+        N1EL   = VELCHE(/2)
+
+C       Creation des nouveaux MELVAL pour ecrire le resultat
+        N2PTEL = 0
+        N2EL   = 0
+        DO 138 J=1,MM
+          SEGINI,MELVA1
+          MCHAM1.IELVAL(J) = MELVA1
+  138   CONTINUE
+
+        N=N1EL*N1PTEL
+        NT1= N / (100 * nbthrs)
+
+C
+C Pour la paralelisation de l'interpolation
+C
+       ITH = 0
+       IF (NBESC .NE. 0) ith=oothrd
+       IF ((NT1 .LE. 1) .OR. (NBTHRS .EQ. 1) .OR. (ITH .GT. 0)) THEN
+         NBTHR = 1
+         ITHRD = 0
+       ELSE
+         ithrd=1
+         NBTHR = MIN(NT1,NBTHRS)
+         call threadii
+       ENDIF
+
+        SEGINI,MTR2
+
+C       Remplissage du 'COMMON/iplnuc' apres THREADII : pthread_mutex_lock
+C       sinon soucis de cohabitation entre les ASSISTANTS qui ecrivent tous dans le meme COMMON...
+        XP1   = XP
+        NBTH1 = NBTHR
+        INUA1 = INUAG
+        ITR1  = MTR1
+        IMAX1 = MAXI1
+        IVAL1 = IVAL
+        N1    = N
+        NN1   = NN
+        MM1   = MM
+        NNMM1 = NNMM
+        IMCHA1= MCHAML
+        IMCHA2= MCHAM1
+        N3EL  = N1EL
+        N3PTEL= N1PTEL
+        ITR2  = MTR2
+
+
+C       Lancement des Threads
+        if ((nbthr .gt. 1) .AND. (ithrd .eq. 1)) then
+          do ith=2,nbthr
+            call threadid(ith,ipln2i)
+          enddo
+          call ipln2i(1)
+          do ith=2,nbthr
+            call threadif(ith)
+          enddo
+        else
+          call ipln2i(1)
+        endif
+
+       if (ithrd .eq. 1) call threadis
+
+
+C        SEGINI ,MTR2
+C        ITR2=MTR2
+
+C
+C    boucle sur chaque point de gauss
+C
+
+C        DO 170 J=1,N1EL
+C        DO 160 K=1,N1PTEL
+C
+C        boucle sur les composantes pour remplir le tableau xi
+C        qui contient les valeurs des variables maitres
+C           DO 140 L=1,NN
+C             MELVAL = IELVAL(L)
+C             XI((J-1)*N1EL+N1PTEL,L) = VELCHE(K,J)
+C  140      CONTINUE
+C
+C        on interpole le nuage pour les valeurs xi
+C
+C           CALL IPLNU2(INUA,ITR1,ITR2,MAXI1,IVAL)
+C           IF ( IERR .NE. 0 ) THEN
+C               SEGDES MCHAML,MCHELM
+C               DO 145 L=1,MCHAM1.IELVAL(/1)
+C                   MELVAL = MCHAM1.IELVAL(L)
+C                   SEGSUP MELVAL
+C  145          CONTINUE
+C               SEGSUP MCHAM1,MCHEL1,MTR1
+C               SEGSUP,MTR2
+C               if (ithrd.eq.1) call threadis
+C               RETURN
+C           ENDIF
+C
+C        remplissage des resultats stockes dans yi
+C
+C           DO 150 L=1,MM
+C             MELVAL = MCHAM1.IELVAL(L)
+C             VELCHE(K,J) = YI((J-1)*N1EL+N1PTEL,L)
+C  150      CONTINUE
+C           SEGSUP ,MTR2
+C
+C  160    CONTINUE
+C  170    CONTINUE
+C
+
+
+C       Desactivation de tout les segments MELVAL
+        DO 180 J=1,NN
+          MELVAL = IELVAL(J)
+          SEGDES ,MELVAL
+  180   CONTINUE
+
+        DO 190 J=1,MM
+          MELVAL = MCHAM1.IELVAL(J)
+          SEGDES ,MELVAL
+  190   CONTINUE
+
+         SEGDES ,MCHAML
+         SEGDES ,MCHAM1
+         SEGSUP ,MTR1,MTR2
+  200 CONTINUE
+C     Fin de la boucle sur les MCHAML
+
+
+       ICH1 = MCHEL1
+       SEGDES MNUAGE,MCHELM,MCHEL1
+       SEGSUP MAXI1
+
+       DO K=1,NNMM
+         NUAVFL = NUAPOI(K)
+         SEGDES ,NUAVFL
+       ENDDO
+
+       CALL ECROBJ('MCHAML  ',ICH1)
+       RETURN
+
+
+
+  210 CONTINUE
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C                           Cas d'un CHPOINT                           C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+      MCHPOI = IPOI
+      SEGACT,MCHPOI
+
+      SEGINI ,MCHPO1 = MCHPOI
+      NSOUPO = IPCHP(/1)
+C
+C boucle sur les CHPOINTS elementaire
+      DO 280 I=1,NSOUPO
+        MSOUPO = IPCHP(I)
+        SEGACT,MSOUPO
+C
+C  calcul de nn et mm
+C
+         NNMM=0
+         SEGINI,MTR1
+         ITR1 = MTR1
+         NN = NOCOMP(/2)
+         MM = NUANOM(/2) - NN
+C   initialisation du nouveau soupo
+         NC = MM
+         SEGINI MSOUP1
+         MCHPO1.IPCHP(I)=MSOUP1
+         MSOUP1.IGEOC = IGEOC
+C
+C  on verifie que les noms des composantes du CHPOINT sont
+C        dans le nuage et on rempli iadd
+C
+        DO 230 J=1,NOCOMP(/2)
+          DO 220 K=1,NUANOM(/2)
+            IF (NUANOM(K) .EQ. NOCOMP(J)) THEN
+               IADD(**)=K
+               NNMM = IADD(/1)
+             ENDIF
+ 220      CONTINUE
+          IF ( NNMM .NE. J ) THEN
+C        une des composantes du champ n'est pas un composante du nuage
+           CALL ERREUR(682)
+C          'incoherence entre les composantes du nuage et du champ'
+           SEGDES MCHPOI,MSOUPO,MNUAGE
+           SEGSUP MTR1,MCHPO1,MSOUP1
+           RETURN
+          ENDIF
+  230     CONTINUE
+C
+C  on recupere les composantes du nuage qui ne sont pas dans le CHPOINT
+C
+        DO 250 J=1,NUANOM(/2)
+          IF ( NUATYP(J) .NE. 'FLOTTANT' ) THEN
+C            la composante du nuanom(j) du nuage n'estpas scalaire
+           MOTERR(1:8) = NUANOM(J)
+           MOTERR(9:13) = 'NUAGE'
+           CALL ERREUR(681)
+           SEGDES MCHPOI,MSOUPO,MNUAGE
+           SEGSUP MTR1,MCHPO1,MSOUP1
+           RETURN
+         ENDIF
+          FLAG = .TRUE.
+          DO 240 K=1,NOCOMP(/2)
+            IF (NUANOM(J) .EQ. NOCOMP(K)) THEN
+               FLAG = .FALSE.
+            ENDIF
+  240     CONTINUE
+          IF (FLAG) THEN
+C          la composante du nuage n'est pas dans le CHPOINT
+            IADD(**) = J
+            NNMM = NNMM +1
+           ENDIF
+  250   CONTINUE
+        IF ( NNMM .NE. NUANOM(/2)) THEN
+          PRINT *, 'INCOHERENCE DANS LES COMPOSANTES'
+        ENDIF
+C
+C   on rempli le noms des composantes du nouveau champ
+C
+        DO 255 J=1,MM
+          MSOUP1.NOCOMP(J)=NUANOM(IADD(J+NN))
+  255   CONTINUE
+        MPOVAL = IPOVAL
+        SEGACT,MPOVAL
+
+C       Creation du nouveau segment MPOVAL pour ecrire les resultats
+        N = VPOCHA(/1)
+        NC = MM
+        SEGINI,MPOVA1
+        MSOUP1.IPOVAL = MPOVA1
+
+
+C       Preparation pour le calcul en parallele
+        NT1= N / (100 * nbthrs)
+C
+C Pour la paralelisation de l'interpolation
+C
+       ITH = 0
+       IF (NBESC .NE. 0) ith=oothrd
+       IF ((NT1 .LE. 1) .OR. (NBTHRS .EQ. 1) .OR. (ITH .GT. 0)) THEN
+         NBTHR = 1
+         ITHRD = 0
+       ELSE
+         ithrd=1
+         NBTHR = MIN(NT1,NBTHRS)
+         call threadii
+       ENDIF
+
+C       Remplissage du 'COMMON/iplnuc' apres THREADII : pthread_mutex_lock
+C       sinon soucis de cohabitation entre les ASSISTANTS qui ecrivent tous dans le meme COMMON...
+        XP1   = XP
+        NBTH1 = NBTHR
+        INUA1 = INUAG
+        ITR1  = MTR1
+        IMAX1 = MAXI1
+        IVAL1 = IVAL
+        N1    = N
+        NN1   = NN
+        MM1   = MM
+        NNMM1 = NNMM
+        IMPOV1= MPOVAL
+        IMPOV2= MPOVA1
+
+C       Lancement des Threads
+        if ((nbthr.gt.1) .AND. (ithrd.eq.1)) then
+          do ith=2,nbthr
+            call threadid(ith,ipln2i)
+          enddo
+          call ipln2i(1)
+          do ith=2,nbthr
+            call threadif(ith)
+          enddo
+        else
+          call ipln2i(1)
+        endif
+
+       if (ithrd .eq. 1) call threadis
+
+
+C        DO 270 J=1,N
+C         Boucle sur les POINTS dont les valeurs sont a evaluer
+
+C          SEGINI,MTR2
+C          ITR2 = MTR2
+C          DO 260 K=1,NN
+C           Boucle sur les composantes CONNUES du CHPOINT donne en argument
+C            XI(K)=VPOCHA(J,K)
+C  260     CONTINUE
+C
+C   Interpolation
+C
+C          CALL IPLNU2(INUA,ITR1,ITR2,MAXI1,IVAL)
+CC         en cas d'erreur on sort proprement
+C          IF ( IERR .NE. 0 ) THEN
+C               SEGDES MCHPOI,MSOUPO
+C               SEGSUP MCHPO1,MSOUP1,MPOVAL,MTR1,MTR2,MAXI1
+C               if (ithrd.eq.1) call threadis
+C               RETURN
+C          ENDIF
+C
+C          DO 265 K=1,MM
+C           Boucle sur les composantes MANQUANTES du CHPOINT resultat
+C            MPOVA1.VPOCHA(J,K)=YI(K)
+C  265     CONTINUE
+C          SEGSUP,MTR2
+C
+C  270     CONTINUE
+
+C   Desactivation des SEGMENTS
+          SEGSUP,MTR1
+          SEGDES,MPOVAL
+          SEGDES,MSOUPO
+          SEGDES,MPOVA1,MSOUP1
+C
+  280 CONTINUE
+C
+      IP1 = MCHPO1
+      SEGDES ,MCHPOI
+      SEGDES ,MCHPO1
+      SEGDES ,MNUAGE
+      SEGSUP ,MAXI1
+
+      DO K=1,NNMM
+        NUAVFL = NUAPOI(K)
+        SEGDES ,NUAVFL
+      ENDDO
+      CALL ECROBJ('CHPOINT ',IP1)
+
+      RETURN
+      END
+
+
+
+
+
+
+
+

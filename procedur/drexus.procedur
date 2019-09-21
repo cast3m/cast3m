@@ -1,0 +1,682 @@
+$$$$ DREXUS
+* DREXUS    PROCEDUR  CB215821  15/07/10    21:15:08     8571
+'DEBPROC' DREXUS ETAB*'TABLE' ;
+*
+*----------------------------------------------------------------------------
+*
+*   PROCEDURE DREXUS :
+*
+*   CALCUL DYNAMIQUE PAS A PAS AVEC UN ALGORITHME EXPLICITE
+*
+*   EN ENTREE :
+*   ---------
+*
+*     ETAB    TABLE CONTENANT  :
+*
+*     ETAB.'VITESSE_INITIALE'     : vitesse initiale (champoint)
+*     ETAB.'CHARGEMENT'           : chargement
+*     ETAB.'LIAISONS'             : liaisons (rigidite)
+*     ETAB.'IMPACT'               : données pour l'impact (table)
+*     ETAB.'MODELE'               : objet modele de la structure
+*     ETAB.'CARACTERISTIQUES'     : caractéristiques associées au modele
+*     ETAB.'PAS_TEMPS'            : pas de temps (flottant)
+*     ETAB.'COEFF_STABILITE'      : coeff multi pdt (pas automatique) (flottant)
+*     ETAB.'NPASMAX'              : nbre de pas de temps maximal (entier)
+*     ETAB.'TEMPS_SORTIE'         : liste des temps à stocker (listenti)
+*     ETAB.'FREQUENCE_SORTIE'     : fréquence de sortie (entier)
+*     ETAB.'TEMPS_INITIAL'        : temps initial (flottant) (0. par defaut)
+*     ETAB.'GRANDES_DEFORMATIONS' : prise en compte des gdes def. (logique)
+*     ETAB.'FREQ_MENAGE'          : fréquence de menage (entier) (=50 p. def)
+*     ETAB.'AMORTISSEMENT'        : matrice d'amortissement
+*
+*   EN SORTIE :
+*   ---------
+*
+*     INDICE  N  : numero de l'enregistrement
+*
+*     ETAB.'NPAS'.N                : no du pas (entier)
+*     ETAB.'TEMPS'.N               : temps (reel)
+*     ETAB.'DEPLACEMENTS'.N        : deplacement (champoint)
+*     ETAB.'VITESSES'.N            : vitesse (champoint)
+*     ETAB.'ACCELERATIONS'.N       : accelerations (champoint)
+*     ETAB.'FORCES_EXTERIEURES'.N  : forces exterieures (champoint)
+*     ETAB.'CONTRAINTES'.N         : contraintes (chamelem)
+*     ETAB.'VARIABLES_INTERNES'.N  : variables d'ecrouissage (chamelem)
+*
+*----------------------------------------------------------------------------
+*
+*-- presentation
+*
+'SAUT' 1 lignes ;
+'MESS' '          D.    R.    E.    X.    U.    S.' ;
+'MESS' ' ' ;
+'MESS' '   Dynamique Rapide Explicite , algorithme pleXUS      '  ;
+'MESS' ' ' ;
+'MESS' '   _____________________________________________          ' ;
+'MESS' '      _________ Mens Agitat Molem  __________             ' ;
+'MESS' '          _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _                 ' ;
+'SAUT' 1 lignes ;
+'MESS' '   Options du calcul : ' ;
+'MESS' ' ' ;
+*
+*----------------------------------------------------------------------------
+*    VERIFICATIONS DES ENTREES
+*----------------------------------------------------------------------------
+*
+*-- verification du modèle de comportement
+*
+'SI' ('NON' ('EXISTE' ETAB 'MODELE')) ;
+   'ERREUR' 'Il manque la donnée du modèle.' ;
+'SINON' ;
+   MO_TOT = ETAB.'MODELE' ;
+   TYP1 = 'TYPE' MO_TOT ;
+   'SI' ('NEG' TYP1 'MMODEL  ') ;
+      'ERREUR' 'Le type du modèle est incorrect' ;
+   'FINSI' ;
+'FINSI' ;
+*
+*-- non-linearités matériaux : plasticité
+*
+'SI' ('EXISTE' MO_TOT 'MATE' 'PLASTIQUE') ;
+   PPLAS = VRAI ;
+   'MESS' '    - Matériau : loi de comportement plastique' ;
+'SINON' ;
+   PPLAS = FAUX ;
+   'MESS' '    - Matériau : loi de comportement élastique' ;
+'FINSI' ;
+*
+*-- non-linearités géométriques : grandes déformations
+*
+'SI' ( 'EXISTE' ETAB  'GRANDES_DEFORMATIONS' ) ;
+   CANLGEO = ETAB . 'GRANDES_DEFORMATIONS' ;
+'SINON' ;
+   CANLGEO = FAUX ;
+   'MESS' '    - Hypothèse des petits déplacements' ;
+'FINSI' ;
+'SI' CANLGEO ;
+   'MESS' '    - Grandes déformations modélisées' ;
+'FINSI' ;
+*
+*-- y a t'il de l'amortissement
+*
+CAMOR = FAUX ;
+'SI' ('EXISTE' ETAB  'AMORTISSEMENT') ;
+  'MESS' '    - Prise en compte de l amortissement' ;
+   KAMOR = ETAB . 'AMORTISSEMENT';
+   CAMOR = VRAI ;
+'FINSI' ;
+*
+*-- verification des caractéristiques matériaux
+*
+'SI' ('NON' ('EXISTE' ETAB 'CARACTERISTIQUES')) ;
+   'ERREUR' 'Il manque la donnée du materiau.' ;
+'SINON' ;
+   MA = ETAB.'CARACTERISTIQUES' ;
+   TYP1 = 'TYPE' MA ;
+   'SI' ('NEG' TYP1 'MCHAML  ') ;
+     'ERREUR' 'Le type du champ de materiau est incorrect' ;
+   'FINSI' ;
+   MA_TOT = 'REDU' MA MO_TOT ;
+'FINSI' ;
+*
+*-- définition du temps initial
+*
+'SI' ( 'EXISTE' ETAB 'TEMPS_INITIAL' ) ;
+  T_INIT = ETAB. 'TEMPS_INITIAL' ;
+'SINON' ;
+  T_INIT = 0. ;
+'FINSI' ;
+'MESS' '    - Temps initial : ' T_INIT ;
+*
+*-- définition des impacts
+'SI' ('EXISTE' ETAB 'IMPACT') ;
+  T_IMPA = ETAB.'IMPACT' ;
+  'SI' ('EXISTE' T_IMPA 'NEZ') ;
+    'MESS' '    - Impact : point-ligne ' ;
+    'SI' ('NON' ('EXISTE' T_IMPA 'MASSE')) ;
+       'ERREUR' 'Entrez la masse du projectile' ;
+    'FINSI' ;
+  'SINON' ;
+    'MESS' '    - Impact : ligne-ligne ' ;
+  'FINSI' ;
+'FINSI' ;
+
+*
+*
+*----------------------------------------------------------------------------
+*    INITIALISATIONS
+*----------------------------------------------------------------------------
+*
+*-- configuration initiale
+*
+CATOUCH = FAUX ;
+G_ZERO = 'FORM';
+*
+*-- calcul de la matrice masse
+*
+T_MAS = 'LUMP' MO_TOT MA_TOT ;
+MAIL1 = 'EXTR' MO_TOT 'MAIL' ;
+'SI' ('EXISTE' ETAB 'IMPACT') ;
+  'SI' ('EXISTE' T_IMPA 'NEZ') ;
+     PROJ = ETAB.'IMPACT' . 'ESCLAVE' ;
+     MAIL1 = MAIL1 'ET' PROJ ;
+     MASS_P = MASS DEPL ETAB.'IMPACT' . 'MASSE' PROJ;
+     T_MAS = T_MAS 'ET' MASS_P ;
+  'FINSI' ;
+'FINSI' ;
+CHP1 = 'MANU' 'CHPO' MAIL1 9
+       'UX' 1. 'UY' 1. 'UZ' 1. 'UR' 1. 'UT' 1.
+       'RX' 1. 'RY' 1. 'RZ' 1. 'RT' 1. ;
+CHPMAS = CHP1 '*' T_MAS ;
+CHPM1 = 'NOMC'  CHPMAS
+        ('MOTS' 'FX' 'FY' 'FZ' 'FR' 'FT' 'MX' 'MY' 'MZ' 'MT')
+        ('MOTS' 'UX' 'UY' 'UZ' 'UR' 'UT' 'RX' 'RY' 'RZ' 'RT')
+         'NATU' 'DISCRET' ;
+CHPM_T = 'INVE' CHPM1 ;
+*
+*-- creation des chamelems de contrainte
+*
+'SI' ( 'EXISTE' ETAB  'DEPLACEMENTS' ) ;
+   IDIM = 'DIME' ETAB.'TEMPS' ;
+   SIGMA_T = 'COPIER' (ETAB.'CONTRAINTES' . (IDIM-1)) ;
+SINON ;
+   SIGMA_T = 'ZERO' MO_TOT 'CONTRAIN' ;
+'FINSI' ;
+'SI' (PPLAS) ;
+   'SI' ( 'EXISTE' ETAB  'DEPLACEMENTS' ) ;
+      IDIM = 'DIME' ETAB.'TEMPS' ;
+      D_INELAS = 'COPIER' ( ETAB . 'DEFORMATIONS_INELASTIQUES'
+                  .( IDIM - 1 ) );
+      VARI_T = 'COPIER' (ETAB.'VARIABLES_INTERNES' . (IDIM-1)) ;
+   SINON ;
+      D_INELAS = 'ZERO' MO_TOT 'DEFORMAT' ;
+      VARI_T =  'ZERO' MO_TOT 'VARINTER' ;
+   'FINSI' ;
+'FINSI' ;
+*
+*-- champoints de deplacement et vitesse au pas initial
+*
+'SI' ( 'EXISTE' ETAB  'DEPLACEMENTS' ) ;
+   IDIM = 'DIME' ETAB.'TEMPS' ;
+   DEPLA_T = 'COPIER' (ETAB.'DEPLACEMENTS' . (IDIM-1)) ;
+   VITES_T = 'COPIER' (ETAB.'VITESSES' . (IDIM-1)) ;
+SINON ;
+   CHPZERO1 = 'ZERO' MO_TOT 'DEPLACEM' ;
+   DEPLA_T = 'CHANGER' 'CHPO'  MO_TOT CHPZERO1 ;
+   'SI' ( 'EXISTE' ETAB 'VITESSE_INITIALE' ) ;
+      VITES_T = 'COPIER' (ETAB.'VITESSE_INITIALE') ;
+   'SINON';
+      VITES_T = 'CHANGER' 'CHPO'  MO_TOT CHPZERO1 ;
+   'FINSI' ;
+   'MESS' '    - Vitesse initiale : ' ('MAXI' VITES_T) ;
+'FINSI' ;
+*
+*-- conditions d'impact
+*
+'SI' ('EXISTE' ETAB 'IMPACT') ;
+   P_MAIT = ETAB . 'IMPACT' . 'MAITRE' ;
+   P_ESCL = ETAB . 'IMPACT' . 'ESCLAVE' ;
+   CONT_T = 'IMPO' 'IMPA' 'MAIT' P_MAIT 'ESCL' P_ESCL ;
+'FINSI' ;
+*
+*-- calcul de la matrice de liaisons
+*
+'SI' ( 'EXISTE' ETAB 'LIAISONS' ) ;
+   C_LIAI =  ETAB.'LIAISONS' ;
+   MAIL2 = 'EXTR' C_LIAI 'MAIL' 'MULT' ;
+   C_TOT = C_LIAI ;
+   H0 = 'CMCT' C_TOT CHPM_T ;
+   CABLOC = VRAI ;
+   H = H0 ;
+'SINON' ;
+   CABLOC = FAUX ;
+   'MESS' '    - Pas de conditions aux limites' ;
+'FINSI' ;
+*
+*-- champoint forces exterieures au pas initial
+*
+AUX1 = 'ZERO' MO_TOT 'FORCES  ' ;
+CHFORC1 =  'CHANGER' 'CHPO' MO_TOT AUX1 ;
+FINT_T = 'COPIER' CHFORC1 ;
+'SI' ('EXISTE' ETAB 'CHARGEMENT') ;
+   FEXT1 = 'TIRER' ETAB.'CHARGEMENT' T_INIT ;
+   'SI' CABLOC ;
+      GAMASL = '*'
+        CHPM_T ('MOTS' 'UX' 'UY' 'UZ' 'UR' 'UT' 'RX' 'RY' 'RZ' 'RT')
+        FEXT1  ('MOTS' 'FX' 'FY' 'FZ' 'FR' 'FT' 'MX' 'MY' 'MZ' 'MT')
+               ('MOTS' 'UX' 'UY' 'UZ' 'UR' 'UT' 'RX' 'RY' 'RZ' 'RT');
+      CGAMASL = (-1) '*' (C_LIAI '*' GAMASL) ;
+      SECM_L = CGAMASL ;
+      'MESS' ' ' ;
+      'MESS' '    - Matrice de liaison initiale :' ;
+      LAMBDA = 'RESOU' H0 SECM_L ;
+      FEXT2 = 'REAC' C_TOT LAMBDA ;
+      FEXT_T = FEXT1 + FEXT2 ;
+      'MESS' ' ' ;
+   'SINON' ;
+      FEXT_T = FEXT1 ;
+   'FINSI' ;
+'SINON' ;
+   FEXT_T = 'COPIER' CHFORC1 ;
+'FINSI' ;
+*
+*-- calcul de l'acceleration au pas initial
+*
+'SI' ( 'EXISTE' ETAB  'DEPLACEMENTS' ) ;
+   IDIM = 'DIME' ETAB.'TEMPS' ;
+   ACCE_T = 'COPIER' (ETAB.'ACCELERATIONS'. (IDIM-1)) ;
+SINON ;
+   ACCE_T = '*'
+     CHPM_T ('MOTS' 'UX' 'UY' 'UZ' 'UR' 'UT' 'RX' 'RY' 'RZ' 'RT')
+     FEXT_T ('MOTS' 'FX' 'FY' 'FZ' 'FR' 'FT' 'MX' 'MY' 'MZ' 'MT')
+            ('MOTS' 'UX' 'UY' 'UZ' 'UR' 'UT' 'RX' 'RY' 'RZ' 'RT');
+'FINSI' ;
+*
+*-- determination du pas de temps initial dt1
+*
+'SI' ( 'EXISTE' ETAB 'PAS_TEMPS' ) ;
+   DTAUTO = FAUX ;
+   DT1_T = ETAB.'PAS_TEMPS' ;
+   'MESS'  '    - Pas de temps fixé : ' DT1_T ;
+'SINON' ;
+   DTAUTO = VRAI ;
+   'SI' ( 'EXISTE' ETAB 'COEFF_STABILITE' ) ;
+      CSTA = ETAB . 'COEFF_STABILITE' ;
+   'SINON' ;
+      CSTA = 0.5 ;
+   'FINSI' ;
+   DT1_T = CSTA '*' ('MINI' ('CFL' MO_TOT MA_TOT)) ;
+   'MESS'  '    - Pas de temps automatique : ' DT1_T ;
+'FINSI' ;
+*
+*-- determination du nombre de pas de temps maximum
+*
+'SI' ( 'EXISTE' ETAB 'NPASMAX' ) ;
+   NMAX1 = 'ENTIER' ( ETAB.'NPASMAX') ;
+'SINON' ;
+   NMAX1 = 10000000 ;
+'FINSI' ;
+'MESS' '    - Nombre maximum de pas : ' nmax1 ;
+*
+*-- determination du nombre de sauvegardes
+*
+'SI' ( 'EXISTE' ETAB 'FREQUENCE_SORTIE' ) ;
+  FSORT = ETAB . 'FREQUENCE_SORTIE' ;
+  MESS '    - Fréquence d enregistrement des résultats : ' FSORT ;
+  STEMP1 = ('PROG' 0 'PAS' FSORT NMAX1) '*' DT1_T ;
+'SINON';
+  'SI' ( 'EXISTE' ETAB 'TEMPS_SORTIE' ) ;
+     STEMP1 = ETAB . 'TEMPS_SORTIE';
+  'SINON';
+     'ERREUR' 'Definissez le temps ou la frequence de sortie' ;
+  'FINSI' ;
+'FINSI' ;
+STEMP1 = 'ORDONNER' STEMP1 ;
+T_MAX = 'MAXI' STEMP1 ;
+MESS '    - Temps final : ' T_MAX ;
+ITEM = 0 ;
+'REPETER' ETEM0 ;
+  ITEM = ITEM + 1 ;
+  T_SORT  = 'EXTRAI' STEMP1 ITEM ;
+  'SI' ( T_SORT '>EG' T_INIT ) ;
+     'QUITTER' ETEM0 ;
+  'FINSI' ;
+'FIN' ETEM0 ;
+*
+*- frequence pour le menage
+*
+JPAS = 0 ;
+FREQ_M = 50 ;
+'SI' ( 'EXISTE' ETAB  'FREQ_MENAGE' ) ;
+  FREQ_M = 'ENTIER' ( ETAB . 'FREQ_MENAGE' ) ;
+  'SI' ( FREQ_M 'EGA' 0 ) ;
+    FREQ_M = 50 ;
+  'FINSI' ;
+'FINSI' ;
+'MESS' '    - Fréquence de ménage : ' FREQ_M 'pas' ;
+*
+*-- initialisation de la table de sortie
+*
+IPAS = 0 ;
+'SAUT' 1 lignes ;
+'MESS' '====  Début des calculs de la procédure DREXUS ====' ;
+'SAUT' 1 lignes ;
+'SI' ( 'EXISTE' ETAB 'DEPLACEMENTS' ) ;
+  ISTOC = ('DIME' ETAB.'DEPLACEMENTS') - 1 ;
+'SINON' ;
+  ETAB.'NPAS' = 'TABLE' ;
+  ETAB.'TEMPS' = 'TABLE' ;
+  ETAB.'DEPLACEMENTS' = 'TABLE' ;
+  ETAB.'VITESSES' = 'TABLE' ;
+  ETAB.'ACCELERATIONS' = 'TABLE' ;
+  ETAB.'FORCES_EXTERIEURES' = 'TABLE' ;
+  ETAB.'CONTRAINTES' = 'TABLE' ;
+  ETAB.'VARIABLES_INTERNES' = 'TABLE' ;
+  ETAB.'DEFORMATIONS_INELASTIQUES' = 'TABLE' ;
+  ISTOC = 0 ;
+  'SI' ( T_SORT 'EGA' T_INIT ) ;
+    'MESS' 'Enregistrement des résultats pour le temps'
+    T_INIT 'pas n°' IPAS ;
+    ETAB.'NPAS' . ISTOC = 0 ;
+    ETAB.'TEMPS' . ISTOC =  T_SORT;
+    ETAB.'DEPLACEMENTS'. ISTOC = 'COPIER' DEPLA_T ;
+    ETAB.'VITESSES' . ISTOC = 'COPIER' VITES_T ;
+    ETAB.'ACCELERATIONS' . ISTOC = 'COPIER' ACCE_T ;
+    ETAB.'FORCES_EXTERIEURES' . ISTOC = 'COPIER' FEXT_T ;
+    ETAB.'CONTRAINTES' . ISTOC = 'COPIER' SIGMA_T ;
+    'SI' (PPLAS) ;
+      ETAB.'VARIABLES_INTERNES' . ISTOC = 'COPIER' VARI_T ;
+      ETAB.'DEFORMATIONS_INELASTIQUES'. ISTOC = 'COPIER' D_INELAS ;
+    'FINSI' ;
+    ITEM=ITEM + 1 ;
+    T_SORT = 'EXTRAI' STEMP1 ITEM ;
+  'FINSI' ;
+'FINSI' ;
+*
+*-- définition du temps zero
+*
+T_0 = T_INIT ;
+*
+*----------------------------------------------------------------------------
+*    BOUCLE SUR LES PAS DE TEMPS
+*----------------------------------------------------------------------------
+*
+'REPETER' ETIPAS NMAX1 ;
+    IPAS = IPAS + 1 ;
+    T_1 = T_0 + DT1_T ;
+*
+*-- vitesse au pas n+1/2
+*
+    DT1_DEMI = 0.5 * DT1_T ;
+    V_DEMI = 'COLI' VITES_T 1.D0 ACCE_T DT1_DEMI ;
+*
+*-- deplacement au pas n+1
+*
+    DU1 = DT1_T * V_DEMI ;
+    DEPLA_T1 = DEPLA_T + DU1 ;
+    'DETR' DEPLA_T ;
+    DEPLA_T = DEPLA_T1 ;
+*
+*-- calcul des forces internes au pas n+1
+*
+    ZPREK = 1E-3;
+*
+*   traitement des grandes déformations
+    'SI' CANLGEO ;
+      ZDEP_1 = 0.5D0 * DU1 ;
+      ZSIG0 = PICA MO_TOT SIGMA_T ZDEP_1 ;
+      'SI' PPLAS ;
+        ZEPS0 = D_INELAS ;
+        ZVAR0 = VARI_T ;
+*       ici il faudra faire le transport des variables internes
+*       et eventuellement des déformations plastiques
+      'FINSI'
+*
+*     on calcule la deformation au demi pas de temps
+*     il faut pour les poutres ,les tuyaux, les tuyaux fissures
+*     et les linespring mettre à jour le matériau
+      'FORM' ZDEP_1 ;
+      DEPST = 'EPSI' MO_TOT DU1 MA_TOT ;
+*
+    'SINON' ;
+*
+*     en petits déplacements
+      ZSIG0  = SIGMA_T;
+      DEPST = 'EPSI' MO_TOT DU1 MA_TOT ;
+      'SI' PPLAS ;
+        ZVAR0 = VARI_T ;
+        ZEPS0 = D_INELAS ;
+      'FINSI' ;
+    'FINSI' ;
+*
+*   calcul des contraintes
+    'SI' PPLAS ;
+     SIGMA_T1 ZVARF ZDEPSPL = 'ECOULE' MO_TOT ZSIG0 ZVAR0
+                              DEPST MA_TOT ETAB ZPREK 'NOID' ;
+
+      SIGMA_T0 = SIGMA_T ;
+      SIGMA_T = SIGMA_T1 ;
+*
+*     l'ecoulement se passe mal
+      'SI' ('NON' ETAB.'SUCCES') ;
+         'ERREUR' 'Pas de convergence dans l écoulement' ;
+      'FINSI' ;
+*
+    'SINON' ;
+      DSIGT = 'ELAS' DEPST MO_TOT MA_TOT ;
+      SIGMA_T1 = ZSIG0 + DSIGT ;
+      SIGMA_T0 = SIGMA_T ;
+      SIGMA_T = SIGMA_T1 ;
+      'DETR' DSIGT ;
+    'FINSI' ;
+
+*
+*   transport des contraintes vers la configuration n+1
+    'SI' CANLGEO ;
+      ZSIGF05 = SIGMA_T ;
+      SIGMA_T = PICA MO_TOT ZSIGF05 ZDEP_1 ;
+*     ici il faudra faire le transport des variables internes
+*     et eventuellement des déformations plastiques
+*
+*     passage à la configuration n+1
+      'FORM' ZDEP_1 ;
+      'DETR' ZDEP_1;
+    'FINSI' ;
+*
+*   on  determine les forces internes
+    'SI' CAMOR ;
+      FINT_T1 = 'BSIGMA' MO_TOT SIGMA_T MA_TOT ;
+      FINT_T2 = KAMOR '*' V_DEMI ;
+      FINT_T = FINT_T1 + FINT_T2 ;
+      'DETR' FINT_T1 ; 'DETR' FINT_T2 ;
+    'SINON' ;
+      'DETR' FINT_T ;
+      FINT_T = 'BSIGMA' MO_TOT SIGMA_T MA_TOT ;
+    'FINSI' ;
+
+*
+    'SI' PPLAS ;
+*      'DETR'  VARI_T ;
+      VARI_T = ZVARF;
+      D_INELAS = ZEPS0 + ZDEPSPL ;
+*      'DETR' ZEPS0 ;
+*      'DETR' ZDEPSPL;
+    'FINSI';
+*
+*-- calcul du pas de temps suivant dt2
+    'SI' DTAUTO ;
+       'SI' ('NON' CANLGEO) ;
+          'FORM' DU1 ;
+       'FINSI' ;
+       DT2_T = CSTA '*' ('MINI' ('CFL' MO_TOT MA_TOT)) ;
+    'SINON' ;
+       DT2_T = DT1_T ;
+    'FINSI' ;
+*
+*-- calcul des forces exterieures au pas n+1
+*
+*   forces exterieures imposées
+    'SI' ('EXISTE' ETAB 'CHARGEMENT' )  ;
+       FEXT1 = 'TIRER'  ETAB.'CHARGEMENT' T_1 ;
+    'SINON';
+       FEXT1 =  CHFORC1;
+    'FINSI';
+*
+*   conditions d'impact au pas n+1
+    'SI' ('EXISTE' ETAB 'IMPACT') ;
+      'SI' ('ET' ('NON' CANLGEO) ('NON' DTAUTO));
+         'FORM' DU1 ;
+      'FINSI' ;
+      'SI' ('EXISTE' T_IMPA 'NEZ') ;
+         FNEZ = ETAB.'IMPACT' . 'NEZ' ;
+         LAR = ETAB.'IMPACT' . 'LARGEUR' ;
+         VEC = ETAB.'IMPACT' . 'VECTEUR' ;
+         'SI' ('EGA' FNEZ 'CONE') ;
+           ALP = ETAB.'IMPACT' . 'ANGLE' ;
+           C_IMP = 'IMPO' 'IMPA' CONT_T FNEZ LAR 'ANGL' ALP 'VECT' VEC;
+         'SINON' ;
+           C_IMP = 'IMPO' 'IMPA' CONT_T FNEZ LAR 'VECT' VEC ;
+         'FINSI' ;
+      'SINON' ;
+         C_IMP = 'IMPO' 'IMPA' CONT_T ;
+      'FINSI' ;
+      CATOUCH  = 'EXISTE' C_IMP ;
+      'SI' CATOUCH ;
+         DT_I = 2. '/' ( DT1_T '+' DT2_T ) ;
+         SECM_I = DT_I '*' (C_IMP '*' V_DEMI) ;
+         SECM_I = 'CHANGER' 'ATTRIBUT' SECM_I 'NATURE' 'DIFFUS' ;
+      'FINSI' ;
+    'FINSI' ;
+*
+*   matrice de liaison au pas n+1
+    'SI' ('ET' CABLOC CATOUCH ) ;
+       C_TOT = C_LIAI 'ET' C_IMP ;
+       H = 'CMCT' C_TOT CHPM_T ;
+    'SINON' ;
+       'SI'  CABLOC  ;
+          C_TOT = C_LIAI ;
+          H = H0 ;
+       'FINSI' ;
+       'SI' CATOUCH ;
+          C_TOT = C_IMP ;
+          H = 'CMCT' C_TOT CHPM_T ;
+       'FINSI' ;
+    'FINSI' ;
+*
+*   multiplicateurs de Lagrange au pas n+1
+    'SI' ('OU' CABLOC CATOUCH ) ;
+       AUX1 = FEXT1 - FINT_T ;
+       GAMASL = '*'
+         CHPM_T ('MOTS' 'UX' 'UY' 'UZ' 'UR' 'UT' 'RX' 'RY' 'RZ' 'RT')
+           AUX1 ('MOTS' 'FX' 'FY' 'FZ' 'FR' 'FT' 'MX' 'MY' 'MZ' 'MT')
+                ('MOTS' 'UX' 'UY' 'UZ' 'UR' 'UT' 'RX' 'RY' 'RZ' 'RT');
+       CGAMASL =  C_TOT '*' GAMASL ;
+       'SI' CATOUCH ;
+           SECM_T = CGAMASL '+' SECM_I  ;
+       'SINON' ;
+           SECM_T = CGAMASL ;
+       'FINSI' ;
+       LAMBDA = 'RESOU' H SECM_T ;
+*
+*      rupture de contact
+       'SI' CATOUCH ;
+         'SI' CABLOC ;
+            LAMB_L = 'REDU' LAMBDA MAIL2 ;
+            LAMB_I = LAMBDA '-' LAMB_L ;
+         'SINON';
+            LAMB_I = LAMBDA ;
+         'FINSI' ;
+         AUX2 = LAMB_I 'MASQUE' 'SUPERIEUR' 0. ;
+         LAMB_I = '*' LAMB_I ('MOTS' 'LX') AUX2 ('MOTS' 'LX')
+                    ('MOTS' 'LX') ;
+         'SI' CABLOC ;
+            LAMBDA = LAMB_I '+' LAMB_L ;
+         'SINON';
+            LAMBDA = LAMB_I ;
+         'FINSI' ;
+       'FINSI' ;
+*
+       FEXT2 = 'REAC' C_TOT LAMBDA ;
+    'SINON';
+       FEXT2 =  CHFORC1;
+    'FINSI' ;
+*
+*   assemblage des forces exterieures au pas n+1
+    FEXT_T = FEXT1 '+' FEXT2 ;
+*
+*-- acceleration au pas n+1
+*
+    AUX1 = FEXT_T - FINT_T ;
+    'DETR' ACCE_T ;
+    ACCE_T = '*'
+      CHPM_T ('MOTS' 'UX' 'UY' 'UZ' 'UR' 'UT' 'RX' 'RY' 'RZ' 'RT')
+        AUX1 ('MOTS' 'FX' 'FY' 'FZ' 'FR' 'FT' 'MX' 'MY' 'MZ' 'MT')
+             ('MOTS' 'UX' 'UY' 'UZ' 'UR' 'UT' 'RX' 'RY' 'RZ' 'RT');
+*
+*-- vitesse au pas n+1
+*
+    VITES_T1 = 'COLI' V_DEMI 1.D0 ACCE_T DT1_DEMI;
+    'DETR' VITES_T ;
+    VITES_T = VITES_T1 ;
+    'DETR' V_DEMI ;
+*
+*-- enregistrement de l'instant courant
+*
+    'SI' ( T_SORT '<EG' T_1 ) ;
+       'MESS' 'Enregistrement des résultats pour le temps'
+       T_1 'pas n°' IPAS ;
+       ISTOC = ISTOC + 1 ;
+       ETAB.'NPAS' . ISTOC = IPAS;
+       ETAB.'TEMPS' . ISTOC = T_1;
+       ETAB.'DEPLACEMENTS' . ISTOC = 'COPIER' DEPLA_T ;
+       ETAB.'VITESSES' . ISTOC = 'COPIER' VITES_T ;
+       ETAB.'ACCELERATIONS' . ISTOC = 'COPIER' ACCE_T ;
+       ETAB.'FORCES_EXTERIEURES' . ISTOC = 'COPIER' FEXT_T ;
+       ETAB.'CONTRAINTES' . ISTOC = 'COPIER' SIGMA_T ;
+       'SI' (PPLAS);
+         ETAB.'DEFORMATIONS_INELASTIQUES' . ISTOC = 'COPIER' D_INELAS;
+         ETAB.'VARIABLES_INTERNES' . ISTOC = 'COPIER' VARI_T ;
+       'FINSI';
+*
+       'REPETER' ETEMP;
+           'SI' ( T_SORT '>EG' T_MAX) ;
+                QUITTER ETEMP;
+           'FINSI';
+           ITEM=ITEM + 1 ;
+           T_SORT = 'EXTRAI' STEMP1 ITEM ;
+           'SI' ( T_SORT '>' T_1) ;
+                QUITTER ETEMP;
+           'FINSI';
+        'FIN' ETEMP;
+     'FINSI' ;
+*
+*-- test sur le nombre de pas
+*
+    'SI' (IPAS '>EG' NMAX1) ;
+      'QUITTER'   ETIPAS ;
+    'FINSI' ;
+*
+*-- test sur le temps
+*
+    'SI' ( T_1 '>EG' T_MAX ) ;
+      'QUITTER'   ETIPAS ;
+    'FINSI' ;
+*
+*-- actualisation du temps
+    T_0 = T_1 ;
+    DT1_T = DT2_T ;
+*
+*-- menage
+*
+    JPAS = JPAS + 1 ;
+    'SI' ( JPAS 'EGA' FREQ_M ) ;
+       JPAS = 0 ;
+*       TABTPS = TEMP 'NOEC';
+*       MESS IPAS TABTPS.'TEMPS_CPU'.'INITIAL';
+       'MENAGE' 'GOON' ;
+    'FINSI' ;
+    'SI' CANLGEO ;
+      'DETR' ZSIGF05 ;
+    'FINSI' ;
+    'DETR' DU1 ;
+*    'DETR' SIGMA_T0 ;
+*    'DETR' DEPST ;
+*
+'FIN' ETIPAS ;
+*
+*----------------------------------------------------------------------------
+*    FIN DE LA BOUCLE SUR LES PAS DE TEMPS
+*----------------------------------------------------------------------------
+*
+*-- on se remet dans la configuration initiale
+*
+'FORM' G_ZERO ;
+*
+'FINPROC' ETAB ;
+
+$$$$
+
+
+
+
+

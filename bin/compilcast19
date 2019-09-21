@@ -1,0 +1,721 @@
+#!/bin/bash
+
+#Recuperation des variables d'environnement
+if [ "${CASTEM_VERSION}" == "" ]   ; then CASTEM_VERSION=19                                     ; fi
+if [ "${CASTEM_REP}" == "" ]       ; then CASTEM_REP="$( cd "$( dirname "${BASH_SOURCE[0]}")/.." && pwd )"; fi
+source ${CASTEM_REP}/bin/environnement_Cast3M${CASTEM_VERSION}
+
+CASTEM_INC="-I${CASTEM_REP}/include/c -I/usr/X11R6/include -I/usr/local/include -I/opt/X11/include"
+CASTEM_DEFINE="-DLINUX"
+if [ "$BIT" == "64" ] ; then
+  CASTEM_DEFINE="${CASTEM_DEFINE}${BIT}"
+  if [ ${CASTEM_PLATEFORME} == "MAC" ] ; then
+    CASTEM_DEFINE="${CASTEM_DEFINE} -DOSX"
+  fi
+fi
+
+# Traducteur ESOPE (possibilite de le surcharger par la variable d'environnement "ESOPE_EXEC")
+if [ "${ESOPE_EXEC}" == "" ];then
+  if [ -x esop_${BIT}_${CASTEM_VERSION} ]; then
+    ESOPE_EXEC="./esop_${BIT}_${CASTEM_VERSION}"
+  else
+    ESOPE_EXEC="${CASTEM_REP}/bin/bin_esope_${CASTEM_PLATEFORME}_${BIT}_${CASTEM_VERSION}"
+  fi
+fi
+
+# Definition de variables
+AIDE="FAUX"          # Si VRAI permet d'afficher le manuel -Fr- du script
+HELP="FAUX"          # Si VRAI permet d'afficher le manuel -En- du script
+CONTROLE_MODE="FAUX" # Si VRAI utilise l'option CONTROLE de Esope
+COMP_OPTIM="-O5"     # Par defaut -O5 pour l'optimisation lors de la compilation
+FORTRAN_FILE="FAUX"  # Si VRAI le fichier fortran77 issu de la traduction est conserve
+LOG_FILE="FAUX"      # Si VRAI le fichier log issu de la compilation est conserve
+NIV_ERR="FAUX"       # Si VRAI permet d'afficher une sortie avec erreur du script
+BAD_ARG="FAUX"       # Si VRAI permet d'afficher une sortie avec erreur d'argument
+ESOPE_TRAD="FAUX"    # En cas de fabrication de la librairie ESOPE
+NBCPU="1"
+MFRONT_DEBUG=
+COMP_GENE="-c"         # On transforme la source en '.o' par defaut
+ETOILE="**************************************************************"
+
+
+#ýSuppression des fichiers issus d'une precedente compilation
+if [ "${PARALLELE_COMP}" != "CHILD" ]; then
+  [ -f ZZZ_Non_Compile.txt ] && rm -f ZZZ_Non_Compile.txt
+  [ -f ZZZ_Non_traduit.txt ] && rm -f ZZZ_Non_traduit.txt
+fi
+
+# Teste le nombre d'arguments d'entree
+if [ "$#" == "0" ]; then
+  # Cas du nombre d'arguments nul
+  BAD_ARG="VRAI"
+
+else
+  # Fabication des listes d'options et d'arguments
+  LISTE_ESO_1=""
+  LISTE_F_1=""
+  LISTE_C_1=""
+  LISTE_MFRONT_1=""
+  LISTE_BAD_ARG=""
+  for i in "$@" ; do
+    # "--aide" ==> affichage de l'aide en Francais
+    # "--help" ==> affichage de l'aide en Anglais
+    # "-c"     ==> option "CONTROLE" de Esope
+    # "-d"     ==> option de compilation -g activee
+    # "-cd"    ==> Option CONTROLE et mode debug
+    # "-f"     ==> conserve le ficher .f traduit depuis l'Esope en fortran77 (Automatique si -d)
+    # "-log"   ==> conserve la sortie du compilateur dans un fichier .txt
+    # "-Pn"    ==> Compilation des sources en parallele sur n processus
+    # "-S"     ==> Code Assembleur de la source en sortie
+    # "-ESOPE" ==> Compilation du traducteur ESOPE [SEMT/LM2S seulement]
+
+    if [ -f ${i} ] ; then
+      if [ `dirname ${i}` == "." ] ; then
+        REP=""
+      else
+        REP="`dirname ${i}`/"
+      fi
+    fi
+
+    case ${i} in
+    '--aide') AIDE="VRAI";break;;
+    '--help') HELP="VRAI";break;;
+    '-c')     CONTROLE_MODE="VRAI";OPTIONS_SCRIPT="${OPTIONS_SCRIPT} ${i}";;
+    '-d')     COMP_OPTIM="-g ";FORTRAN_FILE="VRAI";OPTIONS_SCRIPT="${OPTIONS_SCRIPT} ${i}";MFRONT_DEBUG="--debug";;
+    '-cd')    CONTROLE_MODE="VRAI";COMP_OPTIM="-g ";FORTRAN_FILE="VRAI";OPTIONS_SCRIPT="${OPTIONS_SCRIPT} ${i}";MFRONT_DEBUG="--debug";;
+    '-f')     FORTRAN_FILE="VRAI";OPTIONS_SCRIPT="${OPTIONS_SCRIPT} ${i}";;
+    '-log')   LOG_FILE="VRAI";OPTIONS_SCRIPT="${OPTIONS_SCRIPT} ${i}";;
+    '-ESOPE') ESOPE_TRAD="VRAI";OPTIONS_SCRIPT="${OPTIONS_SCRIPT} ${i}";;
+    '-S')     COMP_OPTIM="-ggdb -fverbose-asm";COMP_GENE="-S";FORTRAN_FILE="VRAI";OPTIONS_SCRIPT="${OPTIONS_SCRIPT} ${i}";;
+    -P*)      if [[ ! "$i" =~ ^-P([0-9]+)$ ]]; then
+                 echo 'Il manque le nombre de processus apres -P. Exemple : -P4'
+                 LISTE_BAD_ARG="${LISTE_BAD_ARG} ${i}";
+              fi
+              NBCPU=`echo ${i} | cut -c 3-10`;;
+    -O*)      COMP_OPTIM="${i}";OPTIONS_SCRIPT="${OPTIONS_SCRIPT} ${i}";;
+    "${REP}`basename ${i} .eso`.eso") LISTE_ESO_1="${LISTE_ESO_1} ${i}";;
+    "${REP}`basename ${i} .f`.f")     LISTE_F_1="${LISTE_F_1} ${i}";;
+    "${REP}`basename ${i} .c`.c")     LISTE_C_1="${LISTE_C_1} ${i}";;
+    "${REP}`basename ${i} .mfront`.mfront")     LISTE_MFRONT_1="${LISTE_MFRONT_1} ${i}";;
+    *) BAD_ARG="VRAI"
+       LISTE_BAD_ARG="${LISTE_BAD_ARG} ${i}";;
+    esac
+  done
+fi
+
+if [ "${AIDE}" == "VRAI" ] || [ "${HELP}" == "VRAI" ]; then
+  # Affichage de l'aide si elle est demandee par l'utilisateur
+  if [ "${AIDE}" == "VRAI" ]; then
+    # Affiche l'aide du script en Francais
+    echo ''
+    echo "${ETOILE}"
+    echo "NOM"
+    echo "    compilcast${CASTEM_VERSION} : Compilation des sources pour Cast3M"
+    echo "    Extension traitees : .c .eso .f .F .mfront"
+    echo "    Site web : http://www-cast3m.cea.fr/"
+    echo ''
+    echo "VERSION"
+    echo "    Version du Script : ${CASTEM_VERSION}.${CASTEM_REVISION}"
+    echo ''
+    echo "SYNTAXE"
+    echo "    compilcast${CASTEM_VERSION} [OPTION]... [LISTE_FICHIERS]..."
+    echo ''
+    echo "DESCRIPTION"
+    echo "     --aide  : Affiche le manuel de cette commande en Francais"
+    echo "     --help  : Affiche le manuel de cette commande en Anglais"
+    echo "     -c      : Option CONTROLE d'Esope"
+    echo "     -d      : Option de compilation en mode debug"
+    echo "     -cd     : Option CONTROLE et mode debug"
+    echo "     -On     : Optimisations activee n={s,g,fast,0,1,2,3}"
+    echo "     -f      : Ne supprime pas le fichier fortran77 issu de la traduction"
+    echo "                  des sources en Esope"
+    echo "     -log    : conserve la sortie du compilateur dans un fichier .txt"
+    echo "     -Pn     : Compilation des sources en parallele sur n processus"
+    echo "     -S      : Code Assembleur de la source en sortie"
+#    echo "     -ESOPE  : Compilation du traducteur ESOPE [SEMT/LM2S seulement]"
+    echo ''
+    echo "EXEMPLES"
+    echo "     compilcast${CASTEM_VERSION} fichier1.eso fichier2.eso fichier3.c"
+    echo "          Compile les 3 sources normalement"
+    echo ''
+    echo "     compilcast${CASTEM_VERSION} -d fichier1.eso fichier2.eso fichier3.c"
+    echo "          Compile les 3 sources en mode debug"
+    echo ''
+    echo "     compilcast${CASTEM_VERSION} -d -c fichier1.eso fichier2.eso fichier3.c"
+    echo "          Compile les 3 sources en mode debug avec Esope CONTROLE activee"
+    echo ''
+    echo "     compilcast${CASTEM_VERSION} *.eso *.c"
+    echo "          Compile les toutes les sources Esope et C du repertoire"
+    echo ''
+    echo "AUTEUR"
+    echo "    Script ecrit par Clement BERTHINIER"
+    echo ''
+    echo "VOIR AUSSI"
+    echo "    Aide du Script 'castem${CASTEM_VERSION}'    ==> 'castem${CASTEM_VERSION}    --aide'"
+    echo "    Aide du Script 'essaicast${CASTEM_VERSION}' ==> 'essaicast${CASTEM_VERSION} --aide'"
+    echo "${ETOILE}"
+    echo ''
+
+  else
+    # Affiche l'aide du script en Anglais
+    echo ''
+    echo "${ETOILE}"
+    echo "NAME"
+    echo "    compilcast${CASTEM_VERSION} ==> Compilation of Esope (.eso) and C sources"
+    echo "    Compatible extensions: .c .eso .f .F .mfront"
+    echo "    Web site : http://www-cast3m.cea.fr/"
+    echo ''
+    echo "VERSION"
+    echo "    Script Version : ${CASTEM_VERSION}.${CASTEM_REVISION}"
+    echo ''
+    echo "SYNTAX"
+    echo "    compilcast${CASTEM_VERSION} [OPTION]... [FILE_LIST]..."
+    echo ''
+    echo "DESCRIPTION"
+    echo "     --aide  : Print the manual of this script in French"
+    echo "     --help  : Print the manual of this script in English"
+    echo "     -c      : CONTROLE Option for Esope"
+    echo "     -d      : Debug mode compilation option"
+    echo "     -cd     : CONTROLE Option and debug mode"
+    echo "     -On     : Optimization activated n={s,g,fast,0,1,2,3}"
+    echo "     -f      : Keep the fortran77 source file produced by the conversion"
+    echo "                  from Esope sources"
+    echo "     -log    : Keep the output of the compiler in a .txt file"
+    echo "     -Pn     : Parallel compilation of sources whith n process"
+    echo "     -S      : Assembler Code of the source file as output"
+#    echo "     -ESOPE  : Compilation ESOPE translator [SEMT/LM2S only]"
+    echo ''
+    echo "EXAMPLES"
+    echo "     compilcast${CASTEM_VERSION} fichier1.eso fichier2.eso fichier3.c"
+    echo "          Compile the 3 sources normally"
+    echo ''
+    echo "     compilcast${CASTEM_VERSION} -d fichier1.eso fichier2.eso fichier3.c"
+    echo "          Compile the 3 sources with debug mode"
+    echo ''
+    echo "     compilcast${CASTEM_VERSION} -d -c fichier1.eso fichier2.eso fichier3.c"
+    echo "          Compile the 3 sources with debug mode and Esope CONTROLE mode"
+    echo ''
+    echo "     compilcast${CASTEM_VERSION} *.eso *.c"
+    echo "          Compile all the Esope and C sources in the directory"
+    echo ''
+    echo "AUTHOR"
+    echo "    Script written by Clement BERTHINIER"
+    echo ''
+    echo "SEE ALSO"
+    echo "    Manual for 'castem${CASTEM_VERSION}' script    ==> 'castem${CASTEM_VERSION}    --help'"
+    echo "    Manual for 'essaicast${CASTEM_VERSION}' script ==> 'essaicast${CASTEM_VERSION} --help'"
+    echo "${ETOILE}"
+    echo ''
+  fi
+
+else
+
+  if [ "${BAD_ARG}" == "VRAI" ]; then
+    # Sortie d'erreur sur les arguments
+    echo ''
+    echo "${ETOILE}"
+
+    if [ "${LISTE_BAD_ARG}" == "" ]; then
+      echo " Aucun argument / No arguments "
+      echo ''
+
+    else
+      echo " Liste des arguments invalides / List of unavailable arguments "
+      echo "  ${LISTE_BAD_ARG}"
+      echo ''
+    fi
+
+    echo "  Pour en savoir d'avantage : ' compilcast${CASTEM_VERSION} --aide '"
+    echo "  To learn more             : ' compilcast${CASTEM_VERSION} --help '"
+    echo "${ETOILE}"
+    NIV_ERR="VRAI"
+  fi
+
+  if [ "$GFORBIN" == "FAUX" ]; then
+    echo
+    echo "${ETOILE}"
+    echo "  Vous avez besoin de gfortran (version 4.3.2 ou superieure)"
+    echo "  You need gfortran            (version 4.3.2 or above)    "
+    NIV_ERR="VRAI"
+  fi
+
+  if [ "$GCCBIN" == "FAUX" ]; then
+    echo
+    echo "${ETOILE}"
+    echo "  Vous avez besoin de gcc      (version 4.3.2 ou superieure)"
+    echo "  You need gcc                 (version 4.3.2 or above)    "
+    NIV_ERR="VRAI"
+  fi
+
+  # Teste si les fichiers .eso contenus dans les listes existent
+  LISTE_ESO_2=""
+  for i in ${LISTE_ESO_1}; do
+    if [ ! -f ${i} ]; then
+      echo "Fichier inexistant / Non existing file : '${i}'"
+    else
+      LISTE_ESO_2="${LISTE_ESO_2} ${i}"
+      LISTE_SRC="${LISTE_SRC} ${i}"
+    fi
+  done
+
+  # Teste si les fichiers .f contenus dans les listes existent
+  LISTE_F_2=""
+  for i in ${LISTE_F_1}; do
+    if [ ! -f ${i} ]; then
+      echo "Fichier inexistant / Non existing file : '${i}'"
+    else
+      LISTE_F_2="${LISTE_F_2} ${i}"
+      LISTE_SRC="${LISTE_SRC} ${i}"
+    fi
+  done
+
+  # Teste si les fichiers .c contenus dans les listes existent
+  LISTE_C_2=""
+  for i in ${LISTE_C_1}; do
+    if [ ! -f ${i} ]; then
+      echo "Fichier inexistant / Non existing file : '${i}'"
+    else
+      LISTE_C_2="${LISTE_C_2} ${i}"
+      LISTE_SRC="${LISTE_SRC} ${i}"
+    fi
+  done
+  # Teste si les fichiers .mfront contenus dans les listes existent
+  LISTE_MFRONT_2=""
+  for i in ${LISTE_MFRONT_1}; do
+    if [ ! -f ${i} ]; then
+      echo "Fichier inexistant / Non existing file : '${i}'"
+    else
+      LISTE_MFRONT_2="${LISTE_MFRONT_2} ${i}"
+      LISTE_SRC="${LISTE_SRC} ${i}"
+    fi
+  done
+
+  if [ "$PARALLELE_COMP" != "CHILD" ]; then
+    if [ $NBCPU -gt 1 ]; then
+      PARALLELE_COMP="VRAI"
+    elif [ $NBCPU -eq 1 ]; then
+      PARALLELE_COMP="FAUX"
+    else
+      echo 'Le nombre de processus apres -P est invalide'
+      PARALLELE_COMP="FAUX"
+    fi
+  fi
+
+  if [ "$PARALLELE_COMP" = "FAUX" ] || [ "$PARALLELE_COMP" = "CHILD" ]; then
+
+    # Options de Compilation du fortran
+    if [ ${BIT} == "64" ]; then
+        f_options="-v -Wall -m${BIT} ${COMP_OPTIM} -fdefault-integer-8 -fdefault-real-8 -fdefault-double-8 -fopt-info -ftracer -pthread -mtune=generic -mfpmath=sse -fgcse-sm -fgcse-las -freciprocal-math -ftree-loop-distribution -fno-trapping-math -fno-aggressive-loop-optimizations -finit-real=nan -finit-integer=-2147483647 -finit-logical=false -frename-registers -frecursive -fopenmp"
+        INCLUDE_MPI="-I${MPI_INCREP}"
+      if test ${CASTEM_PLATEFORME} = "MAC" ; then
+        f_options="-v -Wall -m${BIT} ${COMP_OPTIM} -fdefault-integer-8 -fdefault-real-8 -fdefault-double-8 -fopt-info -ftracer -pthread -mtune=generic -mfpmath=sse -fgcse-sm -fgcse-las -freciprocal-math -ftree-loop-distribution -fno-trapping-math -fno-aggressive-loop-optimizations -finit-real=nan -finit-integer=-2147483647 -finit-logical=false -frename-registers -frecursive -fopenmp"
+        INCLUDE_MPI=
+      fi
+    else
+        f_options="-v -Wall -m${BIT} ${COMP_OPTIM} -fopt-info -ftracer -pthread -mtune=generic -march=pentium4 -msse -mfpmath=sse -fgcse-sm -fgcse-las -freciprocal-math -ftree-loop-distribution -fno-trapping-math -fno-aggressive-loop-optimizations -finit-real=nan -finit-integer=-2147483647 -finit-logical=false -frename-registers -frecursive -fopenmp -fno-tree-dse -fno-tree-fre -fno-tree-pre -fno-tree-loop-vectorize -fno-tree-dominator-opts -fno-predictive-commoning -fno-caller-saves"
+        INCLUDE_MPI="-I${MPI_INCREP}"
+    fi
+
+    ########################################################################
+      # Traite la liste des ".eso"
+    ########################################################################
+    if [ "${LISTE_ESO_2}" != "" ] ; then
+
+      if [ "$GFORBIN" != "FAUX" ] ; then
+        # Variables d'environnement pour Esope
+        if [ "${CONTROLE_MODE}" == "VRAI" ]; then
+          export ESOPE_PARAM="NORME=TRADUCTEUR,FORT=UNIX${BIT},ESOPE=10000000,CONTROL"
+        else
+          export ESOPE_PARAM="NORME=TRADUCTEUR,FORT=UNIX${BIT},ESOPE=10000000"
+        fi
+
+        # Calcul du nombre de fichier ".eso" ý traiter
+        nb_eso=`( \ls -1 ${LISTE_ESO_2} | wc -l )`
+
+        # Calcul du nombre d'include ".INC" prýsents dans le repertoire courant
+        nb_INC=`( \ls -1 *.INC  2> /dev/null | wc -l )`
+
+        # Menage d'une compilation precedente
+        for i in ${LISTE_ESO_2} ; do
+          i_base=`basename $i .eso`
+          [ -f ${i_base}.o   ] && rm -f ${i_base}.o
+          [ -f ${i_base}.f   ] && rm -f ${i_base}.f
+          [ -f ${i_base}.lst ] && rm -f ${i_base}.lst
+          [ -f ${i_base}.txt ] && rm -f ${i_base}.txt
+        done
+
+        # Compilations des ".eso"
+        COMPT=0
+
+        # Repertoire des includes pour le traducteur ESOPE (possibilite de le surcharger par la variable d'environnement "ESOPE_INC")
+        if [ "${ESOPE_INC}" == "" ];then
+          if [ "${ESOPE_TRAD}" == "VRAI" ];then
+            export ESOPE_INC=${ESOPE_REP}/include
+          else
+            export ESOPE_INC=${CASTEM_REP}/include/eso
+          fi
+        fi
+
+        for i in ${LISTE_ESO_2} ; do
+          echo
+          echo $i
+          i_base=`basename $i .eso`
+
+          export ESOPE_OUT=${i_base}.f
+          export ESOPE_LST=${i_base}.lst
+
+          # Conversion de l'Esope en fortran
+          ${ESOPE_EXEC} < $i
+          CODE_RETOUR_ESOPE=$?
+
+          #On compile certaines sources avec des options differentes :
+          if [ ${i_base} == "ddot2" ] ; then
+            f_options_associative=""
+          else
+            f_options_associative="-fassociative-math -fno-signed-zeros"
+          fi
+
+          if [ ${CODE_RETOUR_ESOPE} = '0' ]; then
+            [ -f ${i_base}.lst ] && rm -f ${i_base}.lst
+
+            ${GFORTRAN} ${f_options} ${COMP_GENE} ${f_options_associative} ${i_base}.f ${INCLUDE_MPI} > ${i_base}.txt 2>&1
+            #Assembleur "-S" :
+            if [ -f ${i_base}.s ]; then
+              as ${i_base}.s -o ${i_base}.o
+            fi
+
+            # Verification de la compilation de la source
+            if [ ! -f ${i_base}.o ]; then
+              echo Erreur de compilation consultez ${i_base}.txt
+              grep -i -nB 4 'Error:' ${i_base}.txt
+              echo
+              echo ${i_base}.f ' Non compile' >> ZZZ_Non_Compile.txt
+            else
+              # Nettoyage des fichiers
+              if [ "${FORTRAN_FILE}" != "VRAI" ]; then
+                rm -f ${i_base}.f
+              fi
+              if [ "${LOG_FILE}" == "FAUX" ]; then
+                rm -f ${i_base}.txt
+              fi
+            fi
+
+          else
+            echo Erreur de traduction de consultez ${i_base}.lst
+            grep -i -nB 6 'ERROR  :' ${i_base}.lst
+            echo
+            echo ${i_base}.eso ' Non traduit en FORTRAN' >> ZZZ_Non_traduit.txt
+          fi
+
+          COMPT=$(($COMPT+1))
+          echo "Sources traitees : ${COMPT}/${nb_eso}"
+
+        done
+
+      fi
+    fi
+
+    ########################################################################
+      # Traite la liste des ".f"
+    ########################################################################
+    if [ "${LISTE_F_2}" != "" ] ; then
+      if [ "$GFORBIN" != "FAUX" ] ; then
+
+        # Calcul du nombre de fichier ".f" ý traiter
+        nb_f=`( \ls -1 ${LISTE_F_2} | wc -l )`
+
+        # Menage d'une compilation precedente
+        for i in ${LISTE_F_2} ; do
+          i_base=`basename $i .f`
+          [ -f ${i_base}.o   ] && rm -f ${i_base}.o
+          [ -f ${i_base}.txt ] && rm -f ${i_base}.txt
+        done
+
+        # Compilations des ".f"
+        COMPT=0
+
+        for i in ${LISTE_F_2} ; do
+          echo
+          echo $i
+          i_base=`basename $i .f`
+
+          #On compile certaines sources avec des options differentes :
+          if [ ${i_base} == "ddot2" ] ; then
+            f_options_associative=""
+          else
+            f_options_associative="-fassociative-math -fno-signed-zeros"
+          fi
+
+          ${GFORTRAN} ${f_options} ${COMP_GENE} ${f_options_associative} $i ${INCLUDE_MPI} > ${i_base}.txt 2>&1
+
+          #Assembleur "-S" :
+          if [ -f ${i_base}.s ]; then
+            as ${i_base}.s -o ${i_base}.o
+          fi
+
+          # Verification de la compilation de la source
+          if [ ! -f ${i_base}.o ]; then
+            echo Erreur de compilation consultez ${i_base}.txt
+            grep -i -nB 4 'Error:' ${i_base}.txt
+            echo
+            echo ${i_base}.f ' Non compile' >> ZZZ_Non_Compile.txt
+          else
+            # Nettoyage des fichiers
+            if [ "${LOG_FILE}" == "FAUX" ]; then
+              rm -f ${i_base}.txt
+            fi
+          fi
+
+          COMPT=$(($COMPT+1))
+          echo "Sources traitees : ${COMPT}/${nb_f}"
+
+        done
+
+      fi
+    fi
+
+    ########################################################################
+      # Traite la liste des ".c"
+    ########################################################################
+    if [ "${LISTE_C_2}" != "" ] ; then
+      # Calcul du nombre de fichier ".c" ý traiter
+      nb_c=`( \ls -1 ${LISTE_C_2} | wc -l )`
+
+      # Menage d'une compilation precedente
+      for i in ${LISTE_C_2} ; do
+        i_base=`basename $i .c`
+          [ -f ${i_base}.o   ] && rm -f ${i_base}.o
+          [ -f ${i_base}.txt ] && rm -f ${i_base}.txt
+      done
+
+      # Compilations des ".c"
+      COMPT=0
+      # Sur Yosemite, le compilateur GCC ne permet des optimisation que de niveau -O3 au max
+      if test ${CASTEM_PLATEFORME} = "MAC" ; then
+        COMP_OPTIM="-O3"
+      fi
+      for i in ${LISTE_C_2} ; do
+        # Compilations des .c
+        echo
+        echo $i
+        i_base=`basename $i .c`
+
+        ${GCC} -Wall -m${BIT} ${COMP_OPTIM} ${CASTEM_DEFINE} -DDATE_ONLY -DFOR_LINUX ${CASTEM_INC} ${COMP_GENE} $i > ${i_base}.txt 2>&1
+
+        #Assembleur "-S" :
+        if [ -f ${i_base}.s ]; then
+          as ${i_base}.s -o ${i_base}.o
+        fi
+
+        # Verification de la compilation de la source
+        if [ ! -f ${i_base}.o ]; then
+          echo Erreur de compilation consultez ${i_base}.txt
+          grep -i -nB 4 'Error:' ${i_base}.txt
+          echo
+          echo ${i_base}.c ' Non compile' >> ZZZ_Non_Compile.txt
+        else
+          if [ "${LOG_FILE}" == "FAUX" ]; then
+            rm -f ${i_base}.txt
+          fi
+          rm -f `basename $i .c`.txt
+        fi
+
+        COMPT=$(($COMPT+1))
+        echo "Sources traitees : ${COMPT}/${nb_c}"
+
+      done
+    fi
+
+    ########################################################################
+      # Traite la liste des ".mfront"
+    ########################################################################
+    if [ "${LISTE_MFRONT_2}" != "" ] ; then
+      # Calcul du nombre de fichier ".mfront" ý traiter
+      nb_mfront=`( \ls -1 ${LISTE_MFRONT_2} | wc -l )`
+
+      # Compilations des ".mfront"
+      COMPT=0
+      for i in ${LISTE_MFRONT_2} ; do
+        # Compilations des .mfront
+        echo
+        echo $i
+
+        ${TFELHOME}/bin/mfront --interface=castem --obuild ${MFRONT_DEBUG} $i
+        
+        CODE_RETOUR_MFRONT=$?
+        if [ ${CODE_RETOUR_MFRONT} -eq 1 ]; then
+          echo Erreur de compilation
+          echo
+          echo $i ' Non compile' >> ZZZ_Non_Compile.txt
+        fi
+
+        COMPT=$(($COMPT+1))
+        echo "Sources traitees : ${COMPT}/${nb_mfront}"
+
+      done
+    fi
+
+  else # "$PARALLELE_COMP" = "VRAI"
+
+    j=1
+    export PARALLELE_COMP="CHILD"
+    LISTE_SRC_ARR=(${LISTE_SRC})
+    LISTE_SRC_ARR_SIZE=${#LISTE_SRC_ARR[*]}
+    for i in ${!LISTE_SRC_ARR[*]} ; do
+      if [ $i -gt $((${LISTE_SRC_ARR_SIZE}*${j}/${NBCPU})) ] ; then
+        compilcast${CASTEM_VERSION} ${OPTIONS_SCRIPT} ${LISTE_SRC_TEMP} &
+        LISTE_SRC_TEMP=""
+        let j++
+      fi
+      LISTE_SRC_TEMP="$LISTE_SRC_TEMP ${LISTE_SRC_ARR[$i]}"
+    done
+    compilcast${CASTEM_VERSION} ${OPTIONS_SCRIPT} ${LISTE_SRC_TEMP} &
+    wait
+    export PARALLELE_COMP=
+    PARALLELE_COMP="VRAI"
+    
+  fi
+
+  if [ "$PARALLELE_COMP" = "FAUX" ] || [ "$PARALLELE_COMP" = "VRAI" ]; then
+
+    #~ echo "ici 2 !, PWD="`pwd`
+    #~ echo "ici 2 !, LS="`ls`
+
+    ########################################################################
+    # Affichage en sortie de Script selon ce qu'il s'est passe
+    ########################################################################
+
+    if [ -f ZZZ_Non_traduit.txt ];then
+      echo ''
+      echo "${ETOILE}"
+      echo 'Erreurs de traduction : '
+      echo ''
+      cat ZZZ_Non_traduit.txt
+      echo ''
+      echo ''
+      echo "consultez les fichiers '.lst'"
+      echo "${ETOILE}"
+      NIV_ERR="VRAI"
+    fi
+
+    if [ -f ZZZ_Non_Compile.txt ]; then
+      echo ''
+      echo "${ETOILE}"
+      echo 'Erreurs de compilation : '
+      echo ''
+      cat ZZZ_Non_Compile.txt
+      echo ''
+      echo ''
+      echo "consultez les fichiers '.txt'"
+      echo "${ETOILE}"
+      NIV_ERR="VRAI"
+    fi
+
+    if [ $AIDE == "FAUX" ] &&  [ $HELP == "FAUX" ] ; then
+      if [ $NIV_ERR == "FAUX" ] ; then
+        echo ''
+        echo "${ETOILE}"
+        echo '*   Tache terminee avec succes / Successfully completed job  *'
+        echo "${ETOILE}"
+        echo ''
+      else
+        echo ''
+        echo "${ETOILE}"
+        echo '*      Des erreurs sont survenues / Errors have occured      *'
+        echo "${ETOILE}"
+        echo ''
+      fi
+    fi
+
+    ########################################################################
+    # Verification par ftnchek
+    ########################################################################
+    if [ -f ZZZ_ftnchek.txt  ]; then \rm -f ZZZ_ftnchek.txt; fi
+
+    if  [ -x ${CASTEM_REP}/bin/ftnchek-${BIT}bits ]; then
+      # Calcul du nombre de fichier .f presents dans le repertoire courant
+      \ls -l *.f > /dev/null 2>&1
+      CODE_RETOUR=$?
+
+      if [ ${CODE_RETOUR} -eq 0 ] ; then
+
+        if [ "${CASTEM_PLATEFORME}" == "Linux" ]; then
+          INCLUDE_MPI="-include=${MPI_INCREP}"
+        elif [ "${CASTEM_PLATEFORME}" == "MAC" ]; then
+          INCLUDE_MPI=
+        fi
+        ${CASTEM_REP}/bin/ftnchek-${BIT}bits ${INCLUDE_MPI} -nopretty -notruncation -crossref=calls -errors=100 -f77=character,continuation,cray-pointer,format-edit-descr,implicit-none,intrinsic,long-name,mixed-expr,long-line,quotemark,relops,semicolon,statement-order -brief -wrap=500 -calltree *.f > ZZZ_ftnchek_1.txt
+
+
+        # Recherche des variables "Utilisees non initialisees"
+        NBR_VAR=`grep -i 'is used' ZZZ_ftnchek_1.txt | wc -l`
+        if [ "$NBR_VAR" != "0" ]; then
+          echo "${ETOILE}"                                                      >> ZZZ_ftnchek.txt
+          echo " $NBR_VAR VARIABLES NON INITIALISEES detectees"                 >> ZZZ_ftnchek.txt
+          echo "${ETOILE}"                                                      >> ZZZ_ftnchek.txt
+          echo ""                                                               >> ZZZ_ftnchek.txt
+          grep -i -nB 1 -nA 1 'is used' ZZZ_ftnchek_1.txt                       >> ZZZ_ftnchek.txt
+          echo "${ETOILE}"                                                      >> ZZZ_ftnchek.txt
+          echo ""                                                               >> ZZZ_ftnchek.txt
+        fi
+
+        # Recherche des SUBROUTINES "Not Called"
+        NBR_SUB=`grep -i 'not called' ZZZ_ftnchek_1.txt | grep -iv 'entry' | wc -l`
+        if [ "$NBR_SUB" != "0" ]; then
+          echo "${ETOILE}"                                                      >> ZZZ_ftnchek.txt
+          echo " $NBR_SUB SUBROUTINES JAMAIS APPELEES"                          >> ZZZ_ftnchek.txt
+          echo "${ETOILE}"                                                      >> ZZZ_ftnchek.txt
+          echo ""                                                               >> ZZZ_ftnchek.txt
+          grep -i 'not called' ZZZ_ftnchek_1.txt | grep -iv 'entry'             >> ZZZ_ftnchek.txt
+          echo "${ETOILE}"                                                      >> ZZZ_ftnchek.txt
+          echo ""                                                               >> ZZZ_ftnchek.txt
+        fi
+
+        # Recherche des erreurs de syntaxe
+        NBR_ERREURS=`grep "syntax error" ZZZ_ftnchek_1.txt | fgrep -v -e "0" -e "near" | wc -l`
+        if [ "$NBR_ERREURS" != "0" ]; then
+          echo "${ETOILE}"                                                      >> ZZZ_ftnchek.txt
+          echo "Bilan des ERREURS trouvees par ftnchek-${BIT}bits"              >> ZZZ_ftnchek.txt
+          echo "${ETOILE}"                                                      >> ZZZ_ftnchek.txt
+          grep "syntax error" ZZZ_ftnchek_1.txt | fgrep -v -e "0" -e "near"     >> ZZZ_ftnchek.txt
+          echo ""                                                               >> ZZZ_ftnchek.txt
+        fi
+
+        # Recherche des warnings d'incompatibilite de Type
+        NBR_INCOMP=`grep -i "incompatible" ZZZ_ftnchek_1.txt | wc -l`
+        if [ "$NBR_INCOMP" != "0" ]; then
+          echo "${ETOILE}"                                                      >> ZZZ_ftnchek.txt
+          echo "Bilan des INCOMPATIBILITES trouvees par ftnchek-${BIT}bits"     >> ZZZ_ftnchek.txt
+          echo "${ETOILE}"                                                      >> ZZZ_ftnchek.txt
+          grep -i -nA 1 "incompatible" ZZZ_ftnchek_1.txt                        >> ZZZ_ftnchek.txt
+          echo ""                                                               >> ZZZ_ftnchek.txt
+        fi
+        # Recherche des subroutines avec des Noms de plus de 6 caracteres
+        NBR_NOMS6=`grep -i "Names longer than 6 chars" ZZZ_ftnchek_1.txt | wc -l`
+        if [ "$NBR_NOMS6" != "0" ]; then
+          echo "${ETOILE}"                                                      >> ZZZ_ftnchek.txt
+          echo "Bilan des NOMS de PLUS de 6 CARACTERES"                         >> ZZZ_ftnchek.txt
+          echo "${ETOILE}"                                                      >> ZZZ_ftnchek.txt
+          grep -i "Names longer than 6 chars" ZZZ_ftnchek_1.txt                 >> ZZZ_ftnchek.txt
+          echo ""                                                               >> ZZZ_ftnchek.txt
+        fi
+
+        # Separation
+        echo "${ETOILE}"                                                      >> ZZZ_ftnchek.txt
+        echo "             Rapport Detaille              "                    >> ZZZ_ftnchek.txt
+        echo "${ETOILE}"                                                      >> ZZZ_ftnchek.txt
+
+        # Fusion des fichiers
+        cat ZZZ_ftnchek_1.txt                                                 >> ZZZ_ftnchek.txt
+        rm -f ZZZ_ftnchek_1.txt
+      fi
+    fi
+  fi
+fi
+
+if [ "${NIV_ERR}" == "VRAI" ]; then
+  RETURN=1
+elif [ "${NIV_ERR}" == "FAUX" ] && [ "${RETURN}" != "1" ]; then
+  RETURN=0
+fi
+exit ${RETURN}

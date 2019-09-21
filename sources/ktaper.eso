@@ -1,0 +1,867 @@
+C KTAPER    SOURCE    PV        17/09/29    21:15:32     9578
+
+      SUBROUTINE KTAPER(IPMOD0,IPCHE1,IPCHE2,C1,C2,IKTSYM, IPRIGI)
+
+************************************************************************
+*   Entrees :
+*   ---------
+*     IPMODL   pointeur sur un MMODEL
+*     IPCHE1   pointeur sur le MCHAML decrivant l etat a t
+*     IPCHE2   pointeur sur le MCHAML decrivant l etat a t+dt
+*     C1       flottant
+*              coefficient de perturbation de l increment de deformation
+*     C2       flottant
+*              perturbation minimale
+*     IKTSYM   =1 si matrice symetrique en sortie, =0 sinon
+*
+*   Sortie :
+*   --------
+*     IPRIGI   pointeur sur l'objet de type RIGIDITE
+*              =0 en cas d'erreur
+************************************************************************
+*
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*
+-INC CCOPTIO
+-INC CCHAMP
+
+-INC SMCHAML
+-INC SMCOORD
+-INC SMELEME
+-INC SMINTE
+-INC SMLMOTS
+-INC SMMODEL
+-INC SMRIGID
+
+      SEGMENT INFO
+       INTEGER INFELL(JG)
+      ENDSEGMENT
+
+      SEGMENT NOTYPE
+        CHARACTER*16 TYPE(NBTYPE)
+      ENDSEGMENT
+
+      SEGMENT MPTVAL
+         INTEGER IPOS(NS)    ,NSOF(NS)
+         INTEGER      IVAL(NCOSOU)
+         CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+
+      SEGMENT MWRK1
+        REAL*8 DDHOOK(LHOOK,LHOOK)
+        REAL*8 REL(LRE,LRE), XE(3,NBBB)
+        REAL*8 SHPWRK(6,NBBB), BGENE(LHOOK,LRE)
+      ENDSEGMENT
+
+*     SEGMENT MWRK2
+*       REAL*8 DDHOOK(LHOOK,LHOOK,NBPGW2,NBELW2)
+*     ENDSEGMENT
+
+*     INTTYP definit le type de points d integration utilise
+      PARAMETER  ( INTTYP=3 )
+
+      CHARACTER*(NCONCH) CONM
+      CHARACTER*(8) MOCOMP
+
+      PARAMETER    (NINF=3)
+      INTEGER      INFOS(NINF)
+      DIMENSION    A(4,60),BB(3,60)
+
+      LOGICAL BSUPDP,BSUPFO,BSUPCO,BSUPDE,BDPGE,BDIM3
+      LOGICAL BDEL,BDUNI,B3EL,B3UNI
+      LOGICAL BCEL(12),BCUNI(12)
+
+*=======================================================================
+*= 1 = INITIALISATIONS ET VERIFICATIONS                                =
+*=======================================================================
+      IPRIGI = 0
+      KERRE  = 0
+      IPMODU = 0
+      MODEFU = 0
+      MODIM3 = 0
+      MOTYPE = 0
+
+* Modele "deroule" (uniquement "MECANIQUE", "LIQUIDE" ou "POREUX")
+      CALL PIMODL(IPMOD0,IPMODL)
+      IF (IPMODL.EQ.0) RETURN
+* Reduction des champs sur le MODEL IPMOD0
+      CALL REDUAF(IPCHE1,IPMOD0,IPCH_Z,0,IRET,KERRE)
+      IF (IRET.NE.1) CALL ERREUR(KERRE)
+      IF (IERR.NE.0) GOTO 9000
+      IPCHE1=IPCH_Z
+      CALL REDUAF(IPCHE2,IPMOD0,IPCH_Z,0,IRET,KERRE)
+      IF (IRET.NE.1) CALL ERREUR(KERRE)
+      IF (IERR.NE.0) GOTO 9000
+      IPCHE2=IPCH_Z
+
+* Activation du modele
+      MMODEL = IPMODL
+      SEGACT,MMODEL
+      NSOUS = KMODEL(/1)
+* Initialisation de la rigidite TANGENTE
+      NRIGEL = NSOUS
+      SEGINI,MRIGID
+      IPRIGI = MRIGID
+      MTYMAT = 'RIGIDITE'
+      ICHOLE = 0
+      IMGEO1 = 0
+      IMGEO2 = 0
+      ISUPEQ = 0
+      IFORIG = IFOUR
+
+* Modele unitaire contenant successivement chaque sous-modele de IPMODL
+      N1 = 1
+      SEGINI,MMODE1
+      IPMODU = MMODE1
+* Quelques segments utiles par la suite
+      NBROBL = 1
+      NBRFAC = 0
+      SEGINI,NOMID
+      MODEFU = NOMID
+      NBROBL = 0
+      NBRFAC = 1
+      SEGINI,NOMID
+      LESFAC(1) = 'DIM3'
+      MODIM3 = NOMID
+      NBTYPE = 1
+      SEGINI,NOTYPE
+      MOTYPE = NOTYPE
+      TYPE(1) = 'REAL*8'
+
+*=======================================================================
+*= 2 = BOUCLE SUR CHAQUE SOUS-MODELE A PERTURBER       (Etiquette 100) =
+*=======================================================================
+      DO 100 ISOUS = 1, NSOUS
+*
+        SEGACT,MMODE1*MOD
+        IMODEL = KMODEL(ISOUS)
+        MMODE1.KMODEL(1) = IMODEL
+*-----------------------------------------------------------------------
+*- 2.1 - Initialisations associees au sous-modele ISOUS                -
+*-----------------------------------------------------------------------
+        IPDSCR = 0
+        IPMADG = 0
+        IPMATR = 0
+        IPCONF = 0
+        IPDIM3 = 0
+        LISCON = 0
+        LISDEF = 0
+        MOCARA = 0
+        MOCONT = 0
+        MODEFO = 0
+        MODEPL = 0
+        MOFORC = 0
+        BDIM3 = .FALSE.
+*-----------------------------------------------------------------------
+*- 2.2 - Reduction des champs sur le sous-modele ISOUS (MMODEL IPMODU) -
+*-----------------------------------------------------------------------
+*     write(ioimp,*) '1er redu sur IPMODU',ISOUS,IMODEL
+        CALL REDUAF(IPCHE1,IPMODU,IPCHE1U,0,IRET,KERRE)
+        IF (IRET.NE.1) CALL ERREUR(KERRE)
+        IF (IERR.NE.0) GOTO 110
+*     write(ioimp,*) '2e redu sur IPMODU',ISOUS,IMODEL
+        CALL REDUAF(IPCHE2,IPMODU,IPCHE2U,0,IRET,KERRE)
+        IF (IRET.NE.1) CALL ERREUR(KERRE)
+        IF (IERR.NE.0) GOTO 110
+*-----------------------------------------------------------------------
+*- 2.3 - Recuperation d'informations sur le sous-modele ISOUS          -
+*-----------------------------------------------------------------------
+        SEGACT,IMODEL
+        IPMAIL = IMAMOD
+        MELE = NEFMOD
+        CONM = CONMOD
+        IIPDPG = IPDPGE
+* Quelques informations liees a l'EF du sous-modele (MELE)
+        IF (INFMOD(/1).LT.2+INTTYP) THEN
+          CALL ELQUOI(MELE,0,INTTYP,IPINF,IMODEL)
+          INFO = IPINF
+          NBPGAU = INFELL(6)
+          LRE    = INFELL(9)
+          LHOOK  = INFELL(10)
+          MFR    = INFELL(13)
+          IPMINT = INFELL(11)
+          SEGSUP,INFO
+        ELSE
+          NBPGAU = INFELE(6)
+          LRE    = INFELE(9)
+          LHOOK  = INFELE(10)
+          MFR    = INFELE(13)
+          IPMINT = INFMOD(5)
+        ENDIF
+        CALL INFDPG(MFR,IFOUR, BDPGE,NDPGE)
+        MINTE = IPMINT
+        SEGACT,MINTE
+* Point support des deformations planes generalisees
+        IF (BDPGE) THEN
+          IF (IIPDPG.LE.0) THEN
+            CALL ERREUR(925)
+            GOTO 110
+          ENDIF
+          IREF = (IIPDPG-1)*(IDIM+1)
+          XDPGE = XCOOR(IREF+1)
+          YDPGE = XCOOR(IREF+2)
+        ELSE
+          XDPGE = 0.D0
+          YDPGE = 0.D0
+        ENDIF
+* Recherche des noms d'inconnues primales
+        IF (LNOMID(1).NE.0) THEN
+          BSUPDP = .FALSE.
+          MODEPL = LNOMID(1)
+        ELSE
+          BSUPDP = .TRUE.
+          CALL IDPRIM(IMODEL,MFR,MODEPL,NDEPL,NFAC)
+        ENDIF
+        NOMID = MODEPL
+        SEGACT,NOMID
+        NDEPL = LESOBL(/2)
+* Recherche des noms d'inconnues duales
+        IF (LNOMID(2).NE.0) THEN
+          BSUPFO = .FALSE.
+          MOFORC = LNOMID(2)
+        ELSE
+          BSUPFO = .TRUE.
+          CALL IDDUAL(IMODEL,MFR,MOFORC,NFORC,NFAC)
+        ENDIF
+        NOMID = MOFORC
+        SEGACT,NOMID
+        NFORC = LESOBL(/2)
+* Recherche des composantes du champ de contraintes
+        IF (LNOMID(4).NE.0) THEN
+          BSUPCO = .FALSE.
+          MOCONT = LNOMID(4)
+        ELSE
+          BSUPCO = .TRUE.
+          CALL IDCONT(IMODEL,IFOUR,MOCONT,NSTRS,NFAC)
+        ENDIF
+        NOMID = MOCONT
+        SEGACT,NOMID
+        NSTRS = LESOBL(/2)
+        NFAC  = LESFAC(/2)
+        NBCONT = NSTRS
+*AV cas ou NFAC non nul !
+*AV     NBCONT = NSTRS + NFAC
+* Creation d'une liste de mots des composantes de contraintes
+        JGN = LESOBL(/1)
+        JGM = NBCONT
+        SEGINI,MLMOTS
+        DO i = 1, NSTRS
+          MOTS(i) = LESOBL(i)
+        ENDDO
+*AV     IF (NFAC.NE.0) THEN
+*AV       DO i = 1, NFAC
+*AV         MOTS(NSTRS+i) = LESFAC(i)
+*AV       ENDDO
+*AV     ENDIF
+        LISCON = MLMOTS
+* Recherche des composantes obligatoires du champ de deformations
+        IF (LNOMID(5).NE.0) THEN
+          BSUPDE = .FALSE.
+          MODEFO = LNOMID(5)
+        ELSE
+          BSUPDE = .TRUE.
+          CALL IDDEFO(IMODEL,IFOUR,MODEFO,NBDEFO,NFAC)
+        ENDIF
+        NOMID = MODEFO
+        SEGACT,NOMID
+        NDEFO = LESOBL(/2)
+        NFAC  = LESFAC(/2)
+        NBDEFO = NDEFO
+*AV cas ou NFAC non nul !
+*AV     NBDEFO = NDEFO + NFAC
+* Creation d'une liste de mots des composantes de contraintes
+        JGN = LESOBL(/1)
+        JGM = NBDEFO
+        SEGINI,MLMOTS
+        DO i = 1, NDEFO
+          MOTS(i) = LESOBL(i)
+        ENDDO
+*AV     IF (NFAC.NE.0) THEN
+*AV       DO i = 1, NFAC
+*AV         MOTS(NDEFO+i) = LESFAC(i)
+*AV       ENDDO
+*AV     ENDIF
+        LISDEF = MLMOTS
+* Petite verification
+        IF ((NDEPL.EQ.0).OR.(NFORC.EQ.0).OR.(NDEPL.NE.NFORC).OR.
+     &      (NBDEFO.EQ.0).OR.(NBCONT.EQ.0).OR.(NBDEFO.NE.NBCONT)) THEN
+          KERRE = 5
+          GOTO 120
+        ENDIF
+*-----------------------------------------------------------------------
+*- 2.4 - Matrice de RIGIDITE de la sous-zone ISOUS                     -
+*-----------------------------------------------------------------------
+* Segment DESCR
+        MELEME=IPMAIL
+        SEGACT,MELEME
+* Modification du MELEME contenu dans segment DESCRipteur
+        IF (BDPGE) THEN
+          IPT1 = IPMAIL
+          NBNN   = IPT1.NUM(/1)+1
+          NBELEM = IPT1.NUM(/2)
+          NBREF  = 0
+          NBSOUS = 0
+          SEGINI,MELEME
+          DO i = 1, NBELEM
+            DO j = 1, NBNN-1
+               NUM(j,i) = IPT1.NUM(j,i)
+            ENDDO
+            NUM(NBNN,i) = IIPDPG
+          ENDDO
+          ITYPEL = 28
+          ICOLOR = IPT1.ICOLOR
+          SEGDES,MELEME
+        ELSE
+          NBNN=NUM(/1)
+          NBELEM=NUM(/2)
+        ENDIF
+        IPMADG=MELEME
+        IF (BDPGE) THEN
+          NCOMP = NDEPL-NDPGE
+          NBNNS = NBNN-1
+        ELSE
+          NCOMP = NDEPL
+          NBNNS = NBNN
+        ENDIF
+        IF (NBNNS*NCOMP .GT. LRE) THEN
+*         Erreur dans les dimensions de DESCR
+          KERRE = 717
+          GOTO 120
+        ENDIF
+* Remplissage du segment DESCRipteur
+        NLIGRP = LRE
+        NLIGRD = LRE
+        SEGINI,DESCR
+        IDDL = 1
+        DO IPT = 1, NBNNS
+          DO ICOMP = 1, NCOMP
+            NOMID = MODEPL
+            LISINC(IDDL) = LESOBL(ICOMP)
+            NOMID = MOFORC
+            LISDUA(IDDL) = LESOBL(ICOMP)
+            NOELEP(IDDL) = IPT
+            NOELED(IDDL) = IPT
+            IDDL = IDDL+1
+          ENDDO
+        ENDDO
+        IF (BDPGE) THEN
+          DO ICOMP = (NDPGE-1),0,-1
+            NOMID = MODEPL
+            LISINC(IDDL) = LESOBL(NDEPL-ICOMP)
+            NOMID = MOFORC
+            LISDUA(IDDL) = LESOBL(NFORC-ICOMP)
+            NOELEP(IDDL) = NBNN
+            NOELED(IDDL) = NBNN
+            IDDL = IDDL+1
+          ENDDO
+        ENDIF
+        SEGDES,DESCR
+        IPDSCR = DESCR
+*  Initialisation du segment XMATRI
+        NLIGRD = LRE
+        NLIGRP = LRE
+        NELRIG = NBELEM
+        SEGINI,XMATRI
+        IPMATR = XMATRI
+*  Remplissage du segment MRIGID
+        COERIG(ISOUS) = 1.D0
+        IRIGEL(1,ISOUS) = IPMADG
+*       IRIGEL(2,ISOUS) = 0
+        IRIGEL(3,ISOUS) = IPDSCR
+        IRIGEL(4,ISOUS) = IPMATR
+        IRIGEL(5,ISOUS) = NIFOUR
+*       IRIGEL(6,ISOUS) = 0
+*  Pas de symetrie de la matrice de rigidite (sauf si demande)
+        IRIGEL(7,ISOUS) = 2*(1-IKTSYM)
+        xmatri.symre=irigel(7,isous)
+*       IRIGEL(8,ISOUS) = 0
+*-----------------------------------------------------------------------
+*- 2.5 - Recuperation des contraintes finales (reference)              -
+*-----------------------------------------------------------------------
+        CALL ECROBJ('MCHAML',IPCHE2U)
+        CALL ECROBJ('LISTMOTS',LISCON)
+        CALL EXCOMP
+        IF (IERR.NE.0) GOTO 130
+        CALL LIROBJ('MCHAML',IPCONF,1,IRET)
+        IF (IERR.NE.0) GOTO 130
+* Verification du support pour les contraintes finales (IPCONF)
+        CALL QUESUP(IPMODU,IPCONF,INTTYP,0,ISUPCH,IRET)
+        IF (ISUPCH.GT.1) THEN
+          KERRE = 609
+          GOTO 130
+        ENDIF
+*-----------------------------------------------------------------------
+*- 2.6 - Recuperation eventuelle de l'epaisseur DIM3                   -
+*-----------------------------------------------------------------------
+        MELVA3 = 0
+        DIM3   = 1.
+        MOCOMP = 'DIM3'
+        CALL EXISCO('MCHAML  ',IPCHE2U,MOCOMP,BDIM3)
+        IF (BDIM3) THEN
+          CALL EXCOC1(IPCHE2U,MOCOMP,IPDIM3,MOCOMP,1)
+* Verification du support pour DIM3 (IPDIM3)
+          CALL QUESUP(IPMODU,IPDIM3,INTTYP,0,ISUPD3,IRET)
+          IF (ISUPD3.GT.1) THEN
+            KERRE = 609
+            GOTO 130
+          ENDIF
+        ENDIF
+*-----------------------------------------------------------------------
+*- 2.7 - Boucle de CALCUL DE LA PERTURBATION sur chaque composante     -
+*-----------------------------------------------------------------------
+        DO 200 ICOMP = 1, NBDEFO
+*
+*- 2.7.1 - Recuperation de la composante de deformation a perturber
+          MLMOTS = LISDEF
+          MOCOMP = MOTS(ICOMP)
+          NOMID = MODEFU
+          SEGACT,NOMID*MOD
+          LESOBL(1) = MOCOMP
+*- 2.7.2 - Quelques initialisations
+          IPCHF2U = 0
+          IPCHP2U = 0
+          IPCOPE = 0
+          IPDEFI = 0
+          IPDEFF = 0
+          IPPERT = 0
+          IVACON = 0
+          IVADEF = 0
+          IVADM3 = 0
+          MWRK1  = 0
+*- 2.7.3 - Calcul de l'increment de deformation pour la composante ICOMP
+          CALL EXCOC1(IPCHE1U,MOCOMP,IPDEFI,MOCOMP,0)
+          IF (IERR.NE.0) GOTO 210
+          CALL EXCOC1(IPCHE2U,MOCOMP,IPDEFF,MOCOMP,0)
+          IF (IERR.NE.0) GOTO 210
+          CALL ADCHEL(IPDEFF,IPDEFI,IPPERT,-1)
+*  Verification du support pour la perturbation
+          CALL QUESUP(IPMODU,IPPERT,INTTYP,0,ISUPDE,IRET)
+          IF (ISUPDE.GT.1) THEN
+            CALL ERREUR(609)
+            GOTO 210
+          ENDIF
+*- 2.7.4 - Calcul de la perturbation sur la composante ICOMP (IPPERT)
+*          IncDef = Def_Fin - Def_Ini
+*          La perturbation vaut MAX(c1*ABS(IncDef),c2)*SIGNE(IncDEF)
+          MCHELM = IPPERT
+          N1 = ICHAML(/1)
+          DO i1 = 1, N1
+            MCHAML = ICHAML(i1)
+            SEGACT,MCHAML
+            if (ielval(/1).ne.1) then
+              write(ioimp,*) 'nb composantes different de 1 !'
+              call erreur(2)
+              goto 210
+            endif
+            if (typche(1).ne.'REAL*8') then
+              moterr(1:16)  = typche(1)
+              moterr(17:20) = nomche(1)(1:4)
+              moterr(21:36) = 'DEFORMATION'
+              call erreur(552)
+              goto 210
+            endif
+            MELVAL = IELVAL(1)
+            SEGACT,MELVAL*MOD
+            N1PTEL = VELCHE(/1)
+            N1EL   = VELCHE(/2)
+            DO IEL = 1, N1EL
+              DO IPT = 1, N1PTEL
+                V1 = C1 * VELCHE(IPT,IEL)
+                IF (V1.GE.0.) THEN
+                  VELCHE(IPT,IEL) = MAX(V1,C2)
+                ELSE
+                  VELCHE(IPT,IEL) = MIN(V1,-C2)
+                ENDIF
+              ENDDO
+            ENDDO
+*           SEGDES,MELVAL,MCHAML
+          ENDDO
+*         SEGDES,MCHELM
+*- 2.7.5 - Deformations finales perturbees pour appel a COMP
+          CALL ADCHEL(IPCHE2U,IPPERT,IPCHF2U,1)
+*- 2.7.6 - Appel a COMP pour obtenir l'etat final perturbe
+          CALL ECROBJ('MCHAML  ',IPCHF2U)
+          CALL ECROBJ('MCHAML  ',IPCHE1U)
+          CALL ECROBJ('MMODEL  ',IPMODU)
+          CALL COML
+          IF (IERR.NE.0) GOTO 210
+          CALL LIROBJ('MCHAML  ',IPCHP2U,1,IRET)
+          IF (IERR.NE.0) GOTO 210
+*- 2.7.7 - Recuperation du champ de contraintes finales perturbees
+          CALL ECROBJ('MCHAML',IPCHP2U)
+          CALL ECROBJ('LISTMOTS',LISCON)
+          CALL EXCOMP
+          IF (IERR.NE.0) GOTO 210
+          CALL LIROBJ('MCHAML',IPCONP,1,IRET)
+          IF (IERR.NE.0) GOTO 210
+*- 2.7.8 - Calcul de l'increment de contraintes du a la perturbation
+          CALL ADCHEL(IPCONP,IPCONF,IPCOPE,-1)
+          CALL QUESUP(IPMODU,IPCOPE,INTTYP,0,ISUPCO,IRET)
+          IF (ISUPCO.GT.1) THEN
+            CALL ERREUR(609)
+            GOTO 210
+          ENDIF
+*- 2.7.9 - Quelques informations necessaires
+          CALL IDENT(IPMAIL,CONM,IPCOPE,IPPERT,INFOS,IRET)
+          IF (IRET.EQ.0) GOTO 210
+          MELEME = IPMAIL
+          SEGACT,MELEME
+          NBNN   = NUM(/1)
+          NBELEM = NUM(/2)
+*- 2.7.10 - Recuperation de l'epaisseur (fait une seule fois) (IVADM3)
+          IF (BDIM3 .AND. ICOMP.EQ.1) THEN
+            CALL KOMCHA(IPDIM3,IPMAIL,CONM,MODIM3,MOTYPE,0,INFOS,NINF,
+     &                  IVADM3)
+            IF (IERR.NE.0) GOTO 220
+            IF (ISUPD3.EQ.1) THEN
+              CALL VALCHE(IVADM3,1,IPMINT,0,MODIM3,MELE)
+              IF (IERR.NE.0) THEN
+                ISUPD3 = 0
+                GOTO 220
+              ENDIF
+            ENDIF
+            MPTVAL = IVADM3
+            MELVA3 = IVAL(1)
+* Determination du type de champ d'epaisseur 'DIM3' :
+* champ constant par element (B3EL) ou uniforme (B3UNI)
+            IF (MELVA3.NE.0) THEN
+              B3EL   = .FALSE.
+              B3UNI  = .FALSE.
+              N1PTEL = MELVA3.VELCHE(/1)
+              N1EL   = MELVA3.VELCHE(/2)
+              IF (N1PTEL.NE.NBPGAU) THEN
+                IF (N1PTEL.NE.1) THEN
+                  CALL ERREUR(21)
+                  GOTO 220
+                ENDIF
+                B3EL = .TRUE.
+              ENDIF
+              IF (N1EL.NE.NBELEM) THEN
+                IF (N1EL.NE.1) THEN
+                  CALL ERREUR(21)
+                  GOTO 220
+                ENDIF
+                B3UNI = .TRUE.
+              ENDIF
+            ENDIF
+          ENDIF
+*- 2.7.11 - Recuperation de la deformation perturbee (IVADEF)
+          CALL KOMCHA(IPPERT,IPMAIL,CONM,MODEFU,MOTYPE,1,INFOS,NINF,
+     &                IVADEF)
+          IF (IERR.NE.0) GOTO 220
+          IF (ISUPDE.EQ.1) THEN
+            CALL VALCHE(IVADEF,1,IPMINT,0,MODEFU,MELE)
+            IF (IERR.NE.0) THEN
+              ISUPDE = 0
+              GOTO 220
+            ENDIF
+          ENDIF
+* Determination du type de la perturbation :
+* champ constant par element (BDEL) ou uniforme (BDUNI)
+          MPTVAL = IVADEF
+          MELVA2 = IVAL(1)
+          N1PTEL = MELVA2.VELCHE(/1)
+          N1EL   = MELVA2.VELCHE(/2)
+          BDEL  = .FALSE.
+          BDUNI = .FALSE.
+          IF (N1PTEL.NE.NBPGAU) THEN
+            BDEL = .TRUE.
+            IF (N1PTEL.NE.1) THEN
+              CALL ERREUR(21)
+              GOTO 220
+            ENDIF
+          ENDIF
+          IF (N1EL.NE.NBELEM) THEN
+            BDUNI = .TRUE.
+            IF (N1EL.NE.1) THEN
+              CALL ERREUR(21)
+              GOTO 220
+            ENDIF
+          ENDIF
+*- 2.7.12 - Recuperation de l'increment de contraintes (IVACON)
+          CALL KOMCHA(IPCOPE,IPMAIL,CONM,MOCONT,MOTYPE,1,INFOS,NINF,
+     &                IVACON)
+          IF (IERR.NE.0) GOTO 220
+          IF (ISUPCO.EQ.1) THEN
+            CALL VALCHE(IVACON,NBCONT,IPMINT,0,MOCONT,MELE)
+            IF (IERR.NE.0) THEN
+              ISUPCO = 0
+              GOTO 220
+            ENDIF
+          ENDIF
+* Determination du type de chaque composante des contraintes :
+* champ constant par element (BCEL(i)) ou uniforme (BCUNI(i))
+          MPTVAL = IVACON
+          DO i = 1, NBCONT
+            BCEL(i)  = .FALSE.
+            BCUNI(i) = .FALSE.
+            MELVAL = IVAL(i)
+            N1PTEL = VELCHE(/1)
+            N1EL   = VELCHE(/2)
+            IF (N1PTEL.NE.NBPGAU) THEN
+              BCEL(i) = .TRUE.
+              IF (N1PTEL.NE.1) THEN
+                CALL ERREUR(21)
+                GOTO 220
+              ENDIF
+            ENDIF
+            IF (N1EL.NE.NBELEM) THEN
+              BCUNI(i) = .TRUE.
+              IF (N1EL.NE.1) THEN
+                CALL ERREUR(21)
+                GOTO 220
+              ENDIF
+            ENDIF
+          ENDDO
+*- 2.7.13 - Activation & initialisation de quelques segments
+          NHRM = NIFOUR
+*         SEGACT,MELEME
+*         SEGACT,MINTE
+          NBBB = NBNN
+          SEGINI,MWRK1
+*         CALL ZERO(DDHOOK,LHOOK,LHOOK)
+          MPTVAL = IVACON
+*
+*- 2.7.14 - Boucle sur les ELEMENTs : mise a jour matrice REL(.,.,IEL)
+*-----------------------------------------------------------------------
+          DO 300 IEL = 1, NBELEM
+*   Remise a zero de REL
+            CALL ZERO(REL,LRE,LRE)
+*   Coordonnees des noeuds de l element
+            CALL DOXE(XCOOR,IDIM,NBNN,NUM,IEL,XE)
+*   Calcul des coeff de modification de la matrice B-BARRE
+*   (Uniquement en cas d'elements incompressibles)
+            IF  (MFR.EQ.31)  THEN
+              CALL BBCALC(XE,MELE,NBNN,IDIM,NBPGAU,
+     &                    POIGAU,QSIGAU,ETAGAU,DZEGAU,NBCONT,LRE,
+     &                    IFOUR,A,BB,NHRM,SHPTOT,SHPWRK,XDPGE,YDPGE)
+            ENDIF
+*   Champs uniformes ?
+            IF (BDUNI) THEN
+              IBD = 1
+            ELSE
+              IBD = IEL
+            ENDIF
+            IF (BDIM3) THEN
+              IF (B3UNI) THEN
+                IB3 = 1
+              ELSE
+                IB3 = IEL
+              ENDIF
+            ENDIF
+            ISDJC=0
+*   Boucle sur les POINTS d'INTEGRATION
+*-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -
+            DO 400 IGAU = 1, NBPGAU
+*     Calcul de B et du jacobien
+              IF (MELVA3.NE.0) THEN
+                IF (B3EL) THEN
+                  DIM3 = MELVA3.VELCHE(1,IB3)
+                ELSE
+                  DIM3 = MELVA3.VELCHE(IGAU,IB3)
+                ENDIF
+              ENDIF
+              IF (MELE.NE.28.AND.MELE.NE.45) THEN
+                CALL BMATST(IGAU,NBPGAU,POIGAU,QSIGAU,ETAGAU,DZEGAU,
+     &                      MELE,MFR,NBNN,LRE,IFOUR,NBCONT,NHRM,DIM3,
+     &                      XE,SHPTOT,SHPWRK,BGENE,DJAC,XDPGE,YDPGE)
+              ELSE
+                CALL BMAT28(IGAU,NBPGAU,POIGAU,QSIGAU,ETAGAU,DZEGAU,
+     &                      MELE,MFR,NBNN,LRE,IFOUR,NBCONT,NHRM,DIM3,
+     &                      XE,SHPTOT,SHPWRK,BGENE,DJAC,XDPGE,YDPGE)
+              ENDIF
+              IF (DJAC.EQ.0.) THEN
+                INTERR(1) = IEL
+                CALL ERREUR(259)
+                GOTO 220
+              ENDIF
+              IF (DJAC.LT.0.) ISDJC=ISDJC+1
+              DJAC = ABS(DJAC)*POIGAU(IGAU)
+*     En cas d'elements incompressibles : BGENE selon la methode B-BARRE
+              IF (MFR.EQ.31) THEN
+                CALL BBAR(IGAU,NBPGAU,POIGAU,QSIGAU,ETAGAU,DZEGAU,
+     &                    MELE,NBNN,LRE,IFOUR,NSTRS,XE,DJAC,A,BB,BGENE)
+              ENDIF
+*     Perturbation constante par element ou uniforme
+              IF (BDEL) THEN
+                IGAUD = 1
+              ELSE
+                IGAUD = IGAU
+              ENDIF
+*     Pour chaque composante des contraintes :
+              DO i = 1, NBCONT
+                MELVAL = IVAL(i)
+*       Contrainte constante par element ou uniforme
+                IF (BCEL(i)) THEN
+                  IGAUC = 1
+                ELSE
+                  IGAUC = IGAU
+                ENDIF
+                IF (BCUNI(i)) THEN
+                  IBC = 1
+                ELSE
+                  IBC = IEL
+                ENDIF
+*       Calcul de DDHOOK(i) = (cont pert - fin) / defo pert
+                DDHOOK(i,ICOMP) =
+     &                    VELCHE(IGAUC,IBC) / MELVA2.VELCHE(IGAUD,IBD)
+              ENDDO
+*       Calcul de BDB par appel a DBDSTS : cas non symetrique
+*AV? appel a EFFI2 dans RIGI. EFFI2 MODIFIE REL
+              CALL BDBSTS(BGENE,DJAC,DDHOOK,LRE,NBCONT,REL)
+*
+ 400        CONTINUE
+*   Fin de la Boucle sur les POINTS d'INTEGRATION (etiquette 400)
+*-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -
+*   Changement de signe du jacobien dans l element ?
+            IF ((ISDJC.NE.0).AND.(ISDJC.NE.NBPGAU)) THEN
+              INTERR(1) = IEL
+              CALL ERREUR(195)
+              GOTO 220
+            ENDIF
+*   Mise a jour de la matrice de rigidite elementaire RE
+            IF (IKTSYM.EQ.0) THEN
+              DO i = 1, LRE
+                DO j = 1, LRE
+                  RE(i,j,IEL) = RE(i,j,IEL) + REL(i,j)
+                ENDDO
+              ENDDO
+            ELSE
+              DO i = 1, LRE
+                DO j = 1, i
+                  RE(i,j,IEL) = RE(i,j,IEL) + 0.5 * (REL(i,j)+REL(j,i))
+                  RE(j,i,IEL) = RE(i,j,IEL)
+                ENDDO
+              ENDDO
+            ENDIF
+ 300      CONTINUE
+*- Fin de la boucle sur les ELEMENTs (Etiquette 300)
+*-----------------------------------------------------------------------
+*- 2.7.15 - Menage : Desactivation-Destruction de segments
+  220     CONTINUE
+          IF (ISUPCO.EQ.1) THEN
+            CALL DTMVAL(IVACON,3)
+          ELSE
+            CALL DTMVAL(IVACON,1)
+          ENDIF
+          IF (ISUPDE.EQ.1) THEN
+            CALL DTMVAL(IVADEF,3)
+          ELSE
+            CALL DTMVAL(IVADEF,1)
+          ENDIF
+          IF (BDIM3) THEN
+            IF (ICOMP.EQ.NBDEFO .OR. IERR.NE.0) THEN
+              IF (ISUPD3.EQ.1) THEN
+                CALL DTMVAL(IVADM3,3)
+              ELSE
+                CALL DTMVAL(IVADM3,1)
+              ENDIF
+            ENDIF
+          ENDIF
+          IF (MWRK1.NE.0) SEGSUP,MWRK1
+          MELEME = IPMAIL
+          SEGDES,MELEME
+ 210      CONTINUE
+          IF (IPDEFI.NE.0) CALL DTCHAM(IPDEFI)
+          IF (IPDEFF.NE.0) CALL DTCHAM(IPDEFF)
+          IF (IPPERT.NE.0) CALL DTCHAM(IPPERT)
+          IF (IPCONP.NE.0) CALL DTCHAM(IPCONP)
+          IF (IPCOPE.NE.0) CALL DTCHAM(IPCOPE)
+          IF (IERR.NE.0) GOTO 130
+*
+ 200    CONTINUE
+*- Fin de la boucle de CALCUL DE LA PERTURBATION (Etiquette 200)
+*-----------------------------------------------------------------------
+*- 2.8 - Menage : Desactivation-Suppression de segments...             -
+*-----------------------------------------------------------------------
+ 130    CONTINUE
+        SEGDES,DESCR
+        SEGDES,XMATRI
+        IF (IPCONF.NE.0) CALL DTCHAM(IPCONF)
+        IF (IPDIM3.NE.0) CALL DTCHAM(IPDIM3)
+ 120    CONTINUE
+        NOMID = MODEPL
+        IF (BSUPDP) THEN
+          SEGSUP,NOMID
+        ELSE
+          SEGDES,NOMID
+        ENDIF
+        NOMID = MOFORC
+        IF (BSUPFO) THEN
+          SEGSUP,NOMID
+        ELSE
+          SEGDES,NOMID
+        ENDIF
+        NOMID = MOCONT
+        IF (BSUPCO) THEN
+          SEGSUP,NOMID
+        ELSE
+          SEGDES,NOMID
+        ENDIF
+        MLMOTS = LISCON
+        SEGSUP,MLMOTS
+        NOMID = MODEFO
+        IF (BSUPDE) THEN
+          SEGSUP,NOMID
+        ELSE
+          SEGDES,NOMID
+        ENDIF
+        MLMOTS = LISDEF
+        SEGSUP,MLMOTS
+        SEGDES,MINTE
+*  Fin du traitement en cas d'erreur
+ 110    CONTINUE
+        IF (IERR.NE.0 .OR. KERRE.NE.0) THEN
+          IF (IPDSCR.NE.0) SEGSUP,DESCR
+          IF (IPMATR.NE.0) SEGSUP,XMATRI
+          IF (KERRE.NE.0) CALL ERREUR(KERRE)
+          GOTO 9000
+        ENDIF
+*=======================================================================
+ 100  CONTINUE
+*=======================================================================
+
+*=======================================================================
+*= 3 = FIN DU TRAITEMENT (MENAGE...)                                   =
+*=======================================================================
+ 9000 CONTINUE
+* Suppression du modele "deroule"
+      MMODEL = IPMODL
+      DO i = 1, NSOUS
+        IMODEL = KMODEL(i)
+        SEGDES,IMODEL
+      ENDDO
+      SEGSUP,MMODEL
+* Suppresion du modele unitaire
+      IF (IPMODU.NE.0) SEGSUP,MMODE1
+* Suppressions des "petits segments"
+      IF (MODEFU.NE.0) THEN
+        NOMID = MODEFU
+        SEGSUP,NOMID
+      ENDIF
+      IF (MODIM3.NE.0) THEN
+        NOMID = MODIM3
+        SEGSUP,NOMID
+      ENDIF
+      IF (MOTYPE.NE.0) SEGSUP,NOTYPE
+* Envoi de la matrice de rigidite (sauf erreur)
+      IF (IERR.NE.0) THEN
+        IF (IPRIGI.NE.0) SEGSUP,MRIGID
+        IPRIGI = 0
+      ELSE
+**      IPRIGI = MRIGID
+**      SEGDES,MRIGID
+        CALL REPART(IPRIGI)
+      ENDIF
+*
+      RETURN
+      END
+
+
+
+
+
+
+
+

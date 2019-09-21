@@ -1,0 +1,686 @@
+C PSI3D0    SOURCE    CB215821  18/06/19    21:15:11     9862
+
+      SUBROUTINE PSI3D0(ithr,IPOINT)
+
+***********************************************************************
+*     Calcul effectif de la (des) distance(s) signee(s)
+*     Appele par PSIP3D ou PSIP3Di (//isation)
+***********************************************************************
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCREEL
+-INC SMCHPOI
+-INC SMELEME
+-INC SMCOORD
+-INC CCASSIS
+
+      SEGMENT MTRI3
+        INTEGER KNODE(3,NTRI3)
+        REAL*8  XNODE(3,NTRI3),YNODE(3,NTRI3),ZNODE(3,NTRI3)
+c         REAL*8  XMIMA(NTRI3),YMIMA(NTRI3),ZMIMA(NTRI3)
+        REAL*8  VARE12(4,NTRI3),VARE23(3,NTRI3),VARE31(3,NTRI3)
+        REAL*8  VNORM(3,NTRI3),SURFAC(NTRI3)
+      ENDSEGMENT
+
+      segment mxicpr
+        real*8 xicpr(xcoor(/1)/(idim+1))
+      endsegment
+      segment isup(npt)
+      segment sfis
+         integer ifis(nbelfi,2)
+      endsegment
+
+      SEGMENT SPARAL
+        INTEGER NBTHRD
+        INTEGER IERROR(NBTHR)
+        INTEGER KPT3,KPOVA1,KPOVA2,KPOVA3
+        INTEGER KTRI3,KXICPR,KSUP,KFIS
+        INTEGER KCLE,KDEUX,KMIL5
+        REAL*8  XCRIT1
+      ENDSEGMENT
+
+      LOGICAL phicor,phi12,phi23,phi31
+
+      SPARAL = IPOINT
+      NBTHR  = SPARAL.NBTHRD
+      IPT3   = SPARAL.KPT3
+      mpova1 = SPARAL.KPOVA1
+      mpova2 = SPARAL.KPOVA2
+      mpova3 = SPARAL.KPOVA3
+      MTRI3  = SPARAL.KTRI3
+      mxicpr = SPARAL.KXICPR
+      isup   = SPARAL.KSUP
+      sfis   = SPARAL.KFIS
+      icle   = SPARAL.KCLE
+      ideux  = SPARAL.KDEUX
+      xcrit  = SPARAL.XCRIT1
+      imil5  = SPARAL.KMIL5
+
+      idim1 = IDIM+1
+      npt=ipt3.num(/2)
+      nseg=MTRI3.KNODE(/2)
+c       idbug=1
+
+C     Decoupage pour le travail d'ecriture en parallele
+      IRES=MOD(npt,NBTHR)
+      IF (IRES.EQ.0) THEN
+        ILON  = npt / NBTHR
+        IDEB  = (ithr -1)* ILON + 1
+      ELSE
+        IF (ithr .LE. IRES) THEN
+          ILON  = (npt / NBTHR) + 1
+          IDEB  = (ithr -1)* ILON + 1
+        ELSE
+          ILON  = npt / NBTHR
+          IDEB  = (IRES * (ILON+1)) + (ithr-IRES-1)* ILON + 1
+        ENDIF
+      ENDIF
+      IFIN  = IDEB + ILON - 1
+
+c       print *, "psi3d0 ith=",ithr,"/",NBTHR," ==>",IDEB,IFIN,"/",npt
+
+*=======================================================================
+*      Boucle sur les noeuds ======================================
+c        do 490 ipt=1,npt
+       do 490 ipt=IDEB,IFIN
+
+       isupfi=0
+       igard=0
+       igardf=0
+       id=ipt3.num(1,ipt)
+c        print *, "noeud",ipt,"/",npt," #",id
+
+*=====================================================================
+*           Boucle sur les elements de la fissure =========================
+            do 400 iseg=1,nseg
+
+              dis = xgrand
+              iphi2 = 0
+
+c             Recup des infos de la fissure (TRI3)
+              ia=MTRI3.KNODE(1,iseg)
+              ib=MTRI3.KNODE(2,iseg)
+              ic=MTRI3.KNODE(3,iseg)
+
+c               if(id.eq.idebug) print *,"tri",iseg,"/",nseg," #",ia,ib,ic
+
+
+*------------ cas ou le noeud structure id = l un des noeuds des tri3 de la fissure
+              if (ia.eq.id.or.ib.eq.id.or.ic.eq.id) then
+
+                dis=0.D0
+                iphi2 = 1
+                phicor=.false.
+
+*------------ "autres" cas
+              else
+
+*               recup des coordonnees du noeud en question
+                xxp = xcoor((id-1)*idim1 + 1 )
+                yyp = xcoor((id-1)*idim1 + 2 )
+                zzp = xcoor((id-1)*idim1 + 3 )
+*               + coordonnees du triangle
+                x11=MTRI3.XNODE(1,iseg)
+                x22=MTRI3.XNODE(2,iseg)
+                x33=MTRI3.XNODE(3,iseg)
+                y11=MTRI3.YNODE(1,iseg)
+                y22=MTRI3.YNODE(2,iseg)
+                y33=MTRI3.YNODE(3,iseg)
+                z11=MTRI3.ZNODE(1,iseg)
+                z22=MTRI3.ZNODE(2,iseg)
+                z33=MTRI3.ZNODE(3,iseg)
+
+*bp2013         on saute ce point si trop loin (critere)
+                if (icle.eq.1) then
+                  if (x11.ge.x22) then
+                    xxmi=min(x22,x33) - xcrit
+                    xxma=max(x11,x33) + xcrit
+                  else
+                    xxmi=min(x11,x33) - xcrit
+                    xxma=max(x22,x33) + xcrit
+                  endif
+                  if (y11.ge.y22) then
+                    yymi=min(y22,y33) - xcrit
+                    yyma=max(y11,y33) + xcrit
+                  else
+                    yymi=min(y11,y33) - xcrit
+                    yyma=max(y22,y33) + xcrit
+                  endif
+                  if (z11.ge.z22) then
+                    zzmi=min(z22,z33) - xcrit
+                    zzma=max(z11,z33) + xcrit
+                  else
+                    zzmi=min(z11,z33) - xcrit
+                    zzma=max(z22,z33) + xcrit
+                  endif
+                  if(xxp.lt.xxmi) goto 491
+                  if(xxp.gt.xxma) goto 491
+                  if(yyp.lt.yymi) goto 491
+                  if(yyp.gt.yyma) goto 491
+                  if(zzp.lt.zzmi) goto 491
+                  if(zzp.gt.zzma) goto 491
+                endif
+
+                d1xp=xxp-x11
+                d1yp=yyp-y11
+                d1zp=zzp-z11
+                d2xp=xxp-x22
+                d2yp=yyp-y22
+                d2zp=zzp-z22
+                d3xp=xxp-x33
+                d3yp=yyp-y33
+                d3zp=zzp-z33
+* calcul de la distance au triangle
+                d1= sqrt(d1xp*d1xp + d1yp*d1yp + d1zp*d1zp)
+                d2= sqrt(d2xp*d2xp + d2yp*d2yp + d2zp*d2zp)
+                d3= sqrt(d3xp*d3xp + d3yp*d3yp + d3zp*d3zp)
+                if (d1.lt.d2) then
+                    rr= min(d1,d3)
+                else
+                    rr= min(d2,d3)
+                endif
+
+* recup de la normale au triangle + vecteurs des aretes + surface
+                vx=MTRI3.VNORM(1,iseg)
+                vy=MTRI3.VNORM(2,iseg)
+                vz=MTRI3.VNORM(3,iseg)
+                v12x=MTRI3.VARE12(1,iseg)
+                v12y=MTRI3.VARE12(2,iseg)
+                v12z=MTRI3.VARE12(3,iseg)
+                v12lo=MTRI3.VARE12(4,iseg)
+                v23x=MTRI3.VARE23(1,iseg)
+                v23y=MTRI3.VARE23(2,iseg)
+                v23z=MTRI3.VARE23(3,iseg)
+                v31x=MTRI3.VARE31(1,iseg)
+                v31y=MTRI3.VARE31(2,iseg)
+                v31z=MTRI3.VARE31(3,iseg)
+                sur =MTRI3.SURFAC(iseg)
+                xsur=1.D-8*sur
+
+* calcul de la distance au plan du triangle
+                xdd = vx*d1xp + vy*d1yp + vz*d1zp
+* determination du pt projetté
+                xx=xxp-xdd*vx
+                yy=yyp-xdd*vy
+                zz=zzp-xdd*vz
+
+* ce pt est-il à l'interieur ou sur un coté du triangle?
+                d1x=xx-x11
+                d1y=yy-y11
+                d1z=zz-z11
+                d2x=xx-x22
+                d2y=yy-y22
+                d2z=zz-z22
+                d3x=xx-x33
+                d3y=yy-y33
+                d3z=zz-z33
+                pv12x=d1y*d2z-d1z*d2y
+                pv12y=d1z*d2x-d1x*d2z
+                pv12z=d1x*d2y-d1y*d2x
+                pv23x=d2y*d3z-d2z*d3y
+                pv23y=d2z*d3x-d2x*d3z
+                pv23z=d2x*d3y-d2y*d3x
+                pv31x=d3y*d1z-d3z*d1y
+                pv31y=d3z*d1x-d3x*d1z
+                pv31z=d3x*d1y-d3y*d1x
+                ps12v=pv12x*vx+pv12y*vy+pv12z*vz
+                ps23v=pv23x*vx+pv23y*vy+pv23z*vz
+                ps31v=pv31x*vx+pv31y*vy+pv31z*vz
+
+* ce pt est-il à l'interieur ou sur un coté du triangle?
+                if(ps12v.ge.0..and.ps23v.ge.0..and.ps31v.ge.0.) then
+* -> on est a l'interieur
+                    dis = xdd
+                    iphi2 = 1
+                elseif (abs(ps12v).lt.xsur) then
+* -> on est situé sur le segment 12 : est-on a l'interieur?
+                  psc1=v12x*d1x+v12y*d1y+v12z*d1z
+                  psc2=v12x*d2x+v12y*d2y+v12z*d2z
+                  if ( psc1*psc2 .lt.0.d0) then
+                    dis  =  xdd
+                    iphi2 = 1
+                  endif
+                elseif(abs(ps23v).lt.xsur)then
+* -> on est situé sur le segment 23 : est-on a l'interieur?
+                  psc2=v23x*d2x+v23y*d2y+v23z*d2z
+                  psc3=v23x*d3x+v23y*d3y+v23z*d3z
+                  if ( psc2*psc3 .lt.0.d0) then
+                    dis  =  xdd
+                    iphi2 = 1
+                  endif
+                elseif(abs(ps31v).lt.xsur)then
+* -> on est situé sur le segment 31 : est-on a l'interieur?
+                  psc3=v31x*d3x+v31y*d3y+v31z*d3z
+                  psc1=v31x*d1x+v31y*d1y+v31z*d1z
+                  if ( psc3*psc1 .lt.0.d0) then
+                    dis  =  xdd
+                    iphi2 = 1
+                  endif
+                endif
+
+* on est a l'exterieur : il faut calculer dis et verifier xdd
+                if (dis.eq.xgrand) then
+                  iphi2 = 10
+
+* si on est a l'ext du tri3 et en avant du front+contour on change v
+
+*              -si on a affaire a un triangle du front (ou du contour) :
+*               est on en avant du front (ou du contour)? -> phicor
+                phicor=.false.
+                phi12=.false.
+                phi23=.false.
+                phi31=.false.
+                if (ideux.ge.1) then
+                if (ifis(iseg,1).ge.1) then
+*               -Cas ou le segment [1-2] = front ou contour
+                 if(ifis(iseg,1).ge.2.or.ifis(iseg,2).eq.1.or.
+     $              ifis(iseg,2).eq.3.or.ifis(iseg,2).eq.5) then
+c                     phi12=(ps12v.lt.0.d0)
+                    phi12=(ps12v.lt.(-xsur))
+                    if(phi12) then
+                    if(ifis(iseg,1).ge.2) then
+                      iphi2=iphi2+5
+                    else
+                      iphi2=iphi2+1
+                    endif
+                    endif
+                 endif
+*               -Cas ou le segment [2-3] =  contour
+                 if(ifis(iseg,2).eq.2.or.
+     $              ifis(iseg,2).eq.3.or.ifis(iseg,2).eq.6) then
+c                     phi23=(ps23v.lt.0.d0)
+                    phi23=(ps23v.lt.(-xsur))
+                    if(phi23) iphi2=iphi2+1
+                 endif
+*               -Cas ou le segment [3-1] =  contour
+                 if(ifis(iseg,2).eq.4.or.
+     $              ifis(iseg,2).eq.5.or.ifis(iseg,2).eq.6) then
+c                     phi31=(ps31v.lt.0.d0)
+                    phi31=(ps31v.lt.(-xsur))
+                    if(phi31) iphi2=iphi2+1
+                 endif
+*               -Union des test
+                 phicor=(ideux.ge.1).and.(phi12.or.phi23.or.phi31)
+                endif
+                endif
+*               si phicor, il faudra alors "corriger" phi
+*               (et prendre xdd au lieu de dis)
+
+                  psc1=0.d0
+                  psc2=0.d0
+                  psc3=0.d0
+c                     dis=sign(rr,xdd)
+* bp (05/03/2012) : on remplace ci dessus par formule + precise
+*                 --on teste autour du noeud 1--
+                    if (rr.eq.d1) then
+                      if (ps12v.lt.0.d0.and.ps31v.lt.0d0) then
+*                     on est definitivement + proche du noeud 1
+                        dis = sign(rr,xdd)
+                      else
+                        if (ps12v.lt.0.d0) then
+*                       on est du coté du segment 12
+                         psc1 = v12x*d1x + v12y*d1y + v12z*d1z
+                        elseif (ps31v.lt.0.d0) then
+*                       on est du coté du segment 13
+                         psc1 = -1.d0*(v31x*d1x + v31y*d1y + v31z*d1z)
+                        else
+*                       on ne devrait pas passer par la
+                         psc1=0.d0
+                        endif
+                        if (psc1.le.0d0) then
+                          dis = sign(rr,xdd)
+                        else
+                          dis = sign(sqrt(rr*rr-psc1*psc1),xdd)
+                        endif
+                      endif
+*                 --on teste autour du noeud 2--
+                    elseif (rr.eq.d2) then
+                      if (ps12v.lt.0.d0.and.ps23v.lt.0d0) then
+*                     on est definitivement + proche du noeud 2
+                        dis = sign(rr,xdd)
+                      else
+                        if (ps12v.lt.0.d0) then
+*                       on est du coté du segment 21
+                         psc2 = -1.d0*(v12x*d2x + v12y*d2y + v12z*d2z)
+                        elseif (ps23v.lt.0.d0) then
+*                       on est du coté du segment 23
+                         psc2 = v23x*d2x + v23y*d2y + v23z*d2z
+                        else
+*                       on ne devrait pas passer par la
+                           psc2=0.d0
+                        endif
+                        if (psc2.le.0d0) then
+                          dis = sign(rr,xdd)
+                        else
+                          dis = sign(sqrt(rr*rr-psc2*psc2),xdd)
+                        endif
+                      endif
+*                 --on teste autour du noeud 3--
+                    elseif (rr.eq.d3) then
+                      if (ps31v.lt.0.d0.and.ps23v.lt.0d0) then
+*                     on est definitivement + proche du noeud 2
+                        dis = sign(rr,xdd)
+                      else
+                        if (ps31v.lt.0.d0) then
+*                       on est du coté du segment 31
+                         psc3 = v31x*d3x + v31y*d3y + v31z*d3z
+                        elseif (ps23v.lt.0.d0) then
+*                       on est du coté du segment 32
+                         psc3 = -1.d0*(v23x*d3x + v23y*d3y + v23z*d3z)
+                        else
+*                       on ne devrait pas passer par la
+                           psc3=0.d0
+                        endif
+                        if (psc3.le.0d0) then
+                          dis = sign(rr,xdd)
+                        else
+                          dis = sign(sqrt(rr*rr-psc3*psc3),xdd)
+                        endif
+                      endif
+                    endif
+
+                endif
+* fin du cas ou on est a l'exterieur
+
+              endif
+*------------ fin des "autres" cas (noeud id different de ceux du tri3)
+
+*            -on a calculé (xdd et) dis: s'agit il de phi?
+c             on prend xdd plutot que dis pour definir Phi dans le cas ou :
+c -on a l option DEUX ou TROI
+c -le tri3 utilisé (le + proche) appartient au front ou au contour
+c -le point se projette en avant du front ou du contour
+*             iphi2 qu on va eventuellement ranger dans isup(ipt) vaut:
+*              1 si on se projette a l int du triangle
+*             10 si on se projette a l ext du triangle
+*             11 si en + on sort du contour
+*             15 si en + on est en avant du front
+*             16 si en + on est en avant du front et on sort du contour
+
+           if(id.eq.idbug) then
+c            if(phicor) then
+           write(6,*) '-----------------------------------------------'
+           write(6,*) 'noeud:',id,' (',ipt,') tri3',iseg,':',ia,ib,ic
+c            write(6,*) 'iphi2,isup(ipt),dis,xdd',iphi2,isup(ipt),dis,xdd
+           write(6,*) 'dis,xdd',dis,xdd
+           write(6,*)'rr=d1,2,3?',(rr.eq.d1),(rr.eq.d2),(rr.eq.d3),rr
+           write(6,*) 'ps12v,23,31=',ps12v,ps23v,ps31v
+c            write(6,*) 'phi12,phicor=',phi12,phicor
+           endif
+
+*            -c'est la premiere fois que l'on voit ce point
+              if (isup(ipt).eq.0) then
+                  if(phicor) then
+                    mpova2.vpocha(ipt,1)=xdd
+                  else
+                    mpova2.vpocha(ipt,1)=dis
+                  endif
+                  xdmin =dis
+                  xdmin1=xdd
+                  isup(ipt)=iphi2
+                  iphi2=100
+                  igard=igard+1
+              else
+*             --on est (franchement) + proche que les precedents essais
+                if (abs(dis).lt.0.999999*abs(xdmin)) then
+                  if(phicor) then
+                    mpova2.vpocha(ipt,1)=xdd
+                  else
+                    mpova2.vpocha(ipt,1)=dis
+                  endif
+                   xdmin =dis
+                   xdmin1=xdd
+                   isup(ipt)=iphi2
+                   iphi2=100
+*             --on est (quasiment) aussi proche que le meilleur essai
+                elseif (abs(dis).lt.1.000001*abs(xdmin)) then
+*                -on a 2 tri3 du front+contour a egalite
+*                 et l'un des deux a trouvé le point en avant du front :
+                  if ((iseg.le.imil5).and.
+     $                (phicor.or.isup(ipt).gt.10)) then
+c                   strategie : xdd= max(xdd1 xdd2)
+                    if (abs(xdd).gt.abs(xdmin1)) then
+                      mpova2.vpocha(ipt,1)=xdd
+                      xdmin =dis
+                      xdmin1=xdd
+c                       isup(ipt)=iphi2
+                      if(iphi2.gt.isup(ipt)) isup(ipt)=iphi2
+                      iphi2=100
+c                   cas ou on avait pas vu qu il fallait prendre xdd
+                    elseif(isup(ipt).le.10) then
+c                   equivalent à :
+c                     elseif(mpova2.vpocha(ipt,1).ne.xdmin1(ipt)) then
+                      mpova2.vpocha(ipt,1)=xdmin1
+                      isup(ipt)=iphi2
+                      iphi2=100
+                    endif
+
+*                -on avait 1 tri3 du front+contour et ce tri3 est a egalite
+*                 et le 1er avait trouvé le point en avant du front :
+*                 on laisse le xdd calculé depuis le 1er tri3
+                  elseif ((iseg.gt.imil5).and.
+     $                    (isup(ipt).gt.10)) then
+                    goto 491
+*                -quasi-egalite entre 2 concurrents et possibles signes opposés :
+                  else
+c bp: nouvelle strategie: on moyenne les normales*(x-xp) (soit xdd)
+                    xdmin1=xdmin1+xdd
+                    mpova2.vpocha(ipt,1)=sign(dis,xdmin1)
+                  endif
+                endif
+*             --fin de la distinction + proche / aussi proche
+              endif
+*            -fin de la distinction 1ere fois ou pas
+
+             if(id.eq.idbug) then
+             write(6,*)'iphi2,xdmin,xdmin1,phi',iphi2,
+     $             xdmin,xdmin1,mpova2.vpocha(ipt,1)
+             endif
+             if(iimpi.ge.2) then
+               write(ioimp,*) 'point',id,ipt,'dis,xdd,PHI,isup=',
+     $         dis,xdd,mpova2.vpocha(ipt,1),isup(ipt)
+             endif
+
+*            point d'arrivee si hors-boite
+  491        continue
+*            le tri3 n'est pas un tri3 du front => on saute
+*TODO : test a verifier peut etre .eq. et .eq.-1 aussi a ne pas sauter?
+             if (ideux.lt.1)        goto 400
+             if (ifis(iseg,1).le.1) goto 400
+
+c   ------   Calcul de la 2eme Level Set   -------
+             xdd1 = 0.D0
+
+*            -cas ou le noeud structure id = l un des noeuds des tri3 de la fissure
+              if (ia.eq.id.or.ib.eq.id) then
+                   dis1=0.D0
+                   xd2=0.D0
+                   xd3=0.D0
+                   if(ideux.ge.2) xtau=xicpr(id)
+*            -autres cas
+              else
+*              on recupere ce qu on a pas recupéré lors du calcul de phi
+               if (ic.eq.id) then
+                  xxp = xcoor((id-1)*idim1 + 1 )
+                  yyp = xcoor((id-1)*idim1 + 2 )
+                  zzp = xcoor((id-1)*idim1 + 3 )
+               endif
+* calcul du vecteur vn qui est le sens de propagation
+               vnx=v12y*vz-v12z*vy
+               vny=v12z*vx-v12x*vz
+               vnz=v12x*vy-v12y*vx
+* il faut orienter vnx pour que le vecteur  soit  dans le sens
+*  de la propagation
+               qq= vnx*(x33-x11)+vny*(y33-y11)+vnz*(z33-z11)
+               if (qq.gt.0.D0) then
+                 vnx=-vnx
+                 vny=-vny
+                 vnz=-vnz
+               endif
+* normalement vn est normé on le verifie
+               qq= sqrt(vnx*vnx + vny*vny + vnz*vnz)
+               if  (abs(qq-1.d0).gt.1.d-2) then
+                 PRINT *,'PSIP3D0: pb dans le calcul de vn',ithr
+c                call erreur(26)
+                 SPARAL.IERROR(ithr)=26
+                 return
+               elseif(abs(qq-1.d0).gt.1.d-6) then
+                 vnx=vnx/qq
+                 vny=vny/qq
+                 vnz=vnz/qq
+               endif
+c                if (id.eq.idebug) print *,"vn=",vnx,vny,vnz
+* on calcule la distance au plan defini par segment 12 et vecteur vx,vy,vz
+* et le point (xx yy zz ) projeté du point sur ce plan
+               xdd1=(xxp-x11)*vnx+(yyp-y11)*vny+(zzp-z11)*vnz
+               xx=xxp-xdd1*vnx
+               yy=yyp-xdd1*vny
+               zz=zzp-xdd1*vnz
+               psc1=(xx-x11)*v12x+(yy-y11)*v12y+(zz-z11)*v12z
+               psc2=(xx-x22)*v12x+(yy-y22)*v12y+(zz-z22)*v12z
+               if ((psc1*psc2).le.0.d0) then
+C le point se projete sur 12
+                   dis1=xdd1
+                   pp1x=x11+(psc1*v12x)
+                   pp1y=y11+(psc1*v12y)
+                   pp1z=z11+(psc1*v12z)
+                   xd2 = 0.D0
+                   xd3 = sqrt((xxp-pp1x)**2+(yyp-pp1y)**2+(zzp-pp1z)**2)
+                   if (ideux.ge.2) then
+                     xtau1=xicpr(ia)
+                     xtau2=xicpr(ib)
+                     stau = psc1 / v12lo
+                     xtau=stau*xtau2+(1.d0-stau)*xtau1
+                   endif
+               else
+                 if (psc1.ge.0.D0) then
+                   pp2x=xx+((v12lo-psc1)*v12x)
+                   pp2y=yy+((v12lo-psc1)*v12y)
+                   pp2z=zz+((v12lo-psc1)*v12z)
+                   xd2 = abs(v12lo-psc1)
+                   xd3 = sqrt((xxp-x22)**2+(yyp-y22)**2+(zzp-z22)**2)
+c                    if(ideux.ge.2) xtau=xicpr(ib)
+                   if(ideux.ge.2) then
+                     if(ib.eq.i2firs.or.ib.eq.i2last) then
+c                      write(6,*) 'le noeud',id,'detecte comme apres',ib
+                       xtau1=xicpr(ia)
+                       xtau2=xicpr(ib)
+                       stau = psc1 / v12lo
+                       xtau=stau*xtau2+(1.d0-stau)*xtau1
+                     else
+                       xtau=xicpr(ib)
+                     endif
+                   endif
+                 else
+                   pp2x=xx-(psc1*v12x)
+                   pp2y=yy-(psc1*v12y)
+                   pp2z=zz-(psc1*v12z)
+                   xd2 = abs(psc1)
+                   xd3 = sqrt((xxp-x11)**2+(yyp-y11)**2+(zzp-z11)**2)
+c                    if(ideux.ge.2) xtau=xicpr(ia)
+                   if(ideux.ge.2) then
+                     if(ia.eq.i2firs.or.ia.eq.i2last) then
+c                      write(6,*) 'le noeud',id,'detecte comme avant',ia
+                       xtau1=xicpr(ia)
+                       xtau2=xicpr(ib)
+                       stau = psc1 / v12lo
+                       xtau=stau*xtau2+(1.d0-stau)*xtau1
+                     else
+                       xtau=xicpr(ia)
+                     endif
+                   endif
+                 endif
+                 dis1=sqrt((xxp-pp2x)**2+(yyp-pp2y)**2+(zzp-pp2z)**2)
+                 dis1=sign(dis1,xdd1)
+               endif
+
+              endif
+*            -fin de la distinction si noeud du tri3 ou pas
+
+c                if(id.eq.idebug) print *,"isupfi =",isupfi
+*              1ere fois qu on traite ce point?
+               if (isupfi.eq.0) then
+*                 isupfi(ipt)=1
+*                on utilise isupfi pour definir si la valeur inscrite
+*                provient du 1er ou dernier seg du front (=2) ou autre(=1)?
+                 isupfi=ifis(iseg,1)
+                 igardf=igardf+1
+                 xdmin2=xd2
+                 xdmin3=xd3
+cbp2013                 mpova1.vpocha(ipt,1)=dis1
+                 if(ideux.ge.2) mpova3.vpocha(ipt,1)=xtau
+               else
+*                 if(abs(dis1).lt.abs(mpova1.vpocha(ipt,1)))then
+*                on a trouvé un segment + proche ou = du noeud considéré
+*                 if(abs(dis1).le.abs(mpova1.vpocha(ipt,1)))then
+**                 if(abs(dis1).lt.(abs(mpova1.vpocha(ipt,1)))-1.D-8)then
+*                 if(xd2.le.xdmin2(ipt)) then
+                 if (xd3.lt.(abs(xdmin3)-1.D-8)) then
+cbp2013                     mpova1.vpocha(ipt,1)=dis1
+                     xdmin2=xd2
+                     xdmin3=xd3
+                     isupfi=ifis(iseg,1)
+                     if(ideux.ge.2) mpova3.vpocha(ipt,1)=xtau
+                 endif
+*                rattrapage dans le cas d'erreur d'arrondi sur dis1
+*                 elseif(abs(dis1).lt.(abs(mpova1.vpocha(ipt,1)))+1.D-8)
+*     $           then
+*                 if(abs(dis1).lt.(abs(mpova1.vpocha(ipt,1)))+1.D-8)then
+                 if (xd3.lt.(abs(xdmin3)+1.D-8))then
+*                  en cas d'égalité,on n'utilise la distance dis1 que si:
+*                  - le pt projetté appartient au segment (xd2=0)
+*              ou  - le point projeté est + proche du segment
+                   if (xd2.lt.xdmin2) then
+cbp2013                      mpova1.vpocha(ipt,1)=dis1
+                     xdmin2=xd2
+                     xdmin3=xd3
+                     isupfi=ifis(iseg,1)
+                     if(ideux.ge.2) mpova3.vpocha(ipt,1)=xtau
+                   endif
+                 endif
+               endif
+
+  400       continue
+*           Fin de Boucle sur les elements de la fissure ===============
+*=======================================================================
+
+*------   Petite correction de Psi
+          if (ideux.ge.1) then
+              if (isup(ipt).eq.0) goto 500
+c * pour le cas de fissure debouchante
+c * dans le cas ou c'est un segment debouchant qui a servi au calcul de psi,
+c * il faut prendre la distance xdd2 (et pas dis) qu'on retrouve avec :
+c               if ((isupfi(ipt)).eq.2) then
+c                  dis1 = mpova1.vpocha(ipt,1)
+c                  xdd1 = sqrt( (dis1**2) - (xdmin2(ipt)**2) )
+c                  mpova1.vpocha(ipt,1) = sign(xdd1,dis1)
+c               endif
+c bp : essai du 16/03/2012 : psi = distance au front**2-phi**2
+              xdd1 = (xdmin3**2) - (mpova2.vpocha(ipt,1)**2)
+              xdd1 = sqrt(max(xdd1,0.d0))
+           if(ipt3.num(1,ipt).eq.idbug) then
+           write(6,*)'ipt,isup,psi_avant,phi,xdd1,= ',ipt,isup(ipt),
+     $     xdmin3,mpova1.vpocha(ipt,1),mpova2.vpocha(ipt,1),xdd1
+           endif
+c               if (isup(ipt).gt.0) then
+              if (isup(ipt).ge.15) then
+*on est a l exterieur => psi >0
+                mpova1.vpocha(ipt,1) = xdd1
+              else
+                mpova1.vpocha(ipt,1) = -1.d0*xdd1
+              endif
+  500         continue
+          endif
+*------   Fin de la Petite correction de Psi
+
+  490   continue
+*       Fin de Boucle sur les noeuds ===================================
+*=======================================================================
+
+      RETURN
+      END
+
+

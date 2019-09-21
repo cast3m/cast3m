@@ -1,0 +1,805 @@
+C FPMASS    SOURCE    GF238795  18/02/01    21:15:38     9724
+      SUBROUTINE FPMASS(IPCHE1,IPCHM1,IPMODL,IPTFP,JPMAIL,XP,IRET)
+C_____________________________________________________________________
+C
+C   CALCULE LES FORCES DE PRESSIONS APPLIQUEES SUR DES MASSIFS
+C
+C   ENTREES :
+C   ---------
+C
+C    IPCHE1   CHPOINT CONTENANT LES VALEURS DES PRESSIONS AUX NOEUDS
+C              DE LA FACE D UN MASSIF
+C    IPCHM1   CHAMELEM CONTENANT LES VALEURS DES PRESSIONS AUX NOEUDS
+C              DE LA FACE D UN MASSIF
+C    IPMODL   OBJET MODELE  SUR LEQUEL S APPLIQUE LA PRESSION
+C
+C    JPMAIL   POINTEUR SUR LE MAILLAGE SI ON A LU UN FLOTTANT ET
+C             UN MAILLAGE, SINON 0
+C
+C    XP       LA VALEUR DE LA PRESSION SI ON L'A LUE
+C
+C  SORTIES  :
+C  ----------
+C
+C    IPTFP  = CHPOINT DES FORCES NODALES EQUIVALENTES
+C    IRET   = 1 OU 0 SUIVANT SUCCES OU NON
+C
+C     REVISION JACQUELINE BROCHARD  SEPTEMBRE 86
+C     MISE A JOUR P VERPEAUX MAI 88
+C
+C     PASSAGE AUX NOUVEAU CHAMELEM PAR JM CAMPENON LE 17 09 90
+C_______________________________________________________________________
+C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+      INTEGER ISUP
+C
+-INC CCOPTIO
+-INC CCHAMP
+-INC SMCOORD
+-INC SMELEME
+-INC SMMODEL
+-INC SMCHAML
+-INC SMCHPOI
+-INC SMINTE
+-INC CCREEL
+C
+      SEGMENT INFO
+       INTEGER INFELL(JG)
+      ENDSEGMENT
+C
+      SEGMENT NOTYPE
+        CHARACTER*16 TYPE(NBTYPE)
+      ENDSEGMENT
+C
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS)    ,NSOF(NS)
+        INTEGER      IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+C
+      segment netn(xcoor(/1)/(idim+1)+1)
+      segment ietn(letn)
+C
+
+      DIMENSION V(3),F(3)
+      CHARACTER*4 MOSTRI,MOAPPU,MOGEOM
+      CHARACTER*(NCONCH) CONM
+      PARAMETER (NINF=3)
+      INTEGER INFOS(NINF)
+      LOGICAL LSUPFO,ltelq
+      CHARACTER*8 MOFO
+C
+      DATA MOAPPU/'APPU'/,MOSTRI/'STRI'/
+      DATA MOGEOM/'GEOM'/
+C
+      ISUP = 0
+      IRET = 0
+      IGEOM = 0
+C
+      IND=0
+      IPCHE2=0
+      NHRM=NIFOUR
+      IPTVPR=0
+C
+C     CAS OU UN CHPOP EST FOURNI
+C     ON CREE L OBJET GEOMETRIQUE CONTENANT TOUS LES PTS SI BESOIN
+C
+      IF(JPMAIL.EQ.0.AND.IPCHM1.EQ.0) THEN
+        MCHPOI=IPCHE1
+        SEGACT MCHPOI
+        DO 50 I=1,IPCHP(/1)
+           MSOUPO=IPCHP(I)
+           SEGACT MSOUPO
+           IF (I.GT.1) THEN
+              ltelq=.false.
+              CALL FUSE(IGEOM,IGEOC,IPPT,ltelq)
+              IGEOM=IPPT
+           ELSE
+              IGEOM=IGEOC
+           ENDIF
+           SEGDES MSOUPO
+ 50     CONTINUE
+        SEGDES MCHPOI
+        IF (IERR.NE.0) RETURN
+      ENDIF
+C
+C     CAS OU UN CHAMELEM EST FOURNI
+C     ON CREE L OBJET GEOMETRIQUE CONTENANT TOUS LES PTS SI BESOIN
+C
+      IF(IPCHM1.NE.0) THEN
+        MCHEL2 = IPCHM1
+        SEGACT MCHEL2
+        DO 60 I=1,MCHEL2.IMACHE(/1)
+          IMTMP=MCHEL2.IMACHE(I)
+          IF (I.GT.1) THEN
+            ltelq=.false.
+            CALL FUSE(IGEOM,IMTMP,IPPT,ltelq)
+            IGEOM=IPPT
+          ELSE
+            IGEOM=IMTMP
+          ENDIF
+ 60     CONTINUE
+        SEGDES MCHEL2
+        IF (IERR.NE.0) RETURN
+      ENDIF
+C
+C     ACTIVATION DU MODEL
+C
+      MMODEL=IPMODL
+      SEGACT MMODEL
+      NSOUS=KMODEL(/1)
+
+      idimp1=IDIM+1
+C= Cas des modes de calculs en DEFORMATIONS GENERALISEES
+      IF (IFOUR.EQ.-3) THEN
+        NDPGE=3
+      ELSE IF (IFOUR.EQ.11) THEN
+        NDPGE=2
+      ELSE IF (IFOUR.EQ. 7.OR.IFOUR.EQ. 8.OR.IFOUR.EQ. 9.OR.
+     .         IFOUR.EQ.10.OR.IFOUR.EQ.14) THEN
+        NDPGE=1
+      ELSE
+        NDPGE=0
+      ENDIF
+
+      IRRT=0
+      DO 100 ISOUS=1,NSOUS
+C
+C        ON RECUPERE L INFORMATION GENERALE
+C
+         IMODEL=KMODEL(ISOUS)
+         SEGACT IMODEL
+         IPMAIL=IMAMOD
+         CONM  =CONMOD
+C
+C        TRAITEMENT DU MODEL
+C
+         MOCARA = 0
+         IVACAR = 0
+         IVAFOR = 0
+C
+         MELM=NEFMOD
+C         write(*,*) ISOUS,'/',NSOUS,' : ',IMODEL,'NEFMOD=',MELM
+         if ((melm . eq . 22).OR.(melm . eq . 259)) then
+C      ... Ici sous modele de multiplicateur de lagrange on
+C          incrémente le compteur et on passe à la zone suivante ...
+            IRRT=IRRT+1
+            go to 100
+         endif
+C
+C        ON RECUPERE LES ELTS DE L ENVELOPPE DU MASSIF APPUYES
+C        STRICTEMENT SUR LE CHPOINT DE PRESSIONS OU appartenant au
+C        MAILLAGE DONNE
+C
+         CALL ECROBJ('MAILLAGE',IPMAIL)
+         IF (IDIM.EQ.2) THEN
+           CALL PRCONT
+         ELSE IF (IDIM.EQ.3) THEN
+           CALL ENVELO
+         ELSE IF (IDIM.EQ.1) THEN
+           CALL PREX1D
+         ENDIF
+         IF (IERR.NE.0) THEN
+            SEGDES MMODEL
+            SEGDES IMODEL
+            RETURN
+         ENDIF
+         CALL LIROBJ('MAILLAGE',ienvel,1,IRETOU)
+C     ... si un CHPOINT a été donné, on va chercher la partie de
+C         l'enveloppe s'appuyant strictement sur le support du CHPOINT ...
+           IF(JPMAIL.EQ.0) THEN
+              CALL ECROBJ('MAILLAGE',IGEOM)
+              CALL ECRCHA(MOSTRI)
+              CALL ECRCHA(MOAPPU)
+              CALL ECROBJ('MAILLAGE',ienvel)
+              CALL EXTREL (IRR,0,IBNOR)
+           ELSE
+C      ... sinon, on va chercher l'intersection de l'enveloppe avec
+C          le maillage fourni ...
+              CALL INTERB(ienvel,jpmail,irr,IPOGEO)
+           ENDIF
+C      ... Ici on teste si intersection est vide, si OUI on
+C          incrémente le compteur et on passe à la zone suivante ...
+           IF (irr.gt.0) THEN
+              IRRT=IRRT+1
+              GOTO 100
+           ENDIF
+           IF(JPMAIL.EQ.0) THEN
+             CALL LIROBJ('MAILLAGE',IPOGEO,1,iret)
+             IF (IERR.NE.0) RETURN
+           ENDIF
+C
+C     ON DETERMINE LA FORMULATION ASSOCIEE A L OBJET
+C     GEOMETRIQUE ELEMENTAIRE DE SURFACE
+C
+      IPT3=IPOGEO
+      SEGACT IPT3
+      IPT2=IPT3
+      IB=0
+C
+C     BOUCLE SUR LES SOUS ZONES DE L ENVELOPPE
+C
+      DO 110 IB=1,MAX(1,IPT3.LISOUS(/1))
+         IF (IPT3.LISOUS(/1).NE.0) THEN
+            IPT2=IPT3.LISOUS(IB)
+            SEGACT IPT2
+            IPOGEO=IPT2
+         ENDIF
+         NBNN =IPT2.NUM(/1)
+         LETYP=IPT2.ITYPEL
+         IF (IPT3.LISOUS(/1).EQ.0) GOTO 112
+         SEGDES IPT2
+C
+ 112     CONTINUE
+C
+C        PETIT TEST SUR LE TYPE
+C
+         IF(LETYP.EQ.1.AND.IDIM.NE.1) THEN
+            CALL ERREUR(16)
+            SEGDES IPT3
+            GOTO 9997
+         ENDIF
+C
+         CALL TYPFAC(MELM,NBNN,MELE)
+C          write(*,*) 'TYPFAC --> MELE=',MELE
+         IF (MELE.EQ.0) THEN
+C
+C        ERREUR : IMPOSSIBLE D UTILISER L OPERATEUR PRESSI POUR
+C                 LES ELEMENTS DE FORMULATION MELM
+C
+            MOTERR(1:8)=NOMTP(MELM)
+            CALL ERREUR(193)
+            SEGDES IPT3
+            GOTO 9997
+         ENDIF
+C
+C        CAS OU UN CHAMP PAR POINT A ETE FOURNI
+C        ON CREE L OBJET MODEL ASSOCIE A LA SURFACE ELEMENTAIRE
+C
+         IF(JPMAIL.EQ.0.AND.IPCHM1.EQ.0) THEN
+           N1=1
+           SEGINI MMODE1
+           IPMOD1=MMODE1
+           NFOR=FORMOD(/2)
+           NMAT=MATMOD(/2)
+           MN3=0
+           NPARMO=0
+           nobmod=0
+           SEGINI IMODE1
+           MMODE1.KMODEL(1)=IMODE1
+           IMODE1.IMAMOD=IPOGEO
+           IMODE1.NEFMOD=MELE
+           IMODE1.CONMOD=CONMOD
+           DO 10 I=1,NFOR
+              IMODE1.FORMOD(I)=FORMOD(I)
+ 10        CONTINUE
+           DO 11 I=1,NMAT
+              IMODE1.MATMOD(I)=MATMOD(I)
+ 11        CONTINUE
+           SEGDES MMODE1
+           SEGDES IMODE1
+C
+C            ON TRANSFORME LE CHPOINT DE PRESSION EN CHELEM ELEMENTAIRE
+C
+             CALL CHAME1(0,IPMOD1,IPCHE1,' ',ICHELP,3)
+             IF (IERR.NE.0) THEN
+               CALL DTMODL(IPMOD1)
+               SEGDES IPT3
+               RETURN
+             ENDIF
+             MCHEL1=ICHELP
+             SEGACT MCHEL1
+             MCHAM1=MCHEL1.ICHAML(1)
+             SEGACT MCHAM1
+             IPTVPR=MCHAM1.IELVAL(1)
+         ENDIF
+C
+C        INFORMATION SUR L'ELEMENT FINI
+C
+         CALL ELQUOI(MELE,0,3,IPINF,IMODEL)
+Cbp : on aurait voulu faire CALL ELQUOI(MELE,0,3,IPINF,IMODE1),
+C   : mais cela ne marche evidemment pas bien...
+C        SEGDES IMODE1
+         IF (IERR.NE.0) THEN
+            SEGDES IPT3
+            IF(JPMAIL.EQ.0) CALL DTCHAM(ICHELP)
+            IF(IPCHM1.EQ.0) CALL DTMODL(IPMOD1)
+            GOTO 9997
+C            RETURN
+         ENDIF
+         INFO=IPINF
+         IPTINT=INFELL(11)
+         MFR   =INFELL(13)
+C*OF En DIMEnsion 1, on force FORMULATION MASSIVE pour POI1
+         IF (IDIM.EQ.1.AND.MELE.EQ.45) MFR=1
+         IPPORE=0
+         IF(MFR.EQ.33) IPPORE=NBNN
+C Destruction immediate du segment
+         SEGSUP,INFO
+C Caracteristiques d'integration
+         MINTE=IPTINT
+         SEGACT,MINTE
+C
+C        CAS OU UN CHAMP PAR ELEMENT A ETE FOURNI
+C        -> Verification de son support
+C
+         IF (IPCHM1.NE.0) THEN
+           CALL QUESUP(0,IPCHM1,0,0,ISUP1,ISUP2)
+           MCHEL2=IPCHM1
+           SEGACT MCHEL2
+           MCHAM2 = MCHEL2.ICHAML(1)
+           SEGACT MCHAM2
+           IF (ISUP2.NE.3) THEN
+             IF (ISUP2.EQ.4) THEN
+               CALL ERREUR(609)
+               GOTO 9997
+             ELSE IF (ISUP2.EQ.5) THEN
+               IPTVPR = MCHAM2.IELVAL(1)
+             ELSE IF (ISUP2.EQ.1.OR.ISUP2.EQ.2) THEN
+               IVPRES = MCHAM2.IELVAL(1)
+               CALL VALMEL(IVPRES,IPTINT,IPTVPR)
+             ENDIF
+           ELSE
+             IPTVPR = MCHAM2.IELVAL(1)
+           ENDIF
+         ENDIF
+C
+C        INITIALISATION DU CHELEM ELEMENTAIRE DES FORCES NODALES
+C
+         N1=1
+         L1=6
+         N3=5
+         SEGINI MCHELM
+         TITCHE='FORCES'
+         IFOCHE=IFOUR
+         IPCHEL=MCHELM
+C
+         IMACHE(1)=IPOGEO
+         INFCHE(1,1)=0
+         INFCHE(1,2)=0
+         INFCHE(1,3)=NHRM
+         INFCHE(1,4)=IPTINT
+         INFCHE(1,5)=0
+C
+C        RECHERCHE DE LA TAILLE DES MELVALS
+C
+         MELEME=IPOGEO
+         SEGACT MELEME
+         N1PTEL=NUM(/1)
+         N1EL  =NUM(/2)
+         N2PTEL=0
+         N2EL  =0
+         SEGDES MELEME
+C
+C        RECHERCHE DES NOM DE COMPOSANTES
+C
+        if(lnomid(2).ne.0) then
+          nomid=lnomid(2)
+          segact nomid
+          moforc=nomid
+          nfor=lesobl(/2)
+          nfac=0
+          lsupfo=.false.
+C           write(*,*) 'nomid deja existant dans IMODEL',IMODEL
+        else
+         lsupfo=.true.
+         CALL IDFORC(MFR,IFOUR,MOFORC,NFOR,NFAC)
+C           write(*,*) 'appel a IDFORC pour creer nomid'
+        endif
+         NCOMP=NFOR-NDPGE
+C**      IF (IFOUR.EQ.-3) NCOMP=NFOR-3
+C
+C        CREATION DU MCHAML DE LA SOUS ZONE
+C
+         N2=NCOMP
+         SEGINI MCHAML
+         ICHAML(1)=MCHAML
+         NS=1
+         NCOSOU=NCOMP
+         SEGINI MPTVAL
+         IVAFOR=MPTVAL
+         NOMID=MOFORC
+         SEGACT NOMID
+
+Cbp      on verifie qu on a suffisamment de composantes d'effort
+         NFO=0
+         IF(MELE.EQ.2.OR.MELE.EQ.3) NFO=2
+         IF(MELE.EQ.31.OR.MELE.EQ.32.OR.MELE.EQ.33.OR.MELE.EQ.34) NFO=3
+         IF(MELE.EQ.45) NFO=1
+C          IF(NFO.eq.0) --> erreur + tard
+         IF(NFO.ne.0) THEN
+           IF(NCOMP.lt.NFO) GOTO 444
+           DO 44 ICOMP=1,NFO
+              MOFO=LESOBL(ICOMP)
+              IF(MOFO(1:1).NE.'F') GOTO 444
+ 44        CONTINUE
+C          pas d'erreur ?
+           GOTO 440
+C         -erreur
+ 444       CONTINUE
+           WRITE(IOIMP,*) 'on attend un MODELE avec au moins',NFO,
+     &    'composantes de FORCES !'
+           write(IOIMP,*) 'Ici, on a :',(LESOBL(iou),iou=1,NCOMP)
+           MOTERR(1:16)='MECANIQUE, ...  '
+           CALL ERREUR(719)
+           IF(JPMAIL.EQ.0.AND.IPCHM1.EQ.0) CALL DTMODL(IPMOD1)
+           GOTO 9990
+C         -pas d'erreur
+ 440       CONTINUE
+         ENDIF
+
+         DO 4 ICOMP=1,NCOMP
+            NOMCHE(ICOMP)=LESOBL(ICOMP)
+            TYPCHE(ICOMP)='REAL*8'
+            SEGINI MELVAL
+            IELVAL(ICOMP)=MELVAL
+            IVAL(ICOMP)=MELVAL
+ 4       CONTINUE
+C
+C____________________________________________________________________
+C
+C TRAITEMENT DES CHAMPS DE CARACTERISTIQUES
+C____________________________________________________________________
+C
+         IF (IFOUR.EQ.-2.AND.IND.EQ.0) THEN
+           CALL LIROBJ('MCHAML',IPCHE2,0,IRT3)
+           IND=1
+           IF (IERR.NE.0) GOTO 9990
+           IF (IPCHE2.NE.0) THEN
+C
+C   Verification du lieu support du MCHAML de caracteristique
+C
+             CALL QUESUP(IPMODL,IPCHE2,3,1,ISUP,IRETCA)
+             IF (ISUP.GT.1) GOTO 9990
+C
+C        CREATION DU TABLEAU INFOS
+C
+             CALL IDENT (IPMAIL,CONM,IPCHE2,0,INFOS,IRTD)
+             IF (IRTD.EQ.0) THEN
+                SEGSUP MCHELM
+                CALL DTCHAM(IPCHE2)
+                RETURN
+             ENDIF
+C
+             NBROBL=0
+             NBRFAC=1
+             SEGINI NOMID
+             MOCARA=NOMID
+             LESFAC(1)='DIM3'
+C
+             NBTYPE=1
+             SEGINI NOTYPE
+             MOTYPE=NOTYPE
+             TYPE(1)='REAL*8'
+C
+             CALL KOMCHA(IPCHE2,IPMAIL,CONM,MOCARA,MOTYPE,0,
+     +                                       INFOS,3,IVACAR)
+             SEGSUP NOTYPE
+             IF (IERR.NE.0) GOTO 9990
+             NCARA=NBROBL
+             NCARF=NBRFAC
+             NCARR=NCARA+NCARF
+C
+             IF (ISUP.EQ.1) THEN
+               CALL VALCHE(IVACAR,NCARR,IPTINT,IPPORE,MOCARA,MELE)
+             ENDIF
+C
+           ENDIF
+         ENDIF
+C
+C        CALCUL DES FORCES NODALES EQUIVALENTES
+C        DEBRANCHEMENT SUIVANT LE TYPE DES ELEMENTS
+C
+         IF (MELE.EQ.2.OR.MELE.EQ.3) THEN
+C
+C           CAS DES ELEMENTS MASSIFS BIDIMENSIONNELS
+C           FACES ASSOCIEES SEG2 OU SEG3
+C
+            CALL FPMA2D(IPTVPR,IPOGEO,IPTINT,IVAFOR,IVACAR,XP)
+C
+         ELSE IF(MELE.EQ.31.OR.MELE.EQ.32.OR.MELE.EQ.33.
+     +                                   OR.MELE.EQ.34)THEN
+C
+C           CAS DES ELEMENTS MASSIFS TRIDIMENSIONNELS
+C           FACES ASSOCIEES FAC3,FAC4,FAC6 OU FAC8
+C
+            CALL FPMA3D(IPTVPR,IPOGEO,IPTINT,IVAFOR,XP)
+C
+C= Cas des elements MASSIFs UNIDIMENSIONNELs (1D)
+C= Face associee : POI1 (numero 45)
+         ELSE IF (MELE.EQ.45) THEN
+            CALL FPMA1D(IPTVPR,IPOGEO,IPTINT,IVAFOR,XP)
+
+         ELSE
+C
+C           ERREUR L ELEMENT N EST PAS ENCORE IMPLEMENTE
+C
+            MOTERR(1:4)=NOMTP(MELE)
+            MOTERR(5:12)='FPMASS'
+            CALL ERREUR (86)
+            SEGDES IPT3
+            IF(JPMAIL.EQ.0.AND.IPCHM1.EQ.0) THEN
+              SEGDES MCHEL1
+              SEGDES MCHAM1
+            ENDIF
+            IF(JPMAIL.EQ.0.AND.IPCHM1.EQ.0) CALL DTMODL(IPMOD1)
+            GOTO 9990
+         ENDIF
+C
+C        POUR CHAQUE ELEMENT,
+C        ON DETERMINE UN VECTEUR DIRIGE VERS L INTERIEUR DU MASSIF
+C        A PARTIR D UN POINT DE LA FACE ET DU CENTRE DE GRAVITE DU MASSI
+C
+C   prob optimiseur il faut initialiser melva1
+         MELVA1=IPMODL
+         IF(IPTVPR.NE.0) THEN
+           MELVA1=IPTVPR
+           SEGACT MELVA1
+         ENDIF
+         MELEME=IPOGEO
+         IPT1=IPMAIL
+         SEGACT MELEME,IPT1
+C
+C  pour accelerer la recherche, utilisation d'un tableau des elements touchant un noeud.
+         segact mcoord
+         segini netn
+         do 1050 j=1,ipt1.num(/2)
+          do 1050 i=1,ipt1.num(/1)
+           netn(ipt1.num(i,j))=netn(ipt1.num(i,j))+1
+ 1050    continue
+         do 1060 i=2,netn(/1)
+            netn(i)=netn(i)+netn(i-1)
+ 1060    continue
+         letn=netn(netn(/1))
+         segini ietn
+         do 1070 j=1,ipt1.num(/2)
+          do 1070 i=1,ipt1.num(/1)
+           ietn(netn(ipt1.num(i,j)))=j
+           netn(ipt1.num(i,j))=netn(ipt1.num(i,j))-1
+ 1070     continue
+
+         DO 150 IEF=1,NUM(/2)
+           do 160 inf=1,num(/1)
+             ip=num(inf,ief)
+              id=netn(ip)+1
+              if=netn(ip+1)
+             do 165 itn=id,if
+              iem=ietn(itn)
+               jne=0
+               do 166 i0=1,num(/1)
+               do 166 i1=1,ipt1.num(/1)
+                if (num(i0,ief).eq.ipt1.num(i1,iem)) jne=jne+1
+ 166           continue
+               if (jne.eq.num(/1)) goto 170
+ 165         continue
+ 160       continue
+            SEGDES IPT1,MELEME
+            CALL ERREUR(26)
+            IF(IPTVPR.NE.0) SEGDES MELVA1
+            SEGDES IPT3
+            IF(JPMAIL.EQ.0.AND.IPCHM1.EQ.0) CALL DTMODL(IPMOD1)
+            GOTO 9990
+ 170        CONTINUE
+            NBM=IPT1.NUM(/1)
+            NBMA1=NUM(/1)
+            IF (IDIM.EQ.3) THEN
+              XG=0.D0
+              YG=0.D0
+              ZG=0.D0
+              DO INM=1,NBM
+                IREFM=(IPT1.NUM(INM,IEM)-1)*idimp1
+                XG=XG+XCOOR(IREFM+1)
+                YG=YG+XCOOR(IREFM+2)
+                ZG=ZG+XCOOR(IREFM+3)
+              ENDDO
+              XG=XG/NBM
+              YG=YG/NBM
+              ZG=ZG/NBM
+              XK=0.D0
+              YK=0.D0
+              ZK=0.D0
+              DO INF=1,NBMA1
+                IREFF=(NUM(INF,IEF)-1)*idimp1
+                XK=XK+XCOOR(IREFF+1)
+                YK=YK+XCOOR(IREFF+2)
+                ZK=ZK+XCOOR(IREFF+3)
+              ENDDO
+              XK=XK/NBMA1
+              YK=YK/NBMA1
+              ZK=ZK/NBMA1
+              V(1)=XG-XK
+              V(2)=YG-YK
+              V(3)=ZG-ZK
+              VN=SQRT(V(1)**2+V(2)**2+V(3)**2)
+              V(1)=V(1)/VN
+              V(2)=V(2)/VN
+              V(3)=V(3)/VN
+            ELSE IF (IDIM.EQ.2) THEN
+              XG=0.D0
+              YG=0.D0
+              DO INM=1,NBM
+                IREFM=(IPT1.NUM(INM,IEM)-1)*idimp1
+                XG=XG+XCOOR(IREFM+1)
+                YG=YG+XCOOR(IREFM+2)
+              ENDDO
+              XG=XG/NBM
+              YG=YG/NBM
+              XK=0.D0
+              YK=0.D0
+              DO INF=1,NBMA1
+                IREFF=(NUM(INF,IEF)-1)*idimp1
+                XK=XK+XCOOR(IREFF+1)
+                YK=YK+XCOOR(IREFF+2)
+              ENDDO
+              XK=XK/NBMA1
+              YK=YK/NBMA1
+              V(1)=XG-XK
+              V(2)=YG-YK
+              VN=SQRT(V(1)**2+V(2)**2)
+              V(1)=V(1)/VN
+              V(2)=V(2)/VN
+            ELSE IF (IDIM.EQ.1) THEN
+              XG=0.D0
+              DO INM=1,NBM
+                IREFM=(IPT1.NUM(INM,IEM)-1)*idimp1
+                XG=XG+XCOOR(IREFM+1)
+              ENDDO
+              XG=XG/NBM
+              XK=0.D0
+              DO INF=1,NBMA1
+                IREFF=(NUM(INF,IEF)-1)*idimp1
+                XK=XK+XCOOR(IREFF+1)
+              ENDDO
+              XK=XK/NBMA1
+              V(1)=XG-XK
+              VN=ABS(V(1))
+              V(1)=V(1)/VN
+            ENDIF
+C
+C           ET ON ORIENTE LES FORCES NODALES APPLIQUEES SUR L ELEMENT
+C  EN COMPARANT LES DIRECTIONS DE LA RESULTANTE DES FORCES ET DU VECTEUR
+C  PUIS ON MULTIPLIE PAR LE SIGNE DE LA PRESSION
+C
+            F(1)=0.D0
+            F(2)=0.D0
+            F(3)=0.D0
+            MPTVAL=IVAFOR
+            DO 200 INF=1,N1PTEL
+               DO 201 J=1,IDIM
+                  MELVAL=IVAL(J)
+                  F(J)=F(J)+VELCHE(INF,IEF)
+ 201           CONTINUE
+ 200        CONTINUE
+            FN2=0.D0
+            TEST=0.D0
+            DO 210 J=1,IDIM
+               FN2=FN2 + F(J)**2
+               TEST=TEST+ V(J)*F(J)
+ 210        CONTINUE
+            FN=SQRT(FN2)
+C
+C           ERREUR    IMPOSSIBLE D ORIENTER LES FORCES DE PRESSION
+C
+            IF (ABS(TEST).LE.0.001D0*FN .AND.
+     &           FN.NE.0.D0) THEN
+               CALL ERREUR(192)
+               SEGDES MELEME,IPT1
+               IF(IPTVPR.NE.0)  SEGDES MELVA1
+               IF(JPMAIL.EQ.0.AND.IPCHM1.EQ.0)  CALL DTMODL(IPMOD1)
+               GOTO 9990
+            ENDIF
+            XFLOT=1.D0
+            IF (TEST.LT.0.D0) XFLOT=-1.D0
+            IF(IPTVPR.NE.0) THEN
+              SP = SIGN(1.D0,MELVA1.VELCHE(1,IEF))
+            ELSE
+              SP = SIGN(1.D0,XP)
+            ENDIF
+            MPTVAL=IVAFOR
+            DO 220 INF=1,N1PTEL
+               DO 220 ICOMP=1,NCOMP
+                  MELVAL=IVAL(ICOMP)
+                  VELCHE(INF,IEF)=VELCHE(INF,IEF)*XFLOT*SP
+ 220        CONTINUE
+ 150     CONTINUE
+         segsup netn,ietn
+         SEGDES,MINTE
+         SEGDES IPT1,MELEME
+         SEGDES MCHELM,MCHAML
+         IF(IPTVPR.NE.0) SEGDES MELVA1
+C
+C        ON TRANSFORME LE CHAM/ELEM EN CHAM/POIN
+C        ET ON ADDITIONNE LES CHAM/POIN ELEMENTAIRES
+C
+         CALL CHAMPO(IPCHEL,0,IPCHPO,IPPT)
+         CALL DTCHAM(IPCHEL)
+         IF (IPPT.EQ.0) THEN
+           IF(JPMAIL.EQ.0.AND.IPCHM1.EQ.0) CALL DTMODL (IPMOD1)
+            GOTO 9990
+         ENDIF
+         IF ((ISOUS-IRRT).GT.1.OR.IB.GT.1) THEN
+            CALL ADCHPO(IPCHPO,IPTFP,IPPT,1D0,1D0)
+C            CALL ECRCHA(MOGEOM)
+            CALL DTCHPO(IPCHPO)
+C            CALL ECRCHA(MOGEOM)
+            CALL DTCHPO(IPTFP)
+            IF (IPPT.EQ.0) THEN
+              IF(JPMAIL.EQ.0.AND.IPCHM1.EQ.0) CALL DTMODL(IPMOD1)
+               GOTO 9990
+            ENDIF
+            IPTFP=IPPT
+         ELSE
+            IPTFP=IPCHPO
+         ENDIF
+         IF(JPMAIL.EQ.0.AND.IPCHM1.EQ.0) CALL DTMODL(IPMOD1)
+ 110  CONTINUE
+      SEGDES IPT3
+      SEGDES IMODEL
+      NOMID=MOFORC
+      if(lsupfo)SEGSUP NOMID
+      IF(JPMAIL.EQ.0.AND.IPCHM1.EQ.0) CALL DTCHAM(ICHELP)
+C
+      IF(ISUP.EQ.1.AND.IPCHE2.NE.0)THEN
+           CALL DTMVAL(IVACAR,3)
+      ELSE
+          CALL DTMVAL(IVACAR,1)
+      ENDIF
+      NOMID=MOCARA
+      IF (MOCARA.NE.0) SEGSUP NOMID
+C
+      MPTVAL=IVAFOR
+      SEGSUP MPTVAL
+C
+ 100  CONTINUE
+      IF(IRRT.EQ.KMODEL(/1)) THEN
+         CALL ERREUR(395)
+      ELSE
+        IRET = 1
+      ENDIF
+      SEGDES MMODEL
+      RETURN
+C
+ 9990 CONTINUE
+C
+C     ERREUR DANS UNE SOUS ZONE, DESACTIVATION ET RETOUR
+C
+      CALL DTMVAL(IVAFOR,3)
+C
+      IF(ISUP.EQ.1.AND.IPCHE2.NE.0)THEN
+           CALL DTMVAL(IVACAR,3)
+      ELSE
+          CALL DTMVAL(IVACAR,1)
+      ENDIF
+      NOMID=MOCARA
+      IF (MOCARA.NE.0) SEGSUP NOMID
+C
+      SEGSUP MCHAML
+      SEGSUP MCHELM
+C
+      NOMID=MOFORC
+      if(lsupfo)SEGSUP NOMID
+C
+      SEGDES,MINTE
+ 9997 CONTINUE
+      SEGDES IMODEL
+      SEGDES MMODEL
+
+      IRET = 0
+
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+

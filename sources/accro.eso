@@ -1,0 +1,805 @@
+C ACCRO     SOURCE    PV        18/07/27    21:15:00     9887
+
+C========================================================================
+C   ACCROCHAGE D UN MAILLAGE  SUR UN MASSIF PAR L INTERMEDIAIRE
+C   DES FONCTIONS DE FORME
+C   SUBROUTINE APPELLEE PAR RELA2
+C   JMB      OCTOBRE  1996
+C========================================================================
+      SUBROUTINE ACCRO(igliss)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCREEL
+-INC CCHAMP
+-INC CCGEOME
+
+-INC SMCOORD
+-INC SMELEME
+-INC SMRIGID
+-INC SMLMOTS
+-INC SMMODEL
+
+      SEGMENT iexclu
+        INTEGER IDEJVU(NBPTI)
+      ENDSEGMENT
+
+      SEGMENT icount
+        INTEGER NBPTOT
+        INTEGER MAXPZ(nbsz)
+        INTEGER IEINT(3,NODES)
+        REAL*8 QQQ(3,NODES)
+      ENDSEGMENT
+
+      SEGMENT ioubli
+        INTEGER iptou(nboub)
+      ENDSEGMENT
+
+      SEGMENT mtrav
+        INTEGER inomil(NBNOE1)
+        REAL*8 QSI(3)
+        REAL*8 SHPP(6,NBNOE1),XEL(3,NBNOE1)
+      ENDSEGMENT
+
+      SEGMENT itange
+        INTEGER iextr(nbpti)
+        REAL*8 xperp1(3,nbpti), xperp2(3,nbpti)
+      ENDSEGMENT
+
+      SEGMENT icpr(nbpti)
+      SEGMENT imul(idim,nbpt)
+      SEGMENT icomu(nbpt)
+
+      DIMENSION ICOR(100),IMEL(100),imtt(100)
+      DIMENSION xpo(3),CCOE(100)
+
+      LOGICAL ltelq
+
+      idimp1 = idim + 1
+
+      MAIL1  = 0
+      MAIL2  = 0
+      IFROCA = 0
+      MLMOTX = 0
+      CCRIT  = 1.D-5
+
+C**** LECTURE des MAILLAGE et MMODEL ***********************************
+      CALL LIROBJ('MAILLAGE',MAIL1,1,iretou)
+      IF (IERR.NE.0) RETURN
+      CALL LIROBJ('MAILLAGE',MAIL2,0,iret2)
+      IF (IERR.NE.0) RETURN
+
+      IF (iret2.NE.0) THEN
+        MELEMI = MAIL2
+        IPP2   = MAIL1
+      ELSE
+        CALL LIROBJ('MMODEL',IPMODL,1,IFROCA)
+        IF (IERR.NE.0) RETURN
+c IPP2 sera extrait du modele IPMODL
+        MELEMI = MAIL1
+        IPP2   = 0
+      ENDIF
+
+C**** LECTURE DES NOMS D'INCONNUE ET DU CRITERE ************************
+      CALL LIROBJ('LISTMOTS',MLMOTX,0,iretou)
+      IF (IERR.NE.0) RETURN
+
+      CALL LIRREE(CCRIT,0,iretou)
+      IF (IERR.NE.0) RETURN
+      CCRIT = -ABS(CCRIT)
+
+C LISTE DES NOMS D'INCONNUES
+C  Options par defaut
+      IF (MLMOTX.EQ.0) THEN
+        NINC = IDIM
+        IF (IFOUR.EQ.1) NINC = NINC + 1
+        JGN = 4
+        JGM = NINC
+        SEGINI,mlmots
+C   2D axisymetrique
+        IF (IFOUR.EQ.0)  THEN
+          mlmots.MOTS(1) = 'UR  '
+          mlmots.MOTS(2) = 'UZ  '
+C   2D Fourier
+        ELSE IF (IFOUR.EQ.1)  THEN
+          mlmots.MOTS(1) = 'UR  '
+          mlmots.MOTS(2) = 'UZ  '
+          mlmots.MOTS(3) = 'UT  '
+        ELSE
+          mlmots.MOTS(1) = 'UX  '
+          mlmots.MOTS(2) = 'UY  '
+          IF (IDIM.EQ.3) mlmots.MOTS(3) = 'UZ  '
+        ENDIF
+C  On a lu les noms d'inconnues
+      ELSE
+        IF (igliss.EQ.1) THEN
+          CALL ERREUR(19)
+          RETURN
+        ENDIF
+        mlmots = MLMOTX
+        SEGACT,mlmots
+        NINC = mlmots.MOTS(/2)
+        IF (NINC.LT.1 .OR. NINC.GT.100) THEN
+          SEGDES,mlmots
+          CALL ERREUR(19)
+          RETURN
+        ENDIF
+      ENDIF
+C Identification des duals  des ddl  en question
+c bp 18.01.2011 : mieux vaut utiliser LNOMDD renseigné dans cchamp+bdata
+      DO i = 1, NINC
+        k = 0
+        CALL PLACE(NOMDD,LNOMDD,k,mlmots.MOTS(i))
+        IF (k.EQ.0) THEN
+          MOTERR(1:8) = mlmots.MOTS(i)
+          CALL ERREUR(931)
+          RETURN
+        ENDIF
+        ICOR(i) = k
+      ENDDO
+      SEGDES,mlmots
+      IF (MLMOTX.EQ.0) SEGSUP,mlmots
+
+C**** Nombre de noeuds du segment MCOORD *******************************
+**      SEGACT,mcoord*NOMOD
+      NBPTI = mcoord.XCOOR(/1) / idimp1
+
+C**** VERIFICATION DU MAILLAGE MELEMI **********************************
+C   CE MAILLAGE DOIT ETRE MASSIF
+C   TETRAEDRES ET PYRAMIDES SONT EXCLUS
+      IPT1 = MELEMI
+      SEGACT,IPT1
+      NBSZ1 = IPT1.LISOUS(/1)
+      nbsz  = MAX(1,NBSZ1)
+      NBNOE1 = 0
+      meleme = IPT1
+      DO iob = 1, nbsz
+        IF (NBSZ1.NE.0) THEN
+          meleme = ipt1.LISOUS(iob)
+          SEGACT,meleme
+        ENDIF
+        ity  = meleme.ITYPEL
+        nbnn = meleme.NUM(/1)
+        NBNOE1 = MAX(NBNOE1,nbnn)
+*        SEGDES,meleme
+        IF ((IDIM.EQ.2.AND.ity.LT.4) .OR.
+     &      (IDIM.EQ.3.AND.ity.LT.14)) THEN
+          CALL ERREUR(16)
+          RETURN
+        ENDIF
+      ENDDO
+
+C**** CAS OU UN MODELE A ETE LU * EXTRATION DE IPP2 ********************
+      IF (IFROCA.NE.0) THEN
+        mmode1 = IPMODL
+        segact,mmode1
+c*        nbpti = mcoord.xcoor(/1) / idimp1
+        segini,icpr
+        nbpt = 0
+C creation des l'ensemble des points a accrocher et des multiplicateurs
+C correspondant. imul(i,j) est le ieme multiplicateur a accrocher au j eme
+C point local ( icpr(ia)=j)
+C --- puis Assemblage du maillage global (tous les câbles)
+        ltelq=.false.
+        do 500 isouf = 1, mmode1.kmodel(/1)
+          imode1 = mmode1.kmodel(isouf)
+          segact imode1
+          if (imode1.tymode(1).ne.'MMODEL') then
+            call erreur(975)
+            return
+          endif
+          ipt6 = imode1.imamod
+          segact ipt6
+          if (ipt6.itypel.ne.22) then
+            call erreur(19)
+            return
+          endif
+          do iel = 1,ipt6.num(/2)
+            ia = ipt6.num(2,iel)
+            if (icpr(ia).eq.0) then
+              nbpt = nbpt+1
+              icpr(ia) = nbpt
+            endif
+          enddo
+          if (imode1.tymode(1).ne.'MMODEL') then
+            call erreur(975)
+            return
+          endif
+          mmode2 = imode1.ivamod(1)
+          segact mmode2
+          imode2 = mmode2.kmodel(1)
+          segact imode2
+          ipt7 = imode2.imamod
+          segdes,imode2,mmode2
+          if (isouf.eq.1) then
+            ipt5 = ipt7
+          else
+            call fuse(ipt5,ipt7,ipp4,ltelq)
+            ipt5 = ipp4
+          endif
+  500   continue
+        segini,imul,icomu
+        do 502 isouf = 1, mmode1.kmodel(/1)
+          imode1 = mmode1.kmodel(isouf)
+          ipt6 = imode1.imamod
+          do iel = 1, ipt6.num(/2)
+            ia = ipt6.num(2,iel)
+            ib = icpr(ia)
+            icomu(ib) = icomu(ib)+1
+            imul(icomu(ib),ib) = ipt6.num(1,iel)
+          enddo
+          segdes,imode1,ipt6
+  502   continue
+        segdes,mmode1
+        segsup,icomu
+        IPP2 = ipt5
+      ENDIF
+C**** FIN DU PRE-TRAITEMENT DANS LE CAS D'UN MODELE ********************
+
+C**** TRAVAIL **********************************************************
+
+      IPT2 = IPP2
+      SEGACT,IPT2
+C--------------------------------------
+*---- cas de l'accrochage glissant ----
+      IF (igliss.EQ.1) THEN
+*       on va attacher a chaque point un vecteur tangent au cable
+*       si on est arrive avec un modele, on prend le maillage du modele
+*       en reference
+        segini itange
+        nbsz2 = ipt2.lisous(/1)
+        meleme = ipt2
+        do iob = 1, MAX(1,nbsz2)
+          if (nbsz2.ne.0) then
+            meleme = ipt2.lisous(i)
+            segact,meleme
+          endif
+          if (meleme.itypel.ne.2) then
+            call erreur(946)
+            return
+          endif
+          do j = 1, meleme.num(/2)
+            ia = num(1,j)
+            ib = num(2,j)
+            if (iextr(ia).gt.2.or.iextr(ib).gt.2) then
+              call erreur(947)
+              return
+            endif
+            ja = (ia-1)*idimp1
+            jb = (ib-1)*idimp1
+            xab = xcoor(jb+1) - xcoor(ja+1)
+            yab = xcoor(jb+2) - xcoor(ja+2)
+            zab = 0.D0
+            if (idim.eq.3) zab = xcoor(jb+3) - xcoor(ja+3)
+            xlo = sqrt(xab * xab + yab * yab + zab * zab)
+            if (xlo.eq.0.D0) then
+              call erreur(945)
+              return
+            endif
+            xab = xab/xlo
+            yab = yab/xlo
+            zab = zab/xlo
+            if (iextr(ia).eq.0) then
+              xperp1(1,ia) = xab
+              xperp1(2,ia) = yab
+              xperp1(3,ia) = zab
+            else
+              xxx = 1.d0
+              if (iextr(ia).eq.1) xxx = -1.d0
+              zz1 = xab*xxx + xperp1(1,ia)
+              zz2 = yab*xxx + xperp1(2,ia)
+              zz3 = zab*xxx + xperp1(3,ia)
+              xlo = sqrt(zz1*zz1 + zz2*zz2 + zz3*zz3)
+              if (xlo.le.0.d0) then
+                call erreur(945)
+                return
+              endif
+              xperp1(1,ia) = zz1/xlo
+              xperp1(2,ia) = zz2/xlo
+              xperp1(3,ia) = zz3/xlo
+            endif
+            if (iextr(ib).eq.0) then
+              xperp1(1,ib) = xab
+              xperp1(2,ib) = yab
+              xperp1(3,ib) = zab
+            else
+              xxx = 1.d0
+              if (iextr(ia).eq.2) xxx = -1.d0
+              zz1 = xab*xxx + xperp1(1,ib)
+              zz2 = yab*xxx + xperp1(2,ib)
+              zz3 = zab*xxx + xperp1(3,ib)
+              xlo = sqrt(zz1*zz1 + zz2*zz2 + zz3*zz3)
+              if (xlo.le.0.d0) then
+                call erreur(945)
+                return
+              endif
+              xperp1(1,ib) = zz1/xlo
+              xperp1(2,ib) = zz2/xlo
+              xperp1(3,ib) = zz3/xlo
+            endif
+            iextr(ia) = iextr(ia) + 1
+            iextr(ib) = iextr(ib) + 2
+          enddo
+          if (nbsz2.ne.0) segdes,meleme
+        enddo
+        do 3659 j = 1, nbpti
+          if (iextr(j).eq.0) goto 3659
+          if (abs(xperp1(1,j)).gt.2.D-2 .or.
+     &        abs(xperp1(2,j)).gt.2.D-2) then
+            xperp2(1,j) = -xperp1(2,j)
+            xperp2(2,j) =  xperp1(1,j)
+          else
+            xperp2(1,j) = -xperp1(3,j)
+            xperp2(3,j) =  xperp1(1,j)
+          endif
+          if (idim.eq.3) then
+            xlo = sqrt (  xperp2(1,j)**2 + xperp2(2,j)**2
+     $                  + xperp2(3,j)**2 )
+            xperp2(1,j) = xperp2(1,j) / xlo
+            xperp2(2,j) = xperp2(2,j) / xlo
+            xperp2(3,j) = xperp2(3,j) / xlo
+            xaa = xperp1(3,j)*xperp2(2,j)-xperp1(2,j)*xperp2(3,j)
+            xbb = xperp1(1,j)*xperp2(3,j)-xperp1(3,j)*xperp2(1,j)
+            xcc = xperp1(2,j)*xperp2(1,j)-xperp1(1,j)*xperp2(2,j)
+            xperp1(1,j) = xaa
+            xperp1(2,j) = xbb
+            xperp1(3,j) = xcc
+          else
+            xperp1(1,j) = xperp2(1,j)
+            xperp1(2,j) = xperp2(2,j)
+          endif
+ 3659   continue
+      ENDIF
+*---- fin du traitement specifique accrochage glissant ----
+C----------------------------------------------------------
+
+C  ON VA CHANGER LE MAILLAGE IPP2 A ACCROCHER EN ELEMENTS POI1
+C  S'IL NE L EST PAS DEJA
+      IPT2 = IPP2
+c*      SEGACT,IPT2
+      IF (IPT2.ITYPEL.NE.1) THEN
+        CALL CHANGE(IPP2,1)
+        SEGDES,IPT2
+        IPT2 = IPP2
+        SEGACT,IPT2
+      ENDIF
+c On a maintenant : IPT2 = IPP2 qui est maillage de POI1 !
+      NODES = IPT2.NUM(/2)
+
+      SEGINI,iexclu
+      IEXX = iexclu
+
+c On a toujours : ipt1 = MELEMI
+      ipt1 = MELEMI
+
+C On veut savoir s'il n'y a pas des noeuds de IPP2 qui ne sont pas
+C deja des noeuds d'un element de MELEMI, car pour RELA ACCRO, on n'a pas
+C besoin de les traiter (et de construire une matrice de rigidite).
+C Pour cela, pour tous les noeuds (ip) de MELEMI, idejvu(ip) = 2.
+      meleme = ipt1
+      DO iob = 1, NBSZ
+        IF (NBSZ1.NE.0) THEN
+          meleme = ipt1.LISOUS(iob)
+c*          SEGACT,meleme
+        ENDIF
+        NBNN1 = meleme.num(/1)
+        NBEL1 = meleme.num(/2)
+        DO iem = 1, NBEL1
+          DO ipt = 1, NBNN1
+            ip = meleme.NUM(ipt,iem)
+            iexclu.IDEJVU(ip) = 2
+          ENDDO
+        ENDDO
+c*        IF (NBSZ1.NE.0) SEGDES,meleme
+      ENDDO
+
+      SEGINI,icount
+      ICC = icount
+      icount.NBPTOT = 0
+
+      SEGINI,mtrav
+
+C idejvu(ip) = 1 si le point ip dans un element de MELEMI
+C---- BOUCLE SUR LES SOUS ZONES ----
+      meleme = ipt1
+      ITR=0
+      DO iob = 1, NBSZ
+        IF (NBSZ1.NE.0) THEN
+          meleme = ipt1.LISOUS(iob)
+c*          SEGACT,meleme
+        ENDIF
+C  ICI LE ZONAGE (Les segments sont actifs en E/S)
+        CALL ZONAG(iob,meleme,IPP2,ICC,IEXX,ITR)
+c*        IF (NBSZ1.NE.0) SEGDES,meleme
+      ENDDO
+C---- FIN DE LA BOUCLE SUR LES SOUS ZONES ----
+
+      IACCRO = icount.NBPTOT
+
+C---- TABLEAU des POINT PAS VUS ----
+C-----------------------------------------------------------
+      NBOUB = NODES - IACCRO
+*     WRITE(ioimp,*) 'nombre de points exterieurs ' ,nboub
+      SEGINI,ioubli
+      iuo = 0
+      DO j = 1, NODES
+        ip = IPT2.NUM(1,j)
+        IF (iexclu.IDEJVU(ip).EQ.0) THEN
+          iuo = iuo + 1
+          ioubli.IPTOU(iuo) = ip
+        ENDIF
+      ENDDO
+*     WRITE(ioimp,*) 'nombre de points exterieurs ' ,nboub
+      IF (iuo.EQ.0) GOTO 9000
+
+C-----------------------------------------------------------
+C---- RATTRAPAGE EVENTUEL DE POINTS SUR LA LIMITE ----
+      IPT1 = MELEMI
+c*     SEGACT,IPT1
+      krat = 0
+C---- boucle sur les sous zones ----
+      meleme = IPT1
+      DO iob = 1, NBSZ
+        IF (NBSZ1.NE.0) THEN
+          meleme = IPT1.LISOUS(iob)
+c*          SEGACT,meleme
+        ENDIF
+        NBNN1 = meleme.num(/1)
+        NBEL1 = meleme.num(/2)
+        IELE = meleme.itypel
+        kd = kdegre(IELE)
+C element quadratiques
+        if (kd.eq.3) then
+          inomi1 = 0
+          nso = nbsom(IELE)
+          iad = nspos(IELE)-1
+          do 762 i = 1, NBNN1
+            do j = 1, nso
+              iso = ibsom(iad+j)
+              if (i.eq.iso) goto 762
+            enddo
+            inomi1 = inomi1 + 1
+            mtrav.inomil(inomi1) = i
+ 762      continue
+C  elements  lineaires
+        else if (kd.eq.2) then
+          inomi1 = NBNN1
+          do i = 1, NBNN1
+            mtrav.inomil(i) = i
+          enddo
+        endif
+
+C...... boucle sur les elements de la sz .......
+        DO 1121 iem = 1, NBEL1
+          CALL DOXE(xcoor,idim,NBNN1,meleme.num,iem,mtrav.xel)
+
+C.......boucle sur les points candidats au rattrapage ......
+        DO 1120 IPT = 1, IUO
+
+          ip = ioubli.IPTOU(ipt)
+          IF (ip.LT.0) GOTO 1120
+c***c*  Cas deja vu car correspond idejvu(ip) = 2 !
+c***          do jl = 1, NBNN1
+c***            if (ip.eq.meleme.num(jl,iem)) goto 1120
+c***          enddo
+          IREFP = (IP-1)*IDIMP1
+          xpo(1) = XCOOR(IREFP+1)
+          xpo(2) = XCOOR(IREFP+2)
+          xpo(3) = 0.D0
+          IF (IDIM.EQ.3) xpo(3) = XCOOR(IREFP+3)
+C         coordonnes intrinseques et fonctions de forme : qsijs
+C          WRITE(6,5777 ) ((mtrav.xel(ia,ib),ia=1,idim),ib=1,nbnn1)
+C 5777      format(6e12.5)
+          CALL QSIJS(mtrav.xel,IELE,NBNN1,idim,xpo(1),
+     &               mtrav.SHPP,mtrav.qsi,iretou)
+          IF (iretou.NE.0) goto 1120
+          DO i = 1, inomi1
+            ilp = inomil(i)
+            IF (mtrav.shpp(1,ilp).lt.CCRIT) goto 1120
+          ENDDO
+C         ce point exterieur est rattrapable
+          krat = krat + 1
+          ioubli.iptou(ipt) = -ip
+          NNP = icount.NBPTOT + 1
+          icount.IEINT(1,NNP) = ip
+          icount.IEINT(2,NNP) = iem
+          icount.IEINT(3,NNP) = iob
+          DO i = 1, idim
+            icount.QQQ(i,NNP) = mtrav.qsi(i)
+          ENDDO
+          icount.MAXPZ(iob) = icount.MAXPZ(iob) + 1
+          icount.NBPTOT = NNP
+C       WRITE(6,2375)ip,iem,(xpo(i1),i1=1,idim),(qsi(i2),i2=1,idim)
+2375    format(2i4,6e12.5)
+1120    continue
+C.......fin de la boucle sur les points candidats au rattrapage ......
+1121    CONTINUE
+C...... fin de la boucle sur les elements enveloppe de la sz .......
+c*        IF (NSZ1.NE.0) SEGDES,meleme
+      ENDDO
+C---- fin de la boucle sur les zones ----
+
+C     comptage du nombre de points rattrapes
+      k = 0
+      do i = 1, IUO
+        IF (ioubli.IPTOU(I).LT.0) k = k+1
+      ENDDO
+      if (k.ne.krat) then
+      endif
+
+*     WRITE(6,*) ' nombre de points rattrapes ' ,k
+C     on donne le nombre de points non projetés
+C     if (k.ne.iuo) then
+C       INTERR(1)=iuo-k
+C       CALL ERREUR(-322)
+C     endif
+      IACCRO = IACCRO + k
+
+C---- FIN DE LA SEQUENCE DE RATTRAPAGE
+C-----------------------------------------------------------
+ 9000 CONTINUE
+
+c MESSAGE : Nombre de points accrochés %i1  sur  %i2 proposés
+      INTERR(1) = IACCRO
+      INTERR(2) = NODES
+      CALL ERREUR(-319)
+C
+      IPT1 = MELEMI
+C  NOMBRE DE SOUS ZONES TOUCHÉES  ET NOMBRE TOTAL DE NOEUDS CONCERNÉS
+      NBSZR = 0
+      ktot = 0
+      DO iob = 1, NBSZ
+        k = icount.MAXPZ(iob)
+        ktot = ktot + k
+        if (k.GT.0) NBSZR = NBSZR + 1
+      ENDDO
+      if (ktot.NE.icount.NBPTOT) then
+        write(ioimp,*) 'pb ktot nbptot',ktot,icount.NBPTOT
+        CALL ERREUR(5)
+      endif
+
+      SEGACT,MCOORD*MOD
+C     dans le cas IFROCA ne 0 les multiplicateurs existent deja
+      IF (IFROCA.EQ.0) THEN
+        IF (igliss.EQ.1) NINC = NINC - 1
+        NBPTS = NBPTI + (icount.NBPTOT * NINC)
+        SEGADJ,MCOORD
+      ENDIF
+
+C     INITIALISATION  DE MRIGID
+      NRIGEL = NBSZR * NINC
+      NRIGE = 8
+      SEGINI,MRIGID
+      mrigid.IFORIG = IFOMOD
+      mrigid.MTYMAT ='RIGIDITE'
+
+      ipt1 = MELEMI
+      meleme = ipt1
+      ICZ = 0
+
+C________________________________________________________________
+C____ BOUCLE SUR LES SOUS ZONES __________________________
+      DO 400 IOB = 1, NBSZ
+
+        NBELEM = icount.MAXPZ(iob)
+*       WRITE(ioimp,*) 'SOUS ZONE ',IOB ,'NOMBRE DE POINTS ',NBELEM
+        IF (NBELEM.EQ.0) GOTO 395
+
+        IF (NBSZ1.NE.0) meleme = ipt1.lisous(iob)
+        ICZ = ICZ + 1
+
+        KEL   = meleme.ITYPEL
+        NBMA1 = meleme.NUM(/1)
+
+        NHD = NBMA1+1
+
+C     Dimensions des maillage (IPT3), xmatri, DESCR
+        NBNN   = NBMA1 + 2
+        NBSOUS = 0
+        NBREF  = 0
+
+        NELRIG  = NBELEM
+        NLIGRD  = NBNN
+        IF (igliss.EQ.1) NLIGRD = 1 + IDIM*(NBMA1+1)
+        NLIGRP = NLIGRD
+
+*       WRITE(ioimp,*) ' ninc' , ninc
+        DO iop = 1, NINC
+          SEGINI,IPT3
+          IPT3.ITYPEL = 22
+          SEGINI,XMATRI
+          XMATRI.SYMRE = 0
+          IMEL(iop) = IPT3
+          IMTT(iop) = XMATRI
+        ENDDO
+
+C.... boucle sur les elements .......
+        xpo(3)= 0.D0
+        ino = 0
+        DO 300 K = 1, NODES
+          if (icount.ieint(3,k).NE.iob) goto 300
+          ino = ino + 1
+          IP  = icount.IEINT(1,K)
+          IEL = icount.IEINT(2,K)
+          irefp = (ip-1) * idimp1
+          xpo(1) = xcoor(irefp+1)
+          xpo(2) = xcoor(irefp+2)
+          IF (IDIM.EQ.3) xpo(3) = xcoor(irefp+3)
+          qsi(1) = icount.QQQ(1,k)
+          qsi(2) = icount.QQQ(2,k)
+          qsi(3) = icount.QQQ(3,k)
+
+          CALL SHAPE(QSI(1),QSI(2),QSI(3),KEL,SHPP,iret)
+
+          CCOE(1) = 1.D0
+          NHD = NBMA1 + 1
+          DO KM = 1, NBMA1
+            CCOE(1+KM) = -SHPP(1,KM)
+          ENDDO
+
+          DO 59 IK = 1, NINC
+
+            IF (IFROCA.EQ.0) THEN
+              IDE = NBPTI * IDIMP1
+              XCOOR(IDE+1) = xpo(1)
+              XCOOR(IDE+2) = xpo(2)
+              XCOOR(IDE+3) = xpo(3)
+              NBPTI = NBPTI + 1
+            ELSE
+              ibp = icpr(ip)
+              NBPTI = imul(ik,ibp)
+            ENDIF
+C    REMPLISSAGE DU MELEME IPT3
+            ipt3 = imel(ik)
+            ipt3.NUM(1,ino) = NBPTI
+            ipt3.NUM(2,ino) = IP
+            DO i = 1, NBMA1
+              ipt3.NUM(2+i,ino) =  meleme.NUM(i,IEL)
+            ENDDO
+
+C    REMPLISSAGE DU XMATRI
+          XMATRI = imtt(ik)
+
+c    Cas glissant
+        IF (igliss.eq.1) THEN
+         xaa = xperp1(1,ip)
+         xbb = xperp1(2,ip)
+         if (idim.eq.3) xcc = xperp1(3,ip)
+         if (ik.eq.2) then
+           xaa = xperp2(1,ip)
+           xbb = xperp2(2,ip)
+           if (idim.eq.3) xcc = xperp2(3,ip)
+         endif
+         IF (IFROCA.NE.0.AND.ik.EQ.ninc) then
+C petit calcul du vecteur tangent
+           if( idim.eq.2) then
+             XAA = xperp1(2,ip)
+             XBB =-xperp1(1,ip)
+           else
+             XAA = xperp1(2,ip)*xperp2(3,ip)-xperp1(3,ip)*xperp2(2,ip)
+             XBB = xperp1(3,ip)*xperp2(1,ip)-xperp1(1,ip)*xperp2(3,ip)
+             XCC = xperp1(1,ip)*xperp2(2,ip)-xperp1(2,ip)*xperp2(1,ip)
+           endif
+         endif
+         ikm = 1
+         DO 337 km=1,nhd
+           CCC = -CCOE(KM)
+           ikm = ikm + 1
+
+           RE(1,ikm,INO) = -CCC*XAA
+           RE(ikm,1,INO) = -CCC*XAA
+           ikm = ikm + 1
+           RE(1,ikm,INO) = -CCC*XBB
+           RE(ikm,1,INO) = -CCC*XBB
+           IF (IDIM.EQ.3) THEN
+             ikm = ikm + 1
+             RE(1,ikm,INO) = -CCC*XCC
+             RE(ikm,1,INO) = -CCC*XCC
+           ENDIF
+  337    CONTINUE
+
+c       Cas non glissant
+        ELSE
+          DO KM = 1, NHD
+            CCC = CCOE(KM)
+            RE(1,KM+1,INO) = CCC
+            RE(1+KM,1,INO) = CCC
+          ENDDO
+        ENDIF
+  59  continue
+c     - fin de boucle sur les xmatri -
+300     CONTINUE
+C.... fin de boucle sur les elements .......
+        if (ino.ne.nbelem) then
+          write(ioimp,*) 'Pb element zone ',iob,ino,nbelem
+          call erreur(5)
+        endif
+
+        INRI = NINC*(ICZ-1) + 1
+
+        DO iop = 1, NINC
+
+          SEGINI DESCR
+          descr.LISINC(1) = 'LX'
+          descr.LISDUA(1) = 'FLX'
+          descr.NOELEP(1) = 1
+          descr.NOELED(1) = 1
+c    - Cas non glissant -
+          IF (igliss.eq.0) then
+            DO k = 2, NBNN
+              descr.LISINC(k) = NOMDD(ICOR(iop))
+              descr.LISDUA(k) = NOMDU(ICOR(iop))
+              descr.NOELEP(k) = k
+              descr.NOELED(k) = k
+            ENDDO
+c    - Cas glissant -
+          ELSE
+            DO km1 = 1, nhd
+              j = 1+(km1-1)*idim
+              descr.lisinc(j+1)= NOMDD(ICOR(1))
+              descr.lisinc(j+2)= NOMDD(ICOR(2))
+              descr.LISDUA(j+1)= NOMDU(ICOR(1))
+              descr.LISDUA(j+2)= NOMDU(ICOR(2))
+              descr.NOELEP(j+1)= KM1+1
+              descr.NOELEP(j+2)= KM1+1
+              descr.NOELED(j+1)= KM1+1
+              descr.NOELED(j+2)= KM1+1
+              if (idim.eq.3) then
+                descr.lisinc(j +3)= NOMDD(ICOR(3))
+                descr.LISDUA(j +3)= NOMDU(ICOR(3))
+                descr.NOELEP(j +3)= KM1+1
+                descr.NOELED(j +3)= KM1+1
+              endif
+            ENDDO
+          endif
+          SEGDES,DESCR
+          IPT3 = IMEL(iop)
+          SEGDES,IPT3
+          XMATRI = IMTT(iop)
+          SEGDES,xMATRI
+
+          jop = INRI + iop - 1
+          IRIGEL(1,jop) = IPT3
+c          IRIGEL(2,jop) = 0
+          IRIGEL(3,jop) = DESCR
+          IRIGEL(4,jop) = XMATRI
+          IRIGEL(5,jop) = NIFOUR
+c          IRIGEL(6,jop) = 0
+          IF (IFROCA.NE.0.AND.iop.EQ.ninc) IRIGEL(6,jop) = 2
+c          IRIGEL(7,jop) = 0
+c          IRIGEL(8,jop) = 0
+          COERIG(jop) = 1.D0
+        ENDDO
+
+395     CONTINUE
+        IF (NBSZ1.NE.0) SEGDES,meleme
+
+400   CONTINUE
+C____ FIN DE BOUCLE SUR LES SOUS ZONES __________________________
+
+      if (icz.ne.nbszr) then
+        write(ioimp,*) 'Pb Rigi ',ICZ,NBSZR
+        call erreur(5)
+      endif
+
+C**** MENAGE ***********************************************************
+      IF (IFROCA.EQ.0) THEN
+        SEGACT,MCOORD*NOMOD
+      ENDIF
+      SEGSUP,icount,iexclu,mtrav
+      SEGDES,IPT1,IPT2
+*  elimination des termes trop petits dans les relations
+      call relasi(mrigid)
+      SEGDES,MRIGID
+
+C**** ECRITURE DE LA RIGIDTE RESULTAT **********************************
+      CALL ECROBJ('RIGIDITE',MRIGID)
+
+      RETURN
+      END
+
+
+
+

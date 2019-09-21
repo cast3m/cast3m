@@ -1,0 +1,306 @@
+C MICRO1    SOURCE    CHAT      05/01/13    01:44:59     5004
+      SUBROUTINE MICRO1(WRK0,NMATT,WRK1,NSTRS,DSIGT,
+     1                          NVARI,IDECAL,KERRE,LIMPR)
+      IMPLICIT INTEGER(I-N)
+-INC CCOPTIO
+      INTEGER NSTRS,NVARI,KERRE,ISTRS,NMATT,ITER,NSIG,IDECAL
+      LOGICAL CONV,LCP,LIMPR
+      REAL*8 SEQ,TRDFDS,YOUNG,XNU,DEUXMU,LAMB,R0,DR,DR0,RINF,RI
+      REAL*8 FPC,MP,EPSE,R,TEST,TRSIG,F0,DELTL,DELTLT
+      REAL*8 DEPS3,EPS3,DFDELTL,DFDEPS3,DS3DELTL,DS3DEPS3
+      REAL*8 A,B,C,A1,B1,C1,A2,B2,C2
+      CHARACTER*8 CMATE
+      REAL*8 DSIGT(6)
+*
+      SEGMENT WRK0
+       REAL*8 XMAT(NMATT)
+      ENDSEGMENT
+*
+      SEGMENT WRK1
+        REAL*8 DDHOOK(LHOOK,LHOOK),SIG0(NSTRS),DEPST(NSTRS)
+        REAL*8 SIGF(NSTRS),VAR0(NVARI),VARF(NVARI)
+        REAL*8 DEFP(NSTRS),XCAR(ICARA)
+      ENDSEGMENT
+*
+      SEGMENT WRKK1
+        REAL*8 SIGE0(NSTRS),DFDS(NSTRS)
+      END SEGMENT
+*
+      SEGINI WRKK1
+      YOUNG=XMAT(1)
+      XNU=XMAT(2)
+      FPC=XMAT(7)
+      MP=XMAT(8)
+      EPSE=VAR0(1)
+      RI=VAR0(2)
+      R0=0.4D0*FPC
+      RINF=0.6d0*FPC
+      LCP=IFOUR.EQ.-2
+      DEUXMU=YOUNG/(1.D0+XNU)
+      LAMB=XNU*DEUXMU/(1.D0-2.D0*XNU)
+      TEST=1.D-6*R0
+      DR0=0.D0
+      KERRE=0
+C
+C     calcul de la matrice elastique
+C
+      CMATE = 'ISOTROPE'
+      KCAS=1
+      CALL DOHMAS(XMAT,CMATE,IFOUR,NSTRS,KCAS,DDHOOK,IRTD)
+      IF ( IRTD .EQ. 0) THEN
+        KERRE=123
+        return
+      end if
+C
+C      calcul de l'increment de contrainte
+C
+      CALL MATVE1 (DDHOOK,DEPST,NSTRS,NSTRS,DSIGT,1)
+*      print*,'IFOUR=',IFOUR
+*      print*,'DDHOOK'
+*      do i=1,3
+*      print*,(ddhook(i,j),j=1,3)
+*      end do
+*      do i=1,3
+*      print*,'DEPST(',I,')=',DEPST(i)
+*      print*,'DSIGT(',I,')=',DSIGT(I)
+*      end do
+*
+*     calcul des parametres du critere de NADAI
+*
+C-
+C- A,B,C : PARAMETRES DU CRITERE DE PLASTICITE (NADAI)
+C- ILS SONT DIFFERENTS SUIVANT LE CHARGEMENT
+C-
+
+      CONV=.FALSE.
+      CALL ZDANUL (DEFP,NSTRS)
+      ITER=0
+      EPS3=0.d0
+      DELTLT=0.D0
+      R=RI
+      A1=0.4d0
+      B1=(1.d0 - A1) / (1.D0 + A1)
+      C1=(2.D0 * A1) / (1.D0 + A1)
+      A2=1.16d0
+      B2=(A2 - 1.D0) / (2.D0 * A2 - 1.D0)
+      C2=A2 / (2.D0 * A2 - 1.D0)
+*
+*     NSIG est la dimension du tenseur des contraintes:
+*     NSIG=3 sauf 2 en contraintes planes
+*
+      IF (LCP)THEN
+        NSIG=2
+      ELSE
+        NSIG=3
+      END IF
+*
+*     on recupere les contraintes anelastiques due a l'endommagement
+*
+      DO ISTRS=1,NSTRS
+         SIGE0(ISTRS)=VAR0(ISTRS+IDECAL)
+      END DO
+*
+*     prediction elastique de la contrainte effective
+*     contrainte + contrainte anelastique + increment de contrainte elastique
+*
+*     l'increment de contrainte est decoupe:
+*     1) point de contact avec la surface seuil ???
+*     2) decoupage du reste de facon a ce que le pas en contrainte
+*        equivalente soit inferieur a disons pour le moment E*1.e-04
+*
+*     en deux coups les gros
+*
+*
+*      DS=0.d0
+*      do istrs=1,nstrs
+*        ds=ds + dsigt(istrs)**2
+*      end do
+*      nstep=int(1.e+4*sqrt(ds)/youn)
+      DO ISTRS=1,NSTRS
+         SIGE0(ISTRS)=SIG0(ISTRS)+SIGE0(ISTRS)+DSIGT(ISTRS)
+      END DO
+      if(limpr)then
+       DO ISTRS=1,NSTRS
+         PRINT*,'SIG0(',ISTRS,')=',SIGE0(ISTRS)
+         PRINT*,'DSIGT(',ISTRS,')=',DSIGT(ISTRS)
+       END DO
+      endif
+
+      DO WHILE (ITER .LE. 100 .AND. .NOT. CONV)
+        ITER=ITER+1
+*
+*       on calcule la contrainte equivalente de Mises (SEQ)
+*               et la trace des contraintes (TRSIG)
+*
+*       on utilise la fonction modulo:
+*       MOD( 1,3)= 1
+*       MOD( 2,3)= 2
+*       MOD( 3,3)= 0
+*       MOD( 4,3)= 1
+*       MOD( 5,3)= 2
+*       MOD( 6,3)= 0
+*
+        SEQ=0.D0
+        TRSIG=0.d0
+* ici NSIG change en 3 le 6/11/95 (clb)
+        DO ISTRS=1,3
+          TRSIG=TRSIG + SIGE0(ISTRS)
+          SEQ=SEQ+SIGE0(ISTRS)*(SIGE0(ISTRS)-SIGE0(MOD(ISTRS,3)+1))
+        END DO
+        DO ISTRS=4,NSTRS
+          SEQ=SEQ + 3.D0*SIGE0(ISTRS)**2
+        END DO
+        if (limpr) then
+          print*,'VMIS**2=',SEQ,'TRSIG=',TRSIG
+        end if
+        SEQ=SQRT(SEQ)
+*
+*       en fonction de la valeur de la trace de sigma, on determine les
+*       coef b et c a applique a la surface seuil
+*
+        IF (MOD(ITER-1,3).EQ.0 )then
+          IF ( TRSIG .GT. (R+R0)*(C2-C1)/(B2-B1))THEN
+            B=B1
+            C=C1
+          ELSE
+            B=B2
+            C=C2
+          END IF
+        ENDIF
+*
+*       fonction seuil
+*
+        F0=(SEQ + B*TRSIG)/C - R0 -R
+        if (limpr) then
+          PRINT*,'B=',B,'C=',C,'F0=',F0
+          PRINT*,'SIGMAEQ=',(SEQ + B*TRSIG)/C
+        end if
+*
+*       le critere de convergence est verifie si la valeur absolue
+*       de la fonction seuil est plus petite que le critere ou si
+*       la fonction seuil est negative pour la premiere iteration
+*
+        CONV=(ABS(F0).LE.TEST .AND.
+     1       (.NOT. LCP .OR. ABS(SIGE0(3)) .LE. TEST ) )
+     2        .OR. (F0 .LE. 0.D0 .AND. ITER .EQ. 1)
+*
+*       dans le cas des contraintes planes on rajoute aussi
+*       que la valeur absolue de sigma33 est inferieure au critere
+*
+        IF (.NOT. CONV) THEN
+*
+*       calcul de dF/dSigma
+*
+          DO ISTRS=1,3
+            DFDS(ISTRS)=(2.D0*SIGE0(ISTRS)-SIGE0(MOD(ISTRS,3)+1)
+     &              -SIGE0(MOD(ISTRS+1,3)+1) )/(2.D0*C*SEQ) +B/C
+          END DO
+          DO ISTRS=4,NSTRS
+            DFDS(ISTRS)=3.D0*SIGE0(ISTRS)/(2.d0*C*SEQ)
+          END DO
+          TRDFDS=0.D0
+          DO ISTRS=1,NSIG
+            TRDFDS=TRDFDS+DFDS(ISTRS)
+          END DO
+          if (limpr) then
+*           on verifie que les valeur ppales sont bonnes
+            do istrs=1,nstrs
+              print*,'dfds(',istrs,')=',dfds(istrs)
+            end do
+            print*,'trdfds=',trdfds
+          end if
+*
+*        calcul de dsigma/deltl=C * depsp
+*        attention !! dans le cas des contraintes planes:epsp33 n'est
+*        pas une inconnue directe mais c'est depse33
+*
+*
+*         R=MP*p  -----> DR=MP * Dp  =MP*DELTL
+*         R=Rinf(1-exp(-bR))  ---> dR=b(Rinf-R)deltl
+*
+*          DR = (RINF - R)*MP
+*          DR=MP
+*          R=MP*(p)**0.5 ---> DR=0.5 * MP *P**(-05)dp
+          IF ((EPSE+DELTLT).GE. 1.D-20 )THEN
+             DR=0.5*MP*(EPSE+DELTLT)**(-0.5)
+          ELSE
+             DR=0.D0
+          END IF
+          DFDELTL=-DR
+          DO ISTRS=1,NSIG
+            DFDELTL=DFDELTL-DFDS(ISTRS)*(DFDS(ISTRS)*DEUXMU+TRDFDS*LAMB)
+          END DO
+          DO ISTRS=4,NSTRS
+            DFDELTL=DFDELTL - 2.d0*DEUXMU * DFDS(ISTRS)**2
+          END DO
+          IF (LCP) THEN
+            DFDELTL=DFDELTL-DFDS(3)*TRDFDS*LAMB
+            DFDEPS3=LAMB*TRDFDS + (LAMB+DEUXMU)*DFDS(3)
+            DS3DELTL=-LAMB*TRDFDS
+            DS3DEPS3=LAMB + DEUXMU
+            DELTL=(SIGE0(3)*DFDEPS3 - F0*DS3DEPS3)/
+     &            (DS3DEPS3*DFDELTL - DS3DELTL*DFDEPS3)
+            DEPS3=-(SIGE0(3)-DS3DELTL*DELTL)/DS3DEPS3
+            EPS3=EPS3+DEPS3
+            DELTLT=DELTLT+DELTL
+            DO ISTRS=1,NSIG
+               SIGE0(ISTRS)=SIGE0(ISTRS)+LAMB*DEPS3
+            END DO
+            SIGE0(3)=SIGE0(3)+(LAMB+DEUXMU)*DEPS3-LAMB*DELTL*TRDFDS
+          ELSE
+            DELTL=-F0/DFDELTL
+            DELTLT=DELTLT+DELTL
+          END IF
+          DO ISTRS=1,NSIG
+            SIGE0(ISTRS)=SIGE0(ISTRS)
+     &               -DELTL*(DEUXMU*DFDS(ISTRS)+LAMB*TRDFDS)
+          END DO
+          DO ISTRS=4,NSTRS
+            SIGE0(ISTRS)=SIGE0(ISTRS)-DELTL*DEUXMU*DFDS(ISTRS)
+          END DO
+        ELSE
+                DELTL=0.D0
+        END IF
+        R=R + DR*DELTL
+        DO ISTRS=1,3
+          DEFP(ISTRS)=DEFP(ISTRS)+DELTL*DFDS(ISTRS)
+        END DO
+        DO ISTRS=4,NSTRS
+          DEFP(ISTRS)=DEFP(ISTRS)+2.D0*DELTL*DFDS(ISTRS)
+        END DO
+         if (limpr) then
+           print*,'ITER=',ITER,'F0=',F0,'DELTL=', DELTL
+           print*,'DELTLT=',DELTLT,'R=',R
+           do istrs=1,nstrs
+             print*,'SIGMA(',ISTRS,')=', SIGE0(ISTRS)
+           end do
+         end if
+      END DO
+*      EN CAS DE NON CONVERGENCE: ON MET KERRE a 1
+      IF (.NOT. CONV) THEN
+              KERRE=1
+      END IF
+*      PRINT*,'CONVERGENCE OBTENUE APRES ',ITER, 'ITERATIONS'
+*
+*  on remplit les variables finales
+*
+      VARF(1)=EPSE+DELTLT
+      VARF(2)=R
+*
+*  ON REND LES CONTRAINTES
+*
+      DO ISTRS=1,NSTRS
+        SIGF(ISTRS)=SIGE0(ISTRS)
+*        PRINT*,'SIGF(',ISTRS,')=',SIGF(ISTRS)
+      END DO
+*
+* ON REND L'INCREMENT DE DEFORMATIONS PLASTIQUES
+*
+
+      SEGSUP WRKK1
+      RETURN
+      END
+*
+
+
+

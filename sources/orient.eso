@@ -1,0 +1,405 @@
+C ORIENT    SOURCE    PV        18/02/19    21:15:14     9754
+C   CET OPERATEUR ORIENTE LES ELEMENTS ORIENTABLES EN FONCTION DE XP
+C
+      SUBROUTINE ORIENT(IPT1,IPT2,XP,ICLE)
+*
+C   IPT1     (E)   MAILLAGE A ORIENTER (segment ACTIF)
+C   IPT2     (S)   MAILLAGE ORIENTE    (segment ACTIF)
+C     IPT2 peut être égal à IPT1 si on ne savait pas orienter ou si le
+C     maillage
+C     est deja orienté...
+*
+*   ICLE=1 ORIEN DIRE
+*   ICLE=2 ORIEN POINT
+*
+C SG : 2016/05/17 ajout orientation elements massifs
+*
+*
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-z)
+
+-INC CCREEL
+-INC SMELEME
+-INC SMLENTI
+-INC CCGEOME
+-INC CCOPTIO
+-INC SMCOORD
+
+      DIMENSION XP(3)
+      DIMENSION XQ(3)
+      LOGICAL LQUAF
+      PARAMETER (NLMASS=22)
+*    NLNOMA=2*2 + 8*3 + 12*4
+      PARAMETER (NLNOMA=76)
+*     Tableau donnant la liste des types d'elements susceptibles d'etre
+*     traites dans le cas massif
+      INTEGER LTYMAS(NLMASS)
+*     Pour chaque element susceptible d'etre traite, ce tableau donne
+*     l'adresse dans le tableau LNOMAS de la description des noeuds
+*     servant à calculer l'orientation
+      INTEGER LADMAS(NLMASS)
+*     Ce tableau donne les idim+1 noeuds (triedre) de chaque element massif
+*     servant pour calculer l'orientation
+*     On aurait pu le simplifier sachant que les QUAD et QUAF sont
+*     similaires...
+      INTEGER LNOMAS(NLNOMA)
+*                  SEG2 SEG3 TRI3 TRI4 TRI6 TRI7 QUA4 QUA5 QUA8 QUA9   10
+      DATA LTYMAS/ 2,     3,  4,   5,   6,   7,   8,   9,   10,  11,
+C                  CUB8 CU20  PRI6  PR15  TET4 TE10  PYR5  PY13        18
+     $             14,   15,   16,   17,   23,  24,   25,   26,
+C                  CU27  PR21  TE15  PY19                              22
+     $             33,   34,   35,   36/
+*                  SEG2 SEG3 TRI3 TRI4 TRI6 TRI7 QUA4 QUA5 QUA8 QUA9   10
+      DATA LADMAS/ 1,     3,   5,   8,   11,  14,  17,  20,  23,  26,
+C                  CUB8 CU20  PRI6  PR15  TET4 TE10  PYR5  PY13        18
+     $             29,    33,   37,  41,    45,  49,   53,   57,
+C                  CU27  PR21  TE15  PY19                              22
+     $             61,    65,    69,   73/
+*                  SEG2   SEG3 TRI3    TRI4    TRI6   TRI7   QUA4
+      DATA LNOMAS/ 1,2,   1,3,  1,2,3,  1,2,3, 1,3,5, 1,3,5,  1,2,4,
+C                  QUA5   QUA8    QUA9    CUB8     CU20       PRI6
+     $             1,2,4, 1,3,7,  1,3,7,  1,2,4,5,  1,3,7,13, 1,2,3,4,
+C                  PR15      TET4     TE10      PYR5     PY13
+     $             1,3,5,10, 1,2,3,4, 1,3,5,10, 1,2,4,5,  1,3,7,13,
+C                  CU27      PR21       TE15       PY19
+     $             1,3,7,13, 1,3,5,10,  1,3,5,10,  1,3,7,13/
+*
+* Cas de l'orientation des éléments massifs
+*     On souhaite orienter positivement les éléments (ie même
+*     orientation que l'élément de référence)
+*
+* Est-on dans le cas des elements massifs ?
+      ilmass=0
+      ITY=IPT1.ITYPEL
+      DO i=1,nlmass
+         if (ity.eq.ltymas(i)) then
+            ilmass=i
+            goto 666
+         endif
+      enddo
+ 666  continue
+*dbg      write(ioimp,*) 'ilmass=',ilmass
+*dbg      write(ioimp,*) 'idim=',idim
+      if (ilmass.eq.0) goto 1000
+      if (LDLR(ity).ne.idim) goto 1000
+*dbg      write(ioimp,*) 'Cas massif'
+*     Si oui, il faut que ICLE=0 sauf pour le cub8 (shb8) qui est traité
+*     plus loin
+      if (icle.ne.0) then
+         if (ity.eq.14) goto 1000
+         if (icle.eq.1) moterr(1:8)='DIRE    '
+         if (icle.eq.2) moterr(1:8)='POIN    '
+*dbg         write(ioimp,*) 'icle=',icle
+* 803 2
+* Option %m1:8 incompatible avec les donnees
+         call erreur(803)
+         return
+      endif
+*     Ici, on teste l'orientation des éléments et on la stocke dans une
+*     liste d'entiers valant +1 ou -1.
+*     On stocke le nombre d'orientation négative dans ninv
+*
+* oubli des references (suivant la logique de invers)
+*eff      nbref=0
+*eff      nbsous=0
+      nbnn=ipt1.num(/1)
+      nbelem=ipt1.num(/2)
+*eff      segini meleme
+*eff      itypel=ipt1.itypel
+      iadr=ladmas(ilmass)-1
+*dbg      write(ioimp,*) 'iadr=',iadr
+      jg=nbelem
+      segini mlenti
+      ninv=0
+      do il=1,nbelem
+* test orientation
+         if (idim.eq.1) then
+            ia=ipt1.num(lnomas(iadr+1),il)
+            ib=ipt1.num(lnomas(iadr+2),il)
+*dbg            write(ioimp,*) 'ia=',ia,' ib=',ib
+            ira=(idim+1)*(ia-1)
+            irb=(idim+1)*(ib-1)
+            x1=xcoor(irb+1)-xcoor(ira+1)
+            pmix=x1
+         elseif (idim.eq.2) then
+            ia=ipt1.num(lnomas(iadr+1),il)
+            ib=ipt1.num(lnomas(iadr+2),il)
+            ic=ipt1.num(lnomas(iadr+3),il)
+            ira=(idim+1)*(ia-1)
+            irb=(idim+1)*(ib-1)
+            irc=(idim+1)*(ic-1)
+            x1=xcoor(irb+1)-xcoor(ira+1)
+            y1=xcoor(irb+2)-xcoor(ira+2)
+            x2=xcoor(irc+1)-xcoor(ira+1)
+            y2=xcoor(irc+2)-xcoor(ira+2)
+            pmix=x1*y2-y1*x2
+         elseif (idim.eq.3) then
+*dbg            write(ioimp,*) 'lnomas1=',lnomas(iadr+1)
+            ia=ipt1.num(lnomas(iadr+1),il)
+            ib=ipt1.num(lnomas(iadr+2),il)
+            ic=ipt1.num(lnomas(iadr+3),il)
+            id=ipt1.num(lnomas(iadr+4),il)
+*dbg            write(ioimp,*) 'ia=',ia,' ib=',ib,' ic=',ic,' id=',id
+            ira=(idim+1)*(ia-1)
+            irb=(idim+1)*(ib-1)
+            irc=(idim+1)*(ic-1)
+            ird=(idim+1)*(id-1)
+            x1=xcoor(irb+1)-xcoor(ira+1)
+            y1=xcoor(irb+2)-xcoor(ira+2)
+            z1=xcoor(irb+3)-xcoor(ira+3)
+            x2=xcoor(irc+1)-xcoor(ira+1)
+            y2=xcoor(irc+2)-xcoor(ira+2)
+            z2=xcoor(irc+3)-xcoor(ira+3)
+            x3=xcoor(ird+1)-xcoor(ira+1)
+            y3=xcoor(ird+2)-xcoor(ira+2)
+            z3=xcoor(ird+3)-xcoor(ira+3)
+            pmix=x1*(y2*z3-y3*z2)+y1*(z2*x3-z3*x2)+z1*(x2*y3-x3*y2)
+         endif
+*dbg         write(ioimp,*) 'pmix=',pmix
+         if (pmix.ge.0.d0) then
+            lect(il)=+1
+         else
+            ninv=ninv+1
+            lect(il)=-1
+         endif
+      enddo
+      if (ninv.gt.0) then
+         call inver4(ipt1,ipt2,3,mlenti)
+         if (ierr.ne.0) return
+      else
+         ipt2=ipt1
+      endif
+      segsup mlenti
+* fin du cas massif
+      return
+*
+* Cas de l'orientation des éléments non massifs (sauf cub8 shb8)
+*
+*
+ 1000 continue
+      IF (IDIM.EQ.3) THEN
+         IF (ICLE.NE.1.AND.ICLE.NE.2) CALL ERREUR(1074)
+      ELSE
+* SG Ceci est un residu de l'ancienne programmation en 2D,
+* ou on oriente par rapport a un vecteur (0. 0. 1.). En fait, comme
+* on n'orientait que les TRI et les QUA, ceux-ci ont deja ete
+* traites dans le cas massif. Du coup, on ne passera normalement ici
+* que pour les elements que l'on ne sait pas orienter (SEG en 2D par ex)
+* Voir IPT2=IPT1 plus loin
+         ICLE=1
+      ENDIF
+
+      IF (ICLE.EQ.1) THEN
+*  NORMALISATION DU VECTEUR
+         DP=SQRT(XP(1)**2+XP(2)**2+XP(3)**2)
+         IF (DP.LE.XPETIT) THEN
+            CALL ERREUR(277)
+            DP=1.D0
+         ENDIF
+         XQ(1)=XP(1)/DP
+         XQ(2)=XP(2)/DP
+         XQ(3)=XP(3)/DP
+      ENDIF
+      NBREF=IPT1.LISREF(/1)
+      NBSOUS=0
+      NBELEM=IPT1.NUM(/2)
+      NBNN=IPT1.NUM(/1)
+      ITYP=KSURF(IPT1.ITYPEL)
+      IF (ITYP.NE.0.AND.ITYP.EQ.IPT1.ITYPEL) GOTO 1
+*
+* ce n'est pas des éléments de surface
+* est-on en présence de cub8 (shb8)
+*
+      if(ipt1.itypel.eq.14) then
+         nbref=2
+         segini ipt2
+         nbnn=4
+         nbref=0
+         segini ipt3,ipt4
+         ipt2.lisref(1)=ipt3
+         ipt2.lisref(2)=ipt4
+         ipt3.itypel=8
+         ipt4.itypel=8
+         ipt2.itypel=14
+         idim1=idim+1
+         do i=1,ipt1.num(/2)
+            ia=ipt1.num(1,i) - 1
+            ib=ipt1.num(5,i) - 1
+            ic=ipt1.num(2,i) - 1
+            id=ipt1.num(3,i) - 1
+            xab=xcoor(ib*idim1+1)-xcoor(ia*idim1+1)
+            yab=xcoor(ib*idim1+2)-xcoor(ia*idim1+2)
+            zab=xcoor(ib*idim1+3)-xcoor(ia*idim1+3)
+            xac=xcoor(ic*idim1+1)-xcoor(ia*idim1+1)
+            yac=xcoor(ic*idim1+2)-xcoor(ia*idim1+2)
+            zac=xcoor(ic*idim1+3)-xcoor(ia*idim1+3)
+            xad=xcoor(id*idim1+1)-xcoor(ia*idim1+1)
+            yad=xcoor(id*idim1+2)-xcoor(ia*idim1+2)
+            zad=xcoor(id*idim1+3)-xcoor(ia*idim1+3)
+            xpvec= yac*zad - zac*yad
+            ypvec= zac*xad - xac*zad
+            zpvec= xac*yad - yac*xad
+            pmix=xpvec*xab+ypvec*yab+zpvec*zab
+            isens=0
+            if(pmix.ge.0.d0) isens=1
+            if(icle.eq.1) then
+               xsc=xab*xq(1)+yab*xq(2)+zab*xq(3)
+            else
+               xsc= xab*(xq(1)-xcoor(ib*idim1+1))+
+     $              yab*(xq(2)-xcoor(ib*idim1+2))+
+     $              zab*(xq(3)-xcoor(ib*idim1+3))
+            endif
+            if(xsc.ge.0.d0) then
+               do j=1,8
+                  ipt2.num(j,i)=ipt1.num(j,i)
+               enddo
+               if(isens.eq.2) then
+                  iu=ipt2.num(2,i)
+                  ipt2.num(2,i)=ipt2.num(4,i)
+                  ipt2.num(4,i)=iu
+                  iu=ipt2.num(6,i)
+                  ipt2.num(6,i)=ipt2.num(8,i)
+                  ipt2.num(8,i)=iu
+               endif
+            else
+               ipt2.num(1,i)=ipt1.num(5,i)
+               ipt2.num(2,i)=ipt1.num(8,i)
+               ipt2.num(3,i)=ipt1.num(7,i)
+               ipt2.num(4,i)=ipt1.num(6,i)
+               ipt2.num(5,i)=ipt1.num(1,i)
+               ipt2.num(6,i)=ipt1.num(4,i)
+               ipt2.num(7,i)=ipt1.num(3,i)
+               ipt2.num(8,i)=ipt1.num(2,i)
+               if(isens.eq.2) then
+                  iu=ipt2.num(2,i)
+                  ipt2.num(2,i)=ipt2.num(4,i)
+                  ipt2.num(4,i)=iu
+                  iu=ipt2.num(6,i)
+                  ipt2.num(6,i)=ipt2.num(8,i)
+                  ipt2.num(8,i)=iu
+               endif
+            endif
+            ipt2.icolor(i)=ipt1.icolor(i)
+            ipt3.num(1,i)=ipt2.num(1,i)
+            ipt3.num(2,i)=ipt2.num(2,i)
+            ipt3.num(3,i)=ipt2.num(3,i)
+            ipt3.num(4,i)=ipt2.num(4,i)
+            ipt3.icolor(i)=ipt2.icolor(i)
+            ipt4.num(1,i)=ipt2.num(5,i)
+            ipt4.num(2,i)=ipt2.num(6,i)
+            ipt4.num(3,i)=ipt2.num(7,i)
+            ipt4.num(4,i)=ipt2.num(8,i)
+            ipt4.icolor(i)=ipt2.icolor(i)
+         enddo
+         segdes ipt3,ipt4
+         return
+      endif
+*
+* Sinon, on ne savait pas orienter les éléments de ipt1
+*
+      IPT2=IPT1
+      RETURN
+*
+*  on a des vrais éléments de surfaces
+*
+ 1    CONTINUE
+* Cas QUAF TRI7 ou QUA9
+      LQUAF=(ITYP.EQ.11.OR.ITYP.EQ.7)
+      SEGINI IPT2
+      IPT2.ITYPEL=ITYP
+      IF (NBREF.EQ.0) GOTO 3
+      DO 2 I=1,NBREF
+         IPT2.LISREF(I)=IPT1.LISREF(I)
+ 2    CONTINUE
+ 3    CONTINUE
+      SEGACT MCOORD
+      IB=NSPOS(ITYP)-1
+      IS1=IBSOM(IB+1)
+      IS2=IBSOM(IB+2)
+      IS3=IBSOM(IB+3)
+
+
+      DO 4 J=1,NBELEM
+         IP1=IPT1.NUM(IS1,J)
+         IP2=IPT1.NUM(IS2,J)
+         IP3=IPT1.NUM(IS3,J)
+         IREF1=(IDIM+1)*(IP1-1)
+         IREF2=(IDIM+1)*(IP2-1)
+         IREF3=(IDIM+1)*(IP3-1)
+         XV1=XCOOR(IREF2+1)-XCOOR(IREF1+1)
+         YV1=XCOOR(IREF2+2)-XCOOR(IREF1+2)
+         ZV1=XCOOR(IREF2+3)-XCOOR(IREF1+3)
+         IF (IDIM.NE.3) ZV1=0.D0
+         XV2=XCOOR(IREF2+1)-XCOOR(IREF3+1)
+         YV2=XCOOR(IREF2+2)-XCOOR(IREF3+2)
+         ZV2=XCOOR(IREF2+3)-XCOOR(IREF3+3)
+         IF (IDIM.NE.3) ZV2=0.D0
+         XV3=ZV1*YV2-ZV2*YV1
+         YV3=XV1*ZV2-XV2*ZV1
+         ZV3=YV1*XV2-YV2*XV1
+         XVN=SQRT(XV3**2+YV3**2+ZV3**2)
+         IF (ICLE.EQ.2) THEN
+            XQ(1)=0.D0
+            XQ(2)=0.D0
+            XQ(3)=0.D0
+            DO 10 L=1,NBNN
+               IREF=(IPT1.NUM(L,J)-1)*(IDIM+1)
+               DO 11 K=1,3
+                  XQ(K)=XQ(K)+XCOOR(IREF+K)
+ 11            CONTINUE
+ 10         CONTINUE
+            XQ(1)=XQ(1)/NBNN
+            XQ(2)=XQ(2)/NBNN
+            XQ(3)=XQ(3)/NBNN
+            XQ(1)=XP(1)-XQ(1)
+            XQ(2)=XP(2)-XQ(2)
+            XQ(3)=XP(3)-XQ(3)
+            DP=SQRT(XQ(1)**2+XQ(2)**2+XQ(3)**2)
+            IF (DP.LE.XPETIT) THEN
+               CALL ERREUR(277)
+               DP=1.D0
+            ENDIF
+            XQ(1)=XQ(1)/DP
+            XQ(2)=XQ(2)/DP
+            XQ(3)=XQ(3)/DP
+         ENDIF
+         TEST=XV3*XQ(1)+YV3*XQ(2)+ZV3*XQ(3)
+         IF (ABS(TEST).LE.0.0175D0*XVN) CALL ERREUR(278)
+         IF (TEST.GE.0.D0) THEN
+            DO 6 I=1,NBNN
+               IPT2.NUM(I,J)=IPT1.NUM(I,J)
+ 6          CONTINUE
+         ELSE
+            IF (.NOT.LQUAF) THEN
+               DO 7 I=1,NBNN
+                  IPT2.NUM(MOD(NBNN+1-I,NBNN)+1,J)=IPT1.NUM(I,J)
+ 7             CONTINUE
+            ELSE
+               NBNN1=NBNN-1
+               DO 8 I=1,NBNN1
+                  IPT2.NUM(MOD(NBNN1+1-I,NBNN1)+1,J)=IPT1.NUM(I,J)
+ 8             CONTINUE
+               IPT2.NUM(NBNN,J)=IPT1.NUM(NBNN,J)
+            ENDIF
+         ENDIF
+         IPT2.ICOLOR(J)=IPT1.ICOLOR(J)
+ 4    CONTINUE
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

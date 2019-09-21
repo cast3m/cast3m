@@ -1,0 +1,336 @@
+C KONSF1    SOURCE    PV        09/03/12    21:26:42     6325
+      SUBROUTINE KONSF1(INDMET,ISF,IVN,INORM,ICHPSU,ICHPDI,
+     &      MELEMC,MELEMF,MELEFE,ICHFLU,DT,LOGAN,
+     &      MESERR)
+C************************************************************************
+C
+C PROJET            :  CASTEM 2000
+C
+C NOM               :  KONSF1
+C
+C DESCRIPTION       :  Voir KONV14
+C
+C                      Cas 2D/3D
+C
+C LANGAGE           :  FORTRAN 77 + ESOPE 2000 (avec estensions CISI)
+C
+C AUTEUR            :  A. BECCANTINI, DM2S/SFME
+C
+C************************************************************************
+C
+C APPELES (Outils
+C          CASTEM)  :  KRIPAD, LICHT
+C
+C APPELES (Calcul)  :
+C
+C************************************************************************
+C
+C ENTREES
+C
+C  1) PARAMETRES
+C
+C     INDMET  :     1        UPWIND
+C
+C                   2        CENTERED
+C
+C  2) Pointeurs des MCHAMLs/CHPOINTs
+C
+C     ISF     : MCHAML sur "FACEL"  contenant les scalaires passifs
+C              ("gauche" et "droite");
+C
+C     IVN     : CHPOINTs sur "FACE" (vitesse aux faces)
+C
+C  3) Pointeurs de CHPOINTs de la table DOMAINE
+C
+C     INORM   : CHPOINT "FACE" contenant les normales aux faces
+C
+C     ICHPSU  : CHPOINT "FACE" contenant la surface des faces
+C
+C     ICHPDI  : CHPOINT "CENTRE" contenant le diametre minimum
+C               de chaque element
+C
+C
+C  4) Pointeurs de MELEME de la table DOMAINE
+C
+C     MELEMC  : MELEME 'CENTRE' du SPG des CENTRES
+C
+C     MELEMF  : MELEME 'FACE' du SPG des FACES
+C
+C     MELEFE  : MELEME 'FACEL' du connectivité FACES -> ELEM
+C
+C SORTIES
+C
+C     ICHFLU     : pointeurs de CHPOINTs "FACE" des flux aux interfaces:
+C
+C     DT      : pas de temps pour le respect de la CFL-like condition
+C               DT < DIAMMIN /2 /max(Lambda_i)
+C               En maillage regulier cette condition garantie la
+C               non-interaction des ondes
+C
+C     LOGAN   : (LOGICAL): si .TRUE. une anomalie à été detectée
+C
+C     MESERR  : pour l'ecriture des messages d'erreurs
+C
+C************************************************************************
+C
+C HISTORIQUE (Anomalies et modifications éventuelles)
+C
+C HISTORIQUE : créée le 29.11.01
+C
+C************************************************************************
+C
+C
+C**** Variables de COOPTIO
+C
+C      INTEGER IPLLB, IERPER, IERMAX, IERR, INTERR
+C     &        ,IOTER,   IOLEC,  IOIMP,     IOCAR,  IOACQ
+C     &        ,IOPER,   IOSGB,  IOGRA,     IOSAU,  IORES
+C     &        ,IECHO,   IIMPI,  IOSPI
+C     &        ,IDIM
+C     &        ,MCOORD
+C     &        ,IFOMOD, NIFOUR, IFOUR, NSDPGE, IONIVE
+C     &        ,NGMAXY, IZROSF, ISOTYP, IOSCR,LTEXLU
+C     &        ,NORINC,NORVAL,NORIND,NORVAD
+C     &        ,NUCROU, IPSAUV
+C
+      IMPLICIT INTEGER(I-N)
+      INTEGER INDMET, ISF, IVN, INORM
+     &       ,ICHPSU,ICHPDI,MELEMC,MELEMF,MELEFE
+     &       ,IGEOMC,IGEOMF
+     &       ,ICHFLU
+     &       ,NFAC
+     &       ,NLCF, NGCEG,  NGCED, NLCEG, NLCED
+     &       ,NGCF, NLCF1, NSCA, ISCA
+      REAL*8 DT, UNSDT, UX, UY, UZ, UN
+     &     , SURF,CNX, CNY, CNZ
+     &     , CELL, DIAM
+      LOGICAL LOGAN
+      CHARACTER*(40) MESERR
+      CHARACTER*(8) TYPE
+C
+C**** LES INCLUDES
+C
+-INC CCOPTIO
+-INC SMCHAML
+-INC SMCHPOI
+      POINTEUR MPOVSU.MPOVAL, MPOVDI.MPOVAL
+     &        , MPOFLU.MPOVAL, MPNORM.MPOVAL, MPOVIT.MPOVAL
+-INC SMELEME
+-INC SMLMOTS
+-INC SMLENTI
+C
+C**** Les flux aux interface dans le repaire (n,t)
+C
+      INTEGER NFLU
+      SEGMENT IFLUX
+         REAL*8 FLUX(NFLU)
+      ENDSEGMENT
+C
+C**** Scalaires
+C
+      MCHEL1 = ISF
+      SEGACT MCHEL1
+      MCHAM1 = MCHEL1.ICHAML(1)
+      SEGDES MCHEL1
+      SEGACT MCHAM1
+      NSCA= MCHAM1.IELVAL(/1)
+      DO ISCA=1,NSCA,1
+         MELVAL=MCHAM1.IELVAL(ISCA)
+         SEGACT MELVAL
+      ENDDO
+C
+C**** La vitesse
+C
+      CALL LICHT(IVN,MPOVIT,TYPE,IGEOMC)
+      IF(IERR.NE.0)GOTO 9999
+C     SEGACT MPOVIT
+C
+C**** Le flux à l'interface
+C
+      NFLU=NSCA
+      SEGINI IFLUX
+C
+C**** Lecture des MELEMEs
+C
+C     'CENTRE', 'FACEL'
+C
+      IPT2 = MELEFE
+      SEGACT IPT2
+      NFAC = IPT2.NUM(/2)
+C
+C**** KRIPAD pour la correspondance global/local de centre
+C
+      CALL KRIPAD(MELEMC,MLENT1)
+      IF(IERR.NE.0)GOTO 9999
+C
+C**** MLENTI1 a MCORD.XCOORD(/1)/(IDIM+1) elements
+C
+C     Si i est le numero global d'un noeud de ICEN,
+C     MLENT1.LECT(i) contient sa position, i.e.
+C
+C     I              = numero global du noeud centre
+C     MLENT1.LECT(i) = numero local du noeud centre
+C
+C     MLENT1 déjà activé, i.e.
+C
+C     SEGACT MLENT1
+C
+C
+C**** KRIPAD pour la correspondance global/local de 'FACE'
+C
+      CALL KRIPAD(MELEMF,MLENT2)
+      IF(IERR.NE.0)GOTO 9999
+C     SEGACT MELNT2
+C
+C**** CHPOINTs de la table DOMAINE
+C
+      CALL LICHT(ICHPSU,MPOVSU,TYPE,IGEOMF)
+      IF(IERR.NE.0)GOTO 9999
+      CALL LICHT(ICHPDI,MPOVDI,TYPE,IGEOMC)
+      IF(IERR.NE.0)GOTO 9999
+      CALL LICHT(INORM,MPNORM,TYPE,IGEOMF)
+      IF(IERR.NE.0)GOTO 9999
+C
+C**** LICHT active les MPOVALs en *MOD
+C
+C     i.e.
+C
+C     SEGACT MPOVSU*MOD
+C     SEGACT MPOVDI*MOD
+C     SEGACT MPNORM*MOD
+C
+C**** Les FLUX aux faces
+C
+      CALL LICHT(ICHFLU,MPOFLU,TYPE,IGEOMF)
+C
+C     SEGACT MPOFLU*MOD
+C
+C
+C**** Initialisation de 1/DT
+C
+      UNSDT = 0.0D0
+C
+C**** BOUCLE SUR FACEL pour le calcul du FLUX
+C
+      DO NLCF = 1, NFAC
+C
+C******* NLCF  = numero local du centre de facel
+C        NGCF  = numero global du centre de facel
+C        NLCF1 = numero local du centre de face
+C        NGCEG = numero global du centre ELT "gauche"
+C        NLCEG = numero local du centre ELT "gauche"
+C        NGCED = numero global du centre ELT "droite"
+C        NLCED = numero local du centre ELT "droite"
+C
+         NGCEG = IPT2.NUM(1,NLCF)
+         NGCED = IPT2.NUM(3,NLCF)
+         NGCF  = IPT2.NUM(2,NLCF)
+         NLCF1 = MLENT2.LECT(NGCF)
+         NLCEG = MLENT1.LECT(NGCEG)
+         NLCED = MLENT1.LECT(NGCED)
+C
+C******* NLCF != NLCF1 -> l'auteur (MOI) n'a rien compris.
+C
+         IF(NLCF .NE. NLCF1)THEN
+            MESERR = 'Il ne faut pas jouer avec la console.   '
+            LOGAN = .TRUE.
+            GOTO 9999
+         ENDIF
+C
+C******* Calcul du flux/DT
+C
+         UX=MPOVIT.VPOCHA(NLCF,1)
+         UY=MPOVIT.VPOCHA(NLCF,2)
+         CNX=MPNORM.VPOCHA(NLCF,1)
+         CNY=MPNORM.VPOCHA(NLCF,2)
+         UN= (UX*CNX) + (UY*CNY)
+         IF(IDIM .EQ.3)THEN
+            UZ=MPOVIT.VPOCHA(NLCF,3)
+            CNZ=MPNORM.VPOCHA(NLCF,3)
+            UN=UN+(UZ*CNZ)
+         ENDIF
+C
+         IF(INDMET .EQ. 1)THEN
+            IF(UN.GT.0.0D0)THEN
+               DO ISCA=1,NSCA,1
+                  MELVAL=MCHAM1.IELVAL(ISCA)
+                  IFLUX.FLUX(ISCA)=UN*MELVAL.VELCHE(1,NLCF)
+                  DIAM = MPOVDI.VPOCHA(NLCEG,1)
+               ENDDO
+            ELSE
+               DO ISCA=1,NSCA,1
+                  MELVAL=MCHAM1.IELVAL(ISCA)
+                  IFLUX.FLUX(ISCA)=UN*MELVAL.VELCHE(3,NLCF)
+                  DIAM = MPOVDI.VPOCHA(NLCED,1)
+               ENDDO
+            ENDIF
+         ELSEIF(INDMET .EQ. 2)THEN
+            DO ISCA=1,NSCA,1
+               MELVAL=MCHAM1.IELVAL(ISCA)
+               IFLUX.FLUX(ISCA)=UN*(MELVAL.VELCHE(1,NLCF)+MELVAL
+     $              .VELCHE(3,NLCF))*0.5D0
+               DIAM = MIN(MPOVDI.VPOCHA(NLCED,1),MPOVDI.VPOCHA(NLCEG,1))
+               ENDDO
+         ENDIF
+C
+C******* Ecriture des flux
+C
+         SURF   = MPOVSU.VPOCHA(NLCF,1)
+         DO ISCA=1,NSCA,1
+            MPOFLU.VPOCHA(NLCF,ISCA) =
+     &           (IFLUX.FLUX(ISCA) * SURF )
+         ENDDO
+C
+C******* Calcul du pas du temps (CFL)
+C
+         CELL  = ABS(UN)/DIAM
+         IF(CELL .GT. UNSDT)THEN
+            UNSDT  =  CELL
+         ENDIF
+C
+C**** Fin boucle sur FACEL
+C
+      ENDDO
+C
+C**** Pas du temps (condition de non interaction en 1D)
+C
+      DT = 0.5D0 / UNSDT
+C
+C**** Desactivation des segments et
+C     on detruit les MCHAMLs
+C
+      SEGSUP MLENT1
+      SEGSUP MLENT2
+      SEGDES IPT2
+C
+      SEGSUP IFLUX
+C
+      SEGDES MPOVSU
+      SEGDES MPOVDI
+      SEGDES MPNORM
+C
+      SEGDES MPOFLU
+C
+      DO ISCA=1,NSCA,1
+         MELVAL=MCHAM1.IELVAL(ISCA)
+         SEGDES MELVAL
+      ENDDO
+      SEGDES MCHAM1
+C
+ 9999 CONTINUE
+C
+      RETURN
+      END
+C
+
+
+
+
+
+
+
+
+
+
+
+

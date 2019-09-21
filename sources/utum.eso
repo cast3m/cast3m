@@ -1,0 +1,778 @@
+C UTUM      SOURCE    PV        17/09/29    21:16:10     9578
+      SUBROUTINE UTUM(LCH1,IRIG1,DFLO,IRIG2)
+************************************************************************
+* NOM         : UTUM
+************************************************************************
+* DESCRIPTION : Realise le produit U*tU*M ou M est une matrice carree
+*               et U est une matrice rectangle dont les colonnes sont
+*               donnees par un objet LISTCHPO
+*
+*               - Les multiplicateurs de Lagrange sont ignores
+*               - Les harmoniques de Fourier differentes ne sont pas
+*                 croisees (matrice bloc-diagonale)
+*
+*               Les inconnues primales et duales de M doivent avoir
+*               ete definies dans les listes NOMDD et NOMDU et les
+*               composantes du LISTCHPO doivent avoir ete definies dans
+*               la liste NOMDD de l'include CCHAMP pour pour savoir
+*               comment effectuer la multiplication entre M et U*tU et
+*               comment nommer les inconnues duales de la matrice
+*            ***********************************************************
+*
+*                                     +-----------+
+*                                     | CHPOINT#1 |
+*                                     +-----------+   +-----------+
+*                      tU[L;N] ---->  | CHPOINT#2 |   |           |
+*                                     +-----------+   |     M     |
+*                                     |    ...    |   |           |
+*                U[N;L]               +-----------+   |   [N;N]   |
+*                   |                 | CHPOINT#L |   |           |
+*                   |                 +-----------+   +-----------+
+*                   V
+*                 +---+---+---+---+   +-----------+   +-----------+
+*                 | C | C |   | C |   |           |   |           |
+*                 | H | H | . | H |   |    UTU    |   |   UTUM    |
+*                 | P | P | . | P |   |           |   |           |
+*                 | # | # | . | # |   |   [N;N]   |   |   [N;N]   |
+*                 | 1 | 2 |   | L |   |           |   |           |
+*                 +---+---+---+---+   +-----------+   +-----------+
+*
+*
+*                  avec :  L = nombre de champs
+*                          N = nombre d'inconnues
+*                              (triplet noeud/composante/harmonique)
+*
+************************************************************************
+* APPELE PAR : pod.eso
+************************************************************************
+* ENTREES :: LCH1  = POINTEUR VERS UN OBJET LISTCHPO
+*            IRIG1 = POINTEUR VERS UN OBJET RIGIDITE
+*            DFLO  = COEFFICIENT MULTIPLICATEUR
+* SORTIES :: IRIG2 = POINTEUR VERS UN OBJET RIGIDITE
+************************************************************************
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+-INC CCOPTIO
+-INC SMCOORD
+-INC SMCHPOI
+-INC SMLCHPO
+-INC SMELEME
+-INC SMRIGID
+-INC CCHAMP
+*
+*     ICPR(I) EST LE NUMERO LOCAL (DANS LE SUPPORT GEOMETRIQUE DU
+*     LISTCHPO LCH1) DU I-EME NOEUD GLOBAL (DANS LA TABLE XCOORD)
+      SEGMENT/TICPR/(ICPR(NOMAX))
+*
+*     TINCO(I) = [MCOMP(I) ; IHARM(I)]
+*     ********************************
+*     TINCO1 DEFINIT LES INCONNUES DE LA MATRICE IRIG1
+*     TINCO EST LE SOUS-ENSEMBLE DE TINCO1 DES INCONNUES COMMUNES A LA
+*     RIGIDITE IRIG1 ET AU LISTCHPO LCH1
+*     ********************************
+*     ICOMP(I) EST LE NUMERO DE LA COMPOSANTE (DANS LES LISTES NOMDD
+*              ET NOMDU) ASSOCIEE A LA I-EME INCONNUE
+*     IHARM(I) EST LE NUMERO D'HARMONIQUE DE LA I-EME INCONNUE
+      SEGMENT,ICOMP(0)
+      SEGMENT,IHARM(0)
+      SEGMENT,ICOMP1(0)
+      SEGMENT,IHARM1(0)
+*
+*     NUMHAR(I) EST LE NUMERO D'HARMONIQUE ASSOCIE A LA I-EME RIGIDITE
+*              ELEMENTAIRE DE LA MATRICE DE SORTIE IRIG2
+*     IMAHAR(I) EST LE POINTEUR VERS LE SEGMENT TIMAH ASSOCIE A LA I-EME
+*              RIGIDITE ELEMENTAIRE DE LA MATRICE DE SORTIE IRIG2
+      SEGMENT,NUMHAR(0)
+      SEGMENT,IMAHAR(0)
+*     IMAHA(I)=1 INDIQUE QUE LE I-EME NOEUD GLOBAL (DANS LA TABLE
+*     XCOORD) APPARTIENT AU MAILLAGE LOCAL DE LA RIGIDITE ELEMENTAIRE
+*     CORRESPONDANTE
+      SEGMENT/TIMAH/(IMAHA(NOMAX))
+*
+*     IMAI(I) EST LE MAILLAGE ASSOCIE AU I-EME SOUPO DU PREMIER CHPOINT
+*     IPOV(I,J) EST LE MPOVAL DU SOUPO DU J-EME CHPOINT QUI CORRESPOND
+*               AU I-EME SOUPO DU PREMIER CHPOINT (IPOV=0 SI LE SOUPO
+*               EST ASSOCIE AUX MULT. DE LAGRANGE)
+*     L'INCONNUE I DU SOUPO J DU PREMIER CHPOINT EST EN POSITION
+*     IINC(I,J,K) DANS LE SOUPO CORRESPONDANT DU K-EME CHPOINT
+*     L'INCONNUE I DU SOUPO J DU PREMIER CHPOINT EST EN POSITION
+*     IGLO(I,J) DANS LA LISTE GLOBALE ICOMP+IHARM
+      SEGMENT TRAV1
+         INTEGER IMAI(NBSOU)
+         INTEGER IPOV(NBSOU,NBCHP)
+         INTEGER IINC(NXMAX,NBSOU,NBCHP)
+         INTEGER IGLO(NXMAX,NBSOU)
+      ENDSEGMENT
+*
+*     VPO(I,J,K) EST LA VALEUR DU K-EME CHPOINT PRISE POUR LE I-EME
+*                NOEUD LOCAL ET POUR LA J-EME INCONNUE DE TINCO
+*     MAT(I,J,K,L) EST LA MATRICE U*tU AVEC I (RESP. K) LE NOEUD LOCAL
+*                  DUAL (RESP. PRIMAL) ET J (RESP. L) L'INCONNUE DUALE
+*                  (RESP. PRIMALE) PRISE DANS TINCO
+      SEGMENT TRAV2
+         REAL*8 VPO(NBPOI,NBINC,NBCHP)
+         REAL*8 MAT(NBPOI,NBINC,NBPOI,NBINC)
+      ENDSEGMENT
+*
+*     IPOSP(I) DONNE LA POSITION DANS TINCO DE LA I-EME INCONNUE PRIMALE
+*              D'UNE MATRICE ELEMENTAIRE
+*     IPOSD(I) DONNE LA POSITION DANS TINCO DE LA I-EME INCONNUE DUALE
+*              D'UNE MATRICE ELEMENTAIRE
+      SEGMENT TPOSIN
+         INTEGER IPOSP(NLIGRE)
+         INTEGER IPOSD(NLIGRE)
+      ENDSEGMENT
+*     ITPOS(I) EST LE POINTEUR VERS LE SEGMENT TPOSIN ASSOCIE A LA I-EME
+*              RIGIDITE ELEMENTAIRE DE LA MATRICE D'ENTREE IRIG1
+      SEGMENT/IPOSIN/(ITPOS(NRIGEL1))
+*
+*     IG2L(I,J) EST L'INDICE DE INCONNUE LOCALE D'UNE SOUS-MATRICE DE
+*               IRIG2 ASSOCIEE AU NOEUD I ET A L'INCONNUE J DANS TINCO
+*     IL2G(I) EST L'INDICE DANS TINCO DE LA I-EME INCONNUE LOCALE D'UNE
+*             SOUS-MATRICE DE IRIG2
+      SEGMENT/TIG2L/(IG2L(NBPOI,NBINC))
+      SEGMENT/TIL2G/(IL2G(NLIGRE))
+*
+      CHARACTER*4 CHA4
+*
+*
+*
+*     +---------------------------------------------------------------+
+*     |                                                               |
+*     |            T R A V A I L   P R E L I M I N A I R E            |
+*     |                                                               |
+*     +---------------------------------------------------------------+
+*
+      MLCHPO=LCH1
+      SEGACT,MLCHPO
+*
+*
+*     ==========================================================
+*     CONSTRUCTION DE LA LISTE DES INCONNUES DE LA MATRICE IRIG1
+*     (= COUPLE NOM_DE_COMPOSANTE_PRIMALE + NUMERO_HARMONIQUE)
+*     ==========================================================
+*
+      NOMAX=XCOOR(/1)/(IDIM+1)
+      SEGINI,ICOMP1,IHARM1,NUMHAR,IMAHAR
+      NBHAR=0
+      NBINC1=0
+*
+      MRIGID=IRIG1
+      SEGACT,MRIGID
+      NRIGEL1=IRIGEL(/2)
+*
+*
+*     BOUCLE SUR LES RIGIDITES ELEMENTAIRES
+      DO IRI1=1,NRIGEL1
+*
+*        IDENTIFICATION DES HARMONIQUES DE FOURIER DISTINCTES DANS IRIG1
+         IHA=IRIGEL(5,IRI1)
+         DO 10 K=1,NBHAR
+            IF (IHA.EQ.NUMHAR(K)) THEN
+               TIMAH=IMAHAR(K)
+               GOTO 11
+            ENDIF
+  10     CONTINUE
+         NBHAR=NBHAR+1
+         NUMHAR(**)=IHA
+         SEGINI,TIMAH
+         IMAHAR(**)=TIMAH
+  11     CONTINUE
+*
+*        CONSTRUCTION DU MAILLAGE SUPPORT DE CHAQUE HARMONIQUE DE IRIG1
+*        => IMAHA(K)=1 INDIQUE QUE LE NOEUD GLOBAL K EST DANS LE SUPPORT
+         MELEME=IRIGEL(1,IRI1)
+         SEGACT,MELEME
+         NNO=NUM(/1)
+         NEL=NUM(/2)
+         DO IEL=1,NEL
+            DO 12 INO=1,NNO
+               K1=NUM(INO,IEL)
+               IMAHA(K1)=1
+  12        CONTINUE
+         ENDDO
+*
+*        CONSTRUCTION DE LA LISTE DES INCONNUES DE LA MATRICE IRIG1
+         DESCR=IRIGEL(3,IRI1)
+         SEGACT,DESCR
+         NLIGRE=LISDUA(/2)
+         DO 15 IX1=1,NLIGRE
+
+*           RECHERCHE DE L'INDICE DE LA COMPOSANTE DANS LNOMDU (LISTE
+*           GLOBALE DES COMPOSANTES DUALES)
+            CHA4=LISDUA(IX1)
+            DO IXD=1,LNOMDU
+               IF (CHA4.EQ.NOMDU(IXD)) GOTO 13
+            ENDDO
+            MOTERR(1:4)=CHA4
+            CALL ERREUR(108)
+            RETURN
+  13        CONTINUE
+
+*           AJOUT SI BESOIN D'UNE NOUVELLE INCONNUE A ICOMP1+IHARM1
+            DO 14 IX2=1,NBINC1
+               IF (IXD.NE.ICOMP1(IX2)) GOTO 14
+               IF (IHA.EQ.IHARM1(IX2)) GOTO 15
+  14        CONTINUE
+            ICOMP1(**)=IXD
+            IHARM1(**)=IHA
+            NBINC1=NBINC1+1
+
+  15     CONTINUE
+
+      ENDDO
+*
+*
+*     ===================================
+*     NOMBRE DE CHPOINTS DANS LE LISTCHPO
+*     ===================================
+*
+      NBCHP=ICHPOI(/1)
+      IF (NBCHP.EQ.0) THEN
+         MOTERR(1:8)='LISTCHPO'
+         INTERR(1)=LCH1
+         CALL ERREUR(356)
+         RETURN
+      ENDIF
+*
+*
+*     ===============================================================
+*     CORRESPONDANCE ENTRE LES INCONNUES DU PREMIER CHPOINT ET CELLES
+*     DES CHPOINTS SUIVANTS + CORRESPONDANCE AVEC LA LISTE GLOBALE
+*     ICOMP1+IHARM1 DES INCONNUES DE LA MATRICE (REMPLISSAGE DE TRAV1)
+*     CORRESPONDANCE ENTRE LES NUMEROTATIONS LOCALE ET GLOBALE
+*     (REMPLISSAGE DE ICPR)
+*     ===============================================================
+*
+      MCHPO1=ICHPOI(1)
+      SEGACT,MCHPO1
+*
+      NS1=MCHPO1.IPCHP(/1)
+      IF (NS1.EQ.0) THEN
+         MOTERR(1:8)='CHPOINT'
+         CALL ERREUR(1027)
+         RETURN
+      ENDIF
+*
+      NOMAX=XCOOR(/1)/(IDIM+1)
+      SEGINI,TICPR
+      NBPOI=0
+*
+      SEGINI,ICOMP,IHARM
+      NBINC=0
+*
+      NXMAX=3
+      NBSOU=NS1
+      SEGINI,TRAV1
+*
+*
+*     **************************************
+*     BOUCLE 1 SUR LES SOUPOS DU 1ER CHPOINT
+*     **************************************
+      DO 20 IS1=1,NS1
+         MSOUP1=MCHPO1.IPCHP(IS1)
+         SEGACT,MSOUP1
+*
+*        ON IGNORE LES MULTIPLICATEURS DE LAGRANGE
+         NX1=MSOUP1.NOCOMP(/2)
+         CHA4=MSOUP1.NOCOMP(1)
+         IF (CHA4.EQ.'LX'.OR.CHA4.EQ.'FLX') THEN
+            SEGDES,MSOUP1
+            GOTO 20
+         ENDIF
+*
+         IF (NX1.GT.NXMAX) THEN
+            NXMAX=NX1
+            SEGADJ,TRAV1
+         ENDIF
+*
+*        DANS ICOMP+IHARM, ON PLACE LES INCONNUES DU LISTCHPO QUI
+*        EXISTENT DEJA DANS ICOMP1+IHARM1 (DONC DANS LA MATRICE IRIG1)
+         DO 21 IX1=1,NX1
+
+*           RECHERCHE DE L'INDICE DE LA COMPOSANTE DANS LNOMDD (LISTE
+*           GLOBALE DES COMPOSANTES PRIMALES)
+            CHA4=MSOUP1.NOCOMP(IX1)
+            IINC(IX1,IS1,1)=IX1
+            DO IC1=1,LNOMDD
+               IF (CHA4.EQ.NOMDD(IC1)) GOTO 22
+            ENDDO
+            MOTERR(1:4)=CHA4
+            CALL ERREUR(108)
+            RETURN
+  22        CONTINUE
+
+*           AJOUT SI BESOIN D'UNE NOUVELLE INCONNUE A ICOMP+IHARM
+            NOHA=MSOUP1.NOHARM(IX1)
+            DO 23 IX2=1,NBINC1
+               IF (IC1.NE.ICOMP1(IX2))  GOTO 23
+               IF (NOHA.NE.IHARM1(IX2)) GOTO 23
+               DO 24 IX3=1,NBINC
+                  IF (IC1.NE.ICOMP(IX3))  GOTO 24
+                  IF (NOHA.EQ.IHARM(IX3)) GOTO 21
+  24           CONTINUE
+               NBINC=NBINC+1
+               ICOMP(**)=IC1
+               IHARM(**)=NOHA
+               IGLO(IX1,IS1)=NBINC
+  23        CONTINUE
+
+  21     CONTINUE
+*
+*        ON VERIFIE QUE LE MAILLAGE N'EST PAS VIDE
+         IGEO1=MSOUP1.IGEOC
+         IF (IGEO1.LE.0) THEN
+            MOTERR(1:8)='CHPOINT'
+            CALL ERREUR(1027)
+            RETURN
+         ENDIF
+         IMAI(IS1)=IGEO1
+         IPT1=IGEO1
+         SEGACT,IPT1
+         NNO1=IPT1.NUM(/2)
+         IF (NNO1.EQ.0) GOTO 20
+*
+*        CONSTRUCTION DE LA TABLE ICPR
+*        (NUMEROTATION GLOBALE <=> LOCALE)
+         DO 25 I1=1,NNO1
+            K1=IPT1.NUM(1,I1)
+            IF (ICPR(K1).NE.0) GOTO 25
+            NBPOI=NBPOI+1
+            ICPR(K1)=NBPOI
+  25     CONTINUE
+         SEGDES,IPT1
+*
+*        POINTEUR DIRECT VERS LE SEGMENT MPOVAL
+         IPOV(IS1,1)=MSOUP1.IPOVAL
+*
+*
+*        ********************************
+*        BOUCLE 2 SUR LES AUTRES CHPOINTS
+*        ********************************
+         DO 26 ICH=2,NBCHP
+            MCHPO2=ICHPOI(ICH)
+            SEGACT,MCHPO2
+            NS2=MCHPO2.IPCHP(/1)
+*
+*           **********************************************
+*           ON VA CHERCHER LE SOUPO CORRESPONDANT A MSOUP1
+*           => BOUCLE 3 SUR LES SOUPOS DE MCHPO2
+*           **********************************************
+            DO 27 IS2=1,NS2
+               MSOUP2=MCHPO2.IPCHP(IS2)
+               SEGACT,MSOUP1,MSOUP2
+*
+*              MEME MAILLAGE ?
+               IGEO2=MSOUP2.IGEOC
+               IF (IGEO1.NE.IGEO2) THEN
+                  SEGDES,MSOUP2
+                  GOTO 27
+               ENDIF
+*
+*              MEME NOMBRE DE COMPOSANTES ?
+               NX2=MSOUP2.NOCOMP(/2)
+               CHA4=MSOUP1.NOCOMP(1)
+               IF (CHA4.EQ.'LX'.OR.CHA4.EQ.'FLX'.OR.NX1.NE.NX2) THEN
+                  SEGDES,MSOUP2
+                  GOTO 27
+               ENDIF
+               IF (NX2.GT.NXMAX) THEN
+                  NXMAX=NX2
+                  SEGADJ,TRAV1
+               ENDIF
+*
+*              MEMES LISTES DE COMPOSANTES ?
+*              => ON FAIT LA CORRESPONDANCE ENTRE LES COMPOSANTES DES
+*                 2 SOUPOS
+               DO 28 IX1=1,NX1
+                  CHA4=MSOUP1.NOCOMP(IX1)
+                  DO 29 IX2=1,NX2
+                     IF (CHA4.NE.MSOUP2.NOCOMP(IX2)) GOTO 29
+                     IF (MSOUP1.NOHARM(IX1).EQ.MSOUP2.NOHARM(IX2)) THEN
+                        IINC(IX1,IS1,ICH)=IX2
+                        GOTO 28
+                     ENDIF
+  29              CONTINUE
+                  GOTO 99
+  28           CONTINUE
+*
+*              POINTEUR DIRECT VERS LE SEGMENT MPOVAL
+               IPOV(IS1,ICH)=MSOUP2.IPOVAL
+
+*              (CHPOINT SUIVANT)
+               SEGDES,MSOUP2,MCHPO2
+               GOTO 26
+*
+  27        CONTINUE
+*
+*           MESSAGE D'ERREUR
+*           ****************
+  99        CONTINUE
+            WRITE(MOTERR(1:16),FMT='(2I8)') MCHPO1,MCHPO2
+            CALL ERREUR(135)
+            RETURN
+*
+  26     CONTINUE
+         SEGDES,MSOUP1
+*
+  20  CONTINUE
+      SEGDES,MCHPO1,MLCHPO
+      SEGSUP,ICOMP1,IHARM1
+*
+*
+*     ========================================================
+*     STOCKAGE DES VALEURS DU LISTCHPO DANS UN TABLEAU ORDONNE
+*     SELON LA GEOMETRIE LOCALE (ICPR) ET SELON LES INCONNUES
+*     DE TINCO => REMPLISSAGE DE TRAV2
+*     ========================================================
+*
+      SEGINI,TRAV2
+      DO ICH=1,NBCHP
+         DO 30 ISOU=1,NBSOU
+            IPO1=IPOV(ISOU,ICH)
+            IF (IPO1.EQ.0) GOTO 30
+            MPOVAL=IPO1
+            SEGACT,MPOVAL
+            NNO=VPOCHA(/1)
+            NIX=VPOCHA(/2)
+            MELEME=IMAI(ISOU)
+            SEGACT,MELEME
+            DO 31 IX=1,NIX
+               IX1=IGLO(IX,ISOU)
+               IF (IX1.EQ.0) GOTO 31
+               IIX=IINC(IX,ISOU,ICH)
+               DO INO=1,NNO
+                  N1=ICPR(NUM(1,INO))
+                  VPO(N1,IX1,ICH)=VPOCHA(INO,IIX)
+               ENDDO
+  31        CONTINUE
+            SEGDES,MELEME,MPOVAL
+  30     CONTINUE
+      ENDDO
+      SEGSUP,TRAV1
+*
+*
+*     =========================
+*     CALCUL DE LA MATRICE U*tU
+*     =========================
+*
+      DO IX1=1,NBINC
+         DO IN1=1,NBPOI
+            DO 40 IX2=1,NBINC
+               IF (IHARM(IX2).NE.IHARM(IX1)) GOTO 40
+               DO IN2=1,NBPOI
+                  XVAL=0.D0
+                  DO ICH=1,NBCHP
+                     VA1=VPO(IN1,IX1,ICH)
+                     VA2=VPO(IN2,IX2,ICH)
+                     XVAL=XVAL+VA1*VA2
+                  ENDDO
+                  MAT(IN2,IX2,IN1,IX1)=XVAL
+               ENDDO
+  40        CONTINUE
+         ENDDO
+      ENDDO
+*
+*     REMPLISSAGE DU TRIANGLE INFERIEUR
+      DO IX1=1,NBINC
+         DO IN1=1,NBPOI
+            DO 50 IX2=IX1+1,NBINC
+               IF (IHARM(IX2).NE.IHARM(IX1)) GOTO 50
+               DO IN2=1,NBPOI
+                  MAT(IN2,IX2,IN1,IX1)=MAT(IN1,IX1,IN2,IX2)
+               ENDDO
+  50        CONTINUE
+         ENDDO
+      ENDDO
+*
+*
+*     ============================================================
+*     POUR CHAQUE SOUS-MATRICE ON REPERE LA POSITION DES INCONNUES
+*     LOCALES AU SEIN DES LISTES GLOBALES ICOMP+IHARM
+*     ============================================================
+*
+      SEGINI,IPOSIN
+*
+      DO IRI1=1,NRIGEL1
+*
+         IHA=IRIGEL(5,IRI1)
+*
+         DESCR=IRIGEL(3,IRI1)
+         SEGACT,DESCR
+         NINCP=LISINC(/2)
+         NINCD=LISDUA(/2)
+*
+*        ON VERIFIE QUE LA MATRICE EST CARREE
+         IF (NINCP.NE.NINCD) THEN
+            CALL ERREUR(21)
+            RETURN
+         ENDIF
+*
+         NLIGRE=NINCD
+         SEGINI,TPOSIN
+         ITPOS(IRI1)=TPOSIN
+*
+*        CORRESPONDANCE ENTRE LES INCONNUES DUALES DE LA MATRICE
+*        ELEMENTAIRE ET LES INCONNUES GLOBALES DES SEGMENTS ICOMP+IHARM
+         DO 60 ICO=1,NINCD
+            CHA4=LISDUA(ICO)
+            DO ICOD=1,LNOMDU
+               IF (CHA4.EQ.NOMDU(ICOD)) GOTO 61
+            ENDDO
+  61        CONTINUE
+            DO 62 IX=1,NBINC
+               IF (ICOD.NE.ICOMP(IX)) GOTO 62
+               IF (IHA.NE.IHARM(IX)) GOTO 62
+               IPOSD(ICO)=IX
+               GOTO 60
+  62        CONTINUE
+  60     CONTINUE
+*
+*        CORRESPONDANCE ENTRE LES INCONNUES PRIMALES DE LA MATRICE
+*        ELEMENTAIRE ET LES INCONNUES "GLOBALES" DU SEGMENT TINCO
+*        L'ASSOCIATION EST FAITE GRACE AUX LISTES DEFINIES DANS
+*        L'INCLUDE CCHAMP
+         DO 70 ICO=1,NINCP
+            CHA4=LISINC(ICO)
+            DO ICOP=1,LNOMDD
+               IF (CHA4.EQ.NOMDD(ICOP)) GOTO 71
+            ENDDO
+            MOTERR(1:4)=CHA4
+            CALL ERREUR(108)
+            RETURN
+  71        CONTINUE
+            DO 72 IX=1,NBINC
+               IF (ICOP.NE.ICOMP(IX)) GOTO 72
+               IF (IHA.NE.IHARM(IX)) GOTO 72
+               IPOSP(ICO)=IX
+               GOTO 70
+  72        CONTINUE
+
+            CALL ERREUR(21)
+            RETURN
+  70     CONTINUE
+*
+      ENDDO
+*
+*
+*
+*     +---------------------------------------------------------------+
+*     |                                                               |
+*     |          C R E A T I O N   D E   L A   M A T R I C E          |
+*     |                                                               |
+*     +---------------------------------------------------------------+
+*
+*
+*     =================
+*     CHAPEAU DU MRIGID
+*     =================
+*
+*     ON VA CREER AUTANT DE SOUS-MATRICES QU'IL Y A D'HARMONIQUES
+*     DE FOURIER DISTINCTES
+      NRIGEL=NBHAR
+      SEGINI,RI2
+      IRIG2=RI2
+      RI2.MTYMAT='RIGIDITE'
+      RI2.COERIG(1)=DFLO
+      RI2.ICHOLE=0
+      RI2.IMGEO1=0
+      RI2.IMGEO2=0
+      RI2.IFORIG=IFOMOD
+      RI2.ISUPEQ=0
+      RI2.JRCOND=0
+      RI2.JRDEPP=0
+      RI2.JRDEPD=0
+      RI2.JRELIM=0
+      RI2.JRGARD=0
+      RI2.JRTOT=0
+      RI2.IMLAG=0
+      RI2.IPROFO=0
+      RI2.IVECRI=0
+*
+*     BOUCLE 1 SUR LES SOUS-MATRICES DE LA MATRICE RESULTAT IRIG2
+*     ***********************************************************
+      IHA2=0
+      DO 80 IRI2=1,NBHAR
+*
+         NOHA2=NUMHAR(IRI2)
+*
+*        =========================
+*        CREATION DU SUPER-ELEMENT
+*        =========================
+*
+         NBSOUS=0
+         NBELEM=1
+         NBNN=NBPOI
+         NBREF=0
+         SEGINI,IPT2
+         IPT2.ITYPEL=28
+*
+*        ON RETIENT LES NOEUDS QUI SONT A LA FOIS DANS M ET DANS U
+         TIMAH=IMAHAR(IRI2)
+         NBNN=0
+         DO K=1,NOMAX
+            IF (IMAHA(K).NE.0.AND.ICPR(K).NE.0) THEN
+               NBNN=NBNN+1
+               IPT2.NUM(NBNN,1)=K
+            ENDIF
+         ENDDO
+         SEGSUP,TIMAH
+*
+         IF (NBNN.EQ.0) THEN
+            SEGSUP,IPT2
+            GOTO 80
+         ENDIF
+*
+         SEGADJ,IPT2
+*
+         IHA2=IHA2+1
+*
+*
+*        =========================
+*        DESCRIPTEUR DE LA MATRICE
+*        =========================
+*
+         NLIGRE=NBINC*NBPOI
+         NLIGRP=NLIGRE
+         NLIGRD=NLIGRE
+         SEGINI,DES2,TIG2L,TIL2G
+         NLIGRE=0
+         DO 81 IX=1,NBINC
+            IF (IHARM(IX).NE.NOHA2) GOTO 81
+            DO IN=1,NBNN
+               NLIGRE=NLIGRE+1
+               DES2.LISINC(NLIGRE)=NOMDD(ICOMP(IX))
+               DES2.LISDUA(NLIGRE)=NOMDU(ICOMP(IX))
+               DES2.NOELEP(NLIGRE)=IN
+               DES2.NOELED(NLIGRE)=IN
+               IN1=ICPR(IPT2.NUM(IN,1))
+               IG2L(IN1,IX)=NLIGRE
+               IL2G(NLIGRE)=IX
+            ENDDO
+  81     CONTINUE
+         NLIGRP=NLIGRE
+         NLIGRD=NLIGRE
+         SEGADJ,DES2,TIL2G
+*
+*
+*        ======================
+*        REMPLISSAGE DU CONTENU
+*        ======================
+*
+         NELRIG=1
+         SEGINI,XMATR2
+*
+*        BOUCLE 2 SUR LES SOUS-MATRICES DE LA MATRICE D'ENTREE IRIG1
+*        ***********************************************************
+         DO 82 IRI1=1,NRIGEL1
+*
+            COER=COERIG(IRI1)
+*
+            NOHA1=IRIGEL(5,IRI1)
+            IF (NOHA1.NE.NOHA2) GOTO 82
+*
+            MELEME=IRIGEL(1,IRI1)
+            SEGACT,MELEME
+            IF (ITYPEL.EQ.22) THEN
+               SEGDES,MELEME
+               GOTO 82
+            ENDIF
+            NNO=NUM(/1)
+            NEL=NUM(/2)
+*
+            DESCR=IRIGEL(3,IRI1)
+            SEGACT,DESCR
+            NINCP=LISINC(/2)
+            NINCD=LISDUA(/2)
+            TPOSIN=ITPOS(IRI1)
+            SEGACT,TPOSIN
+*
+            XMATRI=IRIGEL(4,IRI1)
+            SEGACT,XMATRI
+*
+*           BOUCLE 3 SUR LES ELEMENTS DE LA SOUS-MATRICE [M].IRI1
+*           *****************************************************
+            DO 83 IEL=1,NEL
+*
+*              ON VERIFIE QUE LA RIGIDITE ELEMENTAIRE POSSEDE UN
+*              SUPPORT GEOMETRIQUE COMPATIBLE AVEC LE LISTCHPO
+               DO INO=1,NNO
+                  IF (ICPR(NUM(INO,IEL)).NE.0) GOTO 84
+               ENDDO
+               GOTO 83
+*
+  84           CONTINUE
+*
+*              BOUCLE 4 SUR LES PRIMALES (= COLONNES) DE [M].IRI1.IEL
+*              ******************************************************
+               DO 85 IXP=1,NINCP
+                  IN1=ICPR(NUM(NOELEP(IXP),IEL))
+                  IF (IN1.EQ.0) GOTO 85
+                  IX1=IPOSP(IXP)
+                  IF (IX1.EQ.0) GOTO 85
+                  ICOL=IG2L(IN1,IX1)
+*
+*                 BOUCLE 5 SUR TOUTES LES DUALES (= LIGNES) DE [U*tU]
+*                 ***************************************************
+                  DO ILIG=1,NLIGRE
+                     IX2=IL2G(ILIG)
+                     IN2=ICPR(IPT2.NUM(DES2.NOELED(ILIG),1))
+*
+*                    BOUCLE 6 SUR LES DUALES (= LIGNES) [M].IRI1.IEL ET
+*                    ET LES PRIMALES (= COLONNES) ASSOCIEES DANS [U*tU]
+*                    **************************************************
+                     XVAL=0.D0
+                     DO 86 IXD=1,NINCD
+                        IN3=ICPR(NUM(NOELED(IXD),IEL))
+                        IF (IN3.EQ.0) GOTO 86
+                        IX3=IPOSD(IXD)
+                        IF (IX3.EQ.0) GOTO 86
+*
+                        VA1=RE(IXD,IXP,IEL)
+                        VA2=MAT(IN2,IX2,IN3,IX3)
+*
+                        XVAL=XVAL+VA1*VA2
+  86                 CONTINUE
+*
+                     XMATR2.RE(ILIG,ICOL,1)=XMATR2.RE(ILIG,ICOL,1)
+     &                                     +XVAL*COER
+c
+*
+                  ENDDO
+  85           CONTINUE
+  83        CONTINUE
+            IF (IRI2.EQ.NBHAR) SEGDES,MELEME,DESCR,XMATRI
+  82     CONTINUE
+*
+         RI2.IRIGEL(1,IHA2)=IPT2
+         RI2.IRIGEL(2,IHA2)=0
+         RI2.IRIGEL(3,IHA2)=DES2
+         RI2.IRIGEL(4,IHA2)=XMATR2
+         RI2.IRIGEL(5,IHA2)=NOHA2
+         RI2.IRIGEL(6,IHA2)=0
+*        AUCUNE RAISON A PRIORI QUE IRIG2 SOIT SYMETRIQUE
+         RI2.IRIGEL(7,IHA2)=2
+         xmatr2.symre=2
+*
+         SEGDES,DES2,XMATR2,IPT2
+         SEGSUP,TIG2L,TIL2G
+*
+  80  CONTINUE
+*
+*     UN PEU DE MENAGE...
+      SEGDES,MRIGID,RI2
+      SEGSUP,TRAV2,ICOMP,IHARM,NUMHAR,IMAHAR,TICPR
+      DO IRI=1,NRIGEL1
+         TPOSIN=ITPOS(IRI)
+         SEGSUP,TPOSIN
+      ENDDO
+      SEGSUP,IPOSIN
+*
+*
+      RETURN
+*
+      END
+*
+*
+
+

@@ -1,0 +1,956 @@
+C POIEXT    SOURCE    BP208322  16/11/30    21:15:11     9223
+
+c=======================================================================
+C  Sert a extraire un point d'un objet MAILLAGE
+C
+C  Novembre 1985 :
+C    Extrait d'un objet tous les points appartenant a une DROIte ou a
+C    un PLAN (possibilite de critere de distance)
+C
+C  Fevrier 1986 :
+C    Extrait d'un objet tous les points appartenant a un CYLIndre, un
+C    CONE, une SPHEre ou un TORE
+C
+C  09/2003 :
+C    Introduction de la DIMEnsion 1. Ajout de la syntaxe pour creer un
+C    point a partir de ses coordonnees. Inhibation d'options non compa-
+C    tibles avec la dimension 1. Option PROC adapte au cas IDIM=1.
+C    Ajout de tests sur le type d'element pour POINT Entier,
+C    POINT INITIAL et POINT FINAL (conforme a la notice).
+C
+C  01/2004 :
+C    Modifications des methodes de recherche des points appartenant a
+C    une DROIte, un PLAN, un CYLIndre, un CONE. Methodes moins sensibles
+C    aux imprecisions numeriques.
+C
+C  07/2013 GOUNAND
+C    Les options INIT FINA et PROC détectent les maillages vides
+C    en entrée et provoquent une erreur
+C
+C  04/2015 CB215821
+C    Ajout de la possibilite de generer un MAILLAGE de POI1 en fournissant
+C    des LISTREELS de coordonnees et optionnellement un LISTREEL de densite
+C
+C  11/2016 JCARDO
+C    Ajout de l'option 'JONC' (en liaison avec les developpements dans
+C    l'operateur PART)
+C
+c  11/2016 BP
+c    ajout de la syntaxe : ptij = POIN ieme_noeud jeme_element maillage;
+c
+c=======================================================================
+
+      SUBROUTINE POIEXT
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+-INC SMELEME
+-INC SMLREEL
+-INC SMCOORD
+-INC CCGEOME
+
+      SEGMENT SLREEL
+        INTEGER LISLRE(NBLREE)
+      ENDSEGMENT
+
+C-    DIMENSION XNORM(3)
+      CHARACTER*4 MOT,IPRO
+      CHARACTER*4 MCLE(10),MOTM(9),MOABS(1),MOTAV(2)
+      SEGMENT INDIC(NBELEM)
+
+      SEGMENT NETN(XCOOR(/1)/(IDIM+1)+1)
+
+      INTEGER IERREU
+      INTEGER ICOUR
+
+C  COMMON de sauvegarde lors d'un appel par SYMTRI
+      COMMON / CSYMTR / XNORM(3)
+
+      DATA MCLE / 'INIT','FINA','JONC','PROC',
+     .     'DROI','PLAN','CYLI','CONE','SPHE','TORE' /
+      DATA MOTM / 'MAXI','MINI','SUPE','EGSU','EGAL','EGIN','INFE',
+     .     'DIFF','COMP' /
+      DATA MOTAV / 'AVEC','SANS' /
+      DATA MOABS / 'ABS ' /
+
+
+      ICOUR = 0
+      IERREU= 0
+
+c     Lecture des mots cles correspondant a la 3eme syntaxe (CHPOINT)
+      CALL LIRMOT(MOTM,9,IMM,0)
+      IF (IMM.NE.0) GOTO 300
+c     syntaxe 3 ==> GOTO 300
+
+
+      idimp1=IDIM+1
+c     Lecture des mots cles geometrique
+      CALL LIRMOT(MCLE(5),6,IMC,0)
+      IF (IMC.NE.0) GOTO 250
+c     syntaxe 2.b ==> GOTO 250
+
+
+c     Lecture d'un maillage en entree
+      CALL LIROBJ('MAILLAGE',MELEME,0,IRetou)
+      IF (IERR.NE.0) RETURN
+      IF (IRetou.NE.0) GOTO 200
+c     syntaxe 2.a ==> GOTO 200
+
+
+ 100  CONTINUE
+c       IF(IIMPI.EQ.333) WRITE(IOIMP,*) 'POINT syntaxe 1:'
+C -------------------------------
+C  Operateur POINT - syntaxe 1 :
+C -------------------------------
+C CB215821    Ajout de la possibilité de générer un MAILLAGE de POI1 en
+C             fournissant directement un LISTREEL par COORDONNEES plus
+C             optionnellement un LISTREEL pour la densité
+
+              CALL LIROBJ('LISTREEL',MLREEL,0,IRETOU)
+              IF (IRETOU.NE.0) THEN
+                IF(IDIM .EQ. 0) THEN
+C                 Dimension non définie
+                  CALL ERREUR(14)
+                  RETURN
+                ENDIF
+                NBLREE = IDIM+1
+                SEGINI,SLREEL
+
+                LISLRE(1)=MLREEL
+                SEGACT,MLREEL
+                NBVAL    = PROG(/1)
+                JG       = NBVAL
+C               Lecture OBLIGATOIRE d'un nombre de LISTREEL egal a IDIM
+C               Lecture OPTIONNELLE de la densité comme dernier LISTREEL
+                DO I=2,IDIM+1
+                  IF (I .LE. IDIM) THEN
+                    CALL LIROBJ('LISTREEL',MLREEL,1,IRETOU)
+                    IF (IRETOU .EQ. 0) RETURN
+                    SEGACT,MLREEL
+                  ELSE
+C                   Lecture de la densite OPTIONNELLE
+                    CALL LIROBJ('LISTREEL',MLREEL,0,IRETOU)
+                    IF (IRETOU .EQ. 0) THEN
+                      SEGINI,MLREEL
+C                     Remplissage du LISTREEL avec la densite globale
+                      DO J=1,NBVAL
+                        PROG(J)=DENSIT
+                      ENDDO
+                    ELSE
+                      SEGACT,MLREEL
+                    ENDIF
+                  ENDIF
+
+                  LISLRE(I)=MLREEL
+
+C                 Verification de la longeur des LISTREELS lus
+                  IF (PROG(/1) .NE. NBVAL) THEN
+                    ICOUR = I
+                    IERREU = 1
+                    GOTO 101
+                  ENDIF
+                ENDDO
+
+C               On remplit le MELEME de POI1
+                IF (NBVAL .EQ. 0) THEN
+C                 Gestion des MAILLAGES VIDES
+                  NBNN   = NBNNE(ILCOUR)
+                  NBELEM = 0
+                  NBSOUS = 0
+                  NBREF  = 0
+                  SEGINI,MELEME
+                  ITYPEL = ILCOUR
+                ELSE
+C                 Ajout des NOEUDS au SEGMENT MCOORD et ajustement
+                  SEGACT,MCOORD*MOD
+                  NBANC=XCOOR(/1)/(IDIM+1)
+
+                  NBPTS=NBANC+NBVAL
+                  SEGADJ,MCOORD
+
+                  NBNN   = 1
+                  NBELEM = NBVAL
+                  NBSOUS = 0
+                  NBREF  = 0
+                  SEGINI,MELEME
+                  ITYPEL = 1
+
+                  NBAD   = 0
+                  IDINI  = NBANC*(IDIM+1)
+                  DO I=1,NBVAL
+                    DO J=1,IDIM+1
+C                     Le cas (IDIM+1) sert à remplir la densité
+                      NBAD = NBAD+1
+                      MLREEL=LISLRE(J)
+                      XCOOR(IDINI+NBAD)=PROG(I)
+                    ENDDO
+                    NUM(1,I) =NBANC+I
+                    ICOLOR(I)=IDCOUL
+                  ENDDO
+                ENDIF
+
+                CALL ECROBJ('MAILLAGE',MELEME)
+                SEGDES,MELEME
+                ICOUR = IDIM
+
+C               Desactivation / Suppression des Segments de travail
+ 101            CONTINUE
+                DO J=1,ICOUR
+                  MLREEL=LISLRE(J)
+                  SEGDES,MLREEL
+                ENDDO
+                SEGSUP SLREEL
+                IF (IERREU .EQ. 1) CALL ERREUR(217)
+                RETURN
+
+
+              ELSE
+C               Creation d'un seul POINT par trois flottants
+C               Pour IDIM = 1, seul moyen de creer un point.
+                CALL MESLIR(-149)
+                CALL LIRREE(Val1,1,IRetou)
+                CALL MESLIR(-150)
+                IF (IDIM.EQ.2) THEN
+                  CALL LIRREE(Val2,1,IRetou)
+                ELSE IF (IDIM.EQ.3) THEN
+                  CALL LIRREE(Val2,1,IRetou)
+                  IF (IERR.NE.0) RETURN
+                  CALL MESLIR(-151)
+                  CALL LIRREE(Val3,1,IRetou)
+                ENDIF
+                IF (IERR.NE.0) RETURN
+                SEGACT MCOORD*MOD
+                NbPts=1+(XCOOR(/1)/idimp1)
+                SEGADJ MCOORD
+                IRef=(NbPts-1)*idimp1
+                XCOOR(IRef+1)=Val1
+                IF (IDIM.EQ.2) THEN
+                  XCOOR(IRef+2)=Val2
+                ELSE IF (IDIM.EQ.3) THEN
+                  XCOOR(IRef+2)=Val2
+                  XCOOR(IRef+3)=Val3
+                ENDIF
+              ENDIF
+              XCOOR(IRef+idimp1)=DENSIT
+              CALL ECROBJ('POINT   ',NbPts)
+      RETURN
+
+
+ 200  CONTINUE
+c       IF(IIMPI.EQ.333) WRITE(IOIMP,*) 'POINT syntaxe 2:'
+C -------------------------------
+C  Operateur POINT - syntaxe 2 :
+C -------------------------------
+C  1) Recuperation du POINT1 du maillage GEO1 par son numero
+C       Point1 = POINT Geo1 Entier1 ;
+C     Note : le maillage est constitue uniquement de POI1 ou SEG2.
+C  1') Recuperation de POINT1 = Entier1^eme noeud du Entier2^eme element de GEO1
+C       Point1 = POINT Geo1 Entier1 Entier2;
+C     Note : le maillage est constitue uniquement de POI1 ou SEG2.
+C  2) Recuperation du point INITIAL ou FINAL du maillage GEO1
+C       Point1 = POINT Geo1 'INITIAL' | 'FINAL' ;
+C     Note : le maillage est constitue uniquement de POI1, SEG2 ou SEG3.
+C  3) Recuperation du POINT1 du maillage GEO1 le plus proche du POINT2.
+C       Point1 = POINT Geo1 'PROC' Point2 ;
+
+C  Lecture facultative d'un entier (numero du point a trouver)
+               CALL LIRENT(JPTR,0,IRetou)
+
+c              cas ou on a bien lu un entier
+               IF (IRetou.NE.0) THEN
+
+                  IF (JPTR.LE.0) THEN
+                     CALL ERREUR(262)
+                     RETURN
+                  ENDIF
+                  MOT='    '
+                  IPRO='    '
+C                 Lecture d'un 2eme entier
+                  CALL LIRENT(KPTR,0,IRetou)
+                  IF (IRetou.NE.0) THEN
+                      IF (KPTR.LE.0) THEN
+                        CALL ERREUR(262)
+                        RETURN
+                      ENDIF
+                      MOT='MELE'
+                  ENDIF
+
+               ELSE
+C  Lecture d'un des mots cles ('INIT','FINA','JONC','PROC')
+
+                  CALL LIRCHA(MOT,0,IRetou)
+                  IF (IRetou.EQ.0) THEN
+C  Le type de l'operande est incorrect
+                     CALL QUETYP(MOTERR(1:8),0,IRetou)
+                     IF (IRetou.NE.0) THEN
+                        CALL ERREUR (39)
+                     ELSE
+                        CALL ERREUR(533)
+                     ENDIF
+                     RETURN
+                  ENDIF
+C                 point INIT ou FINA => IPRO=' '
+                  IF ((MOT.EQ.MCLE(1)).OR.(MOT.EQ.MCLE(2))) THEN
+                     IPRO='    '
+C                 point JONC ou PROCH
+                  ELSEIF (MOT.EQ.MCLE(3)) THEN
+                     IPRO=MOT
+                     GOTO 203
+                  ELSEIF (MOT.EQ.MCLE(4)) THEN
+                     IPRO=MOT
+                     GOTO 204
+                  ELSE
+                     CALL ERREUR(7)
+                     RETURN
+                  ENDIF
+
+               ENDIF
+
+C  Traitement des syntaxes POINT Geo1 Entier1 | 'INIT' | 'FINA'
+C  Erreur si objet maillage complexe
+               SEGACT MELEME
+               IF (LISOUS(/1).NE.0) THEN
+                  CALL ERREUR(25)
+                  SEGDES MELEME
+                  RETURN
+               ENDIF
+               IF (NUM(/1).LE.0.OR.NUM(/2).LE.0) THEN
+                  MOTERR(1:8)='MAILLAGE'
+C                 Une donnée de type %m1:8 est vide
+                  CALL ERREUR(1027)
+                  SEGDES MELEME
+                  RETURN
+               ENDIF
+
+c             --- syntaxe POINT Geo1 Entier1 Entier2 ---
+                  IF (MOT.EQ.'MELE') THEN
+c       IF(IIMPI.EQ.333) WRITE(IOIMP,*) '+ option Entier1 Entier2'
+                     IPTR=JPTR
+                     JPTR=KPTR
+                     IF (IPTR.GT.NUM(/1).OR.JPTR.GT.NUM(/2)) THEN
+                        CALL ERREUR(262)
+                        SEGDES MELEME
+                        RETURN
+                     ENDIF
+c             --- syntaxe POINT Geo1 Entier1 ---
+                  ELSEIF (MOT.EQ.'    ') THEN
+c       IF(IIMPI.EQ.333) WRITE(IOIMP,*) '+ option Entier1'
+                     IF ((ITYPEL.NE.1).AND.(JPTR.EQ.(NUM(/2)+1))) THEN
+                        IPTR=NUM(/1)
+                        JPTR=NUM(/2)
+                     ELSE
+                        IPTR=1
+                     ENDIF
+                     IF (JPTR.GT.NUM(/2)) THEN
+                        CALL ERREUR(262)
+                        SEGDES MELEME
+                        RETURN
+                     ENDIF
+c             --- syntaxe POINT Geo1 'INIT' ---
+                  ELSE IF (MOT.EQ.MCLE(1)) THEN
+c       IF(IIMPI.EQ.333) WRITE(IOIMP,*) '+ option INIT'
+                     IPTR=1
+                     JPTR=1
+c             --- syntaxe POINT Geo1 'FINA' ---
+c       IF(IIMPI.EQ.333) WRITE(IOIMP,*) '+ option FINA'
+                  ELSE IF (MOT.EQ.MCLE(2)) THEN
+                     IPTR=NUM(/1)
+                     JPTR=NUM(/2)
+                  ENDIF
+c              ---partie commune aux syntaxes Entier(s) INIT FINA ---
+                  IPoin=NUM(IPTR,JPTR)
+                  CALL ECROBJ('POINT ',IPoin)
+                  SEGDES MELEME
+               RETURN
+
+
+C          --- Traitement de l'option POIN 'JONC' ---
+ 203           CONTINUE
+c       IF(IIMPI.EQ.333) WRITE(IOIMP,*) '+ option JONC'
+                  SEGACT MELEME
+                  NBSOUS=LISOUS(/1)
+                  NBS=MAX(1,NBSOUS)
+                  IPT1=MELEME
+
+                  NBELEM=0
+                  SEGINI,NETN
+                  DO IO=1,NBS
+                     IF (NBSOUS.GT.0) THEN
+                        IPT1=LISOUS(IO)
+                        SEGACT,IPT1
+                     ENDIF
+                     SEGACT,IPT1
+                     DO 222 J=1,IPT1.NUM(/2)
+                     DO 222 I=1,IPT1.NUM(/1)
+                        IF (NETN(IPT1.NUM(I,J)).EQ.2) NBELEM=NBELEM+1
+                        NETN(IPT1.NUM(I,J))=NETN(IPT1.NUM(I,J))+1
+ 222                 CONTINUE
+                     IF (NBSOUS.NE.0) SEGDES,IPT1
+                  ENDDO
+                  SEGDES,MELEME
+
+                  NBNN=1
+                  NBREF=0
+                  NBSOUS=0
+                  SEGINI,IPT1
+                  IPT1.ITYPEL=1
+                  K=0
+                  DO I=1,NETN(/1)
+                     IF (NETN(I).GT.2) THEN
+                        K=K+1
+                        IPT1.NUM(1,K)=I
+                     ENDIF
+                  ENDDO
+
+                  SEGSUP,NETN
+
+                  CALL ECROBJ('MAILLAGE',IPT1)
+
+                  RETURN
+
+C          --- Traitement de l'option POIN 'PROC' ---
+ 204           CONTINUE
+c       IF(IIMPI.EQ.333) WRITE(IOIMP,*) '+ option PROCH'
+                  CALL LIROBJ('POINT ',IPoin1,1,IRetou)
+                  IF (IERR.NE.0) THEN
+                     RETURN
+                  ENDIF
+                  Val1=1.E30
+                  IRef=(IPoin1-1)*idimp1
+                  XP1=XCOOR(IRef+1)
+                  YP1=XCOOR(IRef+2)
+                  ZP1=0.D0
+                  IF (IDIM.GE.3) ZP1=XCOOR(IRef+3)
+                  SEGACT MELEME
+                  IPT1=MELEME
+                  Ipoin=0
+                  DO IOB=1,MAX(1,LISOUS(/1))
+                     IF (LISOUS(/1).NE.0) THEN
+                        IPT1=LISOUS(IOB)
+                        SEGACT IPT1
+                     ENDIF
+                     DO i=1,IPT1.NUM(/2)
+                        DO j=1,IPT1.NUM(/1)
+                           IRef=(IPT1.NUM(j,i)-1)*idimp1
+                           IF (IDIM.EQ.1) THEN
+                              DVN=ABS(XP1-XCOOR(IRef+1))
+                           ELSE
+                              XVN=XP1-XCOOR(IRef+1)
+                              YVN=YP1-XCOOR(IRef+2)
+                              ZVN=0.D0
+                              IF (IDIM.GE.3) ZVN=ZP1-XCOOR(IRef+3)
+                              DVN=XVN*XVN+YVN*YVN+ZVN*ZVN
+                           ENDIF
+                           IF (DVN.LE.Val1) THEN
+                              Val1=DVN
+                              IPoin=IPT1.NUM(j,i)
+                           ENDIF
+                        ENDDO
+                     ENDDO
+                     IF (LISOUS(/1).NE.0) SEGDES,IPT1
+                  ENDDO
+                  IF (IPoin.EQ.0) THEN
+                     MOTERR(1:8)='MAILLAGE'
+C                    Une donnée de type %m1:8 est vide
+                     CALL ERREUR(1027)
+                  ELSE
+                     IF (IERR.EQ.0) CALL ECROBJ('POINT ',IPoin)
+                  ENDIF
+                  SEGDES MELEME
+               RETURN
+
+
+ 250  CONTINUE
+c       IF(IIMPI.EQ.333) WRITE(IOIMP,*) 'POINT syntaxe 2.b :'
+C -------------------------------
+C  Operateur POINT - syntaxe 2.b :
+C -------------------------------
+C  Extraction du(des) point(s) du maillage GEO1 situe(s) sur une
+C  DROIte, un PLAN, un CYLIndre, un CONE, une SPHEre ou un TORE.
+C  L'appartenance du point a l'objet est definie suivant un critere
+C  de distance non nul (appartenance stricte : critere tres faible).
+C    Geof = POINT Geo1 MOT1 Points ... (Critere)
+
+C  En dimension 1, ces criteres n'ont aucun sens.
+            IF (IDIM.EQ.1) THEN
+               MOTERR(1:4)=MCLE(3+IMC)
+               INTERR(1)=IDIM
+               CALL ERREUR(971)
+               RETURN
+            ENDIF
+C  Lectures obligatoire du maillage et facultative du critere
+            CALL LIROBJ('MAILLAGE',MELEME,1,IRetou)
+            IF (IERR.NE.0) RETURN
+            CRIT=DENSIT/10.D0
+            CALL LIRREE(CRIT,0,IRetou)
+            IF (CRIT.LE.0.D0) CALL ERREUR(17)
+            IF (IERR.NE.0) RETURN
+C  Transformation du maillage en 'POI1'
+            SEGACT MELEME
+            CALL CHANGE(MELEME,1)
+            SEGACT MELEME
+            NBELEM=NUM(/2)
+C  Intersection du maillage avec une DROIte
+C --------------------------
+            IF (IMC.EQ.1) THEN
+               CALL LIROBJ('POINT ',IPoin1,1,IRetou)
+               CALL LIROBJ('POINT ',IPoin2,1,IRetou)
+               IF (IERR.NE.0) THEN
+                  SEGDES MELEME
+                  RETURN
+               ENDIF
+C  Recherche du vecteur directeur de la DROIte
+               IRef1=(IPoin1-1)*idimp1
+               IRef2=(IPoin2-1)*idimp1
+               XP1=XCOOR(IRef1+1)
+               XVN=XCOOR(IRef2+1)-XP1
+               YP1=XCOOR(IRef1+2)
+               YVN=XCOOR(IRef2+2)-YP1
+               ZP1=0.D0
+               ZVN=0.D0
+               IF (IDIM.GE.3) THEN
+                  ZP1=XCOOR(IRef1+3)
+                  ZVN=XCOOR(IRef2+3)-ZP1
+               ENDIF
+               DVN=SQRT(XVN*XVN+YVN*YVN+ZVN*ZVN)
+               IF (DVN.EQ.0.D0) THEN
+                  CALL ERREUR(21)
+                  SEGDES MELEME
+                  RETURN
+               ENDIF
+               XVN=XVN/DVN
+               YVN=YVN/DVN
+               ZVN=ZVN/DVN
+               XNORM(1)=XVN
+               XNORM(2)=YVN
+               XNORM(3)=ZVN
+C  Recherche des points verifiant la condition d'appartenance (INDIC)
+               CRIT=CRIT*CRIT
+               SEGINI INDIC
+               NBON=0
+               DO IP=1,NBELEM
+                  IPoin=NUM(1,IP)
+                  IRef=(IPoin-1)*idimp1
+                  XPT=XCOOR(IRef+1)-XP1
+                  YPT=XCOOR(IRef+2)-YP1
+                  ZPT=0.D0
+                  IF (IDIM.GE.3) ZPT=XCOOR(IRef+3)-ZP1
+                  SCAL=XPT*XVN+YPT*YVN+ZPT*ZVN
+                  XV=SCAL*XVN-XPT
+                  YV=SCAL*YVN-YPT
+                  ZV=SCAL*ZVN-ZPT
+                  Val1=XV*XV+YV*YV+ZV*ZV
+                  IF (Val1.LE.CRIT) THEN
+                     INDIC(IP)=IPoin
+                     NBON=NBON+1
+                  ENDIF
+               ENDDO
+C  Intersection du maillage avec un PLAN
+C --------------------------
+            ELSE IF (IMC.EQ.2) THEN
+               CALL LIROBJ('POINT ',IPoin1,1,IRetou)
+               CALL LIROBJ('POINT ',IPoin2,1,IRetou)
+               CALL LIROBJ('POINT ',IPoin3,1,IRetou)
+               IF (IERR.NE.0) THEN
+                  SEGDES MELEME
+                  RETURN
+               ENDIF
+C  Determination du vecteur normal au PLAN
+               IRef1=(IPoin1-1)*idimp1
+               IRef2=(IPoin2-1)*idimp1
+               IRef3=(IPoin3-1)*idimp1
+               XP1=XCOOR(IRef1+1)
+               XP2=XCOOR(IRef2+1)
+               XP3=XCOOR(IRef3+1)
+               YP1=XCOOR(IRef1+2)
+               YP2=XCOOR(IRef2+2)
+               YP3=XCOOR(IRef3+2)
+               ZP1=0.D0
+               ZP2=0.D0
+               ZP3=0.D0
+               IF (IDIM.GE.3) THEN
+                  ZP1=XCOOR(IRef1+3)
+                  ZP2=XCOOR(IRef2+3)
+                  ZP3=XCOOR(IRef3+3)
+               ENDIF
+               XVN=(YP2-YP1)*(ZP3-ZP1)-(ZP2-ZP1)*(YP3-YP1)
+               YVN=(ZP2-ZP1)*(XP3-XP1)-(XP2-XP1)*(ZP3-ZP1)
+               ZVN=(XP2-XP1)*(YP3-YP1)-(YP2-YP1)*(XP3-XP1)
+               DVN=SQRT(XVN*XVN+YVN*YVN+ZVN*ZVN)
+               IF (DVN.EQ.0.D0) THEN
+                  CALL ERREUR(21)
+                  SEGDES MELEME
+                  RETURN
+               ENDIF
+               XVN=XVN/DVN
+               YVN=YVN/DVN
+               ZVN=ZVN/DVN
+               XNORM(1)=XVN
+               XNORM(2)=YVN
+               XNORM(3)=ZVN
+C  Recherche des points verifiant la condition d'appartenance (INDIC)
+               SEGINI INDIC
+               NBON=0
+               DO IP=1,NBELEM
+                  IPoin=NUM(1,IP)
+                  IRef=(IPoin-1)*idimp1
+                  XV=XCOOR(IRef+1)-XP1
+                  YV=XCOOR(IRef+2)-YP1
+                  ZV=0.D0
+                  IF (IDIM.GE.3) ZV=XCOOR(IRef+3)-ZP1
+                  Val1=ABS(XV*XVN+YV*YVN+ZV*ZVN)
+                  IF (Val1.LE.CRIT) THEN
+                     INDIC(IP)=IPoin
+                     NBON=NBON+1
+                  ENDIF
+               ENDDO
+C  Intersection du maillage avec un CYLIndre
+C --------------------------
+            ELSE IF (IMC.EQ.3) THEN
+               CALL LIROBJ('POINT ',IPoin1,1,IRetou)
+               CALL LIROBJ('POINT ',IPoin2,1,IRetou)
+               CALL LIROBJ('POINT ',IPoin3,1,IRetou)
+               IF (IERR.NE.0) THEN
+                  SEGDES MELEME
+                  RETURN
+               ENDIF
+               IRef1=(IPoin1-1)*idimp1
+               IRef2=(IPoin2-1)*idimp1
+               IRef3=(IPoin3-1)*idimp1
+               XP1=XCOOR(IRef1+1)
+               XVN=XCOOR(IRef2+1)-XP1
+               XPT=XCOOR(IRef3+1)-XP1
+               YP1=XCOOR(IRef1+2)
+               YVN=XCOOR(IRef2+2)-YP1
+               YPT=XCOOR(IRef3+2)-YP1
+               IF (IDIM.GE.3) THEN
+                  ZP1=XCOOR(IRef1+3)
+                  ZVN=XCOOR(IRef2+3)-ZP1
+                  ZPT=XCOOR(IRef3+3)-ZP1
+               ELSE
+                  ZP1=0.D0
+                  ZVN=0.D0
+                  ZPT=0.D0
+               ENDIF
+C  Determination de l'axe du cylindre (axe P1-P2)
+               DVN=SQRT(XVN*XVN+YVN*YVN+ZVN*ZVN)
+               IF (DVN.EQ.0.D0) THEN
+                  CALL ERREUR(21)
+                  RETURN
+               ENDIF
+               XVN=XVN/DVN
+               YVN=YVN/DVN
+               ZVN=ZVN/DVN
+C  Calcul du rayon du cylindre (distance P3 a axe P1-P2)
+               SCAL=XPT*XVN+YPT*YVN+ZPT*ZVN
+               XV=SCAL*XVN-XPT
+               YV=SCAL*YVN-YPT
+               ZV=SCAL*ZVN-ZPT
+               Rayon=SQRT(XV*XV+YV*YV+ZV*ZV)
+               IF (Rayon.EQ.0.D0) THEN
+                  CALL ERREUR(21)
+                  SEGDES MELEME
+                  RETURN
+               ENDIF
+C  Recherche des points verifiant la condition d'appartenance (INDIC)
+               SEGINI INDIC
+               NBON=0
+               DO IP=1,NBELEM
+                  IPoin=NUM(1,IP)
+                  IRef=(IPoin-1)*idimp1
+                  XPT=XCOOR(IRef+1)-XP1
+                  YPT=XCOOR(IRef+2)-YP1
+                  ZPT=0.D0
+                  IF (IDIM.GE.3) ZPT=XCOOR(IRef+3)-ZP1
+                  SCAL=XPT*XVN+YPT*YVN+ZPT*ZVN
+                  XV=SCAL*XVN-XPT
+                  YV=SCAL*YVN-YPT
+                  ZV=SCAL*ZVN-ZPT
+                  Val1=SQRT(XV*XV+YV*YV+ZV*ZV)
+                  IF (ABS(Val1-Rayon).LE.CRIT) THEN
+                     INDIC(IP)=IPoin
+                     NBON=NBON+1
+                  ENDIF
+               ENDDO
+C  Intersection du maillage avec un CONE
+C --------------------------
+            ELSE IF (IMC.EQ.4) THEN
+               CALL LIROBJ('POINT ',IPoin1,1,IRetou)
+               CALL LIROBJ('POINT ',IPoin2,1,IRetou)
+               CALL LIROBJ('POINT ',IPoin3,1,IRetou)
+               IF (IERR.NE.0) THEN
+                  SEGDES MELEME
+                  RETURN
+               ENDIF
+               IRef1=(IPoin1-1)*idimp1
+               IRef2=(IPoin2-1)*idimp1
+               IRef3=(IPoin3-1)*idimp1
+               XP1=XCOOR(IRef1+1)
+               XVN=XCOOR(IRef2+1)-XP1
+               XV=XCOOR(IRef3+1)-XP1
+               YP1=XCOOR(IRef1+2)
+               YVN=XCOOR(IRef2+2)-YP1
+               YV=XCOOR(IRef3+2)-YP1
+               IF (IDIM.GE.3) THEN
+                  ZP1=XCOOR(IRef1+3)
+                  ZVN=XCOOR(IRef2+3)-ZP1
+                  ZV=XCOOR(IRef3+3)-ZP1
+               ELSE
+                  ZP1=0.D0
+                  ZVN=0.D0
+                  ZV=0.D0
+               ENDIF
+C  Recherche du vecteur directeur de l'axe du cone
+               DVN=SQRT(XVN*XVN+YVN*YVN+ZVN*ZVN)
+               IF (DVN.EQ.0.D0) THEN
+                  CALL ERREUR(21)
+                  SEGDES MELEME
+                  RETURN
+               ENDIF
+               XVN=XVN/DVN
+               YVN=YVN/DVN
+               ZVN=ZVN/DVN
+C  Calcul de l'angle au sommet du cone
+               Val1=XV*XV+YV*YV+ZV*ZV
+               IF (Val1.EQ.0.D0) THEN
+                  CALL ERREUR(21)
+                  SEGDES MELEME
+                  RETURN
+               ENDIF
+               SCAL=XV*XVN+YV*YVN+ZV*ZVN
+               XPT=SCAL*XVN-XV
+               YPT=SCAL*YVN-YV
+               ZPT=SCAL*ZVN-ZV
+               SISOM=SQRT((XPT*XPT+YPT*YPT+ZPT*ZPT)/Val1)
+C  Recherche des points verifiant la condition d'appartenance (INDIC)
+               SEGINI INDIC
+               NBON=0
+               DO IP=1,NBELEM
+                  IPoin=NUM(1,IP)
+                  IRef=(IPoin-1)*idimp1
+                  XV=XCOOR(IRef+1)-XP1
+                  YV=XCOOR(IRef+2)-YP1
+                  ZV=0.D0
+                  IF (IDIM.GE.3) ZV=XCOOR(IRef+3)-ZP1
+                  Val1=SQRT(XV*XV+YV*YV+ZV*ZV)*SISOM
+                  SCAL=XV*XVN+YV*YVN+ZV*ZVN
+                  XPT=SCAL*XVN-XV
+                  YPT=SCAL*YVN-YV
+                  ZPT=SCAL*ZVN-ZV
+                  Val2=SQRT(XPT*XPT+YPT*YPT+ZPT*ZPT)
+                  IF (ABS(Val2-Val1).LE.CRIT) THEN
+                     INDIC(IP)=IPoin
+                     NBON=NBON+1
+                  ENDIF
+               ENDDO
+C  Intersection du maillage avec une SPHERE
+C --------------------------
+            ELSE IF (IMC.EQ.5) THEN
+               CALL LIROBJ('POINT ',IPoin1,1,IRetou)
+               CALL LIROBJ('POINT ',IPoin2,1,IRetou)
+               IF (IERR.NE.0) THEN
+                  SEGDES MELEME
+                  RETURN
+               ENDIF
+               IRef1=(IPoin1-1)*idimp1
+               IRef2=(IPoin2-1)*idimp1
+               XP1=XCOOR(IRef1+1)
+               XV=XCOOR(IRef2+1)-XP1
+               YP1=XCOOR(IRef1+2)
+               YV=XCOOR(IRef2+2)-YP1
+               IF (IDIM.GE.3) THEN
+                  ZP1=XCOOR(IRef1+3)
+                  ZV=XCOOR(IRef2+3)-ZP1
+               ELSE
+                  ZP1=0.D0
+                  ZV=0.D0
+               ENDIF
+C  Calcul du rayon de la sphere
+               Rayon=SQRT(XV*XV+YV*YV+ZV*ZV)
+               IF (Rayon.EQ.0.D0) THEN
+                  CALL ERREUR(21)
+                  SEGDES MELEME
+                  RETURN
+               ENDIF
+C  Recherche des points verifiant la condition d'appartenance (INDIC)
+               SEGINI INDIC
+               NBON=0
+               DO IP=1,NBELEM
+                  IPoin=NUM(1,IP)
+                  IRef=(IPoin-1)*idimp1
+                  XV=XCOOR(IRef+1)-XP1
+                  YV=XCOOR(IRef+2)-YP1
+                  ZV=0.D0
+                  IF (IDIM.GE.3) ZV=XCOOR(IRef+3)-ZP1
+                  Val1=SQRT(XV*XV+YV*YV+ZV*ZV)
+                  IF (ABS(Val1-Rayon).LE.CRIT) THEN
+                     INDIC(IP)=IPoin
+                     NBON=NBON+1
+                  ENDIF
+               ENDDO
+C  Intersection du maillage avec un TORE
+C --------------------------
+            ELSE IF (IMC.EQ.6) THEN
+               CALL LIROBJ('POINT ',IPoin1,1,IRetou)
+               CALL LIROBJ('POINT ',IPoin2,1,IRetou)
+               CALL LIROBJ('POINT ',IPoin3,1,IRetou)
+               CALL LIROBJ('POINT ',IPoin4,1,IRetou)
+               IF (IERR.NE.0) THEN
+                  SEGDES MELEME
+                  RETURN
+               ENDIF
+               IRef1=(IPoin1-1)*idimp1
+               IRef2=(IPoin2-1)*idimp1
+               IRef3=(IPoin3-1)*idimp1
+               IRef4=(IPoin4-1)*idimp1
+               XP1=XCOOR(IRef1+1)
+               XVN=XCOOR(IRef2+1)-XP1
+               XV=XCOOR(IRef3+1)-XP1
+               XPT=XCOOR(IRef4+1)-XP1
+               YP1=XCOOR(IRef1+2)
+               YVN=XCOOR(IRef2+2)-YP1
+               YV=XCOOR(IRef3+2)-YP1
+               YPT=XCOOR(IRef4+2)-YP1
+               IF (IDIM.GE.3) THEN
+                  ZP1=XCOOR(IRef1+3)
+                  ZVN=XCOOR(IRef2+3)-ZP1
+                  ZV=XCOOR(IRef3+3)-ZP1
+                  ZPT=XCOOR(IRef4+3)-ZP1
+               ELSE
+                  ZP1=0.D0
+                  ZVN=0.D0
+                  ZV=0.D0
+                  ZPT=0.D0
+               ENDIF
+C  Determination du vecteur directeur de l'axe du tore
+               DVN=SQRT(XVN*XVN+YVN*YVN+ZVN*ZVN)
+               IF (DVN.EQ.0.D0) THEN
+                  CALL ERREUR(21)
+                  SEGDES MELEME
+                  RETURN
+               ENDIF
+               XVN=XVN/DVN
+               YVN=YVN/DVN
+               ZVN=ZVN/DVN
+C  Calcul du grand rayon du tore
+               GRayon=XV*XV+YV*YV+ZV*ZV
+               IF (GRayon.EQ.0.D0) THEN
+                  CALL ERREUR(21)
+                  SEGDES MELEME
+                  RETURN
+               ENDIF
+C  Calcul du petit rayon du tore
+               SCAL=XPT*XVN+YPT*YVN+ZPT*ZVN
+               XV=XPT-SCAL*XVN
+               YV=YPT-SCAL*YVN
+               ZV=ZPT-SCAL*ZVN
+               Val1=SQRT(Grayon/(XV*XV+YV*YV+ZV*ZV))
+               XV=XV*Val1-XPT
+               YV=YV*Val1-YPT
+               ZV=ZV*Val1-ZPT
+               PRayon=SQRT(XV*XV+YV*YV+ZV*ZV)
+               IF (PRayon.EQ.0.D0) THEN
+                  CALL ERREUR(21)
+                  SEGDES MELEME
+                  RETURN
+               ENDIF
+C  Recherche des points verifiant la condition d'appartenance (INDIC)
+               SEGINI INDIC
+               NBON=0
+               DO IP=1,NBELEM
+                  IPoin=NUM(1,IP)
+                  IRef=(IPoin-1)*idimp1
+                  XPT=XCOOR(IRef+1)-XP1
+                  YPT=XCOOR(IRef+2)-YP1
+                  ZPT=0.D0
+                  IF (IDIM.GE.3) ZPT=XCOOR(IRef+3)-ZP1
+                  SCAL=XPT*XVN+YPT*YVN+ZPT*ZVN
+                  XV=XPT-SCAL*XVN
+                  YV=YPT-SCAL*YVN
+                  ZV=ZPT-SCAL*ZVN
+                  Val1=SQRT(GRayon/(XV*XV+YV*YV+ZV*ZV))
+                  XV=XV*Val1-XPT
+                  YV=YV*Val1-YPT
+                  ZV=ZV*Val1-ZPT
+                  Val2=SQRT(XV*XV+YV*YV+ZV*ZV)
+                  IF (ABS(Val2-PRayon).LE.CRIT) THEN
+                     INDIC(IP)=IPoin
+                     NBON=NBON+1
+                  ENDIF
+               ENDDO
+            ENDIF
+C  Creation du maillage de sortie
+C ----------------------
+            IF (NBON.EQ.0) THEN
+               CALL ERREUR(18)
+               SEGDES MELEME
+               SEGSUP INDIC
+               RETURN
+            ENDIF
+            NBEL=NBELEM
+            NBNN=1
+            NBELEM=NBON
+            NBSOUS=0
+            NBREF=0
+            SEGINI IPT1
+            IPT1.ITYPEL=1
+            IPLAC=0
+            DO IP=1,NBEL
+               IF (INDIC(IP).NE.0) THEN
+                  IPLAC=IPLAC+1
+                  IPT1.NUM(1,IPLAC)=INDIC(IP)
+                  IPT1.ICOLOR(IPLAC)=IDCOUL
+               ENDIF
+            ENDDO
+            SEGSUP INDIC
+            SEGDES MELEME,IPT1
+            CALL ECROBJ('MAILLAGE',IPT1)
+
+      RETURN
+
+
+
+ 300  CONTINUE
+c       IF(IIMPI.EQ.333) WRITE(IOIMP,*) 'POINT syntaxe 3 :'
+C -------------------------------
+C  Operateur POINT - syntaxe 3 :
+C -------------------------------
+C  Extraction d'un CHAML ou d'un CHPO du(des) point(s) verifiant une
+C  condition indiquee par MOT1.
+C    Geo1 = POINT Che1 Mot1 ...
+
+         Val1=0.D0
+         Val2=0.D0
+         IPList=0
+         IF (IMM.GT.2) THEN
+            CALL LIRREE(Val1,1,IRetou)
+            IF (IERR.NE.0) RETURN
+            IF (IMM.EQ.9) THEN
+               CALL LIRREE(Val2,1,IRetou)
+               IF (IERR.NE.0) RETURN
+            ENDIF
+         ENDIF
+         CALL LIRMOT(MOABS,1,IAB,0)
+         CALL LIRMOT(MOTAV,2,IAV,0)
+         IF (IAV.EQ.0) IAV=1
+         CALL LIROBJ('LISTMOTS',IPList,0,IRetou)
+         IF (IERR.NE.0) RETURN
+         CALL LIROBJ('CHPOINT ',IPCHP,0,IRetou)
+         IF (IERR.NE.0) RETURN
+         IF (IRetou.NE.0) THEN
+            CALL EXPCHP(IPCHP,IMM,IAB,IAV,IPList,Val1,Val2,IPMAIL)
+         ELSE
+            CALL LIROBJ('MCHAML  ',IPCHE,1,IRetou)
+            IF (IERR.NE.0) RETURN
+            CALL EXPCHE(IPCHE,IMM,IAB,IAV,IPList,Val1,Val2,IPMAIL)
+         ENDIF
+         IF (IERR.EQ.0) CALL ECROBJ('MAILLAGE',IPMAIL)
+
+      RETURN
+
+      END
+
+
+

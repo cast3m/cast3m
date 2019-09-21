@@ -1,0 +1,158 @@
+C MASSXR    SOURCE    FANDEUR   11/07/19    21:16:36     7041
+
+      subroutine  MASSXR (ISOUSS,IMODEL,
+     $                    IVAMAT,IVACAR,NMATT,CMATE,
+     $                    IIPDPG,IPMASS,IRETER)
+C
+C Les sous programmes affectés à un type d'élément sont chargés
+C de faire le tri des éléments suivant le type d'enrichissement.
+c
+C Par exemple le XQ4R peut sortir :
+c     - des matrices ne comportant que des ddl standard du QUA4,
+c     - des matrices enrichies par le saut du à la fissure,
+c     - des matrices enrichies par le saut et par les fonctions de
+c       la mécanique de la rupture
+c
+C Donc pour 1 type d'EF, on crée 1+NENR objet elementaire IMATTT
+C Pour y parvenir, on utilise le tableau LOCIRI (=LOCal IRIgel)
+c qui est l'équivalent local de IRIGEL et qui doit etre rempli
+C par les sous programmes élémentaires (comme MASSX.eso).
+c Il est dimensionné en dur à (10,6) au lieu de (8,1+NENR)
+c pour etre large.
+C
+C Finalement, MASSXR.eso recupere LOCIRI, ajuste et remplit IRIGEL
+c
+      IMPLICIT REAL*8 (A-H,O-Z)
+      IMPLICIT INTEGER (I-N)
+C
+-INC CCOPTIO
+-INC SMRIGID
+-INC SMINTE
+-INC SMMODEL
+-INC SMELEME
+C
+      CHARACTER*8 CMATE
+      PARAMETER (NBENRMAX=5)
+      INTEGER    LOCIRI(10,(1+NBENRMAX))
+c
+      SEGMENT MPTVAL
+        INTEGER      IPOS(NS),NSOF(NS)
+        INTEGER      IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+c
+c      write(ioimp,*) '##### entree dans MASSxr #####'
+      IRETER=0
+C
+Ccccc on active le modele, les caracteristiques materiau
+c      segact,imodel    deja actif
+      mele = nefmod
+
+C       element XQ4R (2D rupture) ou element XC8R (3D rupture)
+      IF (mele.ne.263 .and. mele.ne.264) then
+         call erreur (21)
+         RETURN
+      ENDIF
+
+C      mptval=ivacar
+c      segact mptval    deja actif
+
+Ccccc on initialise LOCIRI
+      do i1=1,10
+       do i2=1,(1+NBENRMAX)
+         LOCIRI(i1,i2) = 0
+       enddo
+      enddo
+C
+ccccc Appel au calcul des rigidites elementaires
+         call MASSX(ivamat,ivacar,NMATT,CMATE,
+     &              imodel,LOCIRI)
+c
+ccccc de combien faut-il augmenter INFELE ?
+C     write(ioimp,*) 'LOCIRI=',(LOCIRI(1,iou),iou=1,5)
+      nrigsup = -1
+      do i=1,(1+NBENRMAX)
+        if(LOCIRI(1,i).ne.0)  nrigsup=nrigsup+1
+      enddo
+      if (nrigsup.eq.-1) then
+       write(ioimp,*) 'on n a meme pas reussi a construire des ',
+     &                'rigidites associees aux ddl std'
+        CALL ERREUR(21)
+        return
+      endif
+c      write(ioimp,*) 'nrigsup=',nrigsup
+C      if (nrigsup.gt.0)
+C     & write(ioimp,*) 'on doit augmenter IRIGEL de MASS de',nrigsup,
+C     & ' rigidites elementaires'
+
+c      write(ioimp,*) 'ccccc on ouvre en modification MRIGID'
+      MRIGID=IPMASS
+      segact,MRIGID*mod
+
+      NRIGE   = IRIGEL(/1)
+      nrigini = IRIGEL(/2)
+      NRIGEL  = nrigini + nrigsup
+      IF (nrigsup.gt.0) then
+        segadj,MRIGID
+      ENDIF
+
+c      write(ioimp,*) 'ccccc remplissage de MRIGID'
+*
+c  Cas ou il ya une partie std -----------------------
+      if (LOCIRI(1,1).ne.0) then
+*
+c   + partie non enrichie (=std)
+        do i1 = 1, NRIGE
+          IRIGEL(i1,isouss)=LOCIRI(i1,1)
+        enddo
+        COERIG(isouss)= 1.D0
+
+c   + partie enrichie
+        if (nrigsup.gt.0) then
+C       write(ioimp,*) 'c       modification de la taille de MRIGID de MASS'
+C     &                ,isouss,'->',isouss+nrigsup
+          ia = ISOUSS
+          iloc = 1
+          do i = 1, nrigsup
+            ia = ia + 1
+c       petit ajout pour le cas ou on a "sauté" le H-enrichissement
+ 1000       continue
+            iloc = iloc + 1
+C         write(ioimp,*) 'massxr: nrigini,ia,iloc=',nrigini,ia,iloc
+            if( (LOCIRI(1,iloc)) .eq. 0)    goto 1000
+            do i1 = 1,NRIGE
+C     write(ioimp,*)'IRIGEL(',i1,ia,')=LOCIRI(',i1,iloc,')=',LOCIRI(i1,iloc)
+              IRIGEL(i1,ia) = LOCIRI(i1,iloc)
+            enddo
+            COERIG(ia)= 1.D0
+          enddo
+          ISOUSS = ISOUSS + nrigsup
+        endif
+c
+c  Cas ou il n y a pas (plus) de partie std -----------------------
+      ELSE
+
+c   + partie enrichie
+        ia = ISOUSS - 1
+        iloc = 1
+        do i = 0, nrigsup
+          ia = ia + 1
+c         petit ajout pour le cas ou on a "sauté" le H-enrichissement
+ 2000     continue
+          iloc = iloc + 1
+          if( (LOCIRI(1,iloc)) .eq. 0)    goto 2000
+          do i1=1,NRIGE
+            IRIGEL(i1,ia) = LOCIRI(i1,iloc)
+          enddo
+          COERIG(ia)= 1.D0
+        enddo
+        ISOUSS = ISOUSS + nrigsup
+
+      endif
+*
+c      write(ioimp,*) 'IRIGEL=',(IRIGEL(1,iou),iou=1,NRIGEL)
+
+      return
+      end
+
+

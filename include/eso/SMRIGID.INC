@@ -1,0 +1,98 @@
+*         -INC SMRIGID
+*
+*      OBJET RIGIDITE
+*
+      SEGMENT   MRIGID
+        CHARACTER*8       MTYMAT
+        REAL*8            COERIG(NRIGEL)
+        INTEGER           IRIGEL(8,NRIGEL)
+        INTEGER           ICHOLE,IMGEO1,IMGEO2,IFORIG
+        INTEGER           ISUPEQ,JRCOND,JRDEPP,JRDEPD
+        INTEGER           JRELIM,JRGARD,JRTOT,IMLAG
+	INTEGER           IPROFO,IVECRI
+      ENDSEGMENT
+      POINTEUR  RI1.MRIGID,RI2.MRIGID,RI3.MRIGID
+      POINTEUR  RI4.MRIGID,RI5.MRIGID,RI6.MRIGID
+*
+      SEGMENT   XMATRI
+        INTEGER           SYMRE
+        REAL*8            RE(NLIGRD,NLIGRP,NELRIG)
+      ENDSEGMENT
+      POINTEUR  XMATR1.XMATRI,XMATR2.XMATRI,XMATR3.XMATRI
+      POINTEUR  XMATR4.XMATRI,XMATR5.XMATRI,XMATR6.XMATRI
+*
+      SEGMENT   DESCR
+        CHARACTER*4         LISINC(NLIGRP),LISDUA(NLIGRD)
+        INTEGER             NOELEP(NLIGRP),NOELED(NLIGRD)
+      ENDSEGMENT
+      POINTEUR  DES1.DESCR,DES2.DESCR,DES3.DESCR,DES4.DESCR
+*
+      SEGMENT   IMGEOD
+        INTEGER             IMGEOR(NBGEOR)
+      ENDSEGMENT
+*
+*
+*   NRIGEL        : NOMBRE D'OBJET ELEMENTAIRE DE MRIGIDITE
+*   NLIGRP        : NOMBRE D'INCONNUES PRIMALES D'UNE MATRICE
+*                   ELEMENTAIRE.
+*   NLIGRD        : NOMBRE D'INCONNUES DUALES D'UNE MATRICE
+*                   ELEMENTAIRE.
+*   COERIG(I)     : COEFFICIENT MULTIPLICATEUR
+*   IRIGEL(1,I)   : POINTEUR SUR L'OBJET GEOMETRIE
+*   IRIGEL(2,I)   : POINTEUR SUR UN OBJET GEOMETRIQUE (CAS FROTTEMENT)
+*   IRIGEL(3,I)   : POINTEUR SUR LE SEGMENT DESCRIPTIF D'UNE
+*                        MATRICE ELEMENTAIRE.(SEGMENT DESCR)
+*   IRIGEL(4,I)   : POINTEUR SUR LE SEGMENT CONTENANT LES MATRICES
+*                   ELEMENTAIRES (XMATRI)
+*   IRIGEL(5,I)   : NUMERO DE L'HARMONIQUE DE FOURIER
+*   IRIGEL(6,I)   : NATURE DE LA RELATION DEFINISSANT LA RIGIDITE
+*                   0  EGALITE
+*                  -1  INEGALITE INFERIEURE
+*                  +1  INEGALITE SUPERIEURE
+*   IRIGEL(7,1)   : 0   LA MATRICE EST SYMETRIQUE
+*                 : 1   LA MATRICE EST ANTISYMETRIQUE
+*                 : 2   LA MATRICE NE POSSEDE PAS DE SYMETRIES
+*   IRIGEL(8,I)   : 0   pas de dependance
+*
+*   SYMRE         : 0   LA MATRICE EST SYMETRIQUE
+*                 : 1   LA MATRICE EST ANTISYMETRIQUE
+*                 : 2   LA MATRICE NE POSSEDE PAS DE SYMETRIES
+*
+*   RE(1,1,K )    : DEBUT DE VALEURS DE LA Kieme MATRICE ELEMENTAIRE
+*
+*   NOELEP(I)=J   : LA I EME INCONNUE PRIMAL DE LA MATRICE PORTE SUR
+*                   LE J EME NOEUD DE L'ELEMENT.
+*   LISINC(I)=INO : LA I EME INCONNUE PRIMAL DE LA MATRICE EST DE
+*                   TYPE INO
+*   NOELED(I)=J   : LA I EME INCONNUE DUALE  DE LA MATRICE PORTE SUR
+*                   LE J EME NOEUD DE L'ELEMENT .
+*   LISDUA(I)=INO : LA I EME INCONNUE DUALE DE LA MATRICE EST DE
+*                   TYPE INO
+*
+*   MTYMAT         : TYPE DE LA MATRICE RIGIDITE OU MASSE
+*
+*   ICHOLE        : SI DIFFERENT DE ZERO EST EGAL AU POINTEUR
+*                        SUR SEGMENT DE TYPE MMATRI(VOIR SMMATRI)
+*                        CONTENANT LA MATRICE DEJA TRIANGULARISEE.
+*   ISUPEQ        : POINTEUR EVENTUEL SUR UNE TABLE (UNILATERAL)
+*   IMGEO1        : UNE RESOLUTION A DEJA EU LIEU.POINTEUR SUR
+*                        SUR UN TABLEAU CONTENANT LES POINTEURS DES
+*                        OBJETS GEOMETRIQUES CREES.(TABLEAU DANS IMGEOD)
+*
+*   IMGEO2        : POINTEUR SUR UN PROTOTYPE DU CHAMPOINT DUAL
+*
+*   IFORIG        : CORRESPOND A L'OPTION IFOUR (VOIR CCOPTIO)
+*   JRCOND        : pointeur sur une matrice condensee
+*   JRDEPP        : pointeur sur une matrice de dependance primale
+*   JRDEPD        : pointeur sur une matrice de dependance duale
+*   JRELIM        : pointeur sur la matrices des relations éliminées
+*   JRGARD        : pointeur sur la matrice restante
+*   JRTOT         : pointeur sur la matrice totale (JRELIM + JRGARD)
+*   IPROFO        : pointeur sur un segment decrivant la profondeur
+*                   de le numerotation
+*   IVECRI        : pointeur vers un segment decrivant le passage
+*                   vecteur-Chpoint et vice versa
+*     LA MATRICE ELEMENTAIRE  EST ORGANISEE COMME BON VOUS SEMBLE ELLE
+*     EST SEULEMENT TRIANGULAIRE INFERIEURE STOCKEE LIGNE PARLIGNE
+*
+

@@ -1,0 +1,1067 @@
+C PIOCAP    SOURCE    CB215821  18/09/21    21:16:21     9930
+      SUBROUTINE PIOCAP(IPMODL,IPCHE1,IPCHP1,IPCHP0,ICHAX1,
+     &                  IM,IPCHE2,IRET)
+C_______________________________________________________________________
+C
+C
+C    Entr{es:
+C    ________
+C
+C           IPMODL Pointeur sur un MMODEL
+C           IPCHE1 Pointeur sur un MCHAML de contraintes de KIRCHHOFF
+C                                      OU DE DEFORMATIONS
+C                                      OU DE MATRICES DE HOOKE
+C           IPCHP1 Pointeur sur le CHAMPOINT d{placements entre
+C                  configuration de depart et arrivee
+C           IM     Flag ,= 0 KIRCHHOFF------> CAUCHY
+C                        = 1 CAUCHY-------> KIRCHHOFF
+C           attention si derivee de jauman on fait RTENS   RART avec R matrice
+C           de rotation
+C    Sorties:
+C    ________
+C
+C           IPCHE2 Pointeur sur un MCHAML de CONTRAINTES
+C                                      OU DE DEFORMATIONS
+C                                      OU DE MATRICES DE HOOKE
+C           IRET   1 ou 0 suivant succes ou pas
+C
+C
+C   PASSAGE AUX NOUVEAUX CHAMELEMS PAR P.DOWLATYARI LE 12/4/91
+C_______________________________________________________________________
+C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*
+-INC CCOPTIO
+-INC CCHAMP
+-INC SMCHAML
+-INC SMCHPOI
+-INC SMELEME
+-INC SMCOORD
+-INC SMMODEL
+-INC SMINTE
+-INC SMLREEL
+*
+      SEGMENT MWRK1
+       REAL*8 XE(3,NBNN) ,XE1(3,NBNN) ,XE2(3,NBNN)
+      ENDSEGMENT
+*
+      SEGMENT MWRK2
+       REAL*8 SHPWRK(6,NBNN)
+      ENDSEGMENT
+*
+      SEGMENT MWRK3
+       REAL*8 STRESS(NBPTEL,NSTRS),STRES1(NBPTEL,NSTRS)
+      ENDSEGMENT
+*
+      SEGMENT MWRK4
+       REAL*8 XEL(3,3), BPSS (3,3), XDDL(18), XDDLOC(18)
+      ENDSEGMENT
+*
+      SEGMENT MWRK5
+        REAL*8 BGR(NGRA,LRE),BB(2,NGRA),gradi(ngra),R(ngra),u(ngra)
+        REAL*8 TENS(9),tentra(9),xddls2(lre)
+      ENDSEGMENT
+*
+      SEGMENT MWRK6
+       INTEGER ITRES1(NBPTEL)
+       REAL*8 PRODDI(NBPTEL,LHOO2),PRODDO(NBPTEL,LHOO2)
+       REAL*8 DDHOOK(LHOOK,LHOOK),DDHOMU(LHOOK,LHOOK)
+       REAL*8 VEC(LHOOK),VEC2(LHOOK)
+      ENDSEGMENT
+*
+      SEGMENT NOTYPE
+        CHARACTER*16 TYPE(NBTYPE)
+      ENDSEGMENT
+*
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS)    ,NSOF(NS)
+        INTEGER      IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+*
+*as xfem 2010_01_13
+      SEGMENT MRACC
+        INTEGER TLREEL(NBNN)
+      ENDSEGMENT
+
+      SEGMENT TABA
+        REAL*8 TABA1(IDIM,NBNN),TABA2(IDIM,NBNN)
+      ENDSEGMENT
+*fin as xfem 2010_01_13
+
+      CHARACTER*(NCONCH) CONM
+      CHARACTER*8 CMATE
+      PARAMETER ( NINF=3 )
+      INTEGER INFOS(NINF)
+*as xfem 2010_01_22
+      DIMENSION UDPGE(3)
+      LOGICAL ldpge,lsupdp,lsupno,lsupdp0
+*
+      NHRM=NIFOUR
+      IRET=0
+      IMESS=0
+*
+*     Verification du lieu support du MCHAML
+*
+      call reduaf(ipche1,ipmodl,ipch,0,iretou,kerr)
+      if (iretou.ne.1) call erreur(kerr)
+      if (ierr.ne.0) return
+      ipche1=ipch
+      CALL QUESUP (IPMODL,IPCHE1,5,0,ISUP,IRET2)
+      IF (ISUP.GT.1) RETURN
+c
+*as xfem 2010_01_13
+*   Calcul du niveau d'enrichissement du modèle :
+      IF (ichax1.ne.0) then
+         ipchp2=0
+         MCHAM1=ICHAX1
+         SEGACT MCHAM1
+         nbenr1=MCHAM1.IELVAL(/1)
+         if (nbenr1.gt.1) then
+           SEGDES,MCHAM1
+           write(ioimp,*) 'XFEM : on ne sait pas traiter les grandes ',
+     &              'transformations avec un niveau denrichissement >1'
+           CALL ERREUR(21)
+           return
+         endif
+*   Calcul des déplacements vrais :
+        call XPOST1(IPCHP1,IPMODL,IPCHP2)
+      ENDIF
+*fin as xfem 2010_01_13
+*
+*   CONTRAINTES (KCAS=1) OU DEFORMATIONS (KCAS=2)
+*                        OU MATRICES DE HOOKE (KCAS=3)
+*
+      MCHELM=IPCHE1
+      SEGACT MCHELM
+      IF (TITCHE.EQ.'CONTRAINTES') THEN
+         KCAS=1
+      ELSE IF(TITCHE.EQ.'DEFORMATIONS') THEN
+         KCAS=2
+      ELSE IF(TITCHE.EQ.'MATRICE DE HOOKE') THEN
+         KCAS=3
+      ELSE
+         MOTERR(1:8)  ='CONTRAIN'
+         MOTERR(9:16) ='DEFORMAT'
+         MOTERR(17:24)='MATRICE '
+         CALL ERREUR(109)
+         SEGDES MCHELM
+         RETURN
+      ENDIF
+C      SEGDES MCHELM
+C
+C     ON CONVERTIT LE CHAMP POINT EN CHAMP PAR ELEMENT
+C____________________________________________________________________
+C
+      CALL  CHAME1(0,IPMODL,IPCHP1,' ',IPCHE3,1)
+*as xfem 2010_01_13
+      if(ichax1.ne.0) then
+* IPCHP1 : Deplacement enrichi : config initiale -> config finale
+* Deplacement enrichi : config de reference -> config finale
+        CALL CHAME1(0,IPMODL,IPCHP0,' ',IPCHE0,1)
+* Deplacement vrai : config initiale -> config finale
+        CALL CHAME1(0,IPMODL,IPCHP2,' ',IPCHE4,1)
+      endif
+*fin as xfem 2010_01_13
+C
+C     ACTIVATION DU MODELE
+C
+      MMODEL=IPMODL
+      SEGACT MMODEL
+      NSOUS=KMODEL(/1)
+      N1=NSOUS
+C
+C     ON NE TIENT PAS COMPTE D'UN EVENTUEL MODELE CHARGEMENT
+C
+      DO III = 1,NSOUS
+        IMODEL = KMODEL(III)
+        SEGACT IMODEL
+        IF (FORMOD(1).EQ.'CHARGEMENT') N1=N1-1
+C        SEGDES IMODEL
+      END DO
+C
+C     CREATION DU MCHELM
+C
+      IF (KCAS.EQ.1) L1=11
+      IF (KCAS.EQ.2) L1=12
+      IF (KCAS.EQ.3) L1=16
+      N3=6
+      SEGINI MCHELM
+      IF(KCAS.EQ.1) TITCHE='CONTRAINTES'
+      IF(KCAS.EQ.2) TITCHE='DEFORMATIONS'
+      IF(KCAS.EQ.3) TITCHE='MATRICE DE HOOKE'
+      IFOCHE=IFOUR
+      IPCHE2=MCHELM
+C____________________________________________________________________
+C
+C     DEBUT DE LA BOUCLE SUR LES DIFFERENTES ZONES
+C____________________________________________________________________
+C
+      ISOUS=0
+      DO 500 ISOU=1,NSOUS
+C
+C    INITIALISATION
+C
+      MWRK1=0
+      MWRK2=0
+      MWRK3=0
+      MWRK4=0
+      IVADEP=0
+      NDEP=0
+      IVAST1=0
+      IVASTR=0
+      NSTR=0
+      MODEPV=0
+      MODEPL=0
+      MOSTRS=0
+C
+C     ON RECUPERE L INFORMATION GENERALE
+C
+      IMODEL=KMODEL(ISOU)
+      SEGACT IMODEL
+      IF (FORMOD(1).EQ.'CHARGEMENT') GOTO 500
+      IPMAIL = imodel.IMAMOD
+      CONM   = imodel.CONMOD
+      IIPDPG = imodel.IPDPGE
+      IIPDPG = IPTPOI(IIPDPG)
+C
+C     TRAITEMENT DU MODELE
+C
+C On n'utilise pas PICA avec un des modeles interdits (OTTOSEN, UO2) ou
+C le modele utilisateur UMAT (cas contrainte deja de Cauchy)
+C Cette partie de l'operateur est a ameliorer (juste copie du CHAMP !!!)
+        IPICA = 1
+        IF ( INATUU.EQ.108 .OR. INATUU.EQ.42 .OR. INATUU.EQ.-1 ) THEN
+          IPICA = 0
+        ENDIF
+
+      MELE=NEFMOD
+      MELEME=IMAMOD
+      CMATE=CMATEE
+      ideri=ideriv
+C____________________________________________________________________
+C
+C     INFORMATION SUR L'ELEMENT FINI
+C____________________________________________________________________
+C
+*      CALL ELQUOI(MELE,0,5,IPINF,IMODEL)
+*      IF (IERR.NE.0) THEN
+*        SEGDES IMODEL,MMODEL
+*        SEGSUP MCHELM
+*        CALL DTCHAM(IPCHE3)
+*        RETURN
+*      ENDIF
+*      INFO=IPINF
+      MFR  =INFELE(13)
+      IPORE=INFELE(8)
+      NBG  =INFELE(6)
+      NBGS =INFELE(4)
+      NSTRS=INFELE(16)
+      LRE  =INFELE(9)
+      LW   =INFELE(7)
+      LHOOK=INFELE(10)
+      LHOO2=LHOOK*LHOOK
+      NDDL =INFELE(15)
+*      MINTE=INFELE(11)
+      if (infmod(/1).lt.7) goto 500
+      minte=infmod(7)
+      if (minte.eq.0) goto 500
+      IPMINT=MINTE
+      MINTE1=INFMOD(8)
+      ISOUS=ISOUS+1
+      IMACHE(ISOUS)=IPMAIL
+      CONCHE(ISOUS)=CONMOD
+*      SEGSUP INFO
+C
+C     CREATION DU TABLEAU INFOS
+C
+      INFOS(1)=0
+      INFOS(2)=0
+      INFOS(3)=NIFOUR
+C
+      INFCHE(ISOUS,1)=0
+      INFCHE(ISOUS,2)=0
+      INFCHE(ISOUS,3)=NHRM
+      INFCHE(ISOUS,4)=MINTE
+      INFCHE(ISOUS,5)=0
+      INFCHE(ISOUS,6)=5
+C
+C     INITIALISATION DE MINTE
+C
+      SEGACT MINTE
+      NBPGAU=POIGAU(/1)
+C
+C  Cas des modes de calculs en DEFORMATIONS GENERALISEES
+      CALL INFDPG(MFR,IFOUR, ldpge,ndpge)
+C
+C     ACTIVATION DU MELEME
+C
+      SEGACT MELEME
+      NBNN  =NUM(/1)
+      NBELEM=NUM(/2)
+*as xfem 2010_01_13
+       if (MFR.eq.63) then
+         NBSH=INFELE(8)
+       else
+         NBSH=NBNN
+       endif
+*fin as xfem 2010_01_13
+      IPPORE=0
+      IF(MFR.EQ.33) IPPORE=NBNN
+C____________________________________________________________________
+C
+C     RECHERCHE DES NOMS DE COMPOSANTES
+C____________________________________________________________________
+C
+      lsupno=.false.
+      IF(KCAS.EQ.1) THEN
+        if(lnomid(4).ne.0) then
+          nomid=lnomid(4)
+          segact nomid
+          mostrs=nomid
+          nstr=lesobl(/2)
+          nfac=lesfac(/2)
+        else
+         lsupno=.true.
+         CALL IDCONT(IMODEL,IFOUR,MOSTRS,NSTR,NFAC)
+         endif
+      ENDIF
+      IF(KCAS.EQ.2) THEN
+        if(lnomid(5).ne.0) then
+         nomid=lnomid(5)
+         segact nomid
+         nstr=lesobl(/2)
+         mostrs=nomid
+         nfac=lesfac(/2)
+        else
+         lsupno=.true.
+         CALL IDDEFO(IMODEL,IFOUR,MOSTRS,NSTR,NFAC)
+        endif
+      ENDIF
+*
+      IF(KCAS.EQ.3) THEN
+
+*         CAS PARTICULIER DST,JOT3,JOI4 ORTHOTROPES
+          IF((MELE.EQ.93.OR.MELE.EQ.87.OR.MELE.EQ.88).AND.
+     &        CMATE.NE.'ISOTROPE')THEN
+            NBROBL=3
+            NBRFAC=0
+            SEGINI NOMID
+            LESOBL(1)='MAHO'
+            LESOBL(2)='V1X '
+            LESOBL(3)='V1Y '
+            NBTYPE=3
+            SEGINI NOTYPE
+            TYPE(1)='POINTEURLISTREEL'
+            TYPE(2)='REAL*8'
+            TYPE(3)='REAL*8'
+          ELSE
+            NBROBL   =1
+            NBRFAC   =0
+            SEGINI NOMID
+            LESOBL(1)='MAHO'
+            NBTYPE   =1
+            SEGINI NOTYPE
+            TYPE(1)  ='POINTEURLISTREEL'
+          ENDIF
+          NHOK = NBROBL
+          NFAC = NBRFAC
+          MOHOOK = NOMID
+          NOTYHO = NOTYPE
+      ENDIF
+C
+      if(lnomid(1).ne.0) then
+         nomid=lnomid(1)
+         segact nomid
+         modepl=nomid
+         ndep=lesobl(/2)
+         nfac=lesfac(/2)
+         lsupdp=.false.
+      else
+         lsupdp=.true.
+       CALL IDPRIM(IMODEL,0,MODEPL,NDEP,NFAC)
+      endif
+
+      if (ideri.eq.4) then
+        IF (LNOMID(3).NE.0) then
+          MOGRAD=LNOMID(3)
+          NOMID=MOGRAD
+          SEGACT,NOMID
+          NGRA=LESOBL(/2)
+C          segdes,nomid
+        ELSE
+          CALL IDGRAD(MFR,IFOUR,MOGRAD,NGRA,NFAC)
+        ENDIF
+        LADIM=0
+        IF (NGRA.EQ.4) LADIM=2
+        IF (NGRA.EQ.9) LADIM=3
+        IF (LADIM.EQ.0) THEN
+          CALL ERREUR(26)
+          RETURN
+        ENDIF
+      endif
+
+*as xfem 2010_01_13
+* On récupère les noms des composantes du cas massif, pour les depl. vrais
+      lsupdp0=.false.
+      IF (ichax1.ne.0) then
+         MFRTMP=1
+         call idprim(IMODEL,MFRTMP,MODEPV,NDEPV,NFACV)
+* as 2010_01_22
+         lsupdp0=.true.
+      ENDIF
+*fin as xfem 2010_01_13
+
+C  Recherche des DDL du noeud support des def. planes generalisees
+      IF (ldpge) THEN
+        IF (IIPDPG.LE.0) THEN
+          CALL ERREUR(925)
+        ELSE
+          CALL DEPDPG(IPCHP1,UDPGE(1),UDPGE(2),UDPGE(3),IIPDPG)
+        ENDIF
+        IF (IERR.NE.0) RETURN
+      ENDIF
+C____________________________________________________________________
+C
+C     VERIFICATION DE LEUR PRESENCE
+C____________________________________________________________________
+C
+      NBTYPE=1
+      SEGINI NOTYPE
+      MOTYPE=NOTYPE
+      TYPE(1)='REAL*8'
+      CALL KOMCHA(IPCHE3,IPMAIL,CONM,MODEPL,MOTYPE,1,INFOS,3,IVADEP)
+*as xfem 2010_01_13
+      if (ichax1.ne.0) then
+        call KOMCHA(IPCHE0,IPMAIL,CONM,MODEPL,MOTYPE,1,INFOS,3,IVADEP0)
+        call KOMCHA(IPCHE4,IPMAIL,CONM,MODEPV,MOTYPE,1,INFOS,3,IVADEPV)
+      endif
+*fin as xfem 2010_01_13
+      IF (IERR.NE.0)THEN
+       SEGSUP NOTYPE
+       GOTO 9990
+      ENDIF
+C*Z      MPTVAL=IVADEP
+C*Z      NDDD=IVAL(/1)
+C*Z      IF (ldpge) NDDD=NDEP-ndpge
+C
+
+      IF(KCAS.NE.3) THEN
+        CALL KOMCHA(IPCHE1,IPMAIL,CONM,MOSTRS,MOTYPE,1,INFOS,3,IVAST1)
+        SEGSUP NOTYPE
+        IF (IERR.NE.0) GOTO 9990
+        IF (ISUP.EQ.1) THEN
+             CALL VALCHE(IVAST1,NSTR,IPMINT,IPPORE,MOSTRS,MELE)
+        ENDIF
+      ELSE IF(KCAS.EQ.3) THEN
+        CALL KOMCHA(IPCHE1,IPMAIL,CONM,MOHOOK,NOTYHO,1,INFOS,3,IVAST1)
+        IF (IERR.NE.0) THEN
+          NOTYPE=NOTYHO
+          SEGSUP NOTYPE
+          GOTO 9990
+        ENDIF
+**      IF (ISUP.EQ.1) THEN
+**           ERREUR SI ISUP = 1
+**      ENDIF
+      ENDIF
+
+C
+C     RECHERCHE DE LA TAILLE DES MELVAL A ALLOUER
+C
+
+      IF(KCAS.NE.3) THEN
+        N1PTEL=NBGS
+        N1EL=NBELEM
+        NBPTEL=N1PTEL
+        NEL=N1EL
+C
+C       CREATION DU MCHAML DE LA SOUS ZONE
+C
+        N2=NSTRS
+        SEGINI MCHAML
+        ICHAML(ISOUS)=MCHAML
+        NS=1
+        NCOSOU=NSTRS
+        SEGINI MPTVAL
+        IVASTR=MPTVAL
+        NOMID=MOSTRS
+        SEGACT NOMID
+        DO 100 ICOMP=1,NSTRS
+          NOMCHE(ICOMP)=LESOBL(ICOMP)
+          TYPCHE(ICOMP)='REAL*8'
+          N2PTEL=0
+          N2EL=0
+          SEGINI MELVAL
+          IELVAL(ICOMP)=MELVAL
+          IVAL(ICOMP)=MELVAL
+ 100    CONTINUE
+C        SEGDES NOMID
+*
+      ELSE IF(KCAS.EQ.3) THEN
+*
+*       CREATION DU MCHAML DE LA SOUS ZONE
+*
+        N2=NHOK
+        SEGINI MCHAML
+        ICHAML(ISOUS)=MCHAML
+*
+*
+        NS=1
+        NCOSOU=NHOK
+        SEGINI MPTVAL
+        IVAHOK=MPTVAL
+        NOMID=MOHOOK
+        NOTYPE=NOTYHO
+        SEGACT NOMID
+        DO 110 ICOMP=1,NHOK
+          NOMCHE(ICOMP)=LESOBL(ICOMP)
+          TYPCHE(ICOMP)=TYPE(ICOMP)
+          IF(TYPCHE(ICOMP).EQ.'REAL*8') THEN
+             MPTVAL = IVAST1
+             MELVA1 = IVAL(ICOMP)
+             SEGINI, MELVAL=MELVA1
+             MPTVAL = IVAHOK
+             IELVAL(ICOMP)=MELVAL
+             IVAL(ICOMP)=MELVAL
+          ELSE
+            N1PTEL=0
+            N1EL=0
+            N2PTEL=NBGS
+            N2EL=NBELEM
+            NBPTEL=N2PTEL
+            NEL=N2EL
+            SEGINI MELVAL
+            IELVAL(ICOMP)=MELVAL
+            IVAL(ICOMP)=MELVAL
+          ENDIF
+ 110    CONTINUE
+C        SEGDES NOMID
+      ENDIF
+
+C
+*as xfem 2010_01_13
+      IF(MFR.EQ.1.or.MFR.EQ.63)THEN
+         SEGINI,MWRK1,MWRK2
+      ELSE IF(MFR.EQ.3)THEN
+         SEGINI,MWRK1,MWRK2,MWRK4
+      ENDIF
+      SEGINI,MWRK3,MWRK6
+C
+C ---------------------------------------------------
+C   TRANSFORMATION DES TENSEURS SI ELEMENTS MASSIFS sauf shb8
+C ---------------------------------------------------
+      IF((MFR.EQ.1.or.MFR.EQ.63).and.mele.ne.260)THEN
+
+*as xfem 2010_01_13
+      IF(MFR.EQ.63)   then
+         SEGINI,MRACC
+         SEGINI,TABA
+         SEGACT,MCHAM1
+      ENDIF
+*fin as xfem 2010_01_13
+      if(ideri.eq.4) then
+        segini mwrk5
+      endif
+
+C* Mode en DEFO.GENE (DEBUT)
+      IF (ldpge) THEN
+c* revoir le signe pour IM = 1 (CAPI) ????
+        rsig = 1.D0 - 2.D0*IM
+        IF (IDIM.EQ.2) THEN
+C* equivalent a IF (IFOUR.EQ.-3) THEN
+          XE2(3,1) = rsig * UDPGE(1)
+c* Finir avec les rotations RX et RY ?
+        ELSE
+C*        ELSE IF (IDIM.EQ.1) THEN
+          IF (IFOUR.EQ.7 .OR. IFOUR.EQ.8 .OR. IFOUR.EQ.14) THEN
+            XE2(2,1) = rsig * UDPGE(1)
+          ELSE IF (IFOUR.EQ.9 .OR. IFOUR.EQ.10) THEN
+            XE2(3,1) = rsig * UDPGE(1)
+          ELSE
+c*          ELSE IF (IFOUR.EQ.11) THEN
+            XE2(2,1) = rsig * UDPGE(1)
+            XE2(3,1) = rsig * UDPGE(2)
+          ENDIF
+        ENDIF
+      ENDIF
+C* Mode en DEFO.GENE (FIN)
+C
+C      BOUCLE SUR LES ELEMENTS
+C
+      DO 200 IB=1,NBELEM
+
+*as xfem 2010_01_13
+*      Cacul du niveau d'enrichissement de l'élément :
+       nbenrj=0
+       if (ichax1.ne.0) then
+         if (nbenr1.ne.0) then
+          MELVA1=MCHAM1.IELVAL(1)
+          SEGACT MELVA1
+          do i=1,NBNN
+            mlree1=MELVA1.IELCHE(I,IB)
+            tlreel(i)=mlree1
+            if (mlree1.ne.0) then
+              nbenrj=max(nbenrj,1)
+              segact,mlree1
+            endif
+          enddo
+          segdes MELVA1
+         endif
+       endif
+*fin as xfem 2010_01_13
+
+C  ON RECUPERE LES COORDONNEES DE DEUX CONFIGURATIONS
+C
+         CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+C
+         IF(IM.EQ.0)THEN
+            DO 220 INO=1,NBNN
+            DO 220 ID=1,IDIM
+              XE1(ID,INO)=XE(ID,INO)
+  220       CONTINUE
+C
+*as xfem 2010_01_13
+            if (nbenrj.eq.0) then
+              MPTVAL=IVADEP
+            else
+              MPTVAL=IVADEPV
+            endif
+*fin as xfem 2010_01_13
+             DO 230 ID=1,IDIM
+               MELVAL=IVAL(ID)
+               IBMN=MIN(IB,VELCHE(/2))
+              DO 230 INO=1,NBNN
+               INMN=MIN(INO,VELCHE(/1))
+               XE2(ID,INO)=XE(ID,INO)+VELCHE(INMN,IBMN)
+  230       CONTINUE
+C
+*as xfem 2010_01_13
+* Si élément enrichi :
+           if (nbenrj.ne.0) then
+*      Stockage des sauts config. initiale -> config de reference
+             MPTVAL=IVADEP0
+             DO ID=1,IDIM
+               MELVAL=IVAL(ID+IDIM)
+               IBMN=MIN(IB,VELCHE(/2))
+               do INO=1,NBNN
+                 INMN=MIN(INO,VELCHE(/1))
+                 TABA1(ID,INO)=VELCHE(INMN,IBMN)
+               ENDDO
+             enddo
+*      Stockage des sauts config. initiale -> config finale
+             MPTVAL=IVADEP
+             DO ID=1,IDIM
+               MELVAL=IVAL(ID+IDIM)
+               IBMN=MIN(IB,VELCHE(/2))
+               do INO=1,NBNN
+                 INMN=MIN(INO,VELCHE(/1))
+                 TABA2(ID,INO)= TABA1(ID,INO) + VELCHE(INMN,IBMN)
+               ENDDO
+             enddo
+           endif
+*fin as xfem 2010_01_13
+         ELSE
+*as xfem 2010_01_13
+            if (nbenrj.eq.0) then
+              MPTVAL=IVADEP
+            else
+              MPTVAL=IVADEPV
+            endif
+*fin as xfem 2010_01_13
+           DO 210 ID=1,IDIM
+               MELVAL=IVAL(ID)
+               IBMN=MIN(IB,VELCHE(/2))
+             DO 210 INO=1,NBNN
+               INMN=MIN(INO,VELCHE(/1))
+               XE1(ID,INO)=XE(ID,INO)+VELCHE(INMN,IBMN)
+  210      CONTINUE
+            DO 215 INO=1,NBNN
+            DO 215 ID=1,IDIM
+            XE2(ID,INO)=XE(ID,INO)
+  215      CONTINUE
+
+*as xfem 2010_01_13
+* Si élément enrichi :
+           if (nbenrj.ne.0) then
+*      Stockage des sauts config. initiale -> config de reference
+             MPTVAL=IVADEP0
+             do INO=1,NBNN
+               DO ID=1,IDIM
+                 MELVAL=IVAL(ID+IDIM)
+                 IBMN=MIN(IB,VELCHE(/2))
+                 INMN=MIN(INO,VELCHE(/1))
+                 TABA2(ID,INO)=VELCHE(INMN,IBMN)
+               ENDDO
+             enddo
+*      Stockage des sauts config. initiale -> config finale
+             MPTVAL=IVADEP
+             do INO=1,NBNN
+               DO ID=1,IDIM
+                 MELVAL=IVAL(ID+IDIM)
+                 IBMN=MIN(IB,VELCHE(/2))
+                 INMN=MIN(INO,VELCHE(/1))
+                 TABA1(ID,INO)= TABA2(ID,INO) + VELCHE(INMN,IBMN)
+               ENDDO
+             enddo
+           endif
+*fin as xfem 2010_01_13
+         ENDIF
+C
+C     ON RECUPERE LES CONTRAINTES DE KIRCHHOFF
+C              OU LES DEFORMATIONS
+C              OU LES MATRICES DE HOOKE
+C
+          MPTVAL=IVAST1
+
+          IF(KCAS.NE.3) THEN
+            DO 240 ICOMP=1,NSTRS
+              MELVAL=IVAL(ICOMP)
+              IBMN=MIN(IB,VELCHE(/2))
+              JGMN=VELCHE(/1)
+              DO 240 IGAU=1,NBPTEL
+                 IGMN=MIN(IGAU,JGMN)
+                 STRES1(IGAU,ICOMP)=VELCHE(IGMN,IBMN)
+  240       CONTINUE
+*
+          ELSE IF(KCAS.EQ.3) THEN
+            MELVAL=IVAL(1)
+            IBMN=MIN(IB,IELCHE(/2))
+            JGMN=IELCHE(/1)
+            DO 241 IGAU=1,NBPTEL
+              IGMN=MIN(IGAU,JGMN)
+              MLREEL=IELCHE(IGMN,IBMN)
+              SEGACT,MLREEL
+              DO 242 IJ=1,LHOO2
+                PRODDI(IGAU,IJ)=PROG(IJ)
+  242         CONTINUE
+C             SEGDES MLREEL
+  241       CONTINUE
+          ENDIF
+
+C
+*as xfem 2010_01_13
+         if (nbenrj.eq.0) then
+           if(ideri.eq.5 .or. IPICA.eq.0) then
+             kerre=0
+             do icomp=1,nstrs
+               MELVAL=IVAL(ICOMP)
+               IBMN=MIN(IB,VELCHE(/2))
+               JGMN=VELCHE(/1)
+               do igau=1,nbptel
+                 IGMN=MIN(IGAU,JGMN)
+                 STRESS(IGAU,ICOMP)=VELCHE(IGMN,IBMN)
+               enddo
+             enddo
+           else if(ideri.eq.4) then
+              call jaucau(NBNN,STRES1,NSTRS,NBPTEL,SHPTOT,XE1,XE2,
+     &                    SHPWRK,STRESS,MWRK6,LHOOK,
+     &                    KCAS,mwrk5,LADIM,mele,IIPDPG)
+              kerre=IERR
+           else
+              CALL PIOCAF(NBNN,nbsh,IDIM,STRES1,NSTRS,NBPTEL,SHPTOT,
+     1              XE1,XE2, SHPWRK,STRESS,MWRK6,LHOOK,
+     2              IFOUR,KCAS,KERRE)
+           endif
+         else
+           CALL PIOCAX(NBNN,IDIM,STRES1,NSTRS,NBPTEL,IPMINT,XE1,XE2,
+     1        TABA,MRACC,SHPWRK,STRESS,MWRK6,LHOOK,
+     2        IFOUR,KCAS,KERRE)
+         endif
+*fin as xfem 2010_01_13   <
+C
+           IF(KERRE.NE.0) THEN
+             CALL ERREUR(716)
+             GO TO 9990
+           ENDIF
+C
+C         ON REMPLIT LES SEGMENTS MELVALS CORRESPONDANTS
+C
+           IF(KCAS.NE.3) THEN
+             MPTVAL=IVASTR
+             DO 250 IGAU=1,NBPTEL
+                DO 250 ICOMP=1,NSTRS
+                MELVAL=IVAL(ICOMP)
+                IBMN=MIN(IB,VELCHE(/2))
+                VELCHE(IGAU,IBMN)=STRESS(IGAU,ICOMP)
+  250         CONTINUE
+           ELSE IF(KCAS.EQ.3) THEN
+             MPTVAL=IVAHOK
+             MELVAL=IVAL(1)
+             DO 251 IGAU=1,NBPTEL
+                IBMN=MIN(IB,IELCHE(/2))
+                JG=LHOO2
+                SEGINI, MLREEL
+                DO 252 IJ=1,LHOO2
+                   PROG(IJ)=PRODDO(IGAU,IJ)
+  252           CONTINUE
+                SEGDES, MLREEL
+                IELCHE(IGAU,IBMN)=MLREEL
+  251         CONTINUE
+           ENDIF
+
+  200   CONTINUE
+
+*as xfem 2010_01_27
+      IF(MFR.EQ.63)   then
+         SEGSUP,MRACC
+         SEGSUP,TABA
+         SEGDES,MCHAM1
+      ENDIF
+*fin as xfem 2010_01_13
+      if(ideri.eq.4) then
+        segsup mwrk5
+      endif
+C
+C ---------------------------------------------------
+C   TRANSFORMATION DES TENSEURS SI ELEMENTS DKT
+C ---------------------------------------------------
+C  supprime le 08/06/12 car inutile et donne un resultat faux
+C
+C***********************************************************
+C
+C      ELSE IF(MFR.EQ.3.and.MELE.EQ.28)THEN
+C
+C     DO 3028  IB=1,NBELEM
+C
+C     ON CHERCHE LES COORDONNEES DES NOEUDS DE L ELEMENT IB
+C
+C        CALL DOXE(XCOOR,IDIM,NBNN,NUM,IB,XE)
+C
+C     ON CHERCHE LES DEPLACEMENTS
+C
+C        IE=1
+C        DO 4028 IGAU=1,NBNN
+C           MPTVAL=IVADEP
+C           DO 4028 ICOMP=1,NDEP
+C              MELVAL=IVAL(ICOMP)
+C              IGMN=MIN(IGAU,VELCHE(/1))
+C              IBMN=MIN(IB  ,VELCHE(/2))
+C              XDDL(IE)=VELCHE(IGMN,IBMN)
+C              IE=IE+1
+C4028    CONTINUE
+C
+C        CALL VPAST(XE,BPSS)
+C     BPSS    STOCKE LA MATRICE DE PASSAGE
+C        CALL VCORLC (XE,XEL,BPSS)
+C        CALL MATVEC(XDDL,XDDLOC,BPSS,6)
+C
+C
+C  ON RECUPERE LES COORDONNEES DE DEUX CONFIGURATIONS
+C
+C        IF(IM.EQ.0)THEN
+C           DO 320 INO=1,NBNN
+C           DO 320 ID=1,IDIM
+C             XE1(ID,INO)=XEL(ID,INO)
+C 320       CONTINUE
+C
+C           IG=-6
+C           MPTVAL=IVADEP
+C           DO 330 INO=1,NBNN
+C           IE=1
+C           IG=IG+6
+C            DO 330 ID=1,IDIM
+C              MELVAL=IVAL(ID)
+C              IBMN=MIN(IB,VELCHE(/2))
+C              INMN=MIN(INO,VELCHE(/1))
+C              XE2(ID,INO)=XEL(ID,INO)+XDDLOC(IE+IG)
+C              IE = IE + 1
+C 330       CONTINUE
+C
+C        ELSE
+C         IG=-6
+C         IE = 1
+C         MPTVAL=IVADEP
+C         DO 310 INO=1,NBNN
+C          IE=1
+C          IG=IG+6
+C          DO 310 ID=1,IDIM
+C              MELVAL=IVAL(ID)
+C              IBMN=MIN(IB,VELCHE(/2))
+C              INMN=MIN(INO,VELCHE(/1))
+C              XE1(ID,INO)=XEL(ID,INO)+XDDLOC(IE+IG)
+C              IE = IE + 1
+C 310      CONTINUE
+C           DO 315 INO=1,NBNN
+C           DO 315 ID=1,IDIM
+C           XE2(ID,INO)=XEL(ID,INO)
+C 315      CONTINUE
+C        ENDIF
+C
+C     ON RECUPERE LES CONTRAINTES DE KIRCHHOFF
+C
+C         MPTVAL=IVAST1
+C
+C         DO 340 IGAU=1,NBPTEL
+C          DO 340 ICOMP=1,NSTRS
+C              MELVAL=IVAL(ICOMP)
+C              IBMN=MIN(IB,VELCHE(/2))
+C              IGMN=MIN(IGAU,VELCHE(/1))
+C              STRES1(IGAU,ICOMP)=VELCHE(IGMN,IBMN)
+C 340     CONTINUE
+C
+C          CALL PICAF2(NBNN,2,STRES1,NSTRS,NBPTEL,SHPTOT,XE1,XE2,
+C    1                SHPWRK,STRESS,IFOUR,1,KERRE)
+C
+C          IF(KERRE.NE.0) THEN
+C            CALL ERREUR(716)
+C            GO TO 9990
+C          ENDIF
+C
+C         ON REMPLIT LES SEGMENTS MELVALS CORRESPONDANTS
+C
+C
+C          MPTVAL=IVASTR
+C          DO 350 IGAU=1,NBPTEL
+C             DO 350 ICOMP=1,NSTRS
+C             MELVAL=IVAL(ICOMP)
+C             IBMN=MIN(IB,VELCHE(/2))
+C             VELCHE(IGAU,IBMN)=STRESS(IGAU,ICOMP)
+C 350       CONTINUE
+C
+C
+C3028       CONTINUE
+C
+C --------------------
+C   AUTRES ELEMENTS
+C --------------------
+
+        ELSE
+C
+C
+C      BOUCLE SUR LES ELEMENTS
+C
+         DO 400 IB=1,NBELEM
+C
+C      POUR LES AUTRES ELEMENTS ,ON COPIE LES CONTRAINTES
+C                                      OU LES DEFORMATIONS
+C                                      OU LES MATRICES DE HOOKE
+C       SANS LA TRANSFORMATION
+C
+
+
+          IF(KCAS.NE.3) THEN
+            MPTVAL=IVAST1
+            DO 460 IGAU=1,NBPTEL
+              DO 460 ICOMP=1,NSTRS
+                 MELVAL=IVAL(ICOMP)
+                 IBMN=MIN(IB,VELCHE(/2))
+                 IGMN=MIN(IGAU,VELCHE(/1))
+                 STRES1(IGAU,ICOMP)=VELCHE(IGMN,IBMN)
+  460       CONTINUE
+C
+            MPTVAL=IVASTR
+            DO 470 IGAU=1,NBPTEL
+              DO 470 ICOMP=1,NSTRS
+                MELVAL=IVAL(ICOMP)
+                IBMN=MIN(IB,VELCHE(/2))
+                VELCHE(IGAU,IBMN)=STRES1(IGAU,ICOMP)
+  470         CONTINUE
+*
+          ELSE IF(KCAS.EQ.3) THEN
+            MPTVAL=IVAST1
+            DO 461 IGAU=1,NBPTEL
+                 MELVAL=IVAL(1)
+                 IBMN=MIN(IB,IELCHE(/2))
+                 IGMN=MIN(IGAU,IELCHE(/1))
+                 ITRES1(IGAU)=IELCHE(IGMN,IBMN)
+  461       CONTINUE
+C
+            MPTVAL=IVAHOK
+            DO 471 IGAU=1,NBPTEL
+                MELVAL=IVAL(1)
+                IBMN=MIN(IB,IELCHE(/2))
+                IELCHE(IGAU,IBMN)=ITRES1(IGAU)
+  471         CONTINUE
+          ENDIF
+
+  400    CONTINUE
+        ENDIF
+C
+C     DESACTIVATION DES SEGMENTS
+C
+*as xfem 2010_01_13
+      IF(MFR.EQ.1.or.MFR.eq.63)THEN
+       SEGSUP,MWRK1,MWRK2
+      ELSE IF(MFR.EQ.3)THEN
+       SEGSUP,MWRK1,MWRK2,MWRK4
+      ENDIF
+      SEGSUP,MWRK3,MWRK6
+
+*
+      CALL DTMVAL(IVADEP,1)
+*
+      IF(ISUP.EQ.1)THEN
+           CALL DTMVAL(IVAST1,3)
+      ELSE
+          CALL DTMVAL(IVAST1,1)
+      ENDIF
+*
+      CALL DTMVAL(IVASTR,1)
+*
+        NOMID=MODEPL
+        if(lsupdp)SEGSUP NOMID
+        NOMID=MOSTRS
+        if(lsupno)SEGSUP NOMID
+        nomid=modepv
+        if(lsupdp0) SEGSUP NOMID
+*
+C        SEGDES,IMODEL,MELEME
+        SEGDES,MCHAML,MINTE
+*
+ 500  CONTINUE
+C      SEGDES,MMODEL
+      SEGDES,MCHELM
+      CALL DTCHAM(IPCHE3)
+      IRET = 1
+*
+      RETURN
+*
+*     ERREUR DANS UNE SOUS ZONE, DESACTIVATION ET RETOUR
+*
+ 9990 CONTINUE
+*
+*     Gestion des messages d'erreur
+*
+      IF (IMESS.NE.0) THEN
+         INTERR(1) = IB
+         CALL ERREUR(IMESS)
+      ENDIF
+*
+      CALL DTMVAL(IVADEP,1)
+*
+      IF(ISUP.EQ.1)THEN
+           CALL DTMVAL(IVAST1,3)
+      ELSE
+          CALL DTMVAL(IVAST1,1)
+      ENDIF
+*
+      CALL DTMVAL(IVASTR,3)
+*
+      IF(MODEPL.NE.0)THEN
+       NOMID=MODEPL
+       if(lsupdp)SEGSUP NOMID
+      ENDIF
+*
+      IF(MOSTRS.NE.0)THEN
+       NOMID=MOSTRS
+       if(lsupno)SEGSUP NOMID
+      ENDIF
+*
+C      SEGDES MELEME
+C      SEGDES IMODEL
+*
+C      SEGDES MMODEL
+      SEGSUP,MCHELM
+*
+      CALL DTCHAM(IPCHE3)
+      SEGDES MINTE
+*     write(ioimp,*) 'FIN piocap.eso si erreur'
+      IRET = 0
+      RETURN
+      END
+
+
+
+
+

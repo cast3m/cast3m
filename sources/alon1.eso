@@ -1,0 +1,402 @@
+C ALON1     SOURCE    CHAT      05/01/12    21:20:49     5004
+       SUBROUTINE ALON1(DEPST,NSTRS,NCOMAT,NVARI,
+     .            MFR1,IB,IGAU,
+     .            XMAT,SIG0,VAR0,SIGF,VARF,DEFP,KERRE,DSIGT,
+     .            SUCC1,SUCC2,NECOU)
+*
+*
+***************************************************************
+*
+*  Modèle d'argile partiellement saturé de ALONSO et al
+*
+***************************************************************
+*
+*
+*_________________________________________________________________
+*
+*
+*    ENTREES :
+*    ---------
+*
+* DEPST = INCREMENT DE DEFORMATIONS TOTALES
+* NSTRS = NBRE DE COMPOSANTES DES DEFORMATIONS
+* NCOMAT= NBRE DE CARACTERISTIQUES MECANIQUES DU MATERIAU
+* NVARI = NBRE DE VARIABLES INTERNES
+* MFR1  = NUMERO DE LA FORMULATION
+* IB    = NUMERO DE L ELEMENT COURANT
+* IGAU  = NUMERO DU POINT COURANT
+* SIG0(NSTRS) = CONTRAINTES AU DEBUT DU PAS D'INTEGRATION
+* VAR0(NVARI) = VARIABLES INTERNES AU DEBUT DU PAS DE TEMPS
+* XMAT(NCOMAT) = CARACTERISTIQUES MECANIQUES DU MATERIAU
+* SUCC1    SUCCION AU DEBUT DU PAS
+* SUCC2    SUCCION A LA FIN DU PAS
+*
+*    SORTIE :
+*    --------
+*
+* SIGF(NSTRS) = CONTRAINTES FINALES
+* VARF(NVARI) = VARIALES INTERNES A LA FIN DU PAS D'INTEGRATION
+* DEFP(NSTRS) = INCREMENT DE DEFORMATION PLASTIQUE A LA FIN
+*               DU PAS D'INTEGRATION
+* ============================================================
+*       ICI IL FAUT PROGRAMMER EN FORTRAN PUR
+*=============================================================
+*
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+      REAL*8 LOGSUC
+*
+-INC CCOPTIO
+       SEGMENT NECOU
+*      COMMON/NECOU/NCOURB,IPLAST,IT,IMAPLA,ISOTRO,
+       INTEGER NCOURB,IPLAST,IT,IMAPLA,ISOTRO,
+     . ITYP,IFOURB,IFLUAG,
+     . ICINE,ITHER,IFLUPL,ICYCL,IBI,
+     . JFLUAG,KFLUAG,LFLUAG,
+     . IRELAX,JNTRIN,MFLUAG,JSOUFL,JGRDEF
+      ENDSEGMENT
+
+*
+*      COMMON/NECOU/NCOURB,IPLAST,IT,IMAPLA,ISOTRO,
+*     . ITYP,IFOURB,IFLUAG,
+*     . ICINE,ITHER,IFLUPL,ICYCL,IBI,
+*     . JFLUAG,KFLUAG,LFLUAG,
+*     . IRELAX,JNTRIN,MFLUAG,JSOUFL,JGRDEF
+*
+      DIMENSION SIG0(*),DEPST(*),VAR0(*),XMAT(*),SIGF(*),
+     &          VARF(*),DEFP(*),DSIGT(*)
+      DIMENSION RSIG0(6),RDEPS0(6),RSIGF(6),RDEFP(6)
+      DIMENSION DEPM(6),DEPEL(6),DEVT(6)
+*
+*  Adaptation de l'option de calcul vers le 3D massif de SIG0 a RSIG0
+*====================================================================
+*
+      IF (MFR1 .EQ. 1 .OR. MFR1 .EQ. 31)  THEN
+*
+*---> 1 formulation massive
+*---> 2 formulation quasi incompressible
+*---> MASSIF 3D
+*
+        IF (NSTRS .EQ. 6) THEN
+          DO 110 I=1,NSTRS
+            RSIG0(I)=SIG0(I)
+            RDEPS0(I)=DEPST(I)
+ 110      CONTINUE
+        ELSE IF ( NSTRS .EQ. 4 .AND. ((IFOUR .EQ. 0)
+     &    .OR.(IFOUR .EQ. -1))) THEN
+*
+*---> Calcul en mode deformations planes ou axisymetrique
+*
+          DO 115 I=1,NSTRS
+            RSIG0(I)=SIG0(I)
+            RDEPS0(I)=DEPST(I)
+ 115      CONTINUE
+          RSIG0(5)=0.D0
+          RSIG0(6)=0.D0
+          RDEPS0(5)=0.D0
+          RDEPS0(6)=0.D0
+        ENDIF
+      ELSE
+        KERRE = 99
+        RETURN
+      ENDIF
+*
+*
+*   Passage des deformations de cisaillement exprimées
+*   en GAMA aux déformations de cisaillement exprimées
+*   en déformations
+*
+      DO 116 I=1,6
+         A=1.D0
+         IF (I.GT.3) A=2.D0
+         RDEPS0(I)=RDEPS0(I)/A
+ 116  CONTINUE
+*
+*   Données du materiau
+*===========================================================
+*
+      YOUN0=XMAT(1)
+      XNU0=XMAT(2)
+      XKS0=XMAT(5)
+      XLAM0=XMAT(6)
+      XM0=XMAT(7)
+      XKK0=XMAT(8)
+      PC00=XMAT(9)
+      P0=XMAT(10)
+      XLAM1=XMAT(11)
+      T0=XMAT(12)
+      TAU0=XMAT(13)
+      XG0=XMAT(14)
+      XK0=XMAT(15)
+      XE0=XMAT(16)
+*
+      XXALF=XMAT(19)
+      XXBET=XMAT(20)
+      XXGAM=XMAT(3)
+      XXPREF=XMAT(4)
+*
+*   AM   RHO ET ALPHA SONT DANS XMAT(17) ET XMAT(18)
+*   CF BIZARRERIE DANS ECOU70
+
+*
+*
+*   Quelques initialisations
+*==============================================================
+*
+*
+*---> Variables internes initiales
+*     . déformation plastique équivalente
+*     . pression de consolidation à l'état saturé
+*     . limite élastique en succion
+*     . succions initiale et finale
+*  La succion finale est déstinée à etre calculée au préalable
+*  dans un opérateur particulier indépendant de ECOULE
+*
+      VOLU0=1.D0+XE0
+      PC0=VAR0(2)
+      IF (PC0.LE.1.D-30) PC0=PC00
+      SLIM0=VAR0(3)
+******************************
+*   MODIFICATION POUR LA SUCCION   le 5/11/97
+*
+      IF(SUCC1.LT.-1.E34.AND.SUCC2.LT.-1.E34)  THEN
+*
+*       cas à succion constante : on la prend dans var0
+*
+        SUCI0=VAR0(4)
+        VARF(4)=VAR0(4)
+      ELSE
+        SUCI0=SUCC1
+        VARF(4)=SUCC2
+      ENDIF
+      SUCF0=VARF(4)
+*
+*       TRAITEMENT DU CAS SATURE
+*
+        PSAT0 =0.D0
+        PSAT1 =0.D0
+        IF(SUCI0.LT.0.D0) THEN
+          PSAT0=-SUCI0
+          SUCI0=0.D0
+        ENDIF
+        IF(SUCF0.LT.0.D0) THEN
+          PSAT1=-SUCF0
+          SUCF0=0.D0
+        ENDIF
+*
+*       PASSAGE EN CONTRAINTES EFFECTIVES
+*
+        DO I=1,3
+          RSIG0(I)=RSIG0(I) + PSAT0
+        ENDDO
+*
+*    MODIF POUR REACTUALISER XKS0 EN FONCTION DE
+*    LA PRESSION MOYENNE ET DE LA SUCCION
+*    ON PREND LES VALEURS AU DEBUT DU PAS
+*
+       IF(XXBET.NE.0.D0) THEN
+          XTRR = ABS (( RSIG0(1)+RSIG0(2)+RSIG0(3))/3.D0)
+          XKS0 =XKS0*(1.D0-XXBET*LOG(XTRR/XXPREF))
+     &                                 *EXP(-XXGAM*SUCI0)
+       ENDIF
+*
+*  AM  13/05/98
+*  ON MODIFIE LA LOI DE VARIATION DE K
+*  ATTENTION : DANS LA FORMULE, LA SUCCION DOIT
+*   ETRE EN MPA ET ON CONSIDERE QU'ELLE ARRIVE EN PA
+*   ( CF COMMENTAIRE CI DESSOUS )
+*
+*****  XK0= XK0*( 1.D0-XXALF*SUCI0)
+*
+       SUCMPA = SUCI0 * 1.D-6
+       LOGSUC=0.D0
+       IF(SUCMPA.GT.1.D0) THEN
+          LOGSUC=LOG(SUCMPA)
+       ENDIF
+       XK0= XK0*( 1.D0-XXALF*LOGSUC)
+*
+*---> Pression atmosphérique
+*ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ
+*  ATTENTION : LA PRESSION ATMOSPHERIQUE EST EN Pa
+*ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ
+*
+
+      Pat0=1.E5
+*
+*---> Initialisation du logique de l'écrouissage en succion
+*     succ0=vrai : il y a écrouissage en succion
+*
+      SUCC0=-1.D0
+*
+*---> Pente élasto-plastique (courbe de consolidation)
+*
+      XLAM2=XLAM1*((1.D0-T0)*EXP(-1.D0*TAU0*SUCF0)+T0)
+*
+*---> Pression de saturation
+*
+      PS0=XKK0*SUCF0
+*
+*
+*  Déformation mécanique test
+*======================================================================
+*
+*---> Trace de la déformation élastique de succion
+*
+      TREPSS0=-XKS0/VOLU0*LOG((SUCF0+Pat0)/(SUCI0+Pat0))
+*
+*---> Déformations mécaniques
+*
+      DO 10 I=1,6
+       A=0.D0
+       IF (I.LE.3) A=1.D0
+       DEPM(I)=RDEPS0(I)-TREPSS0/3.D0*A
+ 10   CONTINUE
+*
+*
+*  Ecrouissage en succion ?
+*======================================================================
+*
+      IF ((SUCF0.GT.SLIM0).AND.(SUCC0.LE.0.D0)) THEN
+*
+* HYPOTHESE: on écrouit en succion
+*
+*---> Limite en succion à la fin du pas
+*
+         SLIM1=SUCF0
+*
+*---> Trace de la déformation plastique due à la succion
+*
+         TREPPS0=(XKS0-XLAM0)/VOLU0*LOG((SLIM1+Pat0)/(SLIM0+Pat0))
+*
+*---> Pression de consolidation
+*      . à l'état saturé
+*      . à la succion finale
+*
+         PC1=PC0*EXP(-VOLU0/(XLAM1-XK0)*TREPPS0)
+         PCS1=P0*(PC1/P0)**((XLAM1-XK0)/(XLAM2-XK0))
+*
+*---> On vérifie l'hypothèse
+*
+*     Déformations élastiques test et déformation plastique
+*
+         DO 11 I=1,6
+           A=0.D0
+           IF (I.LE.3) A=1.D0
+           DEPEL(I)=DEPM(I)-TREPPS0/3.D0*A
+           RDEFP(I)=TREPPS0/3.D0*A
+ 11      CONTINUE
+*
+*     Contraintes
+*
+         PRES0=-1.D0*(RSIG0(1)+RSIG0(2)+RSIG0(3))/3.D0
+         TREPS0=DEPEL(1)+DEPEL(2)+DEPEL(3)
+         PRES1=PRES0*EXP(-VOLU0/XK0*TREPS0)
+         DO 12 I=1,6
+           A=0.D0
+           IF (I.LE.3) A=1.D0
+           DEVT(I)=RSIG0(I)+PRES0*A
+           DEVT(I)=DEVT(I)+2.D0*XG0*(DEPEL(I)-TREPS0/3.D0*A)
+           RSIGF(I)=DEVT(I)-PRES1*A
+ 12      CONTINUE
+*
+*     Contrainte équivalente
+*
+         STEST2=3.D0*PROCON(DEVT,DEVT,6)/2.D0
+         IF (STEST2.LE.1.D-10) STEST2=0.D0
+         Stest=(STEST2)**(0.5D0)
+*
+*     Fonction de charge
+*
+        PHIT=Stest*Stest+XM0*XM0*(PRES1+PS0)*(PRES1-PCS1)
+*
+*     On vérifie qu'on est élastique
+*
+        IF (PHIT.LE.0.D0) THEN
+           VARF(1)=VAR0(1)
+           VARF(2)=PC1
+           VARF(3)=SLIM1
+           GOTO 99
+        ELSE
+           SUCC0=1.D0
+           GOTO 98
+        ENDIF
+*
+*---> Fin de la vérification de l'hypothèse
+*
+      ENDIF
+*
+*  Fin du traitement de l'écrouissage en succion
+*===========================================================================
+*
+*
+*  Ecrouissage en pression
+*===========================================================================
+*
+ 98   IF ((SUCF0.LE.SLIM0).OR.(SUCC0.GT.0.D0)) THEN
+*
+         CALL ALON2(Pat0,XMAT,DEPM,RSIG0,VAR0,
+     .        RSIGF,VARF,RDEFP,KERRE,IB,IGAU)
+*
+      ENDIF
+*
+*  Fin de l'écrouissage en pression
+*===========================================================================
+*
+*
+*
+*   Passage des deformations de cisaillement exprimées
+*   en déformations aux déformations de cisaillement exprimées
+*   en GAMA
+*
+ 99   DO 117 I=1,6
+         A=1.D0
+         IF (I.GT.3) A=2.D0
+         RDEFP(I)=RDEFP(I)*A
+ 117  CONTINUE
+*
+*
+*  Passage a l'option de calcul pour les contraintes
+*=========================================================
+*
+      IF (MFR1 .EQ. 1 .OR. MFR1 .EQ. 31)  THEN
+
+*
+*       RETOUR EN CONTRAINTES TOTALES
+*
+        DO I=1,3
+          RSIGF(I)=RSIGF(I) - PSAT1
+        ENDDO
+
+        IF (NSTRS .EQ. 6) THEN
+*
+*---> MASSIF 3D
+*
+          DO 170 I=1,NSTRS
+            SIGF(I)=RSIGF(I)
+            DEFP(I)=RDEFP(I)
+ 170      CONTINUE
+        ELSE IF ( NSTRS .EQ. 4 ) THEN
+*
+*---> Calcul axisymétrique ou contraintes planes
+*
+          DO 180 I=1,NSTRS
+            SIGF(I)=RSIGF(I)
+            DEFP(I)=RDEFP(I)
+ 180      CONTINUE
+        ENDIF
+      ENDIF
+*
+      RETURN
+*
+      END
+
+
+
+
+
+
+
+
+
+
+

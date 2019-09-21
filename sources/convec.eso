@@ -1,0 +1,256 @@
+C CONVEC    SOURCE    CB215821  18/09/21    21:15:32     9930
+
+C=======================================================================
+C=                            C O N V E C                              =
+C=                            -----------                              =
+C=                                                                     =
+C=  OPERATEUR CAST3M "CONVEC" :                                        =
+C=  ---------------------------                                        =
+C=  FF1  =  'CONVECTION'  MODL1  MAT1  |  'T   ' TE  |  ;              =
+C=                                     |  CHPTE      |                 =
+C=                                                                     =
+C=  Cet operateur sert a calculer les flux nodaux equivalents a une    =
+C=  condition de type convection forcee (CHPOINT au second membre).    =
+C=                                                                     =
+C=  ARGUMENTS :                                                        =
+C=  -----------                                                        =
+C=   MODL1  (MMODEL)    Modele de la structure (contour ou enveloppe)  =
+C=   MAT1   (MCHAML)    Caracteristiques : coefficient d'echange       =
+C=   'T   ' (MOT)       Precise que la temperature du milieu exterieur =
+C=                      imposee est constante (flottant suivant)       =
+C=   TE     (FLOTTANT)  Valeur de la temperature imposee (constante)   =
+C=   CHPTE  (CHPOINT)   Valeurs des temperatures aux NOEUDS            =
+C=                                                                     =
+C=  RESULTAT :                                                         =
+C=  ----------                                                         =
+C=   FF1     (CHPOINT)  Flux nodaux equivalents                        =
+C=   Le CHPOINT resultat FF1 est de nature DISCRETE.                   =
+C=                                                                     =
+C=  Denis ROBERT, le 15 avril 1988.                                    =
+C=======================================================================
+
+      SUBROUTINE CONVEC
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+-INC SMMODEL
+-INC SMCHPOI
+-INC SMELEME
+
+      PARAMETER (NBRAC=7,NP=6)
+      INTEGER IRAC(NBRAC)
+      PARAMETER (NBMOCV=3)
+      CHARACTER*4 MOCNV(NBMOCV),MOT4
+
+      DATA MOCNV/ 'T   ','TINF','TSUP' /
+
+C Elem. RACCORD : RAC2 RAC3 LIA3 LIA4 LIA6 LIA8 SEG2
+C Cas Particulier : en 1D, SEG2 = element RACCORD (OF)
+C ---------------
+      DATA IRAC /  12 , 13 , 18 , 19 , 20 , 21 ,  2  /
+
+C Petit traitement pour le cas 1D : on simule l'element raccord 1D via
+C un element fini SEG2 (cela evite de creer un nouvel element fini)
+      IF (IDIM.EQ.1) THEN
+        KRACC=7
+        NRACC=1
+      ELSE
+        KRACC=1
+        NRACC=NP
+      ENDIF
+
+C  1 - LECTURE DES ARGUMENTS DE L'OPERATEUR
+C ==========================================
+C  1.1 - Lecture OBLIGATOIRE du modele (IPMODL)
+C =====
+      MOTERR(1:8)=' MODELE '
+      CALL MESLIR(-137)
+      CALL LIROBJ('MMODEL',IPMODE,1,IRET)
+      IF (IERR.NE.0) RETURN
+C     Selectionne dans le MMODEL la partie 'CONVECTION' et 'RAYONNEMENT'
+      call selmod (ipmode,ipmod1,'CONVECTION' )
+      call selmod (ipmode,ipmod2,'RAYONNEMENT')
+      mmode1=ipmod1
+      mmode2=ipmod2
+      segact mmode1,mmode2
+      if( mmode1.kmodel(/1).eq.0) then
+        ipmode=mmode2
+        segsup mmode1
+      elseif( mmode2.kmodel(/1).eq.0) then
+        ipmode=mmode1
+        segsup mmode2
+      else
+        n1= mmode1.kmodel(/1)+mmode2.kmodel(/1)
+        na=mmode1.kmodel(/1)
+        segadj mmode1
+        do io=1,mmode2.kmodel(/1)
+          mmode1.kmodel(na+io)= mmode2.kmodel(io)
+        enddo
+        segsup mmode2
+        ipmode=mmode1
+      endif
+
+C =====
+C  1.2 - Lecture OBLIGATOIRE du champ de caracteristiques (IPCHEL)
+C =====
+      CALL MESLIR(-145)
+      CALL LIROBJ('MCHAML',IPIN,1,IRET)
+      IF (IERR.NE.0) RETURN
+      CALL ACTOBJ('MMODEL  ',IPMODE,1)
+      CALL ACTOBJ('MCHAML  ',IPIN  ,1)
+      CALL REDUAF(IPIN,IPMODE,IPCHEL,0,IR,KER)
+      IF(IR   .NE. 1) CALL ERREUR(KER)
+      IF(IERR .NE. 0) RETURN
+C =====
+C  1.3 - Lecture OBLIGATOIRE des temperatures exterieures donnees par :
+C           1) un CHPOINT (IPCHPO)
+C        ou 2) un mot ('T   ') et un flottant (TE)
+C =====
+      CALL MESLIR(-146)
+      CALL LIROBJ('CHPOINT',IPCHPO,0,IRET1)
+      IF (IERR.NE.0) RETURN
+      IF (IRET1.EQ.1) THEN
+        CALL ECRCHA('GEOM')
+        CALL ECROBJ('CHPOINT',IPCHPO)
+        CALL COPIER
+        CALL LIROBJ('CHPOINT',IPCHP2,0,IRET)
+        IF (IERR.NE.0) RETURN
+      ELSE
+        CALL LIRCHA(MOT4,1,IRETOU)
+        IRET2 = 0
+        CALL PLACE(MOCNV,NBMOCV,IRET2,MOT4)
+        IF (IRET2 .EQ. 0) THEN
+          MOTERR(1:4)=MOT4
+          CALL ERREUR(197)
+          RETURN
+        ENDIF
+        IF (IERR.NE.0) RETURN
+        CALL MESLIR(-147)
+        CALL LIRREE(TE,1,IRET)
+        IF (IERR.NE.0) RETURN
+
+C       Extraction du MAILLAGE du MODELE
+        CALL EXTRA8(IPMODE,IPGEOM)
+        IF (IERR.NE.0) RETURN
+
+C       Creation d'un CHPOINT de composante MOT4 et de valeur TE
+        NSOUPO=1
+        NAT   =1
+        SEGINI,MCHPOI
+        IPCHP2 = MCHPOI
+        MTYPOI = '        '
+        MOCHDE = ' '
+        IFOPOI = IFOMOD
+C       NATURE 'DIFFUS'
+        JATTRI(1)=1
+        MELEME=IPGEOM
+        CALL CHANGE(MELEME,1)
+        IF (IERR .NE. 0) RETURN
+        SEGACT,MELEME
+        NC=1
+        N =NUM(/2)
+C        SEGDES,MELEME
+        SEGINI,MSOUPO,MPOVAL
+        IPCHP(1) = MSOUPO
+        NOCOMP(1)= MOT4
+        IGEOC    = MELEME
+        IPOVAL   = MPOVAL
+        SEGACT,MSOUPO,MPOVAL
+        SEGACT,MCHPOI
+
+C       ADDITION a ce CHPOINT nul du FLOTTANT TE
+C       IOPERA= 3 pour l'operation ADDITION
+C       IARGU = 2 pour FLOTTANT
+        ICH   = MCHPOI
+        IOPERA= 3
+        IARGU = 2
+        I1    = 0
+        CALL OPCHP1(ICH,IOPERA,IARGU,I1,TE,IPCHP2,IRET)
+        IF (IERR.NE.0) RETURN
+      ENDIF
+
+C  2 - EXTRACTION DES ELEMENTS RACCORDS DU MODELE (s'ils existent)
+C ================================================
+      MMODEL=IPMODE
+      SEGACT,MMODEL
+      NSOU=KMODEL(/1)
+      JRac=0
+      N1=NSOU
+      SEGINI,MMODE1
+      DO iSou=1,NSOU
+        IMODEL=KMODEL(iSou)
+        SEGACT,IMODEL
+        NFOR=FORMOD(/2)
+        nmat=matmod(/2)
+        CALL PLACE(FORMOD,NFOR,IMO,'CONVECTION')
+        call place (matmod,nmat,imoo,'CONVECTION')
+        CALL PLACE2(IRAC(KRACC),NRACC,IOK,NEFMOD)
+        IF (IOK.NE.0.AND.IMO+imoo.NE.0) THEN
+          JRac=JRac+1
+        ELSE
+          MMODE1.KMODEL(iSou-JRac)=KMODEL(iSou)
+        ENDIF
+C        SEGDES,IMODEL
+      ENDDO
+      N1=NSOU-JRac
+C= Reduction du modele initial au modele sans elements raccords
+      IF (N1.NE.0.AND.N1.NE.NSOU) THEN
+        SEGADJ,MMODE1
+        IPMODE1=MMODE1
+C        SEGDES,MMODE1
+        CALL REDUAF(IPCHEL,IPMODE1,IPCHE1,0,IRET,KERRE)
+        IF (IRET.NE.1) THEN
+          CALL ERREUR(KERRE)
+          RETURN
+        ENDIF
+C
+        IPCHEL=IPCHE1
+C= Cas particulier du modele ne contenant que des elements raccords
+C= Le champ de flux nodaux equivalents est vide.
+      ELSE IF (N1.EQ.0) THEN
+        NSOUPO=0
+        NAT=1
+        SEGINI,MCHPOI
+        MTYPOI='CHALEUR '
+        JATTRI(1)=2
+C*      IFOPOI=IFOMOD
+        IFOPOI=IFOUR
+        SEGACT,MCHPOI
+        CALL ECROBJ('CHPOINT',MCHPOI)
+        RETURN
+      ELSE
+        IPMODE1=IPMODE
+      ENDIF
+
+C  3 - CALCUL DES FLUX NODAUX EQUIVALENTS
+C ========================================
+      CALL CONVMA(IPMODE1,IPCHEL,IPCHP2,IPCONV)
+      IF (IERR.NE.0) GOTO 10
+
+C  4 - ECRITURE DU CHPOINT RESULTAT
+C ==================================
+C= Attribution d'une nature DISCRETE au CHPOINT resultat
+      IF (IPCONV.NE.0) THEN
+        MCHPOI=IPCONV
+        SEGACT,MCHPOI
+        NAT=MAX(JATTRI(/1),1)
+        NSOUPO=IPCHP(/1)
+        SEGADJ,MCHPOI
+        JATTRI(1)=2
+        SEGACT,MCHPOI
+        CALL ECROBJ('CHPOINT',IPCONV)
+      ENDIF
+
+C  5 - MENAGE : Destruction de CHPOINT intermediaire
+C ==============
+ 10   CALL DTCHPO(IPCHP2)
+
+      RETURN
+      END
+
+
+
+
+

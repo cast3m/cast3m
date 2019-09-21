@@ -1,0 +1,589 @@
+C TRIALU    SOURCE    PV        16/11/17    22:01:36     9180
+      SUBROUTINE TRIALU(MATRIK,AMORS,AISA,
+     $     IDMAT,
+     $     IMPR,IRET)
+      IMPLICIT REAL*8 (A-H,O-Z)
+      IMPLICIT INTEGER (I-N)
+C************************************************************************
+C
+C    Triangulation d'une matrice symetrique ou non
+C    On decoupe la matrice en bloc
+C    Si IDMAT ne 0 la matrice est deja triangulee on saute
+C
+C HISTORIQUE : 22/03/00 gounand
+C Amélioration de la détection des pivots nulles (pas encore parfaite)
+C HISTORIQUE : 13/01/00 Adaptation au nouvel assemblage :
+C      Modifications cosmétiques.
+C      Correction sur la détection des diagonales nulles (pas encore
+C      parfaite).
+C      Modification de la taille des paquets pour tenir dans le cache
+C      (dépendant machine).
+C      Inlining manuel des produits scalaires de vecteurs (sdot) qui
+C      sont appelés de nombreuses fois...
+C      Gestion correcte des allocations mémoire.
+C HISTORIQUE :
+C HISTORIQUE :
+C************************************************************************
+*      REAL*8 SDOT
+-INC CCOPTIO
+-INC CCREEL
+-INC SMMATRIK
+      INTEGER NTT,NPT,NBLK,KTRING
+      INTEGER NBVA
+      POINTEUR ISAU.IZA,ISAL.IZA
+      POINTEUR ISAU0.IZA,ISAL0.IZA
+      POINTEUR ISAU00.IZA,ISAL00.IZA
+      POINTEUR AMORS.PMORS
+      POINTEUR AISA.IZA
+      POINTEUR PMTRAN.PMORS
+      POINTEUR MYMINC.MINC
+-INC SMELEME
+      POINTEUR MYPTS.MELEME
+-INC SMLREEL
+      POINTEUR GGIS.MLREEL
+*STAT-INC SMSTAT
+      INTEGER IMPR,IRET
+*
+      INTEGER NBVD
+      SEGMENT IZD
+      REAL*8 D(NBVD)
+      ENDSEGMENT
+      INTEGER IBLSIZ
+*      REAL*8 GGIS
+      LOGICAL LACTL,LACTU
+* Le logique LISDDL indique si l'on est capable de faire
+* la correspondance numéro DDL <-> numéro de point, nom d'inconnue
+      LOGICAL LISDDL
+      INTEGER TRAMIN
+      INTEGER I,ISTRT,ISTOP
+      INTEGER J,JSTRT,JSTOP
+      INTEGER NTTDDL
+      REAL*8 TNORM,YZPREC,US
+C*******************************************************************
+C
+C
+      IF (IMPR.GT.5) WRITE(IOIMP,*) 'Entrée dans trialu'
+      IKOMPT=0
+*      GGIS=XZPREC
+      SEGACT MATRIK
+      KTRING=MATRIK.KIDMAT(9)
+      KSIM=MATRIK.KSYM
+      IDMAT=MATRIK.KIDMAT(1)
+      MYMINC=MATRIK.KMINC
+      MYPTS=MATRIK.KISPGT
+      SEGDES MATRIK
+      IF(KTRING.NE.2) THEN
+*STAT         CALL INMSTA(MSTAT,1)
+         SEGACT MATRIK*MOD
+         MATRIK.KIDMAT(9)=2
+         SEGDES MATRIK
+         SEGACT IDMAT*MOD
+C Initialisation des KZA
+         SEGACT AMORS
+         NTT=AMORS.IA(/1)-1
+         NPT=IDMAT.NUAN(/1)
+         LISDDL=(MYMINC.NE.0.AND.MYPTS.NE.0.AND.NPT.GT.0)
+         NBLK=0
+         SEGADJ,IDMAT
+         DO 9 ITT=1,NTT
+            IDMAT.KZA(ITT)=ITT-AMORS.JA(AMORS.IA(ITT))+1
+ 9       CONTINUE
+         SEGDES AMORS
+C On construit la transposée du profil
+C (La matrice Skyline est supposée avoir une structure symétrique)
+C La transposée du profil n'a pas ses colonnes ordonnées...
+         CALL MAKPMT(AMORS,
+     $        PMTRAN,
+     $        IMPR,IRET)
+         IF (IRET.NE.0) GOTO 9999
+         SEGACT PMTRAN
+         DO 91 ITT=1,NTT
+            JSTRT=PMTRAN.IA(ITT)
+            JSTOP=PMTRAN.IA(ITT+1)-1
+            TRAMIN=PMTRAN.JA(JSTRT)
+            DO 912 J=JSTRT+1,JSTOP
+               TRAMIN=MIN(TRAMIN,PMTRAN.JA(J))
+ 912        CONTINUE
+            TRAMIN=DIM(ITT,TRAMIN)+1
+            IDMAT.KZA(ITT)=MAX(IDMAT.KZA(ITT),TRAMIN)
+ 91      CONTINUE
+         SEGSUP PMTRAN
+*STAT         CALL PRMSTA('Init. KZA',MSTAT,1)
+C
+C On cree les blocs
+C
+C La matrice est stockée par blocs de plusieurs lignes. En effet, il faut
+C l'équivalent de 900 opérations pour activer/désactiver un segment. Si
+C une ligne de la matrice comprend 50 éléments, on fait 100 opérations
+C utiles et 900 inutiles lors de la résolution.
+C La taille des blocs est fixée par le paramètre IBLSIZ. La diagonale est
+C stockée dans un segment à part.
+C
+C Il nous faut constituer un certain nombre de tableaux. Le premier segment
+C décrit la matrice. Il contient un tableau donnant les numéros des premières
+C lignes de chaque bloc et un tableau de pointeurs sur des segments
+C descripteurs de bloc.
+C
+C Calcul de la longueur des blocs, on choisit ce qu'il faut
+C
+C Attention !! il y a au moins deux blocs activés en même temps et au plus 4
+C Peut-être qu'une bonne formule fait intervenir la taille du cache...
+C     (Cache-Place(KZA,NUIA,DESCL...)) / 4 (blocs simultanés)
+*         IBLSIZ=OOOVAL(1,1)/100000
+*  Pour 128Ko de cache => 8 KMots
+         IBLSIZ=8000
+C
+C Il faut d'abord déterminer le nombre de blocs.
+C
+         LONG=0
+         NTT=KZA(/1)
+         DO 96 I=1,NTT
+            LONG=LONG+KZA(I)
+ 96      CONTINUE
+         NBLK=1
+         IF(LONG-NTT.GT.IBLSIZ) THEN
+            ILBL=0
+            DO 12 KK=2,NTT
+               LA=KZA(KK)-1
+               IF(LA.GT.IBLSIZ) THEN
+                  NBLK=NBLK+2
+                  ILBL=0
+               ELSE
+                  ILBL=ILBL+LA
+                  IF(ILBL.GT.IBLSIZ) THEN
+                     NBLK=NBLK+1
+                     ILBL=LA
+                  ENDIF
+               ENDIF
+ 12         CONTINUE
+         ENDIF
+C
+C On peut allouer le segment descripteur de la matrice. On va pouvoir
+C remplir des numéros de ligne des débuts de bloc.
+C
+         NTT=KZA(/1)
+         NPT=NUAN(/1)
+         SEGADJ IDMAT
+         IF(NBLK.EQ.1) THEN
+            NLDBLK(1)=1
+            NLDBLK(2)=NTT+1
+         ELSE
+            IBLK=1
+            ILBL=0
+            NLDBLK(1)=1
+            NLDBLK(NBLK+1)=NTT+1
+            DO 13 KK=2,NTT
+               LA=KZA(KK)-1
+               IF(LA.GT.IBLSIZ) THEN
+                  NLDBLK(IBLK+1)=KK
+                  NLDBLK(IBLK+2)=KK+1
+                  IBLK=IBLK+2
+                  ILBL=0
+               ELSE
+                  ILBL=ILBL+LA
+                  IF(ILBL.GT.IBLSIZ) THEN
+                     NLDBLK(IBLK+1)=KK
+                     ILBL=LA
+                     IBLK=IBLK+1
+                  ENDIF
+               ENDIF
+ 13         CONTINUE
+         ENDIF
+         IF(IMPR.GE.2) THEN
+            IF(KSIM.EQ.0) THEN
+               WRITE(IOIMP,*) '* NOMBRE DE BLOCS DE ',IBLSIZ,
+     $              ' MOTS   : ',NBLK
+            ELSE
+               WRITE(IOIMP,*)'* NOMBRE DE BLOCS DE ',IBLSIZ,
+     $              ' MOTS   : 2 X ',NBLK
+            ENDIF
+         ENDIF
+C
+C On Remplit les blocs
+C
+         SEGACT AMORS
+         SEGACT AISA
+*  On construit le vecteurs des normes des lignes
+         NTTDDL=AMORS.IA(/1)-1
+         JG=NTTDDL
+         SEGINI GGIS
+         YZPREC=XZPREC**(0.9D0)
+*         YZPREC=1.D-9
+         DO 152 ITTDDL=1,NTTDDL
+* Calcul de la norme de la ittème ligne
+            ISTRT=AMORS.IA(ITTDDL)
+            ISTOP=AMORS.IA(ITTDDL+1)-1
+            TNORM=XZERO
+            DO 1521 IJA=ISTRT,ISTOP
+               TNORM=TNORM+ABS(AISA.A(IJA))
+ 1521       CONTINUE
+*            WRITE(IOIMP,*) 'ITTDDL=',ITTDDL,' TNORM=',TNORM
+*
+C            IF (TNORM.EQ.0.D0) THEN
+C               WRITE(IOIMP,*) 'The ',ITTDDL,'th line is zero'
+CC Résolution impossible détectée au noeud %i1 pour l'inconnue %m1:4
+C               SEGACT MYMINC
+C               SEGACT MYPTS
+C               N2=IDMAT.NUNA(ITTDDL)
+C               CALL DDL2PI(N2,MYMINC,
+C     $              IPT,IBI,
+C     $              IMPR,IRET)
+C               IF (IRET.NE.0) GOTO 9999
+C               INTERR(1)=MYPTS.NUM(1,IPT)
+C               MOTERR(1:8)=MYMINC.LISINC(IBI)
+C               CALL ERREUR(143)
+C               SEGDES MYPTS
+C               SEGDES MYMINC
+C               GOTO 9999
+C            ENDIF
+            GGIS.PROG(ITTDDL)=(TNORM/DBLE(ISTOP-ISTRT+1))*YZPREC
+ 152     CONTINUE
+         NBVD=KZA(/1)
+         SEGINI IZD
+         IDMAT.IDIAG=IZD
+         ISAU=0
+         DO 601 IBLK=1,NBLK
+C NUMÉROS DES LIGNES DE DÉBUT ET DE FIN DE BLOC KJD,KJF
+            KJD=NLDBLK(IBLK)
+            KJF=NLDBLK(IBLK+1)-1
+            KA=0
+            KA=KA+KZA(1)-1
+            NUIA(1,1)=1
+            DO 600 KJ=KJD,KJF
+               NUIA(KJ,1)=IBLK
+               NUIA(KJ,2)=KA
+               KA=KA+KZA(KJ)-1
+ 600        CONTINUE
+C ALLOCATION DE LA MÉMOIRE POUR LE BLOC
+            NBVA=KA
+*            WRITE(IOIMP,*) '* BLOC LOWER NUMERO : ',IBLK,' TAILLE = '
+*     $           ,NBVA,' MOTS'
+            SEGINI IZA
+            IDESCL(IBLK)=IZA
+            IDESCU(IBLK)=IZA
+            IF(KSIM.EQ.2)IDESCU(IBLK)=NBVA
+            IF(IBLK.EQ.1)THEN
+               KJD=1
+               D(1)=AISA.A(1)
+            ENDIF
+            DO 602 LI=KJD,KJF
+               NBK=AMORS.IA(LI+1)-AMORS.IA(LI)
+               I1=AMORS.IA(LI)
+               DO 603 K=1,NBK
+                  MA=I1+K-1
+                  KO=AMORS.JA(MA)
+                  IF(LI.GT.KO)THEN
+                     NA=KO-LI+KZA(LI)+NUIA(LI,2)
+                     A(NA)=AISA.A(MA)
+                  ELSEIF(LI.EQ.KO.AND.LI.NE.1)THEN
+                     D(LI)=AISA.A(MA)
+                  ELSE
+                     GO TO 602
+                  ENDIF
+ 603           CONTINUE
+ 602        CONTINUE
+            SEGDES IZA
+ 601     CONTINUE
+         IF(KSIM.EQ.2)THEN
+            DO 604 IBLK=1,NBLK
+               KJD=NLDBLK(IBLK)
+               KJF=NLDBLK(IBLK+1)-1
+               NBVA=IDESCU(IBLK)
+               SEGINI IZA
+               IDESCU(IBLK)=IZA
+               IF(IBLK.EQ.1)THEN
+                  KJD=1
+               ENDIF
+               LDEB=KJD
+               DO 605 KO=KJD,KJF
+                  L0=KO-KZA(KO)+1
+                  IF(LDEB.GT.L0)LDEB=L0
+ 605           CONTINUE
+               DO 606 LI=LDEB,KJF
+                  NBK=AMORS.IA(LI+1)-AMORS.IA(LI)
+                  I1=AMORS.IA(LI)
+                  DO 607 K=NBK,1,-1
+                     MA=I1+K-1
+                     KO=AMORS.JA(MA)
+                     IF(KO.GT.KJF)GO TO 607
+                     IF(KO.LT.KJD)GO TO 606
+                     IF(LI.LT.KO)THEN
+                        NA=LI-KO+KZA(KO)+NUIA(KO,2)
+                        A(NA)=AISA.A(MA)
+                     ELSE
+                        GO TO 606
+                     ENDIF
+ 607              CONTINUE
+ 606           CONTINUE
+               SEGDES IZA
+ 604        CONTINUE
+         ENDIF
+         SEGDES AISA
+         SEGDES AMORS
+*STAT         CALL PRMSTA('Remplissage des blocs',MSTAT,1)
+         IF(KSIM.EQ.0.OR.KSIM.EQ.2)THEN
+            DO 200 IBLK=1,NBLK
+               KJD=NLDBLK(IBLK)
+               KJF=NLDBLK(IBLK+1)-1
+               ISAU=IDESCU(IBLK)
+               ISAL=IDESCL(IBLK)
+               SEGACT ISAU*MOD
+               SEGACT ISAL*MOD
+               IF(IBLK.NE.1)THEN
+                  ISAL0=0
+                  ISAU0=0
+C     SEGACT ISAL0
+C     SEGACT ISAU0
+                  ISAL00=0
+                  ISAU00=0
+                  LACTL=.FALSE.
+                  LACTU=.FALSE.
+                  KJD0=KJD-KZA(KJD)+1
+                  DO 304 I=KJD+1,KJF
+                     KLD=I-KZA(I)+1
+                     IF(KLD.LT.KJD0)KJD0=KLD
+ 304              CONTINUE
+                  DO 302 I=KJD0,KJD-1
+                     LDEB=I-KZA(I)+1
+                     DO 301 N=KJD,KJF
+                        KDEB=N-KZA(N)+1
+                        IF(KDEB.LE.I) THEN
+C Calcul colonne n
+                           K1=MAX(KDEB,LDEB)
+                           LG=I-K1
+                           KL=NUIA(I,2)+K1-LDEB+1
+                           KU=NUIA(N,2)+K1-KDEB+1
+                           ISAL00=IDESCL(NUIA(I,1))
+                           LACTL=(ISAL00.NE.ISAL0.AND.ISAL00.NE.ISAL)
+                           IF (LACTL) THEN
+                              IF (ISAL0.NE.0) THEN
+                                 SEGDES ISAL0
+                              ENDIF
+                              SEGACT ISAL00
+                           ENDIF
+                           ISAL0=ISAL00
+*                           US=SDOT(LG,ISAL00.A(KL),1,ISAU.A(KU),1)
+                           US=0.D0
+                           DO ILG=0,LG-1
+                              US=US+ISAL00.A(KL+ILG)*ISAU.A(KU+ILG)
+                           ENDDO
+                           KU=NUIA(N,2)+I-KDEB+1
+                           ISAU.A(KU)=(ISAU.A(KU)-US)
+C     WRITE(IOIMP,*)' KU=',KU,' I=',I,' A(KU)=',ISAU.A(KU)
+                           IF(KSIM.NE.0)THEN
+C Calcul ligne n
+                              KU=NUIA(I,2)+K1-LDEB+1
+                              KL=NUIA(N,2)+K1-KDEB+1
+                              ISAU00=IDESCU(NUIA(I,1))
+                              LACTU=(ISAU00.NE.ISAU0.AND.ISAU00.NE.ISAU)
+                              IF (LACTU) THEN
+                                 IF (ISAU0.NE.0) THEN
+                                    SEGDES ISAU0
+                                 ENDIF
+                                 SEGACT ISAU00
+                              ENDIF
+                              ISAU0=ISAU00
+*                              US=SDOT(LG,ISAL.A(KL),1,ISAU00.A(KU),1)
+                              US=0.D0
+                              DO ILG=0,LG-1
+                                 US=US+ISAL.A(KL+ILG)*ISAU00.A(KU+ILG)
+                              ENDDO
+                              KL=NUIA(N,2)+I-KDEB+1
+                              ISAL.A(KL)=(ISAL.A(KL)-US)
+                           ENDIF
+                        ENDIF
+ 301                 CONTINUE
+ 302              CONTINUE
+                  IF (ISAL00.NE.ISAL.AND.ISAL00.NE.0) THEN
+                     SEGDES ISAL00
+                  ENDIF
+                  IF (ISAU00.NE.ISAU.AND.ISAU00.NE.0) THEN
+                     SEGDES ISAU00
+                  ENDIF
+               ENDIF
+               DO 202 I=KJD,KJF
+                  LDEB=I-KZA(I)+1
+                  KL=NUIA(I,2)
+                  DO 2011 II=LDEB,I-1
+                     ISAL.A(KL+II-LDEB+1)=ISAL.A(KL+II-LDEB+1)/D(II)
+ 2011             CONTINUE
+                  IF(KSIM.EQ.2)THEN
+                     KL=NUIA(I,2)
+                     DO 2012 II=LDEB,I-1
+                        ISAU.A(KL+II-LDEB+1)=ISAU.A(KL+II-LDEB+1)/D(II)
+ 2012                CONTINUE
+                  ENDIF
+C Calcul diagonale
+                  N=I
+                  IF(N.NE.1) THEN
+                     LG=N-LDEB
+                     KK=NUIA(N,2)+1
+                     US=0.D0
+                     DO 3003 II=1,LG
+                        US=US+
+     $                       ISAL.A(KK+II-1)
+     $                       *D(II+LDEB-1)*ISAU.A(KK+II-1)
+ 3003                CONTINUE
+                     D(N)=D(N)-US
+                  ENDIF
+C! DEBUT
+                  ADK=ABS(D(N))
+*                  WRITE(IOIMP,*) 'N=',N,' ADK=',ADK
+                  IF(ADK.LE.GGIS.PROG(N))THEN
+                     IKOMPT=IKOMPT+1
+*
+* Désactivation temporaire, sinon des cas-tests (mal conçus !) plantent
+*
+C Résolution impossible détectée au noeud %i1 pour l'inconnue %m1:4
+*                     INTERR(1)=N
+*                     MOTERR(1: 8) = '        '
+*                     CALL ERREUR(143)
+                     IF (IKOMPT.EQ.1) THEN
+                        WRITE(IOIMP,*) '!!!!!!!!!!!!! WARNING !!!!!!!!!'
+                        IF (LISDDL) THEN
+                           SEGACT MYMINC
+                           SEGACT MYPTS
+                           DO IDDL=1,MIN(10,NTTDDL)
+                              N2=IDMAT.NUNA(IDDL)
+                              CALL DDL2PI(N2,MYMINC,
+     $                             IPT,IBI,
+     $                             IMPR,IRET)
+                              IF (IRET.NE.0) GOTO 9999
+                              WRITE(IOIMP,*) 'ddl ',IDDL
+     $                             ,' = point numero ',MYPTS.NUM(1,IPT),
+     $                             ' inconnue ',MYMINC.LISINC(IBI)
+                           ENDDO
+                           SEGDES MYPTS
+                           SEGDES MYMINC
+                        ENDIF
+                     ENDIF
+                     IF (IKOMPT.LE.10.OR.ADK.EQ.0.D0) THEN
+                        WRITE(IOIMP,*) 'Au ddl ',N,'le pivot vaut ',ADK,
+     $                       ' ; norme de la ligne =',GGIS.PROG(N)
+     $                       /YZPREC
+                        IF (LISDDL) THEN
+                           N2=IDMAT.NUNA(N)
+                           CALL DDL2PI(N2,MYMINC,
+     $                          IPT,IBI,
+     $                          IMPR,IRET)
+                           IF (IRET.NE.0) GOTO 9999
+                           SEGACT MYMINC
+                           SEGACT MYPTS
+                           IF (ADK.EQ.0.D0) THEN
+                              INTERR(1)=MYPTS.NUM(1,IPT)
+                              MOTERR(1:8)=MYMINC.LISINC(IBI)
+                              CALL ERREUR(143)
+                              GOTO 9999
+                           ELSE
+                              WRITE(IOIMP,*) 'ddl ',N,' = point numero '
+     $                             ,MYPTS.NUM(1,IPT),' inconnue ',MYMINC
+     $                             .LISINC(IBI)
+                           ENDIF
+                           SEGDES MYPTS
+                           SEGDES MYMINC
+                        ELSE
+                           IF (ADK.EQ.0.D0) THEN
+                              INTERR(1)=N
+*  49 2
+*Matrice singulière. Numéro de ligne =%i1
+                              CALL ERREUR(49)
+                              GOTO 9999
+                           ENDIF
+                        ENDIF
+                        IF (ADK.EQ.0.D0) RETURN
+                     ELSE IF (IKOMPT.EQ.11) THEN
+                        WRITE(IOIMP,*) 'Plus de 10 pivots petits'
+                     ELSE
+* Temporairement désactivé pour cause de mauvais cas-tests : difasyk2Dax.dgibi
+*                        GOTO 9999
+                     ENDIF
+                     D(N)=GGIS.PROG(N)
+*                     D(N)=1.D-200
+                  ENDIF
+C! FIN
+                  I1=I+1
+                  DO 201 N=I1,KJF
+                     KDEB=N-KZA(N)+1
+                     IF(KDEB.LE.I) THEN
+C Calcul colonne n
+                        K1=MAX(KDEB,LDEB)
+                        LG=I-K1
+                        KL=NUIA(I,2)+K1-LDEB+1
+                        KU=NUIA(N,2)+K1-KDEB+1
+*                        US=SDOT(LG,ISAL.A(KL),1,ISAU.A(KU),1)
+                        US=0.D0
+                        DO ILG=0,LG-1
+                           US=US+ISAL.A(KL+ILG)*ISAU.A(KU+ILG)
+                        ENDDO
+*
+                        KU=NUIA(N,2)+I-KDEB+1
+                        ISAU.A(KU)=(ISAU.A(KU)-US)
+                        IF(KSIM.NE.0) THEN
+C Calcul ligne n
+                           KU=NUIA(I,2)+K1-LDEB+1
+                           KL=NUIA(N,2)+K1-KDEB+1
+*                           US=SDOT(LG,ISAL.A(KL),1,ISAU.A(KU),1)
+                           US=0.D0
+                           DO ILG=0,LG-1
+                              US=US+ISAL.A(KL+ILG)*ISAU.A(KU+ILG)
+                           ENDDO
+*
+                           KL=NUIA(N,2)+I-KDEB+1
+                           ISAL.A(KL)=(ISAL.A(KL)-US)
+                        ENDIF
+                     ENDIF
+ 201              CONTINUE
+ 202           CONTINUE
+               SEGDES ISAL
+               SEGDES ISAU
+ 200        CONTINUE
+            SEGSUP GGIS
+         ELSE
+            WRITE(IOIMP,*)' TRIALU : KSIM=',KSIM,' Cas non prevu '
+            GOTO 9999
+         ENDIF
+*STAT         CALL PRMSTA('Triangulation',MSTAT,1)
+         SEGDES IZD
+         SEGDES IDMAT
+      ENDIF
+*
+* Normal termination
+*
+      IRET=0
+      RETURN
+*
+* Format handling
+*
+*
+* Error handling
+*
+ 9999 CONTINUE
+      IRET=1
+      WRITE(IOIMP,*) 'An error was detected in subroutine trialu.eso'
+      RETURN
+*
+* End of subroutine TRIALU
+*
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,993 @@
+C SORMAT    SOURCE    PV        16/11/17    22:01:30     9180
+************************************************************************
+* NOM         : sormat.eso
+* DESCRIPTION : Sortie d'objets de type RIGIDITE/CHPOINT définissant
+*               un problème physique sous forme matricielle
+* REFERENCES  : - The Matrix Market Exchange Formats: Initial Design,
+*                 Boisvert R. F., Pozo R., Remington K. A. (Dec 1996)
+*               - The Rutherford-Boeing Sparse Matrix Collection,
+*                 Duff I. S., Grimes R. G., Lewis G. L. (Sep 1997)
+************************************************************************
+* HISTORIQUE :  7/06/2012 : JCARDO : création de la subroutine
+* HISTORIQUE :  4/12/2012 : JCARDO : ajout de la sortie RB
+*                                    + formes ELEMEN et TRIANG
+*                                    + mots-clés RHS, SOL et RES
+* HISTORIQUE :
+************************************************************************
+* Prière de PRENDRE LE TEMPS DE COMPLÉTER LES COMMENTAIRES
+* en cas de modification de ce sous-programme afin de faciliter
+* la maintenance !
+************************************************************************
+* APPELÉ PAR : opérateur SORTir (prsort.eso)
+* APPELLE : - subroutine SORMA1 => MM assemblée
+*           - subroutine SORMA2 =>
+************************************************************************
+* ENTRÉES :: aucune
+* SORTIES :: aucune (sur fichier uniquement)
+************************************************************************
+* SYNTAXE (GIBIANE) :
+*
+*    SORT 'MAT' MOT1 MOT2 RIG1
+*        ('TITR' MOT3)
+*        ('INCO')
+*        ('GEOM')
+*        ('FORC' CHP1)
+*        ('CONN' CHP2)
+*        ('RESU' CHP3)
+*        ('SOLU' CHP4) ;
+*
+************************************************************************
+      SUBROUTINE SORMAT
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+
+      EXTERNAL LONG
+
+-INC CCOPTIO
+
+-INC SMLMOTS
+-INC SMCHPOI
+-INC SMRIGID
+-INC SMMATRI
+-INC SMELEME
+-INC SMCOORD
+
+*
+*     NPOTOT = nombre de noeuds distincts au total
+*     NELTOT = nombre d'éléments au total
+*     NINTOT = nombre d'indices au total
+*     NVATOT = nombre de valeurs au total dans la matrice creuse
+*     NBCOPR = nombre de composantes primales
+*     NBCODU = nombre de composantes duales
+*     NBPTOT = nombre d'inconnues primales au total
+*     NBDTOT = nombre d'inconnues duales au total
+*
+*
+*     DECLARATIONS DES SEGMENTS ET DES POINTEURS
+*     ------------------------------------------
+
+*     Stockage morse provenant de l'include SMMATRIK
+      SEGMENT PMORS
+          INTEGER IA(NTT+1)
+          INTEGER JA(NJA)
+      ENDSEGMENT
+      SEGMENT IZA
+          REAL*8  A(NBVA)
+      ENDSEGMENT
+      POINTEUR KMORS.PMORS,KMOR2.PMORS
+      POINTEUR KIZA.IZA
+
+*     Tableaux temporaires permettant de concatener des données avant
+*     de les imprimer en un seul bloc
+      SEGMENT MIDATA
+          INTEGER IWRIT(NBWR)
+      ENDSEGMENT
+      SEGMENT MRDATA
+          REAL*8 XWRIT(NBWR)
+      ENDSEGMENT
+
+*     Correspondance local/global pour les noeuds
+      SEGMENT IPOG2L(NPOMAX)
+
+*     Tableaux temporaires permettant de mémoriser les indices des
+*     composantes primales/duales de chaque sous-matrice dans la liste
+*     globale IMIK/IDUA
+      SEGMENT MCONUM(NRIGEL)
+      SEGMENT ICONUM
+          INTEGER IICOPR(NLIGRP),IICODU(NLIGRD)
+      ENDSEGMENT
+
+*     Tableaux indiquant le numéro du d.d.l. primal/dual en fonction du
+*     numéro du noeud et du numéro de la composante
+      POINTEUR IDDLPR.MINCPO,IDDLDU.MINCPO
+
+*     Maillage répertoriant tous les noeuds supportant la matrice
+      POINTEUR MNOEUD.MELEME
+
+
+*     LISTES DE MOTS-CLÉS
+*     -------------------
+      PARAMETER (NCLE=7)
+      CHARACTER*4 LCLE(NCLE)
+      DATA LCLE/'TITR','GEOM','INCO','FORC','CONN','SOLU','RESU'/
+
+      PARAMETER (NTYP=2)
+      CHARACTER*4 LTYP(NTYP)
+      DATA LTYP/'ELEM','ASSE'/
+
+      CHARACTER*20 MYFMT
+
+      CHARACTER*16 PTRFMT,INDFMT
+      CHARACTER*20 VALFMT
+      INTEGER      PTRCRD,INDCRD,VALCRD,TOTCRD
+      PARAMETER (PTRFMT='(6I12)')
+      PARAMETER (INDFMT='(6I12)')
+      PARAMETER (VALFMT='(3E25.16)')
+      PARAMETER (NPTRFMT=5)
+      PARAMETER (NINDFMT=5)
+      PARAMETER (NVALFMT=3)
+
+*     VARIABLES BOOLÉENNES
+*     --------------------
+      LOGICAL ZTITR,ZGEOM,ZINCO,ZFORC,ZELEM,ZSOLU,ZRESU,ZNZER
+      LOGICAL ZOPEN
+
+
+*     AUTRES DÉCLARATIONS
+*     -------------------
+
+*     Format de sortie des fichiers
+      CHARACTER*17 CEXTN
+
+*     Chaîne imprimée dans la section TITRE
+      CHARACTER*128 CTITR,CTIT2
+      DATA CTITR/' '/
+
+*     Nom du fichier
+      CHARACTER*256 NOMFI2
+
+
+      IDIM1=IDIM+1
+
+
+*     +---------------------------------------------------------------+
+*     |                                                               |
+*     |           L E C T U R E   D E S   A R G U M E N T S           |
+*     |                                                               |
+*     +---------------------------------------------------------------+
+
+*     =========================
+*     FORMAT STANDARD DE SORTIE
+*     =========================
+
+*     CEXTN='mm' / IEXTN=1 : format Matrix Market
+*     CEXTN='rb' / IEXTN=2 : format Rutherford Boeing
+      CALL LIRCHA(CEXTN,1,LEXTN)
+      IF (CEXTN(1:LEXTN).EQ.'MM'.OR.
+     &    CEXTN(1:LEXTN).EQ.'MATRIX_MARKET') THEN
+          CEXTN='mm'
+          IEXTN=1
+      ELSEIF (CEXTN(1:LEXTN).EQ.'RB'.OR.
+     &    CEXTN(1:LEXTN).EQ.'RUTHERFORD_BOEING') THEN
+          CEXTN='rb'
+          IEXTN=2
+      ELSE
+          WRITE(*,*) 'erreur : mm ou rb ?'
+          CALL ERREUR(21)
+          RETURN
+      ENDIF
+
+
+*     =========================
+*     TYPE DE MATRICE EN SORTIE
+*     =========================
+
+*     ITYP=1 : matrices élémentaires
+*     ITYP=2 : matrice assemblée
+      CALL LIRMOT(LTYP,NTYP,ITYP,1)
+      IF (IERR.NE.0) RETURN
+
+
+*     ===========================
+*     LECTURE DE L'OBJET RIGIDITE
+*     ===========================
+
+      CALL LIROBJ('RIGIDITE',MRIGID,1,IRETOU)
+      IF (IERR.NE.0) RETURN
+
+
+*     =====================
+*     LECTURE DES MOTS-CLÉS
+*     =====================
+
+      ZTITR=.FALSE.
+      ZGEOM=.FALSE.
+      ZINCO=.FALSE.
+      ZFORC=.FALSE.
+      ZELEM=.FALSE.
+      ZSOLU=.FALSE.
+      ZRESU=.FALSE.
+
+ 1    CALL LIRMOT(LCLE,NCLE,ICLE,0)
+      IF (ICLE.EQ.0) GOTO 100
+
+      GOTO (10,11,12,13,14,15,16),ICLE
+
+*     Mot-clé TITR
+ 10   CONTINUE
+      CALL LIRCHA(CTITR,1,LTITR)
+      IF (IERR.NE.0) RETURN
+      ZTITR=.TRUE.
+      GOTO 1
+
+*     Mot-clé GEOM
+ 11   CONTINUE
+      ZGEOM=.TRUE.
+      GOTO 1
+
+*     Mot-clé INCO
+ 12   CONTINUE
+      ZINCO=.TRUE.
+      GOTO 1
+
+*     Mot-clé FORC
+ 13   CONTINUE
+      CALL LIROBJ('CHPOINT',IFORC,1,IRETOU)
+      IF (IERR.NE.0) RETURN
+      ZFORC=.TRUE.
+      GOTO 1
+
+*     Mot-clé ELEM
+ 14   CONTINUE
+      ZELEM=.TRUE.
+      GOTO 1
+
+*     Mot-clé SOLU
+ 15   CONTINUE
+      CALL LIROBJ('CHPOINT',ISOLU,1,IRETOU)
+      IF (IERR.NE.0) RETURN
+      ZSOLU=.TRUE.
+      GOTO 1
+
+*     Mot-clé RESU
+ 16   CONTINUE
+      CALL LIROBJ('CHPOINT',IRESU,1,IRETOU)
+      IF (IERR.NE.0) RETURN
+      ZRESU=.TRUE.
+      GOTO 1
+
+
+
+
+c       WRITE(*,*) 'IEXTN=',IEXTN
+c       WRITE(*,*) 'ITYP=',ITYP
+c       WRITE(*,*) 'ZTITR=',ZTITR
+c       WRITE(*,*) 'ZGEOM=',ZGEOM
+c       WRITE(*,*) 'ZINCO=',ZINCO
+c       WRITE(*,*) 'ZFORC=',ZFORC
+c       WRITE(*,*) 'ZELEM=',ZELEM
+c       WRITE(*,*) 'ZSOLU=',ZSOLU
+c       WRITE(*,*) 'ZRESU=',ZRESU
+
+
+
+
+
+*     +---------------------------------------------------------------+
+*     |                                                               |
+*     |           M A T R I C E  =  F I C H I E R   . M T X           |
+*     |                                                               |
+*     +---------------------------------------------------------------+
+*
+
+ 100  CONTINUE
+
+
+*     On s'assure que la matrice n'est pas vide
+      SEGACT,MRIGID*MOD
+      NRIGEL=IRIGEL(/2)
+      IF (NRIGEL.EQ.0) THEN
+          write(IOIMP,*) 'La matrice est vide, opération annulée'
+          RETURN
+      ENDIF
+
+
+
+*     ======================================
+*     RÉCUPÉRATION DU NOM DE BASE DU FICHIER
+*     ======================================
+
+      INQUIRE(UNIT=IOPER,OPENED=ZOPEN)
+      IF (.NOT.ZOPEN) THEN
+          CALL ERREUR(-212)
+          WRITE(IOIMP,*) '(via OPTI "SORT")'
+          MOTERR(1:8)='.'//CEXTN(1:7)
+          CALL ERREUR(705)
+          RETURN
+      ENDIF
+
+      INQUIRE(UNIT=IOPER,NAME=NOMFIC)
+      CLOSE(UNIT=IOPER,STATUS='DELETE')
+      CALL LENCHA(NOMFIC,LC)
+
+
+
+*     ========================================
+*     SORTIE DE MATRICE SOUS FORME ÉLÉMENTAIRE
+*     ========================================
+
+      IF (ITYP.EQ.1) THEN
+
+
+*         ***********************************
+*         LISTE DES NOEUDS ET DES COMPOSANTES
+*         ***********************************
+
+*         On stocke les noeuds rencontrés dans un MELEME
+          NPOMAX=XCOOR(/1)/IDIM1
+          NBSOUS=0
+          NBREF=0
+          NBNN=1
+          NBELEM=NPOMAX
+          SEGINI,IPOG2L,MNOEUD
+          MNOEUD.ITYPEL=1
+
+*         On stocke les noms des composantes primales/duales dans les
+*         tableaux IMIK et IDUA (analogues à ceux existant dans SMMATRI
+*         pour les matrices assemblées). Les tableaux ICONUM (un par
+*         sous-rigidité) mémorisent pour chaque variable primale/duale
+*         l'indice de la composante correspondante dans IMIK/IDUA.
+          SEGINI,MIMIK,MIDUA,MCONUM
+
+*         (boucle sur les sous-rigidités)
+          NPOTOT=0
+          NELTOT=0
+          NVATOT=0
+          NINTOT=0
+          DO IRIG=1,NRIGEL
+
+*             Construction du MELEME
+*             ----------------------
+              IPT1=IRIGEL(1,IRIG)
+              SEGACT,IPT1
+              NEL1=IPT1.NUM(/2)
+              NNO1=IPT1.NUM(/1)
+              NELTOT=NELTOT+NEL1
+              DO I=1,NEL1
+                  DO J=1,NNO1
+                      IF (IPOG2L(IPT1.NUM(J,I)).EQ.0) THEN
+                          NPOTOT=NPOTOT+1
+                          IPOG2L(IPT1.NUM(J,I))=NPOTOT
+                          MNOEUD.NUM(1,NPOTOT)=IPT1.NUM(J,I)
+                      ENDIF
+                  ENDDO
+              ENDDO
+
+
+*             Construction des listes IMIK/IDUA
+*             ---------------------------------
+              DESCR=IRIGEL(3,IRIG)
+              SEGACT,DESCR
+              NLIGRP=LISINC(/2)
+              NLIGRD=LISDUA(/2)
+              NINTOT=NINTOT+((NLIGRP+NLIGRD)*NEL1)
+              NVATOT=NVATOT+(NLIGRP*NLIGRD*NEL1)
+              SEGINI,ICONUM
+              MCONUM(IRIG)=ICONUM
+
+*             composantes primales
+              DO 101 K=1,NLIGRP
+                  DO J=1,IMIK(/2)
+                      IF (IMIK(J).EQ.LISINC(K)) THEN
+                          IICOPR(K)=J
+                          GOTO 101
+                      ENDIF
+                  ENDDO
+                  IMIK(**)=LISINC(K)
+                  IICOPR(K)=IMIK(/2)
+ 101          CONTINUE
+
+*             composantes duales
+              DO 102 K=1,NLIGRD
+                  DO J=1,IDUA(/2)
+                      IF (IDUA(J).EQ.LISDUA(K)) THEN
+                          IICODU(K)=J
+                          GOTO 102
+                      ENDIF
+                  ENDDO
+                  IDUA(**)=LISDUA(K)
+                  IICODU(K)=IDUA(/2)
+ 102          CONTINUE
+
+          ENDDO
+          NBELEM=NPOTOT
+          SEGADJ,MNOEUD
+
+
+*         *********************************************************
+*         LISTE DES INCONNUES (= DDL) PRIMALES/DUALES DE LA MATRICE
+*         *********************************************************
+
+          NBPTOT=0
+          NBDTOT=0
+
+          NNOE=NPOTOT
+          MAXI=IMIK(/2)
+          SEGINI,IDDLPR
+          MAXI=IDUA(/2)
+          SEGINI,IDDLDU
+
+          DO IRIG=1,NRIGEL
+
+              IPT1=IRIGEL(1,IRIG)
+              DESCR=IRIGEL(3,IRIG)
+              ICONUM=MCONUM(IRIG)
+              NEL1=IPT1.NUM(/2)
+              NBP1=IICOPR(/1)
+              NBD1=IICODU(/1)
+              DO I=1,NEL1
+
+*                 inconnues primales
+                  DO K=1,NBP1
+                      ICOP=IICOPR(K)
+                      INOP=IPOG2L(IPT1.NUM(NOELEP(K),I))
+                      IF (IDDLPR.INCPO(ICOP,INOP).EQ.0) THEN
+                          NBPTOT=NBPTOT+1
+                          IDDLPR.INCPO(ICOP,INOP)=NBPTOT
+                      ENDIF
+                  ENDDO
+
+*                 inconnues duales
+                  DO K=1,NBD1
+                      ICOD=IICODU(K)
+                      INOD=IPOG2L(IPT1.NUM(NOELED(K),I))
+                      IF (IDDLDU.INCPO(ICOD,INOD).EQ.0) THEN
+                          NBDTOT=NBDTOT+1
+                          IDDLDU.INCPO(ICOD,INOD)=NBDTOT
+                      ENDIF
+                  ENDDO
+
+              ENDDO
+
+          ENDDO
+
+
+
+*         ********************************
+*      => Sortie MATRIX_MARKET élémentaire
+*         ********************************
+
+          IF (IEXTN.EQ.1) THEN
+
+*             Création du fichier .mtx.mm
+              M=NBPTOT
+              N=NBDTOT
+              NNZER=NELTOT
+              CALL OPENMM(NOMFIC,'mtx',CTITR,
+     &                    M,N,NNZER,'matrix elemental real general')
+
+
+              DO IRIG=1,NRIGEL
+
+                  IPT1=IRIGEL(1,IRIG)
+                  SEGACT,IPT1
+                  DESCR=IRIGEL(3,IRIG)
+                  XMATRI=IRIGEL(4,IRIG)
+                  ICONUM=MCONUM(IRIG)
+                  SEGACT,XMATRI
+
+                  DO KEL=1,IPT1.NUM(/2)
+
+                      NPR1=LISINC(/2)
+                      NDU1=LISDUA(/2)
+                      WRITE(IOPER,FMT='(I12,1X,I12)')
+     &                NPR1,NDU1
+
+                      DO KDU=1,NDU1
+                          ICOD=IICODU(KDU)
+                          INOD=IPOG2L(IPT1.NUM(NOELED(KDU),KEL))
+                          WRITE(IOPER,FMT='(I15)')
+     &                    IDDLDU.INCPO(ICOD,INOD)
+                      ENDDO
+
+                      DO KPR=1,NPR1
+                          ICOP=IICOPR(KPR)
+                          INOP=IPOG2L(IPT1.NUM(NOELEP(KPR),KEL))
+                          WRITE(IOPER,FMT='(I15)')
+     &                    IDDLPR.INCPO(ICOP,INOP)
+                      ENDDO
+
+                      DO KDU=1,NDU1
+                          DO KPR=1,NPR1
+                              WRITE(IOPER,FMT='(E25.16)')
+     &                        RE(KDU,KPR,KEL)
+                          ENDDO
+                      ENDDO
+
+                  ENDDO
+
+                  SEGDES,IPT1,DESCR,XMATRI
+                  SEGSUP,ICONUM
+
+              ENDDO
+
+
+*         ************************************
+*      => Sortie RUTHERFORD_BOEING élémentaire
+*         ************************************
+
+          ELSEIF (IEXTN.EQ.2) THEN
+
+*             Création du fichier .mtx.rb
+              PTRCRD=2*NELTOT+1
+              INDCRD=NBPTOT+NBDTOT
+              VALCRD=NVATOT
+              TOTCRD=PTRCRD+INDCRD+VALCRD
+              MVAR=MAX(NBPTOT,NBDTOT)
+              NELT=NELTOT
+              NVARIX=NINTOT
+              NELTVL=NVATOT
+              CALL OPENRB(NOMFIC,'mtx',CTITR,
+     &                    TOTCRD,PTRCRD,INDCRD,VALCRD,
+     &                    MVAR,NELT,NVARIX,NELTVL,
+     &                    'rre','(I15)','(I15)','(E25.16)')
+              IF (IERR.NE.0) RETURN
+
+
+*             ECRITURE DES POINTEURS
+*             ----------------------
+              IPTR=1
+              WRITE(IOPER,FMT='(I15)')
+     &        IPTR
+              DO IRIG=1,NRIGEL
+
+                  IPT1=IRIGEL(1,IRIG)
+                  DESCR=IRIGEL(3,IRIG)
+
+                  DO KEL=1,IPT1.NUM(/2)
+                      IPTR=IPTR+LISINC(/2)
+                      WRITE(IOPER,FMT='(I15)')
+     &                IPTR
+                      IPTR=IPTR+LISDUA(/2)
+                      WRITE(IOPER,FMT='(I15)')
+     &                IPTR
+                  ENDDO
+
+              ENDDO
+
+*             ECRITURE DES NUMEROS D'INCONNUES
+*             --------------------------------
+              DO IRIG=1,NRIGEL
+
+                  IPT1=IRIGEL(1,IRIG)
+                  DESCR=IRIGEL(3,IRIG)
+                  ICONUM=MCONUM(IRIG)
+
+                  DO KEL=1,IPT1.NUM(/2)
+
+                      DO KDU=1,LISDUA(/2)
+                          ICOD=IICODU(KDU)
+                          INOD=IPOG2L(IPT1.NUM(NOELED(KDU),KEL))
+                          WRITE(IOPER,FMT='(I15)')
+     &                    IDDLDU.INCPO(ICOD,INOD)
+                      ENDDO
+
+                      DO KPR=1,LISINC(/2)
+                          ICOP=IICOPR(KPR)
+                          INOP=IPOG2L(IPT1.NUM(NOELEP(KPR),KEL))
+                          WRITE(IOPER,FMT='(I15)')
+     &                    IDDLPR.INCPO(ICOP,INOP)
+                      ENDDO
+
+                  ENDDO
+
+                  SEGSUP,ICONUM
+
+              ENDDO
+
+*             ECRITURE DES VALEURS
+*             --------------------
+              DO IRIG=1,NRIGEL
+
+                  IPT1=IRIGEL(1,IRIG)
+                  SEGACT,IPT1
+                  DESCR=IRIGEL(3,IRIG)
+                  XMATRI=IRIGEL(4,IRIG)
+                  SEGACT,XMATRI
+
+                  DO KEL=1,IPT1.NUM(/2)
+                      DO KDU=1,LISDUA(/2)
+                          DO KPR=1,LISINC(/2)
+                              WRITE(IOPER,FMT='(E25.16)')
+     &                        RE(KDU,KPR,KEL)
+                          ENDDO
+                      ENDDO
+                  ENDDO
+
+                  SEGDES,IPT1,DESCR,XMATRI
+
+              ENDDO
+
+          ENDIF
+
+          SEGSUP,IPOG2L,MCONUM
+
+
+
+*     ======================================
+*     SORTIE DE MATRICE SOUS FORME ASSEMBLÉE
+*     ======================================
+*
+
+      ELSEIF (ITYP.EQ.2) THEN
+
+          IF (ICHOLE.NE.0) ICHOLE=0
+
+*         Assemblage des matrices élémentaires
+*         ************************************
+          IF (NORINC.EQ.0.AND.NORIND.EQ.0) THEN
+              INORMU=0
+          ELSE
+              INORMU=1
+          ENDIF
+          CALL KRES9(MRIGID,INORMU)
+          IF (IERR.NE.0) RETURN
+
+*         Mise sous forme morse = CSR (Compressed Sparse Row)
+*         ***************************************************
+*         /!\ Même après transformation en morse, les inconnues restent
+*             decrites par les segments IINCPO et IDUAPO du SMMATRI
+*             pointé par ICHOLE dans le MRIGID d'origine.
+*             En theorie, la matrice qui sort de l'assemblage par KRES9
+*             est carrée, structurellement symétrique. On forcera alors
+*             NBDTOT = NBPTOT mais on distinguera tout de meme les
+*             inconnues primales et duales via IINCPO et IDUAPO.
+          CALL KRES10(MRIGID,KMORS,KIZA)
+          IF (IERR.NE.0) RETURN
+          SEGACT,KMORS,KIZA
+          NBPTOT=KMORS.IA(/1)-1
+          NBDTOT=NBPTOT
+*         /!\ KIZA.A est rempli de 0 inutiles en fin
+*             => à ne pas utiliser pour déterminer NVATOT
+          NVATOT=KMORS.JA(/1)
+
+*         Conversion du stockage CSR (Compressed Sparse Row) vers
+*         CSC (Compressed Sparse Column)
+*         *******************************************************
+          NTT=NBPTOT
+          NJA=NVATOT
+          SEGINI,KMOR2
+          CALL TRPMOR(NTT,NJA,KMORS.JA,KMORS.IA,KMOR2.JA,KMOR2.IA,
+     &                0,IRET)
+          SEGSUP,KMORS
+
+*         On (re)active les segments pour la suite de la subroutine
+*         *********************************************************
+          SEGACT,MRIGID
+          MMATRI=ICHOLE
+          SEGACT,MMATRI
+
+
+*         ******************************
+*      => Sortie MATRIX_MARKET assemblée
+*         ******************************
+
+          IF (IEXTN.EQ.1) THEN
+
+*             Création du fichier .mtx.mm
+              M=NBDTOT
+              N=NBPTOT
+              NNZER=NVATOT
+              CALL OPENMM(NOMFIC,'mtx',CTITR,
+     &                    M,N,NNZER,'matrix coordinate real general')
+     &
+
+*             Ecriture de la matrice
+              NTVA=0
+              DO I=1,M
+                  NIVA=KMOR2.IA(I+1)-KMOR2.IA(I)
+                  DO J=1,NIVA
+                      WRITE(IOPER,FMT='(I12,1X,I12,1X,E25.16)')
+     &                I,KMOR2.JA(NTVA+J),KIZA.A(NTVA+J)
+                  ENDDO
+                  NTVA=NTVA+NIVA
+              ENDDO
+
+
+*         **********************************
+*      => Sortie RUTHERFORD_BOEING assemblée
+*         **********************************
+
+          ELSEIF (IEXTN.EQ.2) THEN
+
+*             Création du fichier .mtx.rb
+              M=NBDTOT
+              NVEC=NBPTOT
+              NAUXD=NVATOT
+c               PTRCRD=CEILING((NBPTOT+1)/NPTRFMT)
+c               INDCRD=CEILING(NVATOT/NINDFMT)
+c               VALCRD=CEILING(NVATOT/NVALFMT)
+              PTRCRD=(NBPTOT+1)/NPTRFMT
+              INDCRD=NVATOT/NINDFMT
+              VALCRD=NVATOT/NVALFMT
+              IF (MOD((NBPTOT+1),NPTRFMT).GT.0) PTRCRD=PTRCRD+1
+              IF (MOD(NVATOT,NINDFMT).GT.0) INDCRD=INDCRD+1
+              IF (MOD(NVATOT,NVALFMT).GT.0) VALCRD=VALCRD+1
+              TOTCRD=PTRCRD+INDCRD+VALCRD
+
+              CALL OPENRB(NOMFIC,'mtx',CTITR,
+     &                    TOTCRD,PTRCRD,INDCRD,VALCRD,
+     &                    M,NVEC,NAUXD,0,
+     &                    'rua',PTRFMT,INDFMT,VALFMT)
+              IF (IERR.NE.0) RETURN
+
+*             Ecriture de la matrice
+              WRITE(IOPER,PTRFMT) (KMOR2.IA(K),K=1,NBPTOT+1)
+              WRITE(IOPER,INDFMT) (KMOR2.JA(K),K=1,NVATOT)
+              WRITE(IOPER,VALFMT) (KIZA.A(K),K=1,NVATOT)
+
+          ENDIF
+
+          SEGSUP,KMOR2,KIZA
+
+      ENDIF
+
+      CLOSE(UNIT=IOPER)
+
+
+
+*     +---------------------------------------------------------------+
+*     |                                                               |
+*     |       G E O M E T R I E   =   F I C H I E R   . G E O M       |
+*     |                                                               |
+*     +---------------------------------------------------------------+
+
+ 200  CONTINUE
+      IF (.NOT.ZGEOM) THEN
+          OPEN(UNIT=IOPER,FILE=NOMFIC(1:LONG(NOMFIC))//'.geom'//CEXTN)
+          CLOSE(UNIT=IOPER,STATUS='DELETE')
+          GOTO 300
+      ENDIF
+
+      IF (ITYP.EQ.2) THEN
+          MNOEUD=IGEOMA
+          SEGACT,MNOEUD
+          NPOTOT=MNOEUD.NUM(/2)
+      ENDIF
+
+      MYFMT='(E25.16)'
+
+*     Création du fichier .geom.mm
+*     ****************************
+      IF (IEXTN.EQ.1) THEN
+          M=NPOTOT
+          N=IDIM1
+          NNZER=0
+          CALL OPENMM(NOMFIC,'geom',CTITR,
+     &                M,N,NNZER,'matrix array real general')
+
+*     Création du fichier .geom.rb
+*     ****************************
+      ELSEIF (IEXTN.EQ.2) THEN
+          M=NPOTOT
+          NVEC=IDIM1
+          NAUXD=0
+          CALL OPENRB(NOMFIC,'geom',CTITR,
+     &                M,NVEC,NAUXD,0,
+     &                0,0,0,0,
+     &                'geos         r',MYFMT,' ',' ')
+          IF (IERR.NE.0) RETURN
+      ENDIF
+
+*     Ecriture des coordonnées du maillage
+      WRITE(IOPER,FMT=MYFMT)
+     &((XCOOR((MNOEUD.NUM(1,K)-1)*IDIM1+J),K=1,NPOTOT),J=1,IDIM)
+      WRITE(IOPER,FMT='(I12)')
+     &(MNOEUD.NUM(1,K),K=1,NPOTOT)
+
+      IF (ITYP.EQ.2) SEGDES,MNOEUD
+      CLOSE(UNIT=IOPER)
+
+
+
+*     +---------------------------------------------------------------+
+*     |                                                               |
+*     |       I N C O N N U E S   =   F I C H I E R   . I N C O       |
+*     |                                                               |
+*     +---------------------------------------------------------------+
+
+ 300  CONTINUE
+      IF (.NOT.ZINCO) THEN
+          OPEN(UNIT=IOPER,FILE=NOMFIC(1:LONG(NOMFIC))//'.inco'//CEXTN)
+          CLOSE(UNIT=IOPER,STATUS='DELETE')
+          GOTO 400
+      ENDIF
+
+      IF (ITYP.EQ.2) THEN
+          IDDLPR=IINCPO
+          IDDLDU=IDUAPO
+          SEGACT,IDDLPR,IDDLDU
+
+          MIMIK=IIMIK
+          MIDUA=IIDUA
+          SEGACT,MIMIK,MIDUA
+      ENDIF
+
+      NBVAR=NBPTOT+NBDTOT
+      NBWR=2*NBVAR
+      SEGINI,MIDATA
+
+      NBCOPR=IDDLPR.INCPO(/1)
+      NBNOPR=IDDLPR.INCPO(/2)
+      NBCODU=IDDLDU.INCPO(/1)
+      NBNODU=IDDLDU.INCPO(/2)
+
+*     Inconnues primales
+      DO J=1,NBCOPR
+          DO I=1,NBNOPR
+              IINC=IDDLPR.INCPO(J,I)
+              IF (IINC.GT.0) THEN
+                  IWRIT(IINC)=I
+                  IWRIT(NBVAR+IINC)=J
+              ENDIF
+          ENDDO
+      ENDDO
+
+*     Inconnues duales
+      DO J=1,NBCODU
+          DO I=1,NBNODU
+              IINC=IDDLDU.INCPO(J,I)
+              IF (IINC.GT.0) THEN
+                  IWRIT(NBPTOT+IINC)=I
+                  IWRIT(NBVAR+NBPTOT+IINC)=J
+              ENDIF
+          ENDDO
+      ENDDO
+
+
+*     Création du fichier .inco.mm
+*     ****************************
+      IF (IEXTN.EQ.1) THEN
+          M=NBVAR
+          N=2
+          NNZER=0
+          MYFMT='(I12)'
+          CALL OPENMM(NOMFIC,'inco',CTITR,
+     &                M,N,NNZER,'matrix array real general')
+
+*         On ajoute le nom des composantes dans l'entête...
+          BACKSPACE(UNIT=IOPER)
+          WRITE(UNIT=IOPER,FMT='("%",/,A)')
+     &    '% COMPOSANTES'
+          WRITE(UNIT=IOPER,FMT='("% PRIM ",I6,"   ",A4)')
+     &    (J,IMIK(J),J=1,NBCOPR)
+          WRITE(UNIT=IOPER,FMT='("% DUAL ",I6,"   ",A4)')
+     &    (J,IDUA(J),J=1,NBCODU)
+
+*         ...puis on reecrit ce que l'on avait effacé
+          WRITE(UNIT=IOPER,FMT='("%")')
+          WRITE(IOPER,FMT='(I12,1X,I12)') M,N
+
+*         Ecriture des noeud et composante associés à chaque variable
+          WRITE(IOPER,FMT=MYFMT) (IWRIT(K),K=1,NBWR)
+
+
+*     Création du fichier .inco.rb
+*     ****************************
+      ELSEIF (IEXTN.EQ.2) THEN
+          M=NBVAR
+          NVEC=2
+          NAUXD=0
+          MYFMT='(I12)'
+          CALL OPENRB(NOMFIC,'inco',CTITR,
+     &                M,NVEC,NAUXD,0,
+     &                0,0,0,0,
+     &                'avl          r',MYFMT,' ',' ')
+          IF (IERR.NE.0) RETURN
+
+*         Ecriture des noeud et composante associés à chaque variable
+          WRITE(IOPER,FMT=MYFMT) (IWRIT(K),K=1,NBWR)
+
+*         On ajoute le nom des composantes en fin de fichier
+          WRITE(UNIT=IOPER,FMT='("%",/,A)')
+     &    '% COMPOSANTES'
+          WRITE(UNIT=IOPER,FMT='("% PRIM ",I6,"   ",A4)')
+     &    (J,IMIK(J),J=1,NBCOPR)
+          WRITE(UNIT=IOPER,FMT='("% DUAL ",I6,"   ",A4)')
+     &    (J,IDUA(J),J=1,NBCODU)
+
+      ENDIF
+
+
+      CLOSE(UNIT=IOPER)
+      IF (ITYP.EQ.2) SEGDES,MIMIK,MIDUA,IDDLPR,IDDLDU
+      SEGSUP,MIDATA
+
+
+
+
+
+
+*     +---------------------------------------------------------------+
+*     |                                                               |
+*     |    S E C O N D - M E M B R E   =   F I C H I E R   . R H S    |
+*     |                                                               |
+*     +---------------------------------------------------------------+
+
+ 400  CONTINUE
+      IF (.NOT.ZFORC) GOTO 500
+      WRITE(IOIMP,*) 'Pas de sortie FORC pour le moment'
+      CALL ERREUR(251)
+
+
+
+*     +---------------------------------------------------------------+
+*     |                                                               |
+*     |    C O N N E C T I V I T É   =   F I C H I E R   . C O N N    |
+*     |                                                               |
+*     +---------------------------------------------------------------+
+
+ 500  CONTINUE
+      IF (.NOT.ZELEM) GOTO 600
+      WRITE(IOIMP,*) 'Pas de sortie CONN pour le moment'
+      CALL ERREUR(251)
+      IF (IERR.NE.0) RETURN
+
+
+
+*     +---------------------------------------------------------------+
+*     |                                                               |
+*     |   S O L U T I O N   D E   R E F E R E N C E                   |
+*     |                               =   F I C H I E R   . S O L U   |
+*     |                                                               |
+*     +---------------------------------------------------------------+
+
+ 600  CONTINUE
+      IF (.NOT.ZSOLU) GOTO 700
+      WRITE(IOIMP,*) 'Pas de sortie SOLU pour le moment'
+      CALL ERREUR(251)
+      IF (IERR.NE.0) RETURN
+
+
+*     +---------------------------------------------------------------+
+*     |                                                               |
+*     |   R É S U L T A T   D E   C A L C U L                         |
+*     |                               =   F I C H I E R   . R E S U   |
+*     |                                                               |
+*     +---------------------------------------------------------------+
+
+ 700  CONTINUE
+      IF (.NOT.ZRESU) GOTO 999
+      WRITE(IOIMP,*) 'Pas de sortie RESU pour le moment'
+      CALL ERREUR(251)
+      IF (IERR.NE.0) RETURN
+
+
+
+
+
+
+
+*     +---------------------------------------------------------------+
+*     |                                                               |
+*     |                M É N A G E   E T   S O R T I E                |
+*     |                                                               |
+*     +---------------------------------------------------------------+
+
+ 999  CONTINUE
+
+
+      IF (ITYP.EQ.1) SEGSUP,MNOEUD,MIMIK,MIDUA,IDDLPR,IDDLDU
+      IF (ITYP.EQ.2) SEGDES,MMATRI
+      SEGDES,MRIGID
+
+      RETURN
+
+      END
+
+
+
+
+
+

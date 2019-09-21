@@ -1,0 +1,607 @@
+C CCREEP    SOURCE    PV        17/12/08    21:15:30     9660
+      SUBROUTINE CCREEP ( wrk52, wrk53, wrk54,
+     &                  IFOURB, IB, IGAU, NBPGAU,
+     &                  wcreep, iecou, xecou )
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+C-----------------------------------------------------------------------
+C
+C     DESCRIPTION FONCTIONNELLE :
+C     -------------------------
+C
+C     Integration des lois 'VISCO_EXTERNE' par un schema Runge-Kutta 1.2
+C
+C     Entrees/sorties : segments wrk52, wrk53, wrk54 de l'objet DECHE
+C     Entrees : IFOURB = -3 EN DEFORMATIONS PLANES GENERALISEES
+C                        -2 EN CONTRAINTES PLANES
+C                        -1 EN DEFORMATIONS PLANES
+C                         0 EN AXISYMETRIE
+C                         1 EN SERIE DE FOURIER
+C                         2 EN TRIDIM
+C               IB     = NUMERO DE L'ELEMENT COURANT
+C               IGAU   = NUMERO DU POINT COURANT
+C               NBPGAU = NBRE DE POINTS DE GAUSS
+C     Variables de travail : segments wcreep, iecou, xecou
+C
+C-----------------------------------------------------------------------
+-INC CCOPTIO
+-INC DECHE
+-INC CCREEL
+C
+C Segment de travail pour les lois 'VISCO_EXTERNE'
+C
+      SEGMENT WCREEP
+C        Entrees/sorties constantes de la routine CREEP
+         REAL*8        SERD
+         CHARACTER*16  CMNAMC
+         INTEGER       LEXIMP, NSTTVC, LAYERC, KSPTC
+C        Entrees/sorties de la routine CREEP pouvant varier
+         REAL*8        STV(NSTV),    STV1(NSTV),  STVP1(NSTV),
+     &                 STVP2(NSTV),  STV12(NSTV), STVP3(NSTV),
+     &                 STVP4(NSTV),  STV13(NSTV), STVF(NSTV),
+     &                 TMP12,        TMP,         TMP32,
+     &                 DTMP12,       DTMP,
+     &                 PRD12(NPRD),  PRD(NPRD),   PRD32(NPRD),
+     &                 DPRD12(NPRD), DPRD(NPRD)
+         INTEGER       KSTEPC
+C        Autres indicateurs et variables de travail
+         LOGICAL       LTMP, LPRD, LSTV
+         INTEGER       IVIEX, NPAREC
+         REAL*8        dTMPdt, dPRDdt(NPRD)
+      ENDSEGMENT
+C
+      SEGMENT IECOU
+         INTEGER       NYOG  ,NYNU  ,NYALFA,NYSMAX,NYN   ,NYM   ,NYKK  ,
+     &   NYALF1,NYBET1,NYR   ,NYA   ,NYRHO ,NSIGY ,NNKX  ,NYKX  ,icow16,
+     &   icow17,icow18,icow19,icow20,icow21,icow22,icow23,icow24,
+     &   icow25,icow26,icow27,icow28,icow29,icow30,ICARA,
+     &   icow32,icow33,NSTRS1,MFR1,  NBGMAT,NELMAT,MSOUPA,
+     &   icow39,icow40,icow41,icow42,icow43,icow44
+        INTEGER icow45,icow46,icow47,icow48,icow49,icow50,
+     .          icow51,icow52,icow53,icow54,icow55,icow56
+     .          icow57,icow58
+      ENDSEGMENT
+C
+      SEGMENT XECOU
+         REAL*8 xcow1, xcow2,xcow3,DTT,  DT,   TREF, xcow7
+      ENDSEGMENT
+C
+C     Variables locales
+C
+C     Tableaux de travail
+C
+      REAL*8     SIG(8),SIG1(8),SIG12(8),SIG13(8),
+     &           DSPT(8),XX(8),
+     &           EVP1(8),EVP2(8),EVP3(8),EVP4(8),
+     &           EPSV(8),EPSV1(8),EPSV12(8),EPSV13(8),
+     &           CRIGI(12),
+     &           DECRA(5),DESWA(5),TIME12(2),TIME(2),TIME32(2)
+C
+C     Variables scalaires
+C
+      LOGICAL    DTLIBR
+C
+C------------------- Debut du code executable --------------------------
+C
+C=======================================================================
+C 1 - INITIALISATIONS
+C     Parametres de pilotage des iterations internes
+C=======================================================================
+C
+      PRELOC=1.d-8
+      KERRE = 0
+C* -> Les tests de "Restriction" sont maintenant effectues lors de la
+C*    ceation du modele (cf MODELI).
+C*C
+C*C     Restriction pour l'instant a 'VISCO_EXTERNE' 'GENERAL'
+C*C
+C*      IF ( IVIEX.NE.1 ) THEN
+C*         KERRE = 958
+C*         RETURN
+C*      ENDIF
+C*C
+C*C     Restriction aux elements massifs avec option de calcul 3D
+C*C
+C*      IF ( MFR1.NE.1.OR.IFOURB.NE.2 ) THEN
+C*         KERRE = 950
+C*         RETURN
+C*      ENDIF
+C*C
+C* Normalement ce test sur DT < 0 devrait etre fait avant (COMVAL ?)
+      IF (DT.LT.0.0) THEN
+         KERRE = 414
+         RETURN
+      ENDIF
+      IF (DT.EQ.0.0) DT = 1.e-20
+C
+      DTLIBR =.TRUE.
+C
+      DTLEFT = DT
+      BORNE  = 2.0
+      RMAX   = 1.3
+      RMIN   = 0.7
+      DIV    = 7.0
+      FAC    = 3.0
+C
+      XMAX = XMAT(1)*1.D-3
+C
+C=======================================================================
+C 2 - Prediction elastique de l'increment de contraintes
+C=======================================================================
+C
+      CALL CALSIG(DEPST,DDAUX,NSTRS1,CMATE,VALMAT,VALCAR,N2EL,
+     &            N2PTEL,MFR1,IFOURB,IB,IGAU,EPAIST,NBPGAU,MELE,
+     &            NPINT,NBGMAT,NELMAT,SECT,LHOOK,TXR,XLOC,XGLOB,
+     &            D1HOOK,ROTHOO,DDHOMU,CRIGI,DSIGT,IRTD)
+C
+      IF (IRTD.NE.1) THEN
+         KERRE = 714
+         RETURN
+      ENDIF
+C
+C=======================================================================
+C 3 - Pre-traitements avant iterations en sous-increments
+C=======================================================================
+C
+C.....Deformations inelastiques au debut du pas :
+C     Passage gamma -> epsilon pour les termes extradiagonaux
+C
+C     ATTENTION : adaptations si extension a d'autres formulations EF
+C                                       ou a d'autres options de calcul
+      DO 30 I=4,NSTRS1
+        EPIN0(I)=0.5D0*EPIN0(I)
+  30  CONTINUE
+C
+C.....Calcul des derivees temporelles de la temperature et des
+C     parametres externes
+C     Ces parametres de chargement sont supposes varier lineairement
+C     au cours du pas de temps
+C
+      IF ( LTMP ) THEN
+         dTMPdt = (TUREF(1)-TURE0(1))/DT
+      ENDIF
+      IF ( LPRD ) THEN
+         DO 35 I=1,NPAREC
+            dPRDdt(I) = (PAREXF(I)-PAREX0(I))/DT
+  35     CONTINUE
+      ENDIF
+C
+C=======================================================================
+C 4 - INITIALISATIONS AVANT ITERATIONS EN SOUS-INCREMENTS
+C=======================================================================
+C
+      ITERO = 0
+ 6543 CONTINUE
+C
+      ITERO = 1 + ITERO
+      IF ( ITERO.NE.1) THEN
+         DTLIBR = .TRUE.
+         preloc = preloc * 7.D0
+         IF (ITERO.GT.3) THEN
+            KERRE = 268
+            RETURN
+         ENDIF
+      ENDIF
+C
+      DTLEFT = DT
+      TAU    = DTLEFT
+      TAU12  = TAU*0.5D0
+C
+      TIME12(1) = 0.5D0*DT
+      TIME12(2) = temp0+TIME12(1)
+      TIME(1)= DT
+      TIME(2)= tempf
+      TIME32(1) = 1.5D0*DT
+      TIME32(2) = temp0+TIME32(1)
+C
+      IF ( LTMP ) THEN
+         DTMP   = TUREF(1)-TURE0(1)
+         DTMP12 = 0.5D0*DTMP
+         TMP12 = TURE0(1)+DTMP12
+         TMP   = TUREF(1)
+         TMP32 = TUREF(1)+DTMP12
+      ENDIF
+      IF ( LPRD ) THEN
+         DO 36 I=1,NPAREC
+            DPRD(I)   = PAREXF(I)-PAREX0(I)
+            DPRD12(I) = 0.5D0*DPRD(I)
+            PRD12(I) = PAREX0(I)+DPRD12(I)
+            PRD(I)   = PAREXF(I)
+            PRD32(I) = PAREXF(I)+DPRD12(I)
+  36     CONTINUE
+      ENDIF
+C
+      ASIG = SQRT(PROCON(SIG0,SIG0,NSTRS1))
+      ERRABS = preloc*ASIG
+      IF (XMAX.GT.ASIG) ERRABS = preloc*XMAX
+C
+      DO 40 I=1,NSTRS1
+         SIG(I) = SIG0(I)
+         EPSV(I) = EPIN0(I)
+         DSPT(I) = DSIGT(I)/DT
+  40  CONTINUE
+C
+      EC0  = VAR0(1)
+      ESW0 = VAR0(2)
+      P    = VAR0(3)
+      QTLD = VAR0(4)
+      IF ( LSTV ) THEN
+         DO 50 I=1,NSTTVC
+            STV(I)=VAR0(4+I)
+  50     CONTINUE
+      ENDIF
+C
+C=======================================================================
+C 5 - ITERATIONS EN SSINCREMENTS  /FIN SI DTLEFT = 0
+C=======================================================================
+C
+      NSSINC = 0
+      NITERA = 0
+  60  CONTINUE
+C
+         NSSINC = NSSINC + 1
+         IF (NSSINC.GT.MSOUPA) THEN
+            DTLIBR=.FALSE.
+            GOTO 6543
+         ENDIF
+C
+C        Evaluation initiale des vitesses de deformation inelastique
+C        sur la base du dernier sous-increment converge
+         LEND = 0
+         CALL CREEP(DECRA,DESWA,STV,serd,EC0,ESW0,P,QTLD,
+     &              TMP,DTMP,PRD,DPRD,TIME,TAU,
+     &              cmnamc,leximp,LEND,coorga,nsttvc,ib,igau,
+     &              layerc,ksptc,KSTEPC,NSSINC)
+         IF (KSTEPC.NE.1) RETURN
+         CALL INCREE(TAU,SIG,P,QTLD,DECRA,DESWA,
+     &               EVP1,EC0P1,ESW0P1,
+     &               NSTRS1,IVIEX,MFR1,IFOURB)
+C
+C        ---------------------------------------------------------------
+C        DEBUT DES ITERATIONS SUR TAU OPTIMAL /FIN SI RA PETIT
+C
+         NITERA  = 0
+  70     CONTINUE
+C
+            NITERA  = NITERA + 1
+C
+C           ____________________________________________________________
+C           Premiere evaluation de l'etat a t+TAU12
+            CALL AVCREE(TAU12,SIG,EPSV,EC0,ESW0,
+     &                  SIG1,EPSV1,EC01,ESW01,P1,QTLD1,
+     &                  DSPT,EVP1,EC0P1,ESW0P1,XMAT,
+     &                  NSTRS1,IVIEX,MFR1,IFOURB)
+C           MAJ des variables internes supplementaires le cas echeant
+            IF ( LSTV ) THEN
+               LEND = 1
+               CALL CREEP(DECRA,DESWA,STV1,serd,EC0,ESW0,P1,QTLD1,
+     &                    TMP12,DTMP12,PRD12,DPRD12,TIME12,TAU12,
+     &                    cmnamc,leximp,LEND,coorga,nsttvc,ib,igau,
+     &                    layerc,ksptc,KSTEPC,NSSINC)
+               IF (KSTEPC.NE.1) RETURN
+            ENDIF
+C
+C           ____________________________________________________________
+C           Reevaluation des vitesses de deformation inelastique sur la
+C           base de l'etat a t+TAU12 calcule precedemment, puis moyenne
+            LEND = 0
+            CALL CREEP(DECRA,DESWA,STV1,serd,EC01,ESW01,P1,QTLD1,
+     &                 TMP32,DTMP,PRD32,DPRD,TIME32,TAU,
+     &                 cmnamc,leximp,LEND,coorga,nsttvc,ib,igau,
+     &                 layerc,ksptc,KSTEPC,NSSINC)
+            IF (KSTEPC.NE.1) RETURN
+            CALL INCREE(TAU,SIG1,P1,QTLD1,DECRA,DESWA,
+     &                  EVP2,EC0P2,ESW0P2,
+     &                  NSTRS1,IVIEX,MFR1,IFOURB)
+C
+            DO 701 I=1,NSTRS1
+               EVP2(I) = 0.5D0*(EVP1(I)+EVP2(I))
+ 701        CONTINUE
+            EC0P2 = 0.5D0*(EC0P1+EC0P2)
+            ESW0P2 = 0.5D0*(ESW0P1+ESW0P2)
+C
+C           ____________________________________________________________
+C           Reevaluation de l'etat a t+TAU12
+            CALL AVCREE(TAU12,SIG,EPSV,EC0,ESW0,
+     &                  SIG12,EPSV12,EC012,ESW012,P12,QTLD12,
+     &                  DSPT,EVP2,EC0P2,ESW0P2,XMAT,
+     &                  NSTRS1,IVIEX,MFR1,IFOURB)
+C           MAJ des variables internes supplementaires le cas echeant
+            IF ( LSTV ) THEN
+               LEND = 1
+               CALL CREEP(DECRA,DESWA,STV12,serd,EC0,ESW0,P12,QTLD12,
+     &                    TMP12,DTMP12,PRD12,DPRD12,TIME12,TAU12,
+     &                    cmnamc,leximp,LEND,coorga,nsttvc,ib,igau,
+     &                    layerc,ksptc,KSTEPC,NSSINC)
+               IF (KSTEPC.NE.1) RETURN
+            ENDIF
+C
+C           ____________________________________________________________
+C           Reevaluation des vitesses de deformation inelastique sur la
+C           base de l'etat a t+TAU12 calcule precedemment
+            LEND = 0
+            CALL CREEP(DECRA,DESWA,STV12,serd,EC012,ESW012,P12,QTLD12,
+     &                 TMP,DTMP12,PRD,DPRD12,TIME,TAU12,
+     &                 cmnamc,leximp,LEND,coorga,nsttvc,ib,igau,
+     &                 layerc,ksptc,KSTEPC,NSSINC)
+            IF (KSTEPC.NE.1) RETURN
+            CALL INCREE(TAU12,SIG12,P12,QTLD12,DECRA,DESWA,
+     &                  EVP3,EC0P3,ESW0P3,
+     &                  NSTRS1,IVIEX,MFR1,IFOURB)
+C
+C           ____________________________________________________________
+C           Premiere evaluation de l'etat a t+TAU
+            CALL AVCREE(TAU12,SIG12,EPSV12,EC012,ESW012,
+     &                  SIG13,EPSV13,EC013,ESW013,P13,QTLD13,
+     &                  DSPT,EVP3,EC0P3,ESW0P3,XMAT,
+     &                  NSTRS1,IVIEX,MFR1,IFOURB)
+C           MAJ des variables internes supplementaires le cas echeant
+            IF ( LSTV ) THEN
+              LEND = 1
+              CALL CREEP(DECRA,DESWA,STV13,serd,EC012,ESW012,P13,QTLD13,
+     &                   TMP,DTMP12,PRD,DPRD12,TIME,TAU12,
+     &                   cmnamc,leximp,LEND,coorga,nsttvc,ib,igau,
+     &                   layerc,ksptc,KSTEPC,NSSINC)
+              IF (KSTEPC.NE.1) RETURN
+            ENDIF
+C
+C           ____________________________________________________________
+C           Reevaluation des vitesses de deformation inelastique sur la
+C           base de l'etat a t+TAU calcule precedemment, puis moyenne
+            LEND = 0
+            CALL CREEP(DECRA,DESWA,STV13,serd,EC013,ESW013,P13,QTLD13,
+     &                 TMP32,DTMP12,PRD32,DPRD12,TIME32,TAU12,
+     &                 cmnamc,leximp,LEND,coorga,nsttvc,ib,igau,
+     &                 layerc,ksptc,KSTEPC,NSSINC)
+            IF (KSTEPC.NE.1) RETURN
+            CALL INCREE(TAU12,SIG13,P13,QTLD13,DECRA,DESWA,
+     &                  EVP4,EC0P4,ESW0P4,
+     &                  NSTRS1,IVIEX,MFR1,IFOURB)
+C
+            DO 711 I=1,NSTRS1
+               EVP4(I) = 0.5D0*(EVP3(I)+EVP4(I))
+ 711        CONTINUE
+            EC0P4 = 0.5D0*(EC0P3+EC0P4)
+            ESW0P4 = 0.5D0*(ESW0P3+ESW0P4)
+C
+C           ____________________________________________________________
+C           Reevaluation de l'etat a t+TAU
+            CALL AVCREE(TAU12,SIG12,EPSV12,EC012,ESW012,
+     &                  SIGF,EPINF,EC0F,ESW0F,PF,QTLDF,
+     &                  DSPT,EVP4,EC0P4,ESW0P4,XMAT,
+     &                  NSTRS1,IVIEX,MFR1,IFOURB)
+C           MAJ des variables internes supplementaires le cas echeant
+            IF ( LSTV ) THEN
+               LEND = 1
+               CALL CREEP(DECRA,DESWA,STVF,serd,EC012,ESW012,PF,QTLDF,
+     &                    TMP,DTMP12,PRD,DPRD12,TIME,TAU12,
+     &                    cmnamc,leximp,LEND,coorga,nsttvc,ib,igau,
+     &                    layerc,ksptc,KSTEPC,NSSINC)
+               IF (KSTEPC.NE.1) RETURN
+            ENDIF
+C
+C           ____________________________________________________________
+C           Reevaluation des vitesses de deformation inelastique sur la
+C           base de l'etat a t+TAU calcule precedemment, puis moyenne
+            LEND = 0
+            CALL CREEP(DECRA,DESWA,STVF,serd,EC0F,ESW0F,PF,QTLDF,
+     &                 TMP32,DTMP12,PRD32,DPRD12,TIME32,TAU12,
+     &                 cmnamc,leximp,LEND,coorga,nsttvc,ib,igau,
+     &                 layerc,ksptc,KSTEPC,NSSINC)
+            IF (KSTEPC.NE.1) RETURN
+            CALL INCREE(TAU12,SIGF,PF,QTLDF,DECRA,DESWA,
+     &                  EVP4,EC0P4,ESW0P4,
+     &                  NSTRS1,IVIEX,MFR1,IFOURB)
+C
+            DO 721 I=1,NSTRS1
+               EVP2(I) = (EVP1(I)+EVP4(I))/6.D0+EVP3(I)*2.D0/3.D0
+ 721        CONTINUE
+            EC0P2 = (EC0P1+EC0P4)/6.D0+EC0P3*2.D0/3.D0
+            ESW0P2 = (ESW0P1+ESW0P4)/6.D0+ESW0P3*2.D0/3.D0
+C
+C           ____________________________________________________________
+C           Derniere evaluation de l'etat a t+TAU pour test convergence
+            CALL AVCREE(TAU,SIG,EPSV,EC0,ESW0,
+     &                  SIG1,EPSV1,EC01,ESW01,P1,QTLD1,
+     &                  DSPT,EVP2,EC0P2,ESW0P2,XMAT,
+     &                  NSTRS1,IVIEX,MFR1,IFOURB)
+C           Pas de MAJ des variables internes supplementaires (inutile)
+C
+C           ____________________________________________________________
+C           CALCUL DU RAPPORT : ERREUR CALCULEE / ERREUR ADMISE
+C
+            DO 730 I=1,NSTRS1
+               XX(I) = SIGF(I)-SIG1(I)
+ 730        CONTINUE
+            RA = SQRT(PROCON(XX,XX,NSTRS1))/(ERRABS)
+            SQRA = SQRT(RA)
+C
+C           ____________________________________________________________
+C           TEST DE FIN D'ITERATIONS /  MISE A JOUR DE TAU
+C           DIV =7   BORNE = 2
+C           SI   SQRA>7   TAU = TAU/7    ET NOUVEL ESSAI
+C           SI 2<RA<7*7   ON VISE RA = 1  ET NOUVEL ESSAI
+C
+            IF ( DTLIBR ) THEN
+C
+C              Petite ruse pour dejouer l'optimisation
+               RA1=RA*1.D0
+C
+               IF ((RA.GT.DIV*DIV).OR.(RA.NE.RA1)) THEN
+C
+                  TAULAS = TAU
+                  TAU = TAU/DIV
+                  TAU12 = TAU*0.5D0
+C
+                  DTAU = TAULAS - TAU
+                  TIME12(1) = TIME12(1) - 0.5D0*DTAU
+                  TIME12(2) = TIME12(2) - 0.5D0*DTAU
+                  TIME(1) = TIME(1) - DTAU
+                  TIME(2) = TIME(2) - DTAU
+                  TIME32(1) = TIME32(1) - 1.5D0*DTAU
+                  TIME32(2) = TIME32(2) - 1.5D0*DTAU
+C
+                  IF ( LTMP ) THEN
+                     DTMP = dTMPdt * TAU
+                     DTMP12 = dTMPdt * TAU12
+                     TMP12 = TMP12 - 0.5D0*DTAU*dTMPdt
+                     TMP = TMP - DTAU*dTMPdt
+                     TMP32 = TMP32 - 1.5D0*DTAU*dTMPdt
+                  ENDIF
+                  IF ( LPRD ) THEN
+                     DO 740 I=1,NPAREC
+                        DPRD(I) = dPRDdt(I) * TAU
+                        DPRD12(I) = dPRDdt(I) * TAU12
+                        PRD12(I) = PRD12(I) - 0.5D0*DTAU*dPRDdt(I)
+                        PRD(I) = PRD(I) - DTAU*dPRDdt(I)
+                        PRD32(I) = PRD32(I) - 1.5D0*DTAU*dPRDdt(I)
+ 740                 CONTINUE
+                  ENDIF
+C
+                  GOTO 70
+C
+               ELSE IF ( RA.GT.(BORNE)) THEN
+C
+                  TAULAS = TAU
+                  TAU = TAU/SQRA
+                  TAU12 = TAU*0.5D0
+C
+                  DTAU = TAULAS - TAU
+                  TIME12(1) = TIME12(1) - 0.5D0*DTAU
+                  TIME12(2) = TIME12(2) - 0.5D0*DTAU
+                  TIME(1) = TIME(1) - DTAU
+                  TIME(2) = TIME(2) - DTAU
+                  TIME32(1) = TIME32(1) - 1.5D0*DTAU
+                  TIME32(2) = TIME32(2) - 1.5D0*DTAU
+C
+                  IF ( LTMP ) THEN
+                     DTMP = dTMPdt * TAU
+                     DTMP12 = dTMPdt * TAU12
+                     TMP12 = TMP12 - 0.5D0*DTAU*dTMPdt
+                     TMP = TMP - DTAU*dTMPdt
+                     TMP32 = TMP32 - 1.5D0*DTAU*dTMPdt
+                  ENDIF
+                  IF ( LPRD ) THEN
+                     DO 750 I=1,NPAREC
+                        DPRD(I) = dPRDdt(I) * TAU
+                        DPRD12(I) = dPRDdt(I) * TAU12
+                        PRD12(I) = PRD12(I) - 0.5D0*DTAU*dPRDdt(I)
+                        PRD(I) = PRD(I) - DTAU*dPRDdt(I)
+                        PRD32(I) = PRD32(I) - 1.5D0*DTAU*dPRDdt(I)
+ 750                 CONTINUE
+                  ENDIF
+C
+                  GOTO 70
+C
+               ENDIF
+            ENDIF
+C           ____________________________________________________________
+C
+C        FIN D'ITERATIONS SUR TAU OPTIMAL / MISE A JOUR DES VARIABLES
+C        Ici RA < BORNE
+C        On avance en temps
+C
+         DO 80 I=1,NSTRS1
+            SIG(I)  = SIGF(I)
+            EPSV(I) = EPINF(I)
+  80     CONTINUE
+C
+         EC0  = EC0F
+         ESW0 = ESW0F
+         P    = PF
+         QTLD = QTLDF
+         IF ( LSTV ) THEN
+            DO 90 I=1,NSTTVC
+               STV(I) = STVF(I)
+  90        CONTINUE
+         ENDIF
+C        ---------------------------------------------------------------
+C
+C     TEST DE FIN DES ITERATIONS EN SSINCREMENTS / MISE A JOUR DE TAU
+C     * si   SQRA<1/3        TAU = TAU*3
+C     * si   1/3<SQRA<RMIN   on vise RA = 1
+C     * si   RMIN<SQRA<RMAX  TAU inchange
+C     * si   SQRA>RMAX       on vise RA = 1
+C     Fin des boucles en ss increments  si tau = DTLEFT
+C
+      IF ( TAU.LT.DTLEFT ) THEN
+         DTLEFT = DTLEFT - TAU
+         IF ( FAC*SQRA.LT.1.D0) THEN
+            TAU=TAU*FAC
+         ELSE IF ( (SQRA.LT.RMIN).OR.(SQRA.GT.RMAX) ) THEN
+            TAU=TAU/SQRA
+         ENDIF
+         IF (TAU.GT.DTLEFT) TAU = DTLEFT
+         TAU12 = TAU*0.5D0
+         TIME12(1) = TIME(1) + TAU12
+         TIME12(2) = TIME(2) + TAU12
+         TIME32(1) = TIME(1) + 1.5D0*TAU
+         TIME32(2) = TIME(2) + 1.5D0*TAU
+         TIME(1) = TIME(1) + TAU
+         TIME(2) = TIME(2) + TAU
+         IF ( LTMP ) THEN
+            DTMP = dTMPdt * TAU
+            DTMP12 = dTMPdt * TAU12
+            TMP12 = TMP + DTMP12
+            TMP32 = TMP + 1.5D0*DTMP
+            TMP = TMP + DTMP
+         ENDIF
+         IF ( LPRD ) THEN
+            DO 100 I=1,NPAREC
+               DPRD(I) = dPRDdt(I) * TAU
+               DPRD12(I) = dPRDdt(I) * TAU12
+               PRD12(I) = PRD(I) + DPRD12(I)
+               PRD32(I) = PRD(I) + 1.5D0*DPRD(I)
+               PRD(I) = PRD(I) + DPRD(I)
+ 100        CONTINUE
+         ENDIF
+         GOTO 60
+      ENDIF
+C
+      IF (ABS(TAU-DTLEFT).GT.(TAU/1000.)) THEN
+         WRITE ( IOIMP,* ) ' PROBLEME   TAU > DTLEFT '
+         KERRE = 223
+         RETURN
+      ENDIF
+C
+C=======================================================================
+C 6 - Post-traitements pour stockage des resultats
+C=======================================================================
+C
+C.....Deformations inelastiques debut/fin de pas :
+C     Passage epsilon -> gamma pour les termes extradiagonaux
+C     ATTENTION : adaptations si extension a d'autres formulations EF
+C                                       ou a d'autres options de calcul
+      DO 110 I=1,NSTRS1
+         A=1.D0
+         IF (I.GT.3) A=2.D0
+         EPIN0(I)=EPIN0(I)*A
+         EPINF(I)=EPINF(I)*A
+ 110  CONTINUE
+C
+C.....Variables internes a la fin du pas
+C
+      VARF(1) = EC0F
+      VARF(2) = ESW0F
+      VARF(3) = PF
+      VARF(4) = QTLDF
+      IF ( LSTV ) THEN
+         DO 120 I=1,NSTTVC
+            VARF(4+I)=STVF(I)
+ 120     CONTINUE
+      ENDIF
+C
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+

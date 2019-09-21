@@ -1,0 +1,285 @@
+C TRAVER    SOURCE    CHAT      05/01/13    03:45:31     5004
+      SUBROUTINE TRAVER(DIAM,EPSILO,NSAUV,MLREE6,TMIN,NDIM
+     $     ,ITY1,ITYG,IEL1,IELL,NOEL1,NOUN1,DIFL,DIFT,DTREEL,IZUN
+     $     ,IZSH,TDEP,XDEP2,NPOS,ITER,IPARPO,KSAUV,DTSTOC,DTCUMU
+     $     ,ICHGZ,Z,JFACE,JREBO,XIREB,XNREB,TARI,XARI2)
+
+*************************************************************************
+*** SP 'TRAVER' : fait avancer la particule par convection + diffusion
+*** entre la face de depart et la face de sortie de l'element traverse
+*** avec un eventuel recalibrage du pas de tps associé au dernier saut
+*** afin d'arriver sur une face.
+***
+*** APPELES 1 = aucun
+*** APPELES 2 = 'SAUTPA','LIEUPT', 'TRJTIN','CHOINT','CALIDT','MODCAL'
+***
+*** E = 'DIAM' "longueur caracteristique" de l'element traversé
+***     'EPSILO' marge relative acceptée position % element
+***     'NSAUV' taille de la liste des tps de sauvegarde
+***     'MLREE6' liste des tps de sauvegarde
+***     'TMIN' instant de depart du lacher de la particule
+***     'NDIM' dimension de l'espace
+***     'ITY1' entier caracterisant le type de l'element
+***     'ITYG' entier caracterisant la geometrie de l'element
+***     'IEL1' n° global de l'element considéré
+***     'IELL' n° local (ds sous-maillage) de l'element considéré
+***     'NOEL1' nombre de noeuds de l'element traversé
+***     'NOUN1' nombre de flux de l'element traversé
+***     'DIFL' coeff dispersion longitudinal ds element considere
+***     'DIFT' coeff dispersion transversal ds element considere
+***     'DTREEL' pas de tps réel pour le calcul avancée particule
+***     'IZUN' segmt content flux aux faces % ss-maillage de 'IELL'
+***     'IZSH' segment content coord reelles noeuds, fcts forme et base
+***     'TDEP' tps reel départ particule
+***     'XDEP2' position réelle de départ particule
+***
+*** E/S = 'NPOS' taille maximale des tableaux du segment 'IPARPO'
+***       'ITER' indice des tableaux de 'IPARPO' pour la sauvegarde
+***       'IPARPO' segment ou sont sauvegardés pts trajectoire particule
+***       'KSAUV' indice liste des tps de sauvegarde considéré
+***       'DTSTOC' pas de tps de sauvegarde considéré
+***       'DTCUMU' cumul des pas de tps entre deux sauvegardes
+***       'ICHGZ' vaut 1 si saut précédent effectif, 0 sinon
+***       'Z' vecteur aleatoire pour le saut diffusif
+***       'JFACE' n° local de la face traversée de l'element considéré
+***       'JREBO' n° local face impermeable ou se trouve particule, -1 sinon
+***       'XIREB' pt d'impact sur la face impermeable
+***       'XNREB' vecteur normal à la face impermeable
+***
+*** S = 'TARI' tps reel ecoulé jusqu'à interface de sortie de l'element
+***     'XARI2' coord reelles arrivee particule (interface de sortie)
+***
+*** Rq : critere d'acceptabilité position % elemt -> EPSILO  (utilisé
+***      aussi pour critere acceptabilité dvlpt limité (calibrage).
+***
+***                 Auteur Cyril Nou
+*************************************************************************
+
+
+***   declaration des segments et tableaux utilisés dans sp 'TRAVER'
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+-INC SMLREEL
+      POINTEUR MLREE6.MLREEL
+      SEGMENT IZSH
+          REAL*8 SHP(6,MNO9),SHY(12,MNO9),XYZL(3,MNO9)
+      ENDSEGMENT
+      SEGMENT IZUN
+         REAL*8 UN(I1,I2,I3)
+      ENDSEGMENT
+      SEGMENT  IPARPO
+         INTEGER NAPAR(NPOS),NUMP(NPOS)
+         REAL*8 CREF(NDIM,NPOS),TPAR(NPOS)
+      ENDSEGMENT
+      DIMENSION XDEP(3),XDEP2(3),XCON(3),XCON2(3),XARI(3),XARI2(3)
+      DIMENSION XCON3(3),XARI3(3)
+      DIMENSION UREEL(3),U(3),UZERO(3),XJAC(3,3),Z(3)
+      DIMENSION XINTER(3),XNORMA(3),XIREB(3),XNREB(3),XC2(3),XA2(3)
+      DIMENSION IFACE(6),XINT(3,6),XN(3,6)
+***   'ICALIB' vaut 1 si calibrage applicable, 0 sinon
+      ICALIB=0
+***   'DTTEST' pas de tps utilisé pour traversee (hors calibrage)
+      DTTEST=DTREEL
+      NCOMPT=0
+      CALL INITD(UZERO,3,0.D0)
+***********************************************************
+*** AVANCEE DE LA PARTICULE APRES PAS DE TEMPS 'DTTEST' ***
+***********************************************************
+ 10   LTEST=1
+***   saut convectif + diffusif dans la maille
+      CALL SAUTPA(EPSILO,ICHGZ,JREBO,XIREB,XNREB,NDIM,ITY1
+     $     ,ITYG,NOEL1,NOUN1,DIAM,DIFL,DIFT,TDEP,XDEP2,UN(1,1,IELL)
+     $     ,DTTEST,UREEL,U,TARI,XCON2,XARI2,IZSH,Z,IREBCO,IREBDI,NTEST)
+***   cas ou Jacobien nul lors approximation vitesse efmh
+      IF (NTEST.EQ.0) THEN
+         IEL1=-1
+         RETURN
+      ENDIF
+***   localisation particule (à 0 pres car intersection inconnue)
+      CALL LIEUPT(0.D0,NDIM,ITYG,XARI2,IZSH,ITEST)
+
+****************************************************************
+*** CAS OU PARTICULE TJS DS MAILLE APRES PAS DE TPS 'DTTEST' ***
+****************************************************************
+
+      IF (ITEST.EQ.1) THEN
+       CALL TRJTIN(EPSILO,NDIM,IEL1,DTTEST,TARI,XARI2,NSAUV,MLREE6,TMIN
+     $   ,NPOS,ITER,IPARPO,KSAUV,DTSTOC,DTCUMU,TDEP,XDEP2,ICALIB,ICHGZ)
+***      la particule n'est plus sur une face impermeable
+         CALL LIEUPT(-EPSILO,NDIM,ITYG,XARI2,IZSH,ITEST)
+         IF (ITEST.EQ.1) THEN
+            JREBO=-1
+            IREBCO=0
+            IREBDI=0
+            DO 50 I=1,3
+               XIREB(I)=0.D0
+               XNREB(I)=0.D0
+ 50         CONTINUE
+            DTTEST=DTREEL
+         ENDIF
+         NCOMPT=NCOMPT+1
+         GOTO 10
+      ENDIF
+
+*************************************************************
+*** CAS OU PARTICULE HORS MAILLE APRES PAS DE TPS 'DTTEST ***
+*************************************************************
+
+***   cas ou 1er saut nul (conv compensée par diff au saut précédent)
+      IF ((DTTEST.LT.(EPSILO*EPSILO*DTREEL)).AND.(NCOMPT.EQ.0)) THEN
+         TARI=TDEP
+         DO 20 I=1,NDIM
+            XARI2(I)=XDEP2(I)
+ 20      CONTINUE
+         RETURN
+      ENDIF
+***   division pas de tps pour avoir au moins un saut ds la maille
+      IF (ICALIB.EQ.0) THEN
+         DTTEST=1.D-1*DTTEST
+         ICHGZ=0
+         GOTO 10
+      ENDIF
+***   determination intersection utilisée pour calibrage particule
+ 30   CONTINUE
+*30   CALL CHOINT(NDIM,ITYG,XDEP2,XCON2
+*    $     ,XARI2,IZSH,XINTER,XNORMA,JTEST,JFACE)
+***   on postule pas de traversee au depart
+      JTEST=0
+
+      CALL FACTRA(NDIM,ITYG,XCON2,XARI2,IZSH,IFACE,XINT,XN,NBFAC)
+   35 CONTINUE
+      IF (NBFAC.NE.0) THEN
+***      cas ou face(s) traversee(s) lors du saut diffusif
+         JFAC1=JFACE
+         CALL INTPRO(NDIM,XARI2,NBFAC,IFACE,XINT,XN,JFAC1,XINTER,XNORMA)
+         CALL CALIDT(EPSILO,NDIM,XINTER,XNORMA,XIREB,XNREB,IREBCO,IREBDI
+     $   ,XDEP2,TDEP,UREEL,U,DTTEST,LTEST,DTNEW,XCON3,XARI3,TARI,KTEST)
+         JTEST=2
+         IF(KTEST.EQ.0)THEN
+***    la face trouvée ne convient pas on l'enleve de la liste
+             IF(NBFAC.GT.1)THEN
+               IJ1=0
+               DO 37 IJ=1,NBFAC-1
+               IF( JFACE.EQ.IFACE(IJ))IJ1=1
+               IFACE(IJ)=IFACE(IJ+IJ1)
+               DO 36 II=1,NDIM
+               XINT(II,IJ)=XINT(II,IJ+IJ1)
+               XN(II,IJ)=XN(II,IJ+IJ1)
+   36          CONTINUE
+   37          CONTINUE
+             ENDIF
+             NBFAC=NBFAC-1
+             JTEST=0
+             GO TO 35
+         ELSE
+         CALL RSETD(XCON2,XCON3,NDIM)
+         CALL RSETD(XARI2,XARI3,NDIM)
+         JFACE=JFAC1
+         ENDIF
+      ELSE
+         CALL FACTRA(NDIM,ITYG,XDEP2,XCON2,IZSH,IFACE,XINT,XN,NBFAC)
+         IF (NBFAC.NE.0) THEN
+***         cas ou face(s) traversee(s) lors du saut convectif
+            CALL INTPRO(NDIM,XCON2,NBFAC
+     $           ,IFACE,XINT,XN,JFACE,XINTER,XNORMA)
+         CALL CALIDT(EPSILO,NDIM,XINTER,XNORMA,XIREB,XNREB,IREBCO,IREBDI
+     $,XDEP2,TDEP,UREEL,UZERO,DTTEST,LTEST,DTNEW,XCON2,XARI2,TARI,KTEST)
+            JTEST=1
+         ENDIF
+      ENDIF
+      IF (JTEST.EQ.0) THEN
+         IEL1=-1
+         RETURN
+      ENDIF
+***   recalibrage particule sur face avec memes vecteurs vitesses
+*******************************************************************
+*** ANALYSE DU CAS OU CALIBRAGE A REUSSI (0 <= DTNEW <= DTTEST) ***
+*******************************************************************
+
+      IF (KTEST.EQ.1) THEN
+         CALL LIEUPT(EPSILO,NDIM,ITYG,XARI2,IZSH,ITEST)
+         IF (ITEST.EQ.1) THEN
+            CALL TRJTIN(EPSILO,NDIM,IEL1,DTNEW,TARI,XARI2
+     $           ,NSAUV,MLREE6,TMIN,NPOS,ITER,IPARPO,KSAUV
+     $           ,DTSTOC,DTCUMU,TDEP,XDEP2,ICALIB,ICHGZ)
+            TARI=TDEP
+            DO 40 I=1,NDIM
+               XARI2(I)=XDEP2(I)
+ 40         CONTINUE
+            NCOMPT=NCOMPT+1
+            RETURN
+         ELSEIF (ITEST.EQ.0) THEN
+            DTTEST=DTNEW
+            LTEST=0
+            GOTO 30
+         ENDIF
+
+*************************************************************
+*** TRAITEMENT DU CAS OU CALIBRAGE ECHOUE (DT INCOHERENT) ***
+*************************************************************
+
+      ELSEIF (KTEST.EQ.0) THEN
+         IF ((IREBCO.EQ.1).OR.(IREBDI.EQ.1)) THEN
+            IEL1=-1
+            RETURN
+         ENDIF
+***      duplication en cas d'echec du calibrage convection seule
+         LTEST=1
+         DO 80 I=1,NDIM
+            XC2(I)=XCON2(I)
+            XA2(I)=XARI2(I)
+ 80      CONTINUE
+         TABIS=TARI
+         CALL MODCAL(EPSILO,NDIM,ITYG,XINTER,XNORMA
+     $        ,XIREB,XNREB,IREBCO,IREBDI,XDEP2,TDEP,UREEL,U
+     $        ,IZSH,DTTEST,XCON2,XARI2,TARI,DTNEW2,KTEST1,KTEST2,LTEST)
+***      cas ou calibrage convection seule non pertinent
+         IF (KTEST1.EQ.0) THEN
+            DO 90 I=1,NDIM
+               XCON2(I)=XC2(I)
+               XARI2(I)=XA2(I)
+ 90         CONTINUE
+            TARI=TABIS
+            CALL TRJTIN(EPSILO,NDIM,IEL1,DTNEW,TARI,XARI2
+     $           ,NSAUV,MLREE6,TMIN,NPOS,ITER,IPARPO,KSAUV
+     $           ,DTSTOC,DTCUMU,TDEP,XDEP2,ICALIB,ICHGZ)
+            TARI=TDEP
+            DO 70 I=1,NDIM
+               XARI2(I)=XDEP2(I)
+ 70         CONTINUE
+            NCOMPT=NCOMPT+1
+            RETURN
+         ENDIF
+***      cas ou calibrage convection seule pertinent
+         IF (KTEST2.EQ.1) THEN
+            CALL TRJTIN(EPSILO,NDIM,IEL1,DTNEW2,TARI,XARI2
+     $           ,NSAUV,MLREE6,TMIN,NPOS,ITER,IPARPO,KSAUV
+     $           ,DTSTOC,DTCUMU,TDEP,XDEP2,ICALIB,ICHGZ)
+***         la particule n'est plus sur une face impermeable
+            CALL LIEUPT(-EPSILO,NDIM,ITYG,XARI2,IZSH,ITEST)
+            IF (ITEST.EQ.1) THEN
+               JREBO=-1
+               IREBCO=0
+               IREBDI=0
+               DO 60 I=1,3
+                  XIREB(I)=0.D0
+                  XNREB(I)=0.D0
+ 60            CONTINUE
+            ENDIF
+            NCOMPT=NCOMPT+1
+            GOTO 10
+         ELSEIF (KTEST2.EQ.0) THEN
+            DTTEST=DTNEW2
+            GOTO 30
+         ENDIF
+      ENDIF
+
+      RETURN
+      END
+
+
+
+
+
+
+

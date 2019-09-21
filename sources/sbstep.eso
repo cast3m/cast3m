@@ -1,0 +1,216 @@
+C SBSTEP    SOURCE    CHAT      05/01/13    03:12:07     5004
+CCC
+C **********************************************************************
+CCC
+      SUBROUTINE SUBSTEP
+     .           (sigini,varini,dsigtr,sigfin,varfin,
+     .            ddefpl,Kmat,ndims,ndimv,ndimk,
+     .            xmat,kerre,precis,nitmax,nescri,ues,
+     .            nmodel,nnumer,deltax,nsteps,
+     .            isub,ntotiter,iincre)
+c
+c IN:
+c     sigini  Initial stresses
+c     varini  Initial internal variables
+c     dsigtr  Increment of trial stresses
+c     ndims   Stress dimension
+c     ndimv   Internal variable dimension
+c     ndimk   Tangent stiffness matrix dimension
+c     xmat    Material parameters
+c     precis  Tolerance for local problem iterations
+c     nitmax  Maximun iterations for local problem
+c     nescri  Write intermediate results (0:no, 1: yes)
+c     ues     Output unit
+c     nmodel  Plasticity model
+c     nnumer  Generalized flow vector computation
+c             0:analytical
+c             1:1st forward differences
+c             2:1st centered differences
+c             3:1st complex approximation
+c     deltax  Relative stepsize value
+c     nsteps  Number of substeps
+c OUT:
+c     sigfin  Final stresses
+c     varfin  Final internal variables
+c     ddefpl  Increment of plastic strains
+c     Kmat    Consistent tangent stiffness matrix
+c     kerre   Error control flag
+      IMPLICIT INTEGER(I-N)
+
+      integer ndims,ndimv,ndimk,kerre,nitmax,nescri,iterlocal,
+     .        nnumer,ues,nmodel,nsteps,isub,ntotiter,iincre
+      real*8    sigini(*),varini(*),ddefpl(*),
+     .          dsigtr(*),sigfin(*),varfin(*),
+     .          Kmat(*),xmat(*),precis,deltax
+      integer ips,i,k,ivoid,ndimx,flagini,iaux,ic,jf
+      real*8  sig1(6),sig2(6),ddsigtr(6),dddefpl(6),
+     .        var1(4),var2(4),Kmat0(64),Kmat1(64),Kmat2(64),
+     .        alphai
+
+      do i=1,2
+        var1(i)=0.D0
+        var2(i)=0.D0
+      enddo
+      do i=1,6
+        sig1(i)=0.D0
+        sig2(i)=0.D0
+        ddsigtr(i)=0.D0
+        dddefpl(i)=0.D0
+      enddo
+      do i=1,64
+        Kmat0(i)=0.D0
+        Kmat1(i)=0.D0
+        Kmat2(i)=0.D0
+      enddo
+c      nescri=1
+c     variable de ecoj2 que no se usa
+      ivoid=0
+c     dimension de sigma ampliado
+      call fijarndimx(nmodel,xmat,ndims,ndimx)
+c     posicion en el step (valor de i inicial)
+      ips   =0
+c     contador de substeps
+      isub  =0
+c     contador de iteraciones
+      ntotiter=0
+c     flag de primer substep para la mtc
+      flagini=1
+c     poner sigma y varint iniciales
+      do i=1,ndims
+        sig1(i)=sigini(i)
+      enddo
+      do i=1,ndimv
+        var1(i)=varini(i)
+      enddo
+      do while (ips.lt.nsteps)
+ 100    continue
+c       proporcion de carga para el substep
+        alphai=float(iincre)/float(nsteps)
+c       dividir incremento de sigma
+        do k=1,ndims
+          ddsigtr(k)=dsigtr(k)*alphai
+        enddo
+c       integra un substep
+         if (nmodel.eq.1) then
+           call eco_j2(sig1,var1,ddsigtr,sig2,var2,
+     .                 dddefpl,ivoid,ndims,xmat,kerre,
+     .                 precis,nitmax,nescri,ues,iterlocal)
+         else if (nmodel.eq.2) then
+           call eco_rhmc(sig1,var1,ddsigtr,sig2,var2,
+     .                   dddefpl,ivoid,ndims,xmat,kerre,
+     .                   precis,nitmax,nescri,ues,iterlocal)
+         else
+           call eco_MRSMAC(sig1,var1,ddsigtr,sig2,var2,
+     .                     dddefpl,ivoid,ndims,xmat,kerre,
+     .                     precis,nitmax,nescri,ues,nnumer,deltax,
+     .                     iterlocal)
+         endif
+c       criterio de aceptacion
+        if (kerre.eq.1) then
+          if (iincre.eq.1) then
+            write(*,*) ' Numero de substeps max. insuficiente'
+            return
+          else
+            iincre=int(iincre/2)
+            iaux=nsteps-(ips+iincre)
+            if (iaux.lt.0) iincre=nsteps-ips
+c           repite el step dividido por la mitad
+            kerre=0
+            goto 100
+          endif
+        endif
+c       añadir defor plastica del step
+        do i=1,ndims
+          ddefpl(i)=dddefpl(i)
+        enddo
+        do i=1,6
+          dddefpl(i)=0.D0
+        enddo
+c       poner como inicial las sigma y varint finales del step
+        do i=1,ndims
+          sig1(i)=sig2(i)
+        enddo
+        do i=1,ndimv
+          var1(i)=var2(i)
+        enddo
+c       actualizar la i de posicion en el step
+        ips=ips+iincre
+c       añadir uno al contador de steps
+        isub=isub+1
+c       añadir el numero de iteraciones al total
+        ntotiter=ntotiter+(iterlocal)
+c       calcula la nx.nx de la inversa del jacobiano (sin E^-1 en la diagonal)
+         if (nmodel.eq.1) then
+            call jac_J2(Kmat1,ndimx,sig2,ndims,var2(1),var2(2),xmat,
+     .                  nescri,ues,kerre)
+         else if (nmodel.eq.2) then
+            call jac_rhmc(Kmat1,ndimx,sig2,ndims,var2(2),xmat,
+     .                    nescri,ues,kerre)
+           else
+            call jac_mrsmac(Kmat1,ndimx,sig2,ndims,
+     .                      var2(1),var2(2),var2(3),var2(4),
+     .                      xmat,nescri,ues,nnumer,deltax,kerre)
+         endif
+        if (flagini.eq.1) then
+c         se guardan ns columnas de Kmat1 en Kmat0 multiplicadas por alphai
+          do ic=1,ndims
+          do jf=1,ndimx
+           Kmat0(ndimx*(ic-1)+jf)=Kmat1(ndimx*(ic-1)+jf)*alphai
+          enddo
+          enddo
+          flagini=0
+          do i=1,ndimx*ndimx
+            Kmat1(i)=0.D0
+          enddo
+        else
+c         suma (Anterior + P*alphai) [nx.ns+nx.ns]
+          do ic=1,ndims
+           Kmat0(ndimx*(ic-1)+ic)=Kmat0(ndimx*(ic-1)+ic)+alphai
+          enddo
+c         multiplica Kmat2=Kmat1*Kmat0 [nx.ns=nx.nx*nx.ns];
+c         corresponde a JSS^-1*()
+          do ic=1,ndims
+          do jf=1,ndimx
+            do k=1,ndimx
+             Kmat2(ndimx*(ic-1)+jf)=Kmat2(ndimx*(ic-1)+jf)+
+     .             Kmat1(ndimx*(k-1)+jf)*Kmat0(ndimx*(ic-1)+k)
+            enddo
+          enddo
+          enddo
+c         guarda Kmat2 en Kmat0 para el siguiente paso
+          do i=1,ndimx*ndims
+            Kmat0(i)=Kmat2(i)
+          enddo
+          do i=1,ndimx*ndimx
+            Kmat1(i)=0.D0
+          enddo
+          do i=1,ndimx*ndims
+            Kmat2(i)=0.D0
+          enddo
+c        write(ues,999)((Kmat0(ndims*(jf-1)+i),jf=1,ndims),i=1,ndims)
+        endif
+      enddo
+c     poner las sigma y varint finales
+        do i=1,ndims
+          sigfin(i)=sig2(i)
+        enddo
+        do i=1,ndimv
+          varfin(i)=var2(i)
+        enddo
+c     Kmat2 = Matriz de hook
+      ivoid=1
+      call MatHok(Kmat2,ndimx,ndims,ivoid)
+c     calcular (Pt*Kmat0)*E [(ns.nx*nx.ns)*ns.ns]
+      do ic=1,ndims
+      do jf=1,ndims
+        Kmat(ndimk*(ic-1)+jf)=0.D0
+        do k=1,ndims
+         Kmat(ndimk*(ic-1)+jf)=Kmat(ndimk*(ic-1)+jf)+
+     .        Kmat0(ndimx*(k-1)+jf)*Kmat2(ndimx*(ic-1)+k)
+        enddo
+      enddo
+      enddo
+      end
+
+
+

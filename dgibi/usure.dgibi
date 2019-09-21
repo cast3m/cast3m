@@ -1,0 +1,679 @@
+* fichier : usure.dgibi
+*
+* Section : Mecanique Usure
+*
+* Cas-test gracieusement mis a disposition par le LTDS
+* Ecole Centrale Lyon (S.Fouvry et S.Garcin)
+*
+* Ce cas-test appelle les procedures :
+*
+*   @CHCOTAE : initialisation des tables de stockage de resultats
+*   @CHREP   : procedure realisant un changement de repere
+*   @PCPT    : decoupage des pas de temps
+*   @PRCA1   : Acquisition des donnees de contact
+*   @PRCA2   : Calcul de la densite d'energie dissipee
+*   @PRCA3   : Calcul du profil d'usure a appliquer
+*   @PRCA4   : Calcul du taux d'application et application du profil
+*              d'usure reparti en profondeur
+*   @PRCA5   : Calcul des donnees scalaires associees au contact
+*   @EVN_MNG : identificateur d'evenements
+*   @EVN_IDT : manageur d'evenements
+*______________________________________________________________________
+
+*                  DEFINITION D'UNE BOITE D USURE
+*______________________________________________________________________
+*
+*  Dans le jeu de donnees, l'utilisateur doit definir les indices
+*  suivant pour chaque boite d'usure :
+
+*    BOX1 = TABL 'BOITE_USURE' ;
+*     -> Creation de la boite d'usure a stocker dans la table PASAPAS
+
+*    BOX1.'VOLUME_REPARTITION'
+*     -> Volume sous la surface usee pour "repartir" l'usure.
+
+*    BOX1.'SURFACE_APPLICATION'
+*     -> Surface usee (ou sera appliquee l'usure).
+
+*    BOX1.'SURFACE_VOISINE'
+*     -> Surface qui use (en contact avec la surface usee).
+
+*    BOX1.'SURFACE_APPUI'
+*     -> Surface delimitant avec 'SUR_APPL' le 'VOLUME_REPARTITION'.
+
+*    BOX1.'POINT_O_U'
+*     -> Point servant de reference pour deplacer le maillage.
+
+*    BOX1.'DIRECTION_APPLICATION'
+*     -> Vecteur donnant la direction d'application de l'usure.
+
+*    BOX1.'COEFFICIENT_USURE'
+*     -> Valeur du coefficient d'usure (en mJ/mm3).
+
+*    BOX1.'COEFFICIENT_FROTTEMENT'
+*     -> Valeur du coefficient de frottement.
+
+*    BOX1.'FACTEUR_ACCELERATION'
+*     -> Valeur du coefficient d'acceleration (sans unite).
+
+*    BOX1.'T_INI_US'
+*    -> Temps ou demarre l'usure.
+
+*    BOX1.'T_FIN_US'
+*    -> Temps ou s'arrete l'usure.
+
+*    BOX1.'PERIODCY'
+*    -> Periode d'un cycle d'usure.
+
+*    BOX1.'USURE_CYCLIQUE'
+*    -> Booleen qui indique le type d'usure.
+*       Si vrai -> usure cyclique sinon incrementale.
+
+*    BOX1.'POINT_REF_DELTA'
+*    -> Point ou l'on recupere les valeurs de glissement et de force
+*       pour les traces.
+
+*  Remarques :
+
+*   1/ On parle de SURFACE et de VOLUME mais puisqu'il s'agit d'un
+*      cas-test bidimensionnel, il convient de remplacer ces termes
+*      respectivement par ligne et surface.
+
+*   2/ Les indices 'SURFACE_APPLICATION' et 'SURFACE_VOISINE' contiennent
+*      les lignes ayant permis de definir le maillage de contact.
+
+*   3/ Un indice 'BOITES_USURES' de la table de PASAPAS sera defini
+*      comme etant un objet de type TABLE. Ainsi dans cette table
+*      on stockera au bon indice la table BOX1 creee.
+*      Soit TAB1, la table de PASAPAS, alors
+*           TAB1.'BOITES_USURES' = 'TABL' ;
+*           TAB1.'BOITES_USURES'. 1 = BOX1
+*             .
+*             .
+*
+*   4/ Les dimensions sont a donner en mm
+*
+*
+* Presentation du cas-test:
+* -------------------------
+*
+* Modelisation du contact-frottement entre un cylindre et un plan
+* Probleme 2D avec prise en compte d'un profil d'usure
+* Choix d'un contact de type Maitre-Esclave
+* Modele de frottement de Coulomb
+* Materiau elastique
+*
+* Comparaison code a code avec code WearBox du LTDS
+*             Code Matlab - Abaqus - Python
+*             Fretting Team - LTDS - Ecole Centrale Lyon
+*
+*______________________________________________________________________
+*
+*                          OPTION DE CALCUL
+*______________________________________________________________________
+*
+* Definition des options de calcul
+OPTI DIME 2 ELEM QUA4;
+OPTI MODE 'PLAN' 'DEFO';
+* Pieces massives => Deformations planes
+* OPTI DEBU 1 ;
+OPTI SAUV TAILLE 2.e9 8 ;
+OPTI TRAC PSC ;
+*
+VALPI = pi ;
+* Booleen pour n'effectuer que le trace du maillage (pas de resolution)
+OnlyMesh = FAUX ;
+* Maillage grossier (en dehors de la zone WearBox, elle non modifiee)
+YESFATMS = FAUX ;
+* Prendre en compte l'usure du plan ?
+OuiUsPla = VRAI ;
+* Prendre en compte l'usure du cylindre ?
+OuiUsCyl = FAUX ;
+*______________________________________________________________________
+*
+*                            MAILLAGE
+*______________________________________________________________________
+*
+* - DIMENSIONS GEOMETRIQUES DU MODELE (en mm !!!!!)
+* CT -> Cylindre Total  BUC -> Boite Usure Cylindre
+* PT -> Plan Total      BUP -> Boite Usure Plan
+* FineMS correspond a la taille des elements
+FineMS = 0.010   ;
+rayon  = 4.8     ;
+LgrCT  = 0.75    ;
+EprCT  = 0.25    ;
+LgrPT  = 0.75    ;
+EprPT  = 0.25    ;
+LgrBUC = 0.4     ;
+EprBUC = 0.125   ;
+LgrBUP = 0.4     ;
+EprBUP = 0.125   ;
+* FCYL et FPLA sont des facteurs permettant de jouer sur la densite du
+* maillage dans la boite d'usure. Ils ne sont pas necessairement egaux
+* Ce sont des facteurs multiplicatifs de FineMS.
+FCYL = 1.0 ; FPLA = 1.0 ;
+*
+* - MAILLAGE DU CYLINDRE
+*  -> Dimensions, nombre et taille des elements pour le cylindre
+LgrBU  = (( ENTI 'SUPERIEUR' (LgrBUC/FineMS/2) ) * FineMS * 2) ;
+EprBU  = (( ENTI 'SUPERIEUR' (EprBUC/FineMS  ) ) * FineMS    ) ;
+NLgrBU = 2* (ENTI 'PROCHE' (LgrBU / FineMS / 2)) ;
+
+*  -> Dimensions du cylindre totale
+AlphaCT = ASIN ((LgrCT/2.)/rayon) ;
+GapCT   = (1. - (COS AlphaCT) ) * rayon ;
+HtrCT   = GapCT + EprCT ;
+
+*  -> Dimensions de la boite d usure, partie cylindre
+AlphaBU = ASIN ((LgrBU/2.)/rayon) ;
+GapBU   = (1. - (COS AlphaBU) ) * rayon ;
+HtrBU   = GapBU + EprBU ;
+
+*  -> Points
+P0   = 0.0        0.0   ;
+PCEN = 0.0          rayon ;
+PA   = (-1*LgrCT/2) GapCT ;
+PB   = (-1*LgrBU/2) GapBU ;
+PC   = (   LgrBU/2) GapBU ;
+PD   = (   LgrCT/2) GapCT ;
+PE   = (   LgrCT/2) HtrCT ;
+PF   = (-1*LgrCT/2) HtrCT ;
+PG   = (   LgrBU/2) HtrBU ;
+PH   = (-1*LgrBU/2) HtrBU ;
+
+*  -> Lignes
+CBC = CERC NLgrBU PB PCEN PC ;
+LCG = DROI PC PG 'DINI' FineMS 'DFIN' (FCYL*FineMS) ;
+LGH = DROI NLgrBU  PG PH ;
+LHB = DROI PH PB 'DINI' (FCYL*FineMS) 'DFIN' FineMS ;
+*  -> Contour interieur (identique que le maillage soit grossier ou non)
+CntrInt  = LCG ET LGH ET LHB ;
+
+*  -> Surface boite d'usure (partie en contact-frottement)
+SrfBUC   = 'DALL' CBC LCG LGH LHB 'PLAN' ;
+
+SI YESFATMS ;
+  NEprBU =     ENTI 'PROCHE' (EprBU / FineMS) ;
+  GrosMSVC = (EprCT / NEprBU) * 2. ;
+  CAB = CERC 'DINI' GrosMSVC 'DFIN' FineMS PA PCEN PB ;
+  CCD = CERC 'DINI' FineMS  'DFIN' GrosMSVC PC PCEN PD ;
+  LDE = DROI PD PE 'DINI' GrosMSVC 'DFIN' GrosMSVC ;
+  LEF = DROI PE PF 'DINI' GrosMSVC 'DFIN' GrosMSVC ;
+  LFA = DROI PF PA 'DINI' GrosMSVC 'DFIN' GrosMSVC ;
+SINON ;
+  NBE = 'NBEL' LCG ;
+  'SI' ('>EG' FCYL 1.51) ;
+    RCYL = ((LgrCT - LgrBU) / 2.)/ EprBU ;
+  'SINON' ;
+    RCYL = 2.0 ;
+  'FINSI' ;
+  CAB = CERC 'DINI' (RCYL*FCYL*FineMS) 'DFIN' FineMS PA PCEN PB ;
+  CCD = CERC 'DINI' FineMS  'DFIN' (RCYL*FCYL*FineMS) PC PCEN PD ;
+  LDE = DROI NBE PD PE ;
+  LEF = DROI NLgrBU PE PF ;
+  LFA = DROI NBE PF PA ;
+FINSI ;
+
+*  -> Contour exterieur (depend si le maillage est grossier ou non)
+CntrExt  = LDE ET LEF ET LFA ;
+
+*  -> Surface du reste du cylindre ( contour interieur et exterieur)
+SI YESFATMS ;
+  SrfCT = SURF ((INVE CntrInt) ET CCD ET CntrExt ET CAB) ;
+SINON ;
+  SrfCT = DALL (INVE CntrInt) CCD CntrExt CAB 'PLAN' ;
+FINSI ;
+
+*  -> Surface totale du cylindre
+SurfCyl = SrfBUC ET SrfCT ;
+ELIM SurfCyl 1.e-8 ;
+
+* - MAILLAGE DU PLAN
+*  -> Dimensions, nombre et taille des elements pour le plan
+LgrBU  = (( ENTI 'SUPERIEUR' (LgrBUP/FineMS/2) ) * FineMS * 2) ;
+EprBU  = (( ENTI 'SUPERIEUR' (EprBUP/FineMS  ) ) * FineMS    ) ;
+NLgrBU = 2* (ENTI 'PROCHE' (LgrBU / FineMS / 2)) ;
+
+*  -> Points
+PI   = (-1*LgrPT/2)    0.0       ;
+PJ   = (-1*LgrBU/2)    0.0       ;
+PK   = (   LgrBU/2)    0.0       ;
+PK   = (   LgrBU/2)    -0.00     ;
+PL   = (   LgrPT/2)    0.0       ;
+PM   = (   LgrPT/2)  (-1.*EprPT) ;
+PN   = (-1*LgrPT/2)  (-1.*EprPT) ;
+PO   = (   LgrBU/2)  (-1.*EprBU) ;
+PP   = (-1*LgrBU/2)  (-1.*EprBU) ;
+
+*  -> Lignes
+LJK = DROI NLgrBU PJ PK ;
+LKO = DROI PK PO 'DINI' FineMS 'DFIN' (FPLA*FineMS) ;
+LOP = DROI NLgrBU PO PP ;
+LPJ = DROI PP PJ 'DINI' (FPLA*FineMS) 'DFIN' FineMS ;
+
+*  -> Contour interieur (identique que le maillage soit grossier ou non)
+CntrInt  = LKO ET LOP ET LPJ ;
+
+*  -> Surface boite d'usure (partie en contact-frottement)
+SrfBUP   = 'DALL' LOP (INVE LKO) LJK (INVE LPJ) 'PLAN' ;
+
+SI YESFATMS ;
+  NEprBU   = ENTI 'PROCHE' (EprBU / FineMS) ;
+  GrosMSVP = (EprPT / NEprBU) * 4. ;
+  LIJ = DROI 'DINI' GrosMSVP 'DFIN' FineMS   PI PJ ;
+  LKL = DROI 'DINI' FineMS   'DFIN' GrosMSVP PK PL ;
+  LLM = DROI PL PM 'DINI' GrosMSVP 'DFIN' GrosMSVP ;
+  LMN = DROI PM PN 'DINI' GrosMSVP 'DFIN' GrosMSVP ;
+  LNI = DROI PN PI 'DINI' GrosMSVP 'DFIN' GrosMSVP ;
+SINON ;
+  NBE = 'NBEL' LPJ ;
+  'SI' ('>EG' FPLA 1.51) ;
+    RPLA = ((LgrPT - LgrBU) / 2.)/ (HtrBU - GapBU) ;
+  'SINON' ;
+    RPLA = 2.0 ;
+  'FINSI' ;
+  LIJ = DROI 'DINI' (RPLA*FPLA*FineMs) 'DFIN' FineMS   PI PJ ;
+  LKL = DROI 'DINI' FineMS   'DFIN' (RPLA*FPLA*FineMS) PK PL ;
+  LLM = DROI NBE PL PM ;
+  LMN = DROI NLgrBU PM PN ;
+  LNI = DROI NBE PN PI ;
+FINSI ;
+
+*  -> Contour exterieur (depend si le maillage est grossier ou non)
+CntrExt  = LLM ET LMN ET LNI;
+
+*  -> Surface du reste du plan
+SI YESFATMS ;
+  SrfPT    = SURF ((INVE CntrInt) ET LKL ET CntrExt ET LIJ ) ;
+SINON ;
+  SrfPT    = DALL (INVE CntrInt) LKL CntrExt LIJ 'PLAN' ;
+FINSI ;
+
+*  -> Surface totale du plan
+SurfPlan = SrfBUP ET SrfPT ;
+ELIM SurfPlan 1.e-8 ;
+*SrfBUP = SurfPlan INTE SrfBUP ;
+*
+* RECUPERATION DES ZONES DE MAILLAGE UTILES
+* -> Cylindre
+CntrCyl  = CONT SurfCyl  'COUL' 'BLEU' ;
+PtsHautC = SurfCyl POIN 'DROIT' PF PE 1.e-8 ;
+PtsCrbeC = SurfCyl POIN 'SPHE'  PCEN P0 1.e-8 ;
+SetHautC = CntrCyl ELEM 'APPU' 'STRI' PtsHautC ;
+SetCrbeC = CntrCyl ELEM 'APPU' 'STRI' PtsCrbeC ;
+SetCrbeC = ORIE SetCrbeC ;
+
+* -> Plan
+CntrPlan = CONT SurfPlan 'COUL' 'BLEU' ;
+PtsHautP = SurfPlan POIN 'DROIT' PI PL 1.e-8 ;
+PtsBasP  = SurfPlan POIN 'DROIT' PM PN 1.e-8 ;
+PtsGaucP = SurfPlan POIN 'DROIT' PI PN 1.e-8 ;
+PtsDroiP = SurfPlan POIN 'DROIT' PL PM 1.e-8 ;
+SetHautP = CntrPlan ELEM 'APPU' 'STRI' PtsHautP ;
+SetBasP  = CntrPlan ELEM 'APPU' 'STRI' PtsBasP  ;
+SetGaucP = CntrPlan ELEM 'APPU' 'STRI' PtsGaucP  ;
+SetDroiP = CntrPlan ELEM 'APPU' 'STRI' PtsDroiP  ;
+SetHautP = ORIE SetHautP ;
+*
+SI OnlyMesh ;
+  TRAC ((CntrCyl ET CntrPlan) ET (SurfCyl ET SurfPlan))
+  TITR 'Maillage Cylindre et Plan' ;
+FINSI ;
+*
+* Creation du maillage de contact
+MeshCntc ='IMPO' 'MAIL' 'MESC' SetCrbeC (INVE SetHautP)   ;
+MeshCntc = MeshCntc 'COUL' 'JAUN' ;
+
+SI OnlyMesh ;
+  TRAC (MeshCntc ET (CntrCyl ET CntrPlan) ET (SurfCyl ET SurfPlan))
+  TITR 'Maillages Cylindre, Plan et Zone Contact' ;
+  FIN ;
+FINSI ;
+*______________________________________________________________________
+*
+*                       MODELES ET MATERIAUX
+*______________________________________________________________________
+*
+* ATTENTION LES DIMENSIONS DE NOS PIECES SONT EN MM
+YoungCyl = 200000 ; NuCyl    = 0.3    ;
+YoungPln = 200000 ; NuPlan   = 0.3    ;
+MuContac = 0.9;
+*
+ModeCyl  = MODE SurfCyl 'MECANIQUE' 'ELASTIQUE' 'ISOTROPE' ;
+MateCyl  = MATE ModeCyl 'YOUN' YoungCyl 'NU' NuCyl ;
+*
+ModePlan = MODE SurfPlan 'MECANIQUE' 'ELASTIQUE' 'ISOTROPE' ;
+MatePlan = MATE ModePlan 'YOUN' YoungPln 'NU' NuPlan ;
+*
+ModeCntc = MODE MeshCntc 'CONTACT' 'FROTTANT' 'COULOMB';
+MateCntc = MATE ModeCntc 'MU' MuContac;
+MFRO = 'EXTR' ModeCntc 'MAIL' 'FROT' ;
+*
+*
+* Etablir une correspondance entre mult de cont et de fro
+*  Attention si renumerotation ne marchera plus ...
+MUFRO = 'VIDE' 'MAILLAGE' ;
+LVALF = 'PROG' ;
+NODEF = 'NBNO' (MFRO 'ELEM' 1) ;
+'SI' ('EGA' NODEF 5) ;
+  NOTOT = 'NBNO' SetHautP ;
+'SINON' ;
+  'SI' ('EGA' NODEF 6) ;
+    NOTOT = 'NBEL' SetHautP ;
+  'SINON' ;
+    'MESS' 'Le nombre de noeud par element dans le maillage de ' ;
+    'MESS' 'contact-frottement semble errone ' ;
+    'ERRE' 5 ;
+  'FINSI' ;
+'FINSI' ;
+*
+REPE BCL NOTOT ;
+  'SI' ('EGA' NODEF 5) ;
+    ELZ = 'CHAN' (MFRO 'ELEM' &BCL) 'POI1' ;
+  'SINON' ;
+    INDZ = NOTOT*(&BCL-1) + 1 ;
+    ELZ = 'CHAN' (MFRO 'ELEM' INDZ) 'POI1' ;
+  'FINSI' ;
+  PTZ = ELZ 'POIN' 1 ;
+  VAL = 'NOEU' (ELZ 'POIN' NODEF) ;
+  MUFRO = MUFRO ET PTZ ;
+  LVALF = LVALF ET VAL ;
+FIN BCL ;
+*
+TESTEL = ('NBEL' SetCrbeC) * NOTOT ;
+
+'SI' (('NEG' TESTEL ('NBEL' MFRO)) 'ET' ('EGA' NODEF 5));
+  NOTOT = 'NBNO' SetCrbeC ;
+  REPE BCL NOTOT ;
+    ELZ = 'CHAN' (MFRO 'ELEM' (TESTEL + &BCL)) 'POI1' ;
+    PTZ = ELZ 'POIN' 1 ;
+    VAL = 'NOEU' (ELZ 'POIN' NODEF) ;
+    MUFRO = MUFRO ET PTZ ;
+    LVALF = LVALF ET VAL ;
+  FIN BCL ;
+'FINSI' ;
+CHPZ = 'MANU' 'CHPO' MUFRO 1 'CORR' LVALF ;
+*______________________________________________________________________
+*
+*                       CONDITIONS AUX LIMITES
+*______________________________________________________________________
+*
+BlcXPlan = (SetGaucP ET SetDroiP) BLOQ 'UX' ;
+BlcYPlan =  SetBasP  BLOQ 'UY'    ;
+BlocPlan = (BlcXPlan ET BlcYPlan) ;
+
+LinkHauC = BLOQ SetHautC 'UX' ;
+YcommunC = RELA ENSE SetHautC 'UY';
+BlocCyl  = LinkHauC ET YcommunC ;
+
+BloTot = BlocPlan ET BlocCyl ;
+*______________________________________________________________________
+*
+*                            CHARGEMENT
+*______________________________________________________________________
+*
+* Donnees necessaires a @PCPT pour determiner les pas de calcul
+DltEtoil = 0.004 ;
+Delta_t  = 0.001 ;
+N_DemiPe = 3     ;
+N_DemiPl = 3     ;
+N_cyclFr = 20.25 ;
+N_cyclFr = 5.25  ;
+t_0       = 1.0  ;
+T_INI_US  = 1.25 ;
+period    = 1.   ;
+T_FIN_US  = T_0 + (N_cyclFr * period) ;
+
+* EVOLution de chargement
+ListT_Fn = PROG 0. 1. T_FIN_US ;
+ListF_Fn = PROG 0. 1. 1.  ;
+
+ListT_De = PROG 0.   1. ;
+ListA_De = PROG 0.   0. ;
+
+REPE BRLDe ((ENTI 'SUPERIEUR' N_cyclFr ) ) ;
+  T_DebCyc = FLOT &BRLDe ;
+  ListT_De = ET ListT_De (PROG (T_DebCyc+0.25) (T_DebCyc+0.75)) ;
+  ListA_De = ET ListA_De (PROG 1. -1) ;
+FIN BRLDE ;
+
+Evol_Fn  = EVOL 'VERT' 'MANU' ListT_Fn 'Temps' ListF_Fn 'F_n' ;
+Evol_De  = EVOL 'BLAN' 'MANU' ListT_De 'Temps' ListA_De 'Delta'   ;
+
+* Chargement normal -> vient mettre le plan et le cylindre en contact
+ForceN   = 60.   ;
+ValPresN = ForceN / LgrCT;
+PressNod = PRES 'MASS' ModeCyl ValPresN SetHautC ;
+CharNorm = CHAR 'MECA' Evol_Fn PressNod ;
+
+* Fretting -> vient faire frotter le cylindre et le plan
+DeplFret = DEPI LinkHauC DltEtoil ;
+CharFret = CHAR 'DIMP' Evol_De DeplFret ;
+
+* Definition des instants de calcul
+Distrib = @PCPT delta_t  DltEtoil t_0 period  N_cyclFr  N_DemiPe
+               N_DemiPl ;
+
+* Pas de calcul Globaux : Sauve et Calcul
+PasGlob = ET (PROG 0. PAS 0.125    1.) Distrib ;
+PasSVGD = PROG T_INI_US PAS period T_FIN_US ;
+*______________________________________________________________________
+*
+*                  DEFINITION DE LA BOITE D USURE
+*______________________________________________________________________
+*
+* Coefficient pour l'usure (alpha en mm3/mJ)
+ALPHA    = 1.e-8 ;
+BETA     = 500.  ;
+*
+* -> Boite d usure relative au plan
+BOX1 = TABL 'BOITE_USURE' ;
+BOX1.'VOLUME_REPARTITION'     = SrfBUP ;
+BOX1.'SURFACE_APPLICATION'    = LJK ;
+BOX1.'SURFACE_VOISINE'        = CBC ;
+BOX1.'SURFACE_APPUI'          = LOP ;
+BOX1.'POINT_O_U'              = PJ ;
+BOX1.'DIRECTION_APPLICATION'  = (0. -1.) ;
+BOX1.'COEFFICIENT_USURE'      = ALPHA    ;
+BOX1.'COEFFICIENT_FROTTEMENT' = MuContac ;
+BOX1.'FACTEUR_ACCELERATION'   = BETA     ;
+BOX1.'T_INI_US'               = T_INI_US ;
+BOX1.'T_FIN_US'               = T_FIN_US ;
+BOX1.'PERIODCY'               = period   ;
+BOX1.'USURE_CYCLIQUE'         = VRAI     ;
+BOX1.'USURE_INCREMENTALE'     = FAUX     ;
+BOX1.'POINT_REF_DELTA'        = SurfCyl POIN 'PROC' PF ;
+
+* -> Boite d usure relative au cylindre
+BOX2 = TABL 'BOITE_USURE' ;
+BOX2.'VOLUME_REPARTITION'     = SrfBUC ;
+BOX2.'SURFACE_APPLICATION'    = ('INVE' CBC) ;
+BOX2.'SURFACE_VOISINE'        = LJK ;
+BOX2.'SURFACE_APPUI'          = LGH ;
+BOX2.'POINT_O_U'              = PB ;
+BOX2.'DIRECTION_APPLICATION'  = (0. 1.) ;
+BOX2.'COEFFICIENT_USURE'      = ALPHA    ;
+BOX2.'COEFFICIENT_FROTTEMENT' = MuContac ;
+BOX2.'FACTEUR_ACCELERATION'   = BETA     ;
+BOX2.'T_INI_US'               = T_INI_US ;
+BOX2.'T_FIN_US'               = T_FIN_US ;
+BOX2.'PERIODCY'               = period   ;
+BOX2.'USURE_CYCLIQUE'         = VRAI     ;
+BOX2.'USURE_INCREMENTALE'     = FAUX     ;
+BOX2.'POINT_REF_DELTA'        = SurfCyl POIN 'PROC' PF ;
+
+**************************************
+**  ENCAPSULAGE DES BOITES D'USURE  **
+**************************************
+NbBoxUs = 0 ;
+YesUsur = VRAI ;
+
+SI OuiUsCyl ; NbBoxUs = NbBoxUs + 1 ; FINSI ;
+SI OuiUsPla ; NbBoxUs = NbBoxUs + 1 ; FINSI ;
+
+BOX_USUR = TABL ;
+BOX_USUR.'N_BOITES' = NbBoxUs ;
+SI (NbBoxUs EGA 2) ;
+  BOX_USUR. 1 = BOX1 ;
+  BOX_USUR. 2 = BOX2 ;
+SINON ; SI OuiUsCyl ;
+  BOX_USUR. 1 = BOX2 ;
+SINON ; SI OuiUsPla ;
+  BOX_USUR. 1 = BOX1 ;
+SINON ;
+  YesUsur = FAUX ;
+FINSI ; FINSI ; FINSI ;
+*______________________________________________________________________
+*
+*                  DEFINTION DE LA TABLE DE PASAPAS
+*______________________________________________________________________
+*
+TAB1 = TABL 'PASAPAS' ;
+TAB1.'MODELE'              = ModeCyl  ET ModePlan ET ModeCntc ;
+TAB1.'CARACTERISTIQUES'    = MateCyl  ET MatePlan ET MateCntc ;
+TAB1.'CHARGEMENT'          = CharFret ET CharNorm ;
+TAB1.'BLOCAGES_MECANIQUES' = BloTot ;
+TAB1.'GRANDS_DEPLACEMENTS' = VRAI     ;
+TAB1.'TEMPS_CALCULES'      = PasGlob  ;
+TAB1.'TEMPS_SAUVES'        = PasGlob  ;
+*TAB1.'TEMPS_SAUVEGARDES'   = PasSVGD  ;
+TAB1.'ECONOMIQUE'          = VRAI ;
+TAB1.'BOITES_USURES'       = BOX_USUR ;
+SI YesUsur ;
+  TAB1.'PROCEDURE_PERSO1'    = VRAI     ;
+SINON ;
+  TAB1.'PROCEDURE_PERSO1'    = FAUX     ;
+FINSI ;
+* Booleen utilise pour afficher le temps de calcul par cycle
+TAB1.'FIN_CYCLE' = FAUX ;
+*
+TAB1.'MESH-MFRO' = MFRO ;
+TAB1.'MESH-CON' = MUFRO ;
+TAB1.'MESH-CORR' = CHPZ ;
+TAB1.'MESH1' = SetHautP ;
+TAB1.'MESH2' = SetCrbeC ;
+*
+Tmp      = TEMPS 'ENTI' 'HORL' ;
+*______________________________________________________________________
+*
+*                  PROCEDURE UTILISATEUR PERSO1
+*______________________________________________________________________
+*
+DEBP PERSO1 T1*'TABLE' ;
+  N_BOITES = T1.'BOITES_USURES'.'N_BOITES' ;
+*
+* Boucle sur les boites a user
+  'REPE' BU N_BOITES ;
+    ID_BU  = &BU ;
+*   Appel de l'identificateur d'evenements
+    T1 = @EVN_IDT T1 ID_BU ;
+*   Appel du manageur d'evenements
+    T1 = @EVN_MNG T1 ID_BU ;
+  'FIN' BU ;
+*
+* Affichage des temps de calcul par cycle :
+  'SI' T1.'FIN_CYCLE' ;
+    T1.'FIN_CYCLE' = FAUX ;
+    RunTimeE = TEMPS 'ENTI' 'HORL' ;
+    CyclTime = (FLOT RunTimeE)/ 1000. ;
+    'SI' ('EXIS' T1 'LISTE_RUN_TIME') ;
+      DILRT = 'DIME' T1.'LISTE_RUN_TIME' ;
+      RunTimeP = 'EXTR' T1.'LISTE_RUN_TIME' DILRT ;
+      RunTimeF = RunTimeP + CyclTime ;
+      T1.'LISTE_RUN_TIME'   = T1.'LISTE_RUN_TIME'   'ET' RunTimeF ;
+      T1.'LISTE_CYCLE_TIME' = T1.'LISTE_CYCLE_TIME' 'ET' CyclTime;
+    'SINON' ;
+      RunTimeF = CyclTime ;
+      T1.'LISTE_RUN_TIME'   = 'PROG' RunTimeF ;
+      T1.'LISTE_CYCLE_TIME' = 'PROG' CyclTime ;
+    'FINSI' ;
+    MESS ' ' ;
+    MESS ' ' ; MESS ' - CyclTime = ' CyclTime ' secondes - ';
+    MESS ' ' ; MESS ' - RunTime  = ' RunTimeF ' secondes - ';
+    MESS ' ' ; MESS ' ' ;
+  'FINSI' ;
+*
+FINP T1;
+*
+PASAPAS Tab1 ;
+OPTI ECHO 0 ;
+*______________________________________________________________________
+*
+*                         VALIDATION CODE A CODE
+*______________________________________________________________________
+*
+* Comparaison des resultats obtenus avec Cast3M a la reference WearBox :
+*             Code Matlab - Abaqus - Python
+*             Fretting Team - LTDS - Ecole Centrale Lyon
+*
+*      Une premiere version du cas test comportait 20 cycles numeriques,
+*      qui dure environ 7 minutes.
+*      La seconde version du cas test comporte 5 cycles numeriques, qui
+*      dure environ 1.5 minutes. Celle-ci a ete mise en place par soucis
+*      de rapidite.
+*
+BOITE_US = TAB1.'BOITES_USURES'. 1 ;
+EvUC_N20 = BOITE_US . 'EVO_USURE_CUMULEE' . 1 ;
+EvUC_N5  = BOITE_US . 'EVO_USURE_CUMULEE' . 5 ;
+
+x_C3M20  = EXTR EvUC_N20 'ABSC' ;
+hu_C3M20 = EXTR EvUC_N20 'ORDO' ;
+
+x_C3M5   = EXTR EvUC_N5  'ABSC' ;
+hu_C3M5  = EXTR EvUC_N5  'ORDO' ;
+
+* Valeurs de reference provenant du code WearBox
+hu_R20_1 = PROG 0 0 0 0 0 0 0 0 0 0 0 ;
+hu_R20_2 = PROG -0.00000622   -0.00011182   -0.00022604   -0.00031499
+  -0.00039416   -0.00045657   -0.0005048    -0.00053816   -0.00055841
+  -0.00056512   -0.00055841   -0.00053816   -0.0005048    -0.00045657
+  -0.00039416   -0.00031499   -0.00022609   -0.00011182   -0.00000622 ;
+hu_R20_3 = PROG 0  0  0  0  0  0  0  0  0  0  0 ;
+
+hu_R5_1  = PROG 0  0  0  0  0  0  0  0  0  0  0  0  0  ;
+hu_R5_2  = PROG -0.00000319  -0.00004986  -0.0000968   -0.0001257
+   -0.00014598  -0.00015885  -0.00016597  -0.00016829  -0.00016597
+   -0.00015885  -0.00014598  -0.0001257   -0.0000968   -0.00004986
+   -0.00000319 ;
+hu_R5_3  = PROG 0  0  0  0  0  0  0  0  0  0  0  0  0  ;
+
+hu_R5    = hu_R5_1   ET  hu_R5_2   ET  hu_R5_3 ;
+hu_R20   = hu_R20_1  ET  hu_R20_2  ET  hu_R20_3 ;
+errHU_20 = (ABS hu_R20) - (ABS hu_C3M20) ;
+errHU_5  = (ABS hu_R5 ) - (ABS hu_C3M5) ;
+
+EvEr_N20  = EVOL 'MANU'  x_C3M20  errHU_20 ;
+EvHU_R20  = EVOL 'MANU'  x_C3M20  hu_R20  ;
+
+EvEr_N5   = EVOL 'MANU'  x_C3M5   errHU_5 ;
+EvHU_R5   = EVOL 'MANU'  x_C3M5   hu_R5  ;
+
+MyEvos = (ABS EvUC_N20) ET (ABS EvHU_R20) ;
+
+VolEr20  = INTG  EvEr_N20  'ABSO'  ;
+VolR20   = INTG  EvHU_R20  'ABSO'  ;
+PCT_Er20 = MAXI (VolEr20 / VolR20 * 100.) ;
+
+VolEr5   = INTG  EvEr_N5  'ABSO'  ;
+VolR5    = INTG  EvHU_R5  'ABSO'  ;
+PCT_Er5  = MAXI (VolEr5 / VolR5 * 100.)  ;
+
+* Critere de validite du code d'usure Cast3M : moins de 1% d'erreur par
+* rapport a la reference WearBox (Matlab Abaqus Python)
+MESS ' ' ; MESS ' ' ;
+MESS '***************************' ;
+MESS '**  CAS TEST CODE USURE  **' ;
+MESS '***************************' ;
+MESS ' ' ; MESS ' ' ;
+
+SI (PCT_Er5 <EG 1.) ;
+    MESS '    CAS TEST DU CODE D USURE VALIDE' ;
+SINON ;
+    MESS '    ERREUR SEUIL DEPASSEE POUR LE CAS TEST DU CODE D USURE' ;
+    MESS '    ERREUR SEUIL TOLEREE : 1%' ;
+    MESS '    ERREUR CONSTATEE     : ' PCT_Er5 '%' ;
+    ERRE 5 ;
+FINSI ;
+FIN ;
+
+

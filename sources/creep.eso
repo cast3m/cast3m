@@ -1,0 +1,607 @@
+C CREEP     SOURCE    CB215821  16/04/21    21:16:08     8920
+      SUBROUTINE CREEP (DECRA,DESWA,STATEV,serd,EC0,ESW0,P,QTILD,
+     &                  TEMP,DTEMP,PREDEF,DPRED,TIME,DTIME,
+     &                  CMNAME,leximp,LEND,COORDS,NSTATV,NOEL,NPT,
+     &                  layer,kspt,KSTEP,KINC)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+-INC CCREEL
+C-----------------------------------------------------------------------
+C
+C     DESCRIPTION FONCTIONNELLE :
+C     -------------------------
+C
+C     Version du module externe CREEP integree au code pour eviter tout
+C     probleme d'edition de lien et pour permettre le passage de tests
+C     de non regression.
+C
+C     En utilisation normale, ce module doit etre surcharge par celui
+C     de meme nom fourni par l'utilisateur.
+C
+C     Si cette version de CREEP est appelee, cela signifie qu'il n'y a
+C     pas eu surcharge par le module utilisateur
+C     ATTENTION : si l'utilisateur oublie de surcharger et affecte a sa
+C     loi le meme numero que l'un de ceux pris en charge ci-apres, il y
+C     a risque d'erreur non controlee a l'execution.
+C
+C     CONVENTION : on autorise la programmation de l'utilisateur a se
+C     servir de KSTEP comme code retour, de la meme maniere que l'on
+C     s'en sert ci-dessous. Regles a respecter :
+C     1. Pas d'initialisation superflue de KSTEP en entrant dans CREEP.
+C        KSTEP est initialise a 1 par WCREE0, avant l'appel a CREEP.
+C     2. En cas d'erreur, KSTEP est affecte d'une valeur differente de 1
+C
+C-----------------------------------------------------------------------
+C
+C     DESCRIPTION DE L'INTERFACE :
+C     --------------------------
+C
+C     OUT    : DECRA  : REAL*8(5)
+C                       DECRA(1) : increment scalaire de deformation de
+C                       fluage, au debut du pas si LEND=0, a la fin du
+C                       pas si LEND=1.
+C                       Les composantes 2 a 5 ne sont pas exploitees
+C                       dans le cas d'une adherence a CAST3M.
+C
+C     OUT    : DESWA  : REAL*8(5)
+C                       DESWA(1) : increment scalaire de deformation de
+C                       gonflement, au debut du pas si LEND=0, a la fin
+C                       du pas si LEND=1.
+C                       Les composantes 2 a 5 ne sont pas exploitees
+C                       dans le cas d'une adherence a CAST3M.
+C
+C                       Remarque : la routine CREEP evalue des VITESSES
+C                       de deformation (fluage et gonflement) au debut
+C                       ou a la fin du pas, suivant la valeur de LEND.
+C                       Les increments DECRA(1) et DESWA(1) sont ensuite
+C                       determines par les produits de ces vitesses par
+C                       le pas de temps DTIME.
+C
+C     IN/OUT : STATEV : REAL*8(*), variables internes supplementaires
+C                       Il s'agit des eventuelles variables internes
+C                       s'ajoutant aux 4 pre-definies 'EC0 ', 'ESW0',
+C                       'P   ' et 'QTLD'.
+C                       Valeurs au debut du pas si LEND=0.
+C                       Peuvent etre mises a jour si LEND=1 : valeurs a
+C                       la fin du pas.
+C
+C     IN/OUT : serd   : REAL*8, puissance volumique de deformation
+C                       inelastique (produit contracte du tenseur des
+C                       contraintes et du tenseur des vitesses de
+C                       deformation inelastique).
+C                       Entree/sortie facultative de la routine CREEP,
+C                       non exploitee par CAST3M pour l'instant.
+C
+C     IN     : EC0    : REAL*8, deformation de fluage cumulee.
+C                       1ere variable interne parmi les 4 pre-definies.
+C                       Valeur au debut du pas.
+C
+C     IN     : ESW0   : REAL*8, deformation de gonflement cumulee.
+C                       2eme variable interne parmi les 4 pre-definies.
+C                       Valeur au debut du pas.
+C
+C     IN     : P      : REAL*8, 1er invariant du tenseur des contraintes
+C                       (1/3 trace(SIGMA)).
+C                       3eme variable interne parmi les 4 pre-definies.
+C                       Valeur au debut du pas si LEND=0, a la fin du
+C                       pas si LEND=1.
+C
+C     IN     : QTILD  : REAL*8, contrainte equivalente de Von Mises
+C                       (SQRT(3/2 S:S) ou S deviateur des contraintes).
+C                       4eme variable interne parmi les 4 pre-definies.
+C                       Valeur au debut du pas si LEND=0, a la fin du
+C                       pas si LEND=1.
+C
+C     IN     : TEMP   : REAL*8, temperature a la fin du pas.
+C              DTEMP  : REAL*8, increment de temperature sur le pas.
+C              PREDEF : REAL*8(*), vecteur des parametres externes de la
+C                       loi de comportement, valeurs a la fin du pas.
+C              DPRED  : REAL*8(*), increments des parametres externes
+C                       sur le pas de temps.
+C
+C     IN     : TIME   : REAL*8(2)
+C                       TIME(1) : duree cumulee des iterations internes
+C                       a la fin du pas en cours.
+C                       TIME(2) : instant intermediaire absolu a la fin
+C                       du pas en cours.
+C              DTIME  : REAL*8, valeur du pas de temps en cours.
+C
+C                       Remarque : l'instant absolu correspondant a la
+C                       precedente iteration interne convergee est
+C                       TIME(2)-DTIME.
+C
+C     IN     : CMNAME : CHARACTER*16, identifiant de la loi de
+C                       comportement.
+C                       On conserve le type 'chaine de caracteres' pour
+C                       l'identifiant de la loi, afin de preserver la
+C                       compatibilite avec ABAQUS.
+C                       Dans le cas d'une adherence a CAST3M, la loi est
+C                       identifiee par le numero qui lui a ete attribue:
+C                       argument 'NUME_LOI' de l'operateur MODE.
+C                       Par convention, ce numero est encode dans les 4
+C                       derniers caracteres de la chaine, et doit etre
+C                       recupere dans CREEP par une instruction du type
+C                       K4ILOI = CMNAME(13:16)
+C                       avec K4ILOI variable locale de type CHARACTER*4.
+C
+C     IN     : leximp : INTEGER, indicateur d'integration par un schema
+C                       Entree non active dans le cas d'une adherence
+C                       a CAST3M.
+C
+C     IN     : LEND   : INTEGER, indicateur de debut/fin de pas.
+C                       LEND=0 : les entrees P, QTILD sont definies au
+C                       debut du pas ; les sorties DECRA(1), DESWA(1)
+C                       sont calculees au debut du pas.
+C                       LEND=1 : les entrees P, QTILD sont definies a la
+C                       fin du pas ; les sorties DECRA(1), DESWA(1) sont
+C                       calculees a la fin du pas.
+C
+C     IN     : COORDS : REAL*8(*), coordonnees cartesiennes du point
+C                       d'integration courant.
+C
+C     IN       NSTATV : INTEGER, nombre de variables internes
+C                       supplementaires (en plus des 4 pre-definies).
+C
+C     IN     : NOEL   : INTEGER, numero de l'element courant.
+C              NPT    : INTEGER, numero du point d'integration courant.
+C
+C     IN     : layer  : INTEGER, numero de couche pour des coques
+C                       composites ou des solides multi-couches.
+C              kspt   : INTEGER, numero de section dans la couche
+C                       courante.
+C                       Entrees non actives dans le cas d'une adherence
+C                       a CAST3M.
+C
+C     IN/OUT : KSTEP  : INTEGER
+C                       Entree n'ayant pas de sens dans le cas d'une
+C                       adherence a CAST3M.
+C                       On autorise la programmation de l'utilisateur a
+C                       se servir de KSTEP comme code retour de CREEP
+C                       (cf. description fonctionnelle ci-dessus).
+C
+C     IN     : KINC   : INTEGER, compteur d'iterations internes.
+C                       Incrementation geree par l'appelant CCREEP.
+C
+C-----------------------------------------------------------------------
+C
+C     MODELES PRIS EN CHARGE par le module CREEP 'bouchon' :
+C     ----------------------------------------------------
+C
+C     ILOI = 21 : Modele 'FLUAGE' 'POLYNOMIAL' de CAST3M, INPLAS=21
+C     ILOI = 23   RESTRICTION A LA FORMULATION MASSIVE
+C                 Le modele ILOI=23 comprend deux variables internes
+C                 supplementaires artificielles :
+C                 'PSUP' <=> 'P   '  et 'QSUP' <=> 'QTLD'
+C
+C     ILOI = 22 : Modele 'FLUAGE' 'POLYNOMIAL' de CAST3M, INPLAS=21
+C     ILOI = 24   RESTRICTION A LA FORMULATION MASSIVE
+C                 Instanciation des composantes de materiau au fur et a
+C                 mesure des iterations internes (uniquement les coef.
+C                 du polynome de la loi de fluage).
+C                 Le modele comprend cette fois des parametres externes.
+C                 Les composantes de materiau sont evaluees par les
+C                 memes fonctions externes que celles utilisees par
+C                 l'operateur VARI.
+C                 MODELE 'MAQUETTE'
+C                 Le modele ILOI=24 comprend deux variables internes
+C                 supplementaires artificielles :
+C                 'PSUP' <=> 'P   '  et 'QSUP' <=> 'QTLD'
+C
+C-----------------------------------------------------------------------
+C     Arguments de l'interface
+C
+      CHARACTER*16  CMNAME
+C
+      INTEGER       leximp, LEND, NSTATV, NOEL, NPT, layer, kspt,
+     &              KSTEP, KINC
+C
+      REAL*8        DECRA(5), DESWA(5), STATEV(*),
+     &              serd, EC0, ESW0, P, QTILD,
+     &              TEMP, DTEMP, PREDEF(*), DPRED(*), TIME(2), DTIME,
+     &              COORDS(*)
+C
+C     Variables locales
+C
+C     Tableaux de travail
+C
+      REAL*8        VALPAR(5)
+C
+C     Variables scalaires
+C
+      INTEGER       NBPAR
+C
+      REAL*8        TFIS, TUO2, FACF, DSIU, DGRA,
+     &              XAF0, XAF1, XAF2, XAF3, XAF4, XAF5, XAF6,
+     &              EC0PT
+C
+      CHARACTER*4   K4ILOI
+C
+      REAL*8        FVAF0, FVAF1, FVAF2, FVAF3, FVAF4, FVAF5, FVAF6
+      EXTERNAL      FVAF0, FVAF1, FVAF2, FVAF3, FVAF4, FVAF5, FVAF6
+C
+C
+C------------------- Debut du code executable --------------------------
+C
+C
+      K4ILOI = CMNAME(13:16)
+C
+C=======================================================================
+C     ILOI = 21 :
+C     Modele 'FLUAGE' 'POLYNOMIAL' de CAST3M, INPLAS=21
+C     RESTRICTION A LA FORMULATION MASSIVE
+C=======================================================================
+C
+      IF (K4ILOI.EQ.'  21') THEN
+C
+C........Affectation des parametres pour evaluation des coefficients
+C        du polynome de la loi de fluage
+C
+         TFIS = 1.5D+19
+         TUO2 = 1.5D+3
+         FACF = 1.D0
+         DSIU = 0.95D0
+         DGRA = 8.0D-6
+
+** pour eviter les overflow
+         qtild=MAX(min(1D65,QTiLD),-1d65)
+
+
+C
+C........Evaluation des coefficients du polynome de la loi de fluage
+C
+         XAF0 = 0.D0 * FACF
+         XAF1 = ( ( EXP(0.183D0*(100.D0-DSIU)) ) *
+     &            ( (0.2031D-13+(0.67861D-32*TFIS)) / (DGRA*DGRA) ) *
+     &            ( EXP(-45294.4D0/TUO2) ) )
+     &          * FACF
+         XAF2 = 1.D0
+         XAF3 = ( ( EXP(0.241D0*(100.D0-DSIU)) ) *
+     &            ( 0.1524D-25+(0.50825D-44*TFIS) ) *
+     &            ( EXP(-66431.8D0/TUO2) ) )
+     &          * FACF
+         XAF4 = 4.5D0
+         XAF5 = ( (1.447D-34*TFIS) * (EXP(-3624.D0/TUO2)) ) * FACF
+         XAF6 = 1.D0
+C
+C........Calcul de la vitesse de deformation de fluage et de l'increment
+C........Pas de terme de gonflement
+C
+         EC0PT = XAF0 + XAF1 * (QTILD**XAF2) + XAF3 * (QTILD**XAF4)
+     &                + XAF5 * (QTILD**XAF6)
+         DECRA(1) = EC0PT * DTIME
+C
+         DESWA(1) = 0.D0
+C
+C=======================================================================
+C     ILOI = 22 :
+C     Modele 'FLUAGE' 'POLYNOMIAL' de CAST3M, INPLAS=21
+C     RESTRICTION A LA FORMULATION MASSIVE
+C     Instanciation des composantes de materiau au fur et a mesure des
+C     iterations internes (uniquement les coef. du polynome de la loi
+C     de fluage).
+C     Le modele comprend cette fois des parametres externes.
+C     Les composantes de materiau sont evaluees par les memes fonctions
+C     externes que celles utilisees par l'operateur VARI.
+C     MODELE 'MAQUETTE'
+C=======================================================================
+C
+      ELSE IF (K4ILOI.EQ.'  22') THEN
+C
+         IERUT = 0
+C
+C........Affectation des parametres et evaluation des coefficients
+C        du polynome de la loi de fluage
+C
+         IF ( LEND.EQ.0 ) THEN
+C
+            NBPAR = 3
+            VALPAR(1) = PREDEF(1)-DPRED(1)
+            VALPAR(2) = PREDEF(2)-DPRED(2)
+            VALPAR(3) = PREDEF(3)-DPRED(3)
+            XAF0 = FVAF0(VALPAR,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -22000-IERUT
+               RETURN
+            ENDIF
+C
+            XAF2 = FVAF2(VALPAR,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -22000-IERUT
+               RETURN
+            ENDIF
+C
+            XAF4 = FVAF4(VALPAR,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -22000-IERUT
+               RETURN
+            ENDIF
+C
+            XAF5 = FVAF5(VALPAR,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -22000-IERUT
+               RETURN
+            ENDIF
+C
+            XAF6 = FVAF6(VALPAR,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -22000-IERUT
+               RETURN
+            ENDIF
+C
+            NBPAR = 4
+            VALPAR(4) = PREDEF(4)-DPRED(4)
+            XAF3 = FVAF3(VALPAR,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -22000-IERUT
+               RETURN
+            ENDIF
+C
+            NBPAR = 5
+            VALPAR(5) = PREDEF(5)-DPRED(5)
+            XAF1 = FVAF1(VALPAR,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -22000-IERUT
+               RETURN
+            ENDIF
+C
+         ELSE
+C
+            NBPAR = 3
+            XAF0 = FVAF0(PREDEF,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -22000-IERUT
+               RETURN
+            ENDIF
+C
+            XAF2 = FVAF2(PREDEF,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -22000-IERUT
+               RETURN
+            ENDIF
+C
+            XAF4 = FVAF4(PREDEF,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -22000-IERUT
+               RETURN
+            ENDIF
+C
+            XAF5 = FVAF5(PREDEF,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -22000-IERUT
+               RETURN
+            ENDIF
+C
+            XAF6 = FVAF6(PREDEF,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -22000-IERUT
+               RETURN
+            ENDIF
+C
+            NBPAR = 4
+            XAF3 = FVAF3(PREDEF,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -22000-IERUT
+               RETURN
+            ENDIF
+C
+            NBPAR = 5
+            XAF1 = FVAF1(PREDEF,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -22000-IERUT
+               RETURN
+            ENDIF
+C
+         ENDIF
+C
+C........Calcul de la vitesse de deformation de fluage et de l'increment
+C........Pas de terme de gonflement
+C
+         EC0PT = XAF0 + XAF1 * (QTILD**XAF2) + XAF3 * (QTILD**XAF4)
+     &                + XAF5 * (QTILD**XAF6)
+         DECRA(1) = EC0PT * DTIME
+C
+         DESWA(1) = 0.D0
+C
+C=======================================================================
+C     ILOI = 23 :
+C     Modele 'FLUAGE' 'POLYNOMIAL' de CAST3M, INPLAS=21
+C     RESTRICTION A LA FORMULATION MASSIVE
+C     Equivalent au modele ILOI=21
+C     Variables internes supplementaires 'PSUP' et 'QSUP'
+C=======================================================================
+C
+      ELSE IF (K4ILOI.EQ.'  23') THEN
+C
+C........Affectation des parametres pour evaluation des coefficients
+C        du polynome de la loi de fluage
+C
+         TFIS = 1.5D+19
+         TUO2 = 1.5D+3
+         FACF = 1.D0
+         DSIU = 0.95D0
+         DGRA = 8.0D-6
+C
+C........Evaluation des coefficients du polynome de la loi de fluage
+C
+         XAF0 = 0.D0 * FACF
+         XAF1 = ( ( EXP(0.183D0*(100.D0-DSIU)) ) *
+     &            ( (0.2031D-13+(0.67861D-32*TFIS)) / (DGRA*DGRA) ) *
+     &            ( EXP(-45294.4D0/TUO2) ) )
+     &          * FACF
+         XAF2 = 1.D0
+         XAF3 = ( ( EXP(0.241D0*(100.D0-DSIU)) ) *
+     &            ( 0.1524D-25+(0.50825D-44*TFIS) ) *
+     &            ( EXP(-66431.8D0/TUO2) ) )
+     &          * FACF
+         XAF4 = 4.5D0
+         XAF5 = ( (1.447D-34*TFIS) * (EXP(-3624.D0/TUO2)) ) * FACF
+         XAF6 = 1.D0
+C
+C........Calcul de la vitesse de deformation de fluage et de l'increment
+C........Pas de terme de gonflement
+C
+         EC0PT = XAF0 + XAF1 * (QTILD**XAF2) + XAF3 * (QTILD**XAF4)
+     &                + XAF5 * (QTILD**XAF6)
+         DECRA(1) = EC0PT * DTIME
+C
+         DESWA(1) = 0.D0
+C
+C........MAJ des variables internes supplementaires le cas echeant
+C
+         IF ( LEND.EQ.1 ) THEN
+            STATEV(1) = P
+            STATEV(2) = QTILD
+         ENDIF
+C
+C=======================================================================
+C     ILOI = 24 :
+C     Modele 'FLUAGE' 'POLYNOMIAL' de CAST3M, INPLAS=21
+C     RESTRICTION A LA FORMULATION MASSIVE
+C     Instanciation des composantes de materiau au fur et a mesure des
+C     iterations internes (uniquement les coef. du polynome de la loi
+C     de fluage).
+C     Le modele comprend cette fois des parametres externes.
+C     Les composantes de materiau sont evaluees par les memes fonctions
+C     externes que celles utilisees par l'operateur VARI.
+C     MODELE 'MAQUETTE'
+C     Equivalent au modele ILOI=22
+C     Variables internes supplementaires 'PSUP' et 'QSUP'
+C=======================================================================
+C
+      ELSE IF (K4ILOI.EQ.'  24') THEN
+C
+C........Affectation des parametres et evaluation des coefficients
+C        du polynome de la loi de fluage
+C        MAJ des variables internes supplementaires le cas echeant
+C
+         IF ( LEND.EQ.0 ) THEN
+C
+            NBPAR = 3
+            VALPAR(1) = PREDEF(1)-DPRED(1)
+            VALPAR(2) = PREDEF(2)-DPRED(2)
+            VALPAR(3) = PREDEF(3)-DPRED(3)
+            XAF0 = FVAF0(VALPAR,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -24000-IERUT
+               RETURN
+            ENDIF
+C
+            XAF2 = FVAF2(VALPAR,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -24000-IERUT
+               RETURN
+            ENDIF
+C
+            XAF4 = FVAF4(VALPAR,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -24000-IERUT
+               RETURN
+            ENDIF
+C
+            XAF5 = FVAF5(VALPAR,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -24000-IERUT
+               RETURN
+            ENDIF
+C
+            XAF6 = FVAF6(VALPAR,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -24000-IERUT
+               RETURN
+            ENDIF
+C
+            NBPAR = 4
+            VALPAR(4) = PREDEF(4)-DPRED(4)
+            XAF3 = FVAF3(VALPAR,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -24000-IERUT
+               RETURN
+            ENDIF
+C
+            NBPAR = 5
+            VALPAR(5) = PREDEF(5)-DPRED(5)
+            XAF1 = FVAF1(VALPAR,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -24000-IERUT
+               RETURN
+            ENDIF
+C
+         ELSE
+C
+            NBPAR = 3
+            XAF0 = FVAF0(PREDEF,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -24000-IERUT
+               RETURN
+            ENDIF
+C
+            XAF2 = FVAF2(PREDEF,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -24000-IERUT
+               RETURN
+            ENDIF
+C
+            XAF4 = FVAF4(PREDEF,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -24000-IERUT
+               RETURN
+            ENDIF
+C
+            XAF5 = FVAF5(PREDEF,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -24000-IERUT
+               RETURN
+            ENDIF
+C
+            XAF6 = FVAF6(PREDEF,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -24000-IERUT
+               RETURN
+            ENDIF
+C
+            NBPAR = 4
+            XAF3 = FVAF3(PREDEF,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -24000-IERUT
+               RETURN
+            ENDIF
+C
+            NBPAR = 5
+            XAF1 = FVAF1(PREDEF,NBPAR,IERUT)
+            IF (IERUT.GT.0) THEN
+               KSTEP = -24000-IERUT
+               RETURN
+            ENDIF
+C
+            STATEV(1) = P
+            STATEV(2) = QTILD
+C
+         ENDIF
+C
+C........Calcul de la vitesse de deformation de fluage et de l'increment
+C........Pas de terme de gonflement
+C
+         EC0PT = XAF0 + XAF1 * (QTILD**XAF2) + XAF3 * (QTILD**XAF4)
+     &                + XAF5 * (QTILD**XAF6)
+         DECRA(1) = EC0PT * DTIME
+C
+         DESWA(1) = 0.D0
+C
+C=======================================================================
+C     Modele externe non reconnu
+C=======================================================================
+C
+      ELSE
+C
+         KSTEP = 0
+C
+      ENDIF
+C
+      RETURN
+      END
+
+
+
+
+
+

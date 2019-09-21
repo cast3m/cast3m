@@ -1,0 +1,233 @@
+C PRITHE    SOURCE    BECC      10/09/10    21:15:01     6472
+      subroutine prithe(ndim,nesp,nLHS,nordpo,aprop,reacoe,Runiv,Tmaxcv
+     $     ,w,gamma,Rgas,cvtot,acvtot,hftot,rho,u,p,T,y,ether,csi,logan)
+C
+C     This subroutine creates some thermodynamical variables and
+C     properties starting from the primitive variables.
+C
+C
+C
+C     INPUT
+C     *****
+C
+C     ndim             = dimension (1,2,3)
+C
+C     nesp             = number of species in the Euler equations
+C
+C     nLHS             = number of species in the LHS of the chemical reaction
+C                        nLHS < nesp
+C
+C     nordpo           = order of polynomial for cp and cv (see also Tmaxcv)
+C
+C     aprop            = gas properties: ,reacoe,Runiv,
+C                        aprop(0:nordpo+2,iesp) :
+C                        (coefcv(i),i=0,nordpo,1), Wi, hf0i)
+C
+C     reacoe(1:nesp)   = coefficient of each species in the global chemical
+C                        reaction
+C
+C     Runiv            = universal constant of the gas
+C
+C     Tmaxcv           = maximum temperature for cv polynomial expansion
+C                        cv(T) = cv(Tmaxcv) if T > Tmaxcv
+C
+C     w                = primitive variables
+C                        w(1)             = rho
+C                        w(2)             = ux
+C                        w(3)             = uy
+C                        w(4)             = uz
+C                        w(2+ndim)        = p
+C                        w(3+ndim)        = csi
+C                        w(3+ndim+1)      = yf(1)
+C                            ...
+C                        w(3+ndim+nLHS)   = yf(nLHS)
+C                        w(3+ndim+nLHS+1) = yi(nLHS+1)
+C                            ...
+C                        w(3+ndim+nesp-1) = yi(nesp-1)
+C                        w(3+ndim+nesp)   = dy1t = yi(1) - yf(1)
+C                        w(4+ndim+nesp)   = k0
+C
+C
+C
+C     OUTPUT
+C     ******
+C
+C     gamma     = specific heat ratio
+C
+C     Rgas      = gas constant
+C
+C     cvtot     = cv
+C
+C     acvtot    = coefficients such that for the mixture
+C                 cv = \sum_{i=1,nordpo+1} acvtot(i) T^{i-1}
+C                 ether = \sum_{i=1,nordpo+1} acvtot(i) T^{i} / (i)
+C
+C     hftot     = \sum_i Y_i hf0i = formation energy of the mixture at 0K
+C
+C     rho       = density
+C
+C     u(1:ndim) = velocity
+C
+C     p         = pressure
+C
+C     T         = temperature
+C
+C     y         = mass fractions (1:nesp), \sum y(i) = 1
+C
+C     ether     = sensible energy at 0K
+C
+C     csi       = progress variable
+C
+C
+C     ERROR VARIABLE
+C     **************
+C
+C     logan     = if it becomes .false. an anomaly has been detected.
+C
+C************************************************************************
+C
+C     HISTORY AND MODIFICATIONS
+C
+c     07/12/2009      Created.
+C
+C     30/07/2010      We check that species mass fractions are not lower
+C                     than yneg > 0 (and not zero).
+C
+C************************************************************************
+C
+C      implicit none
+      integer ndim, nesp, nLHS, nordpo
+     &     , iesp, icoef, idim
+      real*8 aprop(0:(nordpo+2),nesp), reacoe(nesp), Runiv, Tmaxcv
+     &     , w(1:(4+ndim+nesp))
+     &     , gamma, Rgas, cvtot, acvtot(1:(nordpo+1)), hftot
+     &     , rho, u(1:ndim), p, T, y(1:nesp), ether
+     &     , csi, funt, dcv, coef, coef1, T1, yneg
+      parameter (yneg = -1.0D-4)
+      logical logan
+C
+C     Initialisation of some variable
+C
+      y(nesp)=1.0d0
+      hftot = 0.0d0
+      do icoef = 1 ,(nordpo+1), 1
+         acvtot(icoef) = 0.0d0
+      enddo
+      Rgas = 0.0d0
+C
+C     Density, velociy, pressure
+C
+      rho = w(1)
+      do idim = 1, ndim, 1
+         u(idim) = w(1+idim)
+      enddo
+      p = w(2+ndim)
+C
+C     Csi and mass fractions
+C
+      csi = w(3+ndim)
+      if ((csi . lt. 0.0d0) .or. (csi .gt. 1.0d0)) then
+         write(*,*) 'prithe.f'
+         write(*,*) 'csi = ', csi
+         write(*,*) 'Negative csi.'
+         logan = .true.
+         goto 9999
+      endif
+C     coef = dy1t / (w_1 * a_1)
+      coef = w(3+ndim+nesp) / (aprop(nordpo+1,1) * reacoe(1))
+      do iesp = 1, nLHS, 1
+         coef1 = aprop(nordpo+1,iesp) * reacoe(iesp)
+         if (coef1 .le. 0.0D0) then
+            write(*,*) 'prithe.f'
+            write(*,*) 'Incompatibility in reacoe variable for ', iesp
+            write(*,*) 'reacoe should be > 0. reacoe =', reacoe(iesp)
+            logan=.true.
+            goto 9999
+         endif
+C        y_j = y_{j,f} + ((1 - csi) * (y_{j,i} - y_{j,f}))
+         y(iesp) = w(3+ndim+iesp) + ((1.0d0 - csi) * coef1 * coef)
+         if(y(iesp) .lt. yneg)then
+            write(*,*) 'prithe.f'
+            write(*,*) 'Negative mass fraction, species ', iesp
+            write(*,*) y(iesp)
+            logan=.true.
+            goto 9999
+         endif
+         y(nesp) = y(nesp) - y(iesp)
+      enddo
+C
+      do iesp = (nLHS + 1), (nesp - 1), 1
+         coef1 = aprop(nordpo+1,iesp) * reacoe(iesp)
+         if (coef1 .gt. 0.0D0) then
+            write(*,*) 'prithe.f'
+            write(*,*) 'Incompatibility in reacoe variable for ', iesp
+            write(*,*) 'reacoe should be <= 0. reacoe =', reacoe(iesp)
+            logan=.true.
+            goto 9999
+         endif
+C        y_j = y_{j,i} + csi * (y_{j,f} - y_{j,i})
+         y(iesp) = w(3+ndim+iesp) - (csi * coef1 * coef)
+         if(y(iesp) .lt. yneg)then
+            write(*,*) 'prithe.f'
+            write(*,*) 'Negative mass fraction, species ', iesp
+            write(*,*) y(iesp)
+            logan=.true.
+            goto 9999
+         endif
+         y(nesp) = y(nesp) - y(iesp)
+      enddo
+C
+      if(y(nesp) .lt. yneg)then
+         write(*,*) 'prithe.f'
+         write(*,*) 'Negative mass fraction, species ', nesp
+         write(*,*) y(nesp)
+         logan=.true.
+         goto 9999
+      endif
+C
+C     Rgas, hftot, Temperature and acvtot
+C     In order to avoid one more loop, this could have be done before
+C
+      do iesp=1,nesp,1
+C        Rgas = y(iesp) / W_iesp
+         Rgas = Rgas + (y(iesp)/aprop(nordpo+1,iesp))
+C        hftot = hftot + (y_i * hf0i)
+         hftot = hftot + (y(iesp) * aprop(nordpo+2,iesp))
+         do icoef = 0, nordpo, 1
+            acvtot(icoef+1) = acvtot(icoef+1) +
+     &           (y(iesp) * aprop(icoef,iesp))
+         enddo
+      enddo
+      Rgas = Rgas * Runiv
+      T = p / (Rgas * rho)
+C
+C     gamma, ether
+C
+C     T1 = min (T, Tmaxcv)
+      T1 = 0.5d0 * ((T + Tmaxcv) - abs (T - Tmaxcv))
+C
+      funt = 1.0D0
+      cvtot = acvtot(1)
+      ether = cvtot * T1
+      do icoef = 2, nordpo+1, 1
+         funt = funt * T1
+         dcv = acvtot(icoef) * funt
+         cvtot = cvtot + dcv
+         ether = ether + (dcv * T1 / icoef)
+      enddo
+      gamma = (Rgas + cvtot) / cvtot
+C
+C     if ( T > Tmaxcv ) => T1 = (T - Tmaxcv)
+C     else  T1 = 0
+C     i.e.
+C     T1 = max ((T - Tmaxcv),0)
+C
+      T1 = 0.5d0 * ((T - Tmaxcv) + abs (T - Tmaxcv))
+      ether = ether + (cvtot * T1)
+C
+ 9999 continue
+      return
+      end
+C
+
+

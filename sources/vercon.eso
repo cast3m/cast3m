@@ -1,0 +1,376 @@
+C VERCON    SOURCE    CB215821  16/12/05    22:28:37     9237
+      SUBROUTINE VERCON(IPT1,ICONV)
+C-----------------------------------------------------------------------
+C
+C         VERIFICATION DE LA CONVEXITE D'UN MAILLAGE (2D, 3D)
+C
+C-----------------------------------------------------------------------
+C
+C     Appelé par VERMAI
+C
+C     Entrée :
+C       IPT1 : pointeur sur le maillage (MELEME) a tester.
+C              Ce maillage doit respecter certaines conditions:
+C              - en dimension 2, le contour doit etre fait de SEG2
+C              - en dimension 3, l'enveloppe doit etre faite de TRI3
+C
+C     Sortie :
+C       ICONV : entier indiquant si le maillage est convexe
+C               = 1 si le maillage est convexe
+C               = 0 sinon
+C
+C       Un message est emis si le contour, ou de l'enveloppe, ne
+C       respecte pas les conditions requises
+C
+C
+C     Note : en dimension 2, on ne supprime pas le MELEME IPT2 (contour)
+C            car lors de l'appel a PRCONT, le contour IPT2 est reference
+C            dans le maillage IPT1
+
+C-----------------------------------------------------------------------
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+-INC SMCOORD
+-INC CCOPTIO
+-INC SMELEME
+-INC SMLENTI
+C
+      SEGMENT,MADJACEN
+        INTEGER LEAC(NBL1,IDIM,2)
+      ENDSEGMENT
+      POINTEUR ILEA1.MADJACEN
+C
+      POINTEUR LNPT1.MLENTI
+C
+C     Tolerance pour la planeite des element adjacents
+      ZERO=1.E-14
+C
+C     1. CONSTRUCTION DU CONTOUR OU DE L'ENVELOPPE DU MAILLAGE
+C
+C     J'ecris le maillage dans la pile
+      CALL ECROBJ('MAILLAGE',IPT1)
+      IF (IERR.NE.0) RETURN
+C     puis je fais appel a l'operateur ad hoc pour calculer :
+C     - soit le contour, en dimension 2
+C     - soit l'enveloppe, en dimension 3
+      IF (IDIM.EQ.2) THEN
+        CALL PRCONT
+      ELSEIF (IDIM.EQ.3) THEN
+        CALL ENVVOL
+      ENDIF
+C     Je lis le contour/enveloppe dans la pile, je le designe par IPT2
+      CALL LIROBJ('MAILLAGE',IPT2,1,IRETOU)
+      IF (IERR.NE.0) RETURN
+      SEGACT,IPT2
+C
+C     2. TESTS SUR LE MAILLAGE DU CONTOUR/ENVELOPPE
+C
+C     Test si le type d'elements est bien celui attendu, a savoir:
+C     des TRI3 en dimension 3 ou bien des SEG2 en dimension 2
+      IF (IDIM.EQ.2) THEN
+        IF ((IPT2.ITYPEL).NE.2) THEN
+          ICONV=0
+          MOTERR(1:8) = 'utilise '
+          CALL ERREUR(926)
+          RETURN
+        ENDIF
+      ELSEIF (IDIM.EQ.3) THEN
+        IF ((IPT2.ITYPEL).NE.4) THEN
+          ICONV=0
+          MOTERR(1:8) = 'utilise '
+          CALL ERREUR(926)
+          RETURN
+        ENDIF
+      ENDIF
+C
+C     3. VERIFICATION DE LA CONVEXITE
+C
+C     3.1 EN DIMENSION 2
+C         On parcourt le contour de proche en proche et on verifie la
+C         convexite: le contour doit tourner toujours dans le meme sens
+C
+      IF (IDIM.EQ.2) THEN
+        I1=0
+        JG=IPT2.NUM(/2)
+        SEGINI,LNPT1
+C       On part du premier element du contour
+        NEL1=1
+        NNOA1=1
+        NNOB1=2
+C       Boucle sur les elements (indice I)
+        DO I=1,JG
+          LNPT1.LECT(I)=1
+C         Coordonnees des points A et B, extremites de l'element I
+          NREFA=IPT2.NUM(NNOA1,NEL1)
+          XA=XCOOR((NREFA-1)*(IDIM+1)+1)
+          YA=XCOOR((NREFA-1)*(IDIM+1)+2)
+          NREFB=IPT2.NUM(NNOB1,NEL1)
+          XB=XCOOR((NREFB-1)*(IDIM+1)+1)
+          YB=XCOOR((NREFB-1)*(IDIM+1)+2)
+C         Le voisin du dernier element est le premier
+          IF (I.EQ.JG) THEN
+            NEL2=1
+            NNOB2=1
+            NNOC2=2
+            GOTO 10
+          ENDIF
+C         Boucle sur les autres elements du contour
+C         on recherche le voisin de I partageant le point B
+          DO J=1,JG
+C           Si on a deja traite l'element J, alors on itere
+            IF (LNPT1.LECT(J).EQ.1) GOTO 20
+C           Boucle sur les noeuds de l'element J
+            DO NNOB2=1,IDIM
+C             On teste si le noeud NNOB2 correspond au noeud B
+              IF ((IPT2.NUM(NNOB2,J)).EQ.NREFB) THEN
+                NEL2=J
+                IF (NNOB2.EQ.1) NNOC2=2
+                IF (NNOB2.EQ.2) NNOC2=1
+                GOTO 10
+              ENDIF
+            ENDDO
+20        CONTINUE
+          ENDDO
+10        CONTINUE
+C         Coordonnees du point C
+          NREFC=IPT2.NUM(NNOC2,NEL2)
+          XC=XCOOR((NREFC-1)*(IDIM+1)+1)
+          YC=XCOOR((NREFC-1)*(IDIM+1)+2)
+C         Calcul de la composante Z du produit vectoriel AB^BC
+C         => on obtient ainsi le sens de rotation
+          ZPV=((XB-XA)*(YC-YB))-((YB-YA)*(XC-XB))
+C          CB215821 : Inutile de normer le resultat ==> SIGFPE si 2 pts
+C                     sont confondus... Le denominateur est toujours
+C                     positif ou nul donc aucun interet de normer
+C          X0A=((XA**2)+(YA**2))**0.5
+C          X0B=((XB**2)+(YC**2))**0.5
+C          X0C=((XC**2)+(YC**2))**0.5
+C          ZPV1=ZPV/(X0A*X0B*X0C)
+C         Determination du sens de rotation initial
+          IF (I1.EQ.0) THEN
+C           Si le produit vectoriel est nul, on ne peut pas connaitre le
+C           sens initial, alors on passe a l'element suivant
+            IF (ABS(ZPV).LT.ZERO) THEN
+              GOTO 30
+            ELSE
+              SIG_0=SIGN(1D0,ZPV)
+              I1=1
+            ENDIF
+          ELSE
+C           Si le sens de rotation change, par rapport a l'initial,
+C           alors le maillage n'est pas convexe => on sort
+            IF (ABS(ZPV).LT.ZERO) THEN
+              GOTO 30
+            ELSE
+              SIG_I=SIGN(1D0,ZPV)
+              IF (SIG_I.NE.SIG_0) THEN
+                ICONV=0
+                SEGSUP,LNPT1
+                RETURN
+              ENDIF
+            ENDIF
+          ENDIF
+30        CONTINUE
+C         On passe a l'element suivant, B devient A
+          NEL1=NEL2
+          NNOA1=NNOB2
+          IF (NNOA1.EQ.1) NNOB1=2
+          IF (NNOA1.EQ.2) NNOB1=1
+        ENDDO
+        ICONV=1
+        SEGSUP,LNPT1
+        RETURN
+C
+C     3.2 EN DIMENSION 3
+C         On parcoure toutes les facettes de l'enveloppe et on recherche
+C         les 3 elements adjacents. Une fois trouves, on teste la
+C         convexite: les noeuds des elements adjacents doivent tous etre
+C         du meme cote du plan definit par la facette
+C
+      ELSEIF (IDIM.EQ.3) THEN
+        I1=0
+        NBL1=IPT2.NUM(/2)
+        SEGINI,ILEA1
+C       Boucle sur les elements (indice I)
+        DO I=1,NBL1
+C         Numeros des noeuds A, B et C de l'element I
+          NREFA=IPT2.NUM(1,I)
+          NREFB=IPT2.NUM(2,I)
+          NREFC=IPT2.NUM(3,I)
+C         Numeros des adjacents et des noeuds D, E et F
+          NELD=0
+          NELE=0
+          NELF=0
+          NREFD=0
+          NREFE=0
+          NREFF=0
+C         On part a la recherche des adjacents de l'element I
+C         Si des indices de la table de connectivite existent deja,
+C         alors  on va chercher les numeros des elements adjacents et
+C         ceux des noeuds D, E ou F
+          IF ((ILEA1.LEAC(I,1,1)).NE.0) THEN
+            NELD=ILEA1.LEAC(I,1,1)
+            NREFD=IPT2.NUM((ILEA1.LEAC(I,1,2)),NELD)
+          ENDIF
+          IF ((ILEA1.LEAC(I,2,1)).NE.0) THEN
+            NELE=ILEA1.LEAC(I,2,1)
+            NREFE=IPT2.NUM((ILEA1.LEAC(I,2,2)),NELE)
+          ENDIF
+          IF ((ILEA1.LEAC(I,3,1)).NE.0) THEN
+            NELF=ILEA1.LEAC(I,3,1)
+            NREFF=IPT2.NUM((ILEA1.LEAC(I,3,2)),NELF)
+          ENDIF
+C         Boucle sur les elements d'indice superieurs a I (indice II)
+          DO II=I+1,NBL1
+C           Si l'element II est un des adjacents connus, on itere
+            IF ((II.EQ.NELD).OR.(II.EQ.NELE).OR.(II.EQ.NELF)) GOTO 40
+C           Indicateurs si l'un des noeuds de II correspond a A, B ou C
+            IA=0
+            IB=0
+            IC=0
+C           Boucle sur les noeuds (indice JJ) de l'element II
+            DO JJ=1,IDIM
+              NREFX=IPT2.NUM(JJ,II)
+C             On teste si le noeud JJ correspond aux noeuds A, B ou C
+              IF (NREFX.EQ.NREFA) IA=JJ
+              IF (NREFX.EQ.NREFB) IB=JJ
+              IF (NREFX.EQ.NREFC) IC=JJ
+C             A t on trouve l'adjacent vu par A ?
+              IF ((IB.NE.0).AND.(IC.NE.0)) THEN
+                IF ((IB+IC).EQ.3) NNOJJ=3
+                IF ((IB+IC).EQ.4) NNOJJ=2
+                IF ((IB+IC).EQ.5) NNOJJ=1
+                NREFD=IPT2.NUM(NNOJJ,II)
+                ILEA1.LEAC(I,1,1)=II
+                ILEA1.LEAC(I,1,2)=NNOJJ
+                ILEA1.LEAC(II,NNOJJ,1)=I
+                ILEA1.LEAC(II,NNOJJ,2)=1
+              ENDIF
+C             A t on trouve l'adjacent vu par B ?
+              IF ((IA.NE.0).AND.(IC.NE.0)) THEN
+                IF ((IA+IC).EQ.3) NNOJJ=3
+                IF ((IA+IC).EQ.4) NNOJJ=2
+                IF ((IA+IC).EQ.5) NNOJJ=1
+                NREFE=IPT2.NUM(NNOJJ,II)
+                ILEA1.LEAC(I,2,1)=II
+                ILEA1.LEAC(I,2,2)=NNOJJ
+                ILEA1.LEAC(II,NNOJJ,1)=I
+                ILEA1.LEAC(II,NNOJJ,2)=2
+              ENDIF
+C             A t on trouve l'adjacent vu par C ?
+              IF ((IA.NE.0).AND.(IB.NE.0)) THEN
+                IF ((IA+IB).EQ.3) NNOJJ=3
+                IF ((IA+IB).EQ.4) NNOJJ=2
+                IF ((IA+IB).EQ.5) NNOJJ=1
+                NREFF=IPT2.NUM(NNOJJ,II)
+                ILEA1.LEAC(I,3,1)=II
+                ILEA1.LEAC(I,3,2)=NNOJJ
+                ILEA1.LEAC(II,NNOJJ,1)=I
+                ILEA1.LEAC(II,NNOJJ,2)=3
+              ENDIF
+            ENDDO
+40          CONTINUE
+C           A t on trouve tous les adjacents ?
+            IF ((NREFD*NREFE*NREFF).NE.0) GOTO 50
+          ENDDO
+C         On a trouve les 3 voisins de l'element I
+50        CONTINUE
+C         Coordonnees des noeuds A, B, C, D, E et F
+          XA=XCOOR((NREFA-1)*(IDIM+1)+1)
+          YA=XCOOR((NREFA-1)*(IDIM+1)+2)
+          ZA=XCOOR((NREFA-1)*(IDIM+1)+3)
+          XB=XCOOR((NREFB-1)*(IDIM+1)+1)
+          YB=XCOOR((NREFB-1)*(IDIM+1)+2)
+          ZB=XCOOR((NREFB-1)*(IDIM+1)+3)
+          XC=XCOOR((NREFC-1)*(IDIM+1)+1)
+          YC=XCOOR((NREFC-1)*(IDIM+1)+2)
+          ZC=XCOOR((NREFC-1)*(IDIM+1)+3)
+          XD=XCOOR((NREFD-1)*(IDIM+1)+1)
+          YD=XCOOR((NREFD-1)*(IDIM+1)+2)
+          ZD=XCOOR((NREFD-1)*(IDIM+1)+3)
+          XE=XCOOR((NREFE-1)*(IDIM+1)+1)
+          YE=XCOOR((NREFE-1)*(IDIM+1)+2)
+          ZE=XCOOR((NREFE-1)*(IDIM+1)+3)
+          XF=XCOOR((NREFF-1)*(IDIM+1)+1)
+          YF=XCOOR((NREFF-1)*(IDIM+1)+2)
+          ZF=XCOOR((NREFF-1)*(IDIM+1)+3)
+C         Calcul d'un vecteur normal au plan ABC, on prend le produit
+C         vectoriel n = AB^AC
+          XN=((YB-YA)*(ZC-ZA))-((ZB-ZA)*(YC-YA))
+          YN=((ZB-ZA)*(XC-XA))-((XB-XA)*(ZC-ZA))
+          ZN=((XB-XA)*(YC-YA))-((YB-YA)*(XC-XA))
+C         Calcul des produits scalaires n.AD n.AE et n.AF pour connaitre
+C         la position de D, E et F par rapport au plan ABC
+          PSD=(XN*(XD-XA))+(YN*(YD-YA))+(ZN*(ZD-ZA))
+          PSE=(XN*(XE-XA))+(YN*(YE-YA))+(ZN*(ZE-ZA))
+          PSF=(XN*(XF-XA))+(YN*(YF-YA))+(ZN*(ZF-ZA))
+          X0N=((XN**2)+(YN**2)+(ZN**2))**0.5
+          X0AD=(((XD-XA)**2)+((YD-YA)**2)+((ZD-ZA)**2))**0.5
+          X0AE=(((XE-XA)**2)+((YE-YA)**2)+((ZE-ZA)**2))**0.5
+          X0AF=(((XF-XA)**2)+((YF-YA)**2)+((ZF-ZA)**2))**0.5
+          PSD1=PSD/(X0N*X0AD)
+          PSE1=PSE/(X0N*X0AE)
+          PSF1=PSF/(X0N*X0AF)
+C         Cas particulier ou le point D est dans le plan ABC
+          IF (ABS(PSD1).LT.ZERO) THEN
+            SIGD=0.
+          ELSE
+            SIGD=SIGN(1D0,PSD)
+          ENDIF
+C         Cas particulier ou le point E est dans le plan ABC
+          IF (ABS(PSE1).LT.ZERO) THEN
+            SIGE=0.
+          ELSE
+            SIGE=SIGN(1D0,PSE)
+          ENDIF
+C         Cas particulier ou le point F est dans le plan ABC
+          IF (ABS(PSF1).LT.ZERO) THEN
+            SIGF=0.
+          ELSE
+            SIGF=SIGN(1D0,PSF)
+          ENDIF
+C         Si les 3 points ne sont pas tous situe du meme cote du plan
+C         ABC, alors le maillage n'est pas convexe => on sort
+C         - si D seulement est dans le plan ABC, on teste juste E et F
+          IF ((SIGD.EQ.0.).AND.(SIGE.NE.0.).AND.(SIGF.NE.0.)) THEN
+            IF (SIGE.NE.SIGF) THEN
+              ICONV=0
+              SEGSUP,ILEA1,IPT2
+              RETURN
+            ENDIF
+          ENDIF
+C         - si E seulement est dans le plan ABC, on teste juste D et F
+          IF ((SIGE.EQ.0.).AND.(SIGD.NE.0.).AND.(SIGF.NE.0.)) THEN
+            IF (SIGD.NE.SIGF) THEN
+              ICONV=0
+              SEGSUP,ILEA1,IPT2
+              RETURN
+            ENDIF
+          ENDIF
+C         - si F seulement est dans le plan ABC, on teste juste D et E
+          IF ((SIGF.EQ.0.).AND.(SIGD.NE.0.).AND.(SIGE.NE.0.)) THEN
+            IF (SIGD.NE.SIGE) THEN
+              ICONV=0
+              SEGSUP,ILEA1,IPT2
+              RETURN
+            ENDIF
+          ENDIF
+C         - cas general (D, E et F hors du plan ABC)
+          IF ((SIGD.NE.0.).AND.(SIGE.NE.0.).AND.(SIGF.NE.0.)) THEN
+            IF ((SIGD.NE.SIGE).OR.(SIGE.NE.SIGF)) THEN
+              ICONV=0
+              SEGSUP,ILEA1,IPT2
+              RETURN
+            ENDIF
+          ENDIF
+C         - dans tous les autres cas (2 ou 3 des points D, E, F sont
+C           dans le plan ABC), on itere
+        ENDDO
+        ICONV=1
+        SEGSUP,ILEA1,IPT2
+      ENDIF
+      RETURN
+      END
+
+
+

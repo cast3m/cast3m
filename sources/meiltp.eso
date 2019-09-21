@@ -1,0 +1,407 @@
+C MEILTP    SOURCE    GOUNAND   05/06/06    21:15:36     5078
+      SUBROUTINE MEILTP(NTT,NNZA,A,JA,IA,
+     $     XLFIL,XDTOL,XSPIV,NNZMLU,
+     $     ALU,JLU,JU,NNZLU,
+     $     IWORK,JWORK,RWORK,
+     $     IPERM,JPERM,
+     $     IMPR,IRET)
+      IMPLICIT REAL*8 (A-H,O-Z)
+      IMPLICIT INTEGER (I-N)
+C***********************************************************************
+C NOM         : MEILTP
+C DESCRIPTION :
+C     Calcul du préconditionneur ILUTP d'une matrice Morse
+C     ILUT : Incomplete LU factorization with dual truncation strategy
+C     La matrice Morse est au format CSR (Column Sparse Row)
+C     Le préconditionneur est au format MSR (Modified Sparse Row,
+C     stockage de l'inverse de la diagonale) (ALU, JLU).
+C     JU est un tableau supplémentaire pour le repérage des diagonales.
+C     (voir la doc. de Sparskit version 2)
+C
+C LANGAGE     : FORTRAN 77 (sauf E/S)
+C AUTEUR      : Stéphane GOUNAND (CEA/DRN/DMT/SEMT/LTMF)
+C               mél : gounand@semt2.smts.cea.fr
+C REFERENCE (bibtex-like) :
+C  @BOOK{templates,
+C        AUTHOR={R.Barrett, M.Berry, T.F.Chan, J.Demmel, J.Donato,
+C                J.Dongarra, V.Eijkhout, R.Pozo, C.Romine,
+C                H. Van der Vorst},
+C        TITLE={Templates for the Solution of Linear Systems :
+C               Building Blocks for Iterative Methods},
+C        PUBLISHER={SIAM}, YEAR={1994}, ADDRESS={Philadelphia,PA} }
+C  -> URL : http://www.netlib.org/templates/Templates.html
+C  Sparskit : a basic tool kit for sparse matrix computations
+C  Version 2 (Youcef Saad)
+C  -> URL : http://www.cs.umn.edu/Research/arpa/SPARSKIT/sparskit.html
+C REMARQUES :
+C Quelques parties pourraient être améliorés :
+C - l'algorithme de quicksplit (cf.qsplit.eso)
+C - la partie où l'on doit effectuer l'élimination dans le bon ordre
+C   pourrait utiliser un algorithme de tri type quicksort
+C
+C On a tenté de corriger les bugs de la version Saad
+C signalés par *!
+C
+C***********************************************************************
+C APPELES          : QSPLIT
+C APPELE PAR       : PRILUT
+C***********************************************************************
+C ENTREES            : NTT,NNZA,A,JA,IA,XLFIL,XDTOL,NNZMLU,IVARI
+C ENTREES/SORTIES    : IWORK,JWORK,RWORK (tableaux de travail)
+C SORTIES            : ALU,JLU,JU,NNZLU
+C CODE RETOUR (IRET) : = 0 si tout s'est bien passé
+C***********************************************************************
+C VERSION    : v1, 08/04/04, version initiale
+C HISTORIQUE : v1, 08/04/04, création
+C HISTORIQUE :
+C HISTORIQUE :
+C***********************************************************************
+C Prière de PRENDRE LE TEMPS de compléter les commentaires
+C en cas de modification de ce sous-programme afin de faciliter
+C la maintenance !
+C***********************************************************************
+-INC CCOPTIO
+-INC CCREEL
+*     .. Scalar Arguments ..
+      INTEGER  NTT,NNZA,NNZMLU,NNZLU
+      INTEGER  IMPR,IRET
+      REAL*8 XDTOL,XLFIL
+*     ..
+*     .. Array Arguments ..
+      REAL*8  A(NNZA),ALU(NNZMLU+1)
+      INTEGER JA(NNZA),IA(NTT+1),JU(NTT),JLU(NNZMLU+1)
+      INTEGER IWORK(NTT)
+      INTEGER JWORK(NTT)
+      REAL*8 RWORK(NTT)
+      INTEGER IPERM(NTT)
+      INTEGER JPERM(NTT)
+*
+*     .. Variables locales
+*     .. Parameters
+      REAL*8     ZERO      ,ONE
+      PARAMETER (ZERO=0.0D0,ONE=1.0D0)
+*     ..
+C     Nombre de pivots petits
+      INTEGER NBPIVP
+C     Nombre de pivots inférieurs à 0
+      INTEGER NBPIVI
+*
+      INTEGER ILFIL,ILFILL,ILFILU
+      INTEGER COL,COLLU
+      INTEGER IJA,ILEN,ILENL,ILENU,ITT,ISTRT,ISTOP
+      INTEGER JJL,JPOS,JROW,KJL,KLU
+      INTEGER LEN,LENL,LENU
+      INTEGER JU0,ITMP
+      REAL*8 FACT,RTMP,TERMLU,TNORM,VAL,VALPIV,PETIT
+      REAL*8 XNTLIG
+*      REAL*8 XPOND1,XPOND2
+*
+* Executable statements
+*
+      IF (XLFIL.LT.0.D0) THEN
+         WRITE(IOIMP,*) 'XLFIL.LT.0.D0 non acceptable'
+         GOTO 9999
+      ENDIF
+      PETIT=XZPREC**(0.75D0)
+      NBPIVP=0
+      NBPIVI=0
+c-----------------------------------------------------------------------
+c     initialize ju0 (points to next element to be added to alu,jlu)
+c     and pointer array.
+c-----------------------------------------------------------------------
+      JU0=NTT+2
+      JLU(1)=JU0
+*
+* Initialize permutation arrays
+*
+      DO ITT=1,NTT
+         JWORK(ITT)=0
+         IPERM(ITT)=ITT
+         JPERM(ITT)=ITT
+      ENDDO
+*
+* On boucle sur les ddl
+*
+      DO 1 ITT=1,NTT
+* Calcul de la norme de la ittème ligne
+         ISTRT=IA(ITT)
+         ISTOP=IA(ITT+1)-1
+         TNORM=ZERO
+         DO 11 IJA=ISTRT,ISTOP
+            TNORM=TNORM+ABS(A(IJA))
+ 11      CONTINUE
+         TNORM=TNORM/DBLE(ISTOP-ISTRT+1)
+         IF (TNORM.LE.XPETIT) THEN
+            WRITE(IOIMP,*) 'La ligne ',ITT,' est nulle...'
+            GOTO 9999
+         ENDIF
+* On stocke la ittème ligne de A dans IWORK,RWORK en distinguant les
+* parties triangulaires inférieures et supérieurs.
+*
+* On peut le programmer autrement compte tenu du fait que les
+* colonnes sont ordonnées
+*
+         LENU=1
+         LENL=0
+         IWORK(ITT)=ITT
+         RWORK(ITT)=ZERO
+         JWORK(ITT)=ITT
+
+         DO 12 IJA=ISTRT,ISTOP
+*!            COL=JA(IJA)
+            COL=JPERM(JA(IJA))
+            VAL=A(IJA)
+            IF (COL.LT.ITT) THEN
+               LENL=LENL+1
+               IWORK(LENL)=COL
+               RWORK(LENL)=VAL
+               JWORK(COL) =LENL
+            ELSEIF (COL.EQ.ITT) THEN
+               RWORK(ITT)=VAL
+            ELSE
+               LENU=LENU+1
+               JPOS=ITT+LENU-1
+               IWORK(JPOS)=COL
+               RWORK(JPOS)=VAL
+               JWORK(COL) =JPOS
+            ENDIF
+ 12      CONTINUE
+* On a enlevé les stratégies bizarres
+         XNTLIG=DBLE(NNZA)/DBLE(NTT)
+         ILFIL=INT((XNTLIG-1.D0)*XLFIL/2.D0)
+         ILFILL=ILFIL
+         ILFILU=ILFIL
+* Elimination avec les lignes précédentes
+         JJL=0
+         LEN=0
+ 13      CONTINUE
+         JJL=JJL+1
+         IF (JJL.LE.LENL) THEN
+c-----------------------------------------------------------------------
+c     in order to do the elimination in the correct order we must select
+c     the smallest column index among jw(k), k=jj+1, ..., lenl.
+c-----------------------------------------------------------------------
+            JROW=IWORK(JJL)
+            KJL=JJL
+c     determine smallest column index
+            DO 132 ILENL=JJL+1,LENL
+               IF (IWORK(ILENL).LT.JROW) THEN
+                  JROW=IWORK(ILENL)
+                  KJL=ILENL
+               ENDIF
+ 132        CONTINUE
+            IF (KJL.NE.JJL) THEN
+               ITMP=IWORK(JJL)
+               IWORK(JJL)=IWORK(KJL)
+               IWORK(KJL)=ITMP
+               JWORK(JROW)=JJL
+               JWORK(ITMP)=KJL
+               RTMP=RWORK(JJL)
+               RWORK(JJL)=RWORK(KJL)
+               RWORK(KJL)=RTMP
+            ENDIF
+c     zero out element in row by setting jw(n+jrow) to zero.
+            JWORK(JROW)=0
+c     get the multiplier for row to be eliminated (jrow).
+            FACT=RWORK(JJL)*ALU(JROW)
+            IF (ABS(FACT).LE.XDTOL) THEN
+               GOTO 13
+            ENDIF
+c
+c     combine current row and row jrow
+c
+            DO 134 KLU=JU(JROW),JLU(JROW+1)-1
+               TERMLU=FACT*ALU(KLU)
+*!               COLLU =JLU(KLU)
+               COLLU =JPERM(JLU(KLU))
+               JPOS  =JWORK(COLLU)
+               IF (COLLU.GE.ITT) THEN
+c     dealing with upper part (including diagonal)
+                  IF (JPOS.EQ.0) THEN
+c     this is a fill-in element
+                     LENU=LENU+1
+                     IF (LENU.GT.NTT-ITT+1) THEN
+                        WRITE(IOIMP,*) 'pb. matrice U'
+                        GOTO 9999
+                     ENDIF
+                     IWORK(ITT+LENU-1)=COLLU
+                     JWORK(COLLU)=ITT+LENU-1
+                     RWORK(ITT+LENU-1)=-TERMLU
+                  ELSE
+c     this is not a fill-in element
+                     RWORK(JPOS)=RWORK(JPOS)-TERMLU
+                  ENDIF
+               ELSE
+c     dealing with lower part.
+                  IF (JPOS.EQ.0) THEN
+c     this is a fill-in element
+                     LENL=LENL+1
+                     IF (LENL.GT.ITT-1) THEN
+                        WRITE(IOIMP,*) 'pb. matrice L'
+                        WRITE(IOIMP,*) 'LENL=',LENL
+                        WRITE(IOIMP,*) 'ITT=',ITT
+                        GOTO 9999
+                     ENDIF
+                     IWORK(LENL) =COLLU
+                     JWORK(COLLU)=LENL
+                     RWORK(LENL) =-TERMLU
+                  ELSE
+c     this is not a fill-in element
+                     RWORK(JPOS)=RWORK(JPOS)-TERMLU
+                  ENDIF
+               ENDIF
+ 134        CONTINUE
+c     store this pivot element -- (from left to right -- no danger of
+c     overlap with the working elements in L (pivots).
+            LEN=LEN+1
+            RWORK(LEN)=FACT
+            IWORK(LEN)=JROW
+            GOTO 13
+         ENDIF
+c     reset double-pointer to zero (U-part including diagonal)
+         DO 14 ILENU=1,LENU
+            JWORK(IWORK(ITT+ILENU-1))=0
+ 14      CONTINUE
+c     update L-matrix
+         LENL=LEN
+         LEN=MIN(LENL,ILFILL)
+c     sort by quick-split
+         CALL QSPLIT(RWORK,IWORK,LENL,LEN,
+     $        IMPR,IRET)
+c     store L-part -- in original coordinates
+         DO 15 ILEN=1,LEN
+*!            JLU(JU0)=IWORK(ILEN)
+            ALU(JU0)=RWORK(ILEN)
+            JLU(JU0)=IPERM(IWORK(ILEN))
+            JU0=JU0+1
+ 15      CONTINUE
+c     save pointer to beginning of row ii of U
+         JU(ITT)=JU0
+c     update U-matrix -- first apply dropping strategy
+         LEN=0
+         DO 16 ILEN=1,LENU-1
+            IF (ABS(RWORK(ITT+ILEN)).GT.XDTOL*TNORM) THEN
+               LEN=LEN+1
+               RWORK(ITT+LEN)=RWORK(ITT+ILEN)
+               IWORK(ITT+LEN)=IWORK(ITT+ILEN)
+            ENDIF
+ 16      CONTINUE
+         LENU=LEN+1
+*!!!!!!!!
+         LEN=MIN(LENU,ILFILU+1)
+*!!!         LEN=MIN(LENU,ILFILU)
+c     sort by quick-split
+         CALL QSPLIT(RWORK(ITT+1),IWORK(ITT+1),LENU-1,LEN-1,
+     $        IMPR,IRET)
+*!
+*!    Determine next pivot
+*!
+         IMAX=ITT
+         XMAX=ABS(RWORK(IMAX))
+         XMAX0=XMAX
+* Je ne comprends pas bien cette ligne, je ne la mets pas
+*         ICUT=ITT-1+IRPIV-MOD(ITT-1,IRPIV)
+*         ICUT=ITT+IRPIV
+         DO ILEN=ITT+1,ITT+LEN-1
+*!!!         DO ILEN=ITT+1,ITT+LEN
+            XCOU=ABS(RWORK(ILEN))
+            IF (XCOU.GT.XMAX.AND.(XCOU*XSPIV).GT.XMAX0) THEN
+               IMAX=ILEN
+               XMAX=XCOU
+            ENDIF
+         ENDDO
+*
+* Echange des valeurs
+*
+         XTMP=RWORK(ITT)
+         RWORK(ITT)=RWORK(IMAX)
+         RWORK(IMAX)=XTMP
+*
+* Update de la numérotation ancienne
+*
+         JMAX=IWORK(IMAX)
+         ITMP=IPERM(ITT)
+         IPERM(ITT)=IPERM(JMAX)
+         IPERM(JMAX)=ITMP
+*
+* Update de la numérotation nouvelle
+*
+         JPERM(IPERM(ITT))=ITT
+         JPERM(IPERM(JMAX))=JMAX
+*
+c     copy U-Part in original coordinates
+*
+         DO 17 ILEN=ITT+1,ITT+LEN-1
+*!!!         DO 17 ILEN=ITT+1,ITT+LEN
+            JLU(JU0)=IPERM(IWORK(ILEN))
+            ALU(JU0)=RWORK(ILEN)
+            JU0=JU0+1
+ 17      CONTINUE
+c     store inverse of diagonal element of u
+         VALPIV=RWORK(ITT)
+         IF (VALPIV.EQ.ZERO) THEN
+            WRITE(IOIMP,*) 'Pivot',ITT,' nul : ',
+     $           'le préconditionnement ILUTP est impossible.'
+            IRET=-2
+            GOTO 9999
+         ELSE
+            IF (ABS(VALPIV).LT.PETIT*TNORM) THEN
+               NBPIVP=NBPIVP+1
+            ENDIF
+            IF (VALPIV.LT.ZERO) THEN
+               NBPIVI=NBPIVI+1
+            ENDIF
+         ENDIF
+         ALU(ITT)=ONE/RWORK(ITT)
+c     update pointer to beginning of next row of U.
+         JLU(ITT+1)=JU0
+ 1    CONTINUE
+      NNZLU=JLU(NTT+1)-1
+C
+C Permutation des colonnes de LU
+C
+      DO KLU=JLU(1),JLU(NTT+1)-1
+         JLU(KLU)=JPERM(JLU(KLU))
+      ENDDO
+C
+C Permutation des colonnes de A
+C
+      DO IJA=IA(1),IA(NTT+1)-1
+         JA(IJA)=JPERM(JA(IJA))
+      ENDDO
+*
+* Warning(s)
+*
+      IF (IMPR.GT.0) THEN
+         IF (NBPIVP.GT.0) THEN
+            WRITE(IOIMP,*) 'WARNING !',
+     $           ' meiltp :',NBPIVP,' |pivot(s)|/|ligne|<',PETIT
+         ENDIF
+*!         IF (NBPIVI.GT.0) THEN
+*!            WRITE(IOIMP,*) 'WARNING !',
+*!     $           ' meiltp :',NBPIVI,' pivot(s) < 0'
+*!         ENDIF
+      ENDIF
+*
+* Normal termination
+*
+      IRET=0
+      RETURN
+*
+* Error handling
+*
+ 9999 CONTINUE
+      IRET=1
+      WRITE(IOIMP,*) 'An error was detected in meiltp.eso'
+      RETURN
+*
+*     End of MEILTP
+*
+      END
+
+
+
+
+
+
+

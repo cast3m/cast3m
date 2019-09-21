@@ -1,0 +1,983 @@
+C KONV13    SOURCE    BECC      11/06/08    21:15:41     7000
+         SUBROUTINE KONV13
+C************************************************************************
+C
+C PROJET            :  CASTEM 2000
+C
+C NOM               :  KONV13
+C
+C DESCRIPTION       :  Subroutine appellée par KONV1
+C
+C                      Modelisation 2D/3D des equations d'Euler.
+C                      Discrete Equation Method for combustion.
+C
+C                      Calcul du residu / jacobien / DELTAT
+C
+C LANGAGE           :  FORTRAN 77 + ESOPE 2000 (avec estensions CISI)
+C
+C AUTEUR            :  A. BECCANTINI, DEN/DM2S/SFME/LTMF
+C
+C************************************************************************
+C
+C APPELES (Calcul)  :  KDEM12 (2D, gaz "thermally perfect", DEM)
+C
+C************************************************************************
+C
+C*** SINTAXE
+C
+C  Discrétisation en VF "cell-centered" des équations d'Euler pour
+C  un gaz parfait mono-constituent. Methode DEM.
+C  Inconnues: alpha, densité, quantité de mouvement, énergie totale par
+C  unité de volume (variables conservatives)
+C
+C  RCHPO1 RFLOT1 SURF1 =  'KONV' 'VF' 'DEM' MOT1 MOT2 MOD1 TABPG
+C                         LMOT1  MCHAA1  MCHAA2 ICHPK0 GRALP1 EPS
+C                         MAILLIM ;
+C  ENTREES
+C
+C
+C  MOT1   : objet de type MOT
+C           Il vaut 'RESI' si on veut calculer le résidu
+C
+C  MOT2   : objet de type MOT
+C           Il indique la méthode de décentrement:
+C           'SS       = solveur choc-choc
+C
+C  MOD1   : objet modele de type Navier_Stokes
+C
+C  TABG   : objet de type TABLE
+C           il contient les proprietes du gaz:
+C
+C LMOT1   : objet de type LISTMOTS
+C           Noms de composantes du résultat (RCHPO1)
+C           Il contient dans l'ordre suivant: le noms de alpha,
+C           de la densité,
+C           de la vitesse, de l'énergie totale par unité de volume
+C
+C MCHAA1  : MCHAML contenant la fraction volumique alpha de la phase 1,
+C           qui a comme SPG (support géométrique) l'indice 'FACEL' de la
+C           table associée à MOD1 (une composante, 'SCAL')
+C
+C MCHAA2  : MCHAML contenant la fraction volumique alpha de la phase 2,
+C           même SPG que MCHAA1, une composante, 'SCAL'
+C
+C MCHAR1  : MCHAML contenant la masse volumique de la phase 1,
+C           même SPG que MCHAA1, une composante, 'SCAL'
+C
+C MCHAR2  : MCHAML contenant la masse volumique de la phase 2,
+C           même SPG que MCHAA1, une composante, 'SCAL'
+C
+C MCHAV1  : MCHAML  contenant la vitesse de la phase 1 et les cosinus
+C           directeurs du repère locale (n,t) dans le repère
+C           global (x,y), même SPG que MCHAA1,
+C           (dans le cas 2D 6 composantes:
+C           * 'UN' = vitesse normale  (SPG =('DOMA' MOD1 'FACEL'))
+C           * 'UT' = vitesse tangentielle  (SPG =('DOMA' MOD1 'FACEL'))
+C           * 'NX' = n.x (SPG = 'FACE')
+C           * 'NY' = n.y (SPG = 'FACE')
+C           * 'TX' = t.x (SPG = 'FACE')
+C           * 'TY' = t.y (SPG = 'FACE')).
+C
+C MCHAV2  : MCHAML  contenant la vitesse de la phase 1 et les cosinus
+C           directeurs du repère locale (n,t) dans le repère
+C           global (x,y), même SPG que MCHAA1,
+C           (dans le cas 2D 6 composantes:
+C           * 'UN' = vitesse normale  (SPG =('DOMA' MOD1 'FACEL'))
+C           * 'UT' = vitesse tangentielle  (SPG =('DOMA' MOD1 'FACEL'))
+C           * 'NX' = n.x (SPG = 'FACE')
+C           * 'NY' = n.y (SPG = 'FACE')
+C           * 'TX' = t.x (SPG = 'FACE')
+C           * 'TY' = t.y (SPG = 'FACE')).
+C
+C MCHAP1  : MCHAML (SPG =('DOMA' MOD1 'FACEL')) contenant la pression de
+C           la phase 1 (une  seule composante, 'SCAL').
+C
+C MCHAP2  : MCHAML (SPG =('DOMA' MOD1 'FACEL')) contenant la pression de
+C           la phase 2 (une  seule composante, 'SCAL').
+C
+C K0      : CHPOINT,  fundamental flame speed
+C
+C GRALP1  : CHPOINT, grad(alp1)/|grad(alp1)|
+C
+C EPSILON : FLOTTANT t.q. a < EPSILON => a = 0
+C
+C MAILLIM : MAILLAGE -- describes the mesh where the flux is not
+C                       determined; it will be found by using
+C                       the subroutins for the Boundary Conditions
+C
+C SORTIES
+C
+C RCHPO1  : objet de type CHPOINT (composantes =  LMOT1)
+C           Residu  si MOT2 = 'RESI' (SPG =('DOMA' MOD1 'CENTRE'))
+C
+C RFLOT1  : objet de type FLOTTANT
+C           Il est le temps caracteristique associé à l'onde la plus
+C           rapide.
+C
+C SURF1   : objet de type FLOTTANT
+C           Surface de combustion
+C
+C Remarque
+C --------
+C
+C RCHPO1 est égal à:
+C * la derivé temporelle des inconnues si l'option 'RESI' est utilisée
+C
+C
+C***********************************************************************
+C
+C************************************************************************
+C
+C HISTORIQUE (Anomalies et modifications éventuelles)
+C
+C 07/12/2009 - Created
+C 21/12/2010 - Estension au 3D
+C
+C************************************************************************
+C
+      IMPLICIT INTEGER(I-N)
+C
+-INC CCOPTIO
+-INC SMLMOTS
+      POINTEUR MLMVIT.MLMOTS, MLMOEU.MLMOTS, MLMOSC.MLMOTS,
+     $     MLMESP.MLMOTS
+-INC SMLREEL
+      POINTEUR MLRMFR.MLREEL, MLRCHE.MLREEL
+-INC SMELEME
+C
+      INTEGER IDOMA, MELEMC, MELEMF, MELEFE, ICHPSU, ICHPDI , ICHPVO
+     &      , INORM, MELLIM, IFLIM
+     &      , NBMET, INDMET, IRET, INDK0
+     &      , IPGAS, NORD, NORDP1, NESP, IESP
+     &      , JGM, JGN
+     &      , I1, I2
+     &      , INDIC, NBCOMP
+     &      , IALP1, IALP2
+     &      , IALF1, IROF1, IVITF1, IPF1
+     &      , IALF2, IROF2, IVITF2, IPF2
+     &      , IGRALP
+     &      , ICHPK0
+     &      , NINC, ILIINC, NC, ICELL
+     &      , ICHRES, INEFMD, ICOND, MMODEL
+     &      , ITOTO, NORD1, NESP1
+     &      , N1, N2
+     &      , IUINF1, IUINF2
+      REAL*8 RUNIV, TMAX, EPS, K0
+C
+C**** Variables en ACCTAB
+C
+      INTEGER IVALI, IRETI,IVALR, IRETR
+      REAL*8 XVALI, XVALR
+      LOGICAL LOGII, LOGIR
+      CHARACTER*(8) MTYPI, MTYPR, CHARR
+C
+C**** Segment des proprietes du gaz
+C
+      SEGMENT PROPHY
+          REAL*8 XTAB(N1,N2)
+C         REAL*8 ACV(NORDP1,NESP+1), W(NESP+1), H0K(NESP+1)
+C     &         ,ACVTOG(NORDP1), ACVTOD(NORDP1)
+      ENDSEGMENT
+C
+      PARAMETER (NBMET=3)
+      REAL*8 DT, SURFL
+      CHARACTER*8 LMETO(NBMET), TYPE
+      CHARACTER*4 LFLUX(1), MOT1(1), LK0(2)
+      CHARACTER*(40) MESERR
+      LOGICAL LOGNC, LOGAN, LOGRES
+C
+      DATA LMETO/'VLH     ','SS      ','AUSMPUP '/
+      DATA LFLUX/'RESI'/
+      DATA LK0/'CONS','VARI'/
+C
+C**** Initialisation des variables pour la gestion des erreurs.
+C
+      LOGNC  = .FALSE.
+      LOGAN  = .FALSE.
+      MESERR  = '                                        '
+C
+C******* Flux ou residu???
+C
+      CALL LIRMOT(LFLUX,1,ICELL,1)
+      IF(IERR .NE. 0)GOTO 9999
+      IF(ICELL .NE. 1)THEN
+C         LOGRES = .TRUE.
+C      ELSE
+C
+C******** Message d'erreur standard
+C         251 2
+C         Tentative d'utilisation d'une option non implémentée
+C
+         CALL ERREUR(251)
+      ENDIF
+C
+C**** Metode utilisée
+C
+      CALL LIRMOT(LMETO,NBMET,INDMET,1)
+      IF(IERR .NE. 0)GOTO 9999
+      IF(INDMET .EQ. 0)THEN
+C
+C******** Message d'erreur standard
+C         251 2
+C         Tentative d'utilisation d'une option non implémentée
+C
+         CALL ERREUR(251)
+      ENDIF
+C
+C**** KO constant ou variable ???
+C
+      CALL LIRMOT(LK0,2,INDK0,1)
+      IF(IERR .NE. 0)GOTO 9999
+      IF(INDK0 .EQ. 0)THEN
+C
+C******** Message d'erreur standard
+C         251 2
+C         Tentative d'utilisation d'une option non implémentée
+C
+         CALL ERREUR(251)
+      ENDIF
+C
+C**********************************
+C**** Lecture de l'objet MODELE ***
+C**********************************
+C
+      ICOND = 1
+      CALL QUETYP(TYPE,ICOND,IRET)
+
+      IF(IRET.EQ.0.AND.TYPE.NE.'MMODEL')THEN
+        WRITE(IOIMP,*)' On attend un objet MMODEL'
+        RETURN
+      ENDIF
+      CALL LIROBJ('MMODEL',MMODEL,ICOND,IRET)
+      IF(IERR.NE.0)GOTO 9999
+      CALL LEKMOD(MMODEL,IDOMA,INEFMD)
+      IF(IERR.NE.0)GOTO 9999
+C
+C**** Centre, FACE et FACEL
+C
+      CALL LEKTAB(IDOMA,'CENTRE',MELEMC)
+      IF(IERR .NE. 0) GOTO 9999
+C
+      CALL LEKTAB(IDOMA,'FACE',MELEMF)
+      IF(IERR .NE. 0) GOTO 9999
+C
+      CALL LEKTAB(IDOMA,'FACEL',MELEFE)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Lecture du CHPOINT contenant les surfaces des faces.
+C
+      CALL LEKTAB(IDOMA,'XXSURFAC',ICHPSU)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Lecture du CHPOINT contenant les diametres minimums.
+C
+      CALL LEKTAB(IDOMA,'XXDIEMIN',ICHPDI)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Lecture du CHPOINT contenant les volumes
+C
+      CALL LEKTAB(IDOMA,'XXVOLUM',ICHPVO)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C********** Les normales aux faces
+C
+      IF(IDIM .EQ. 2)THEN
+C        Que les normales
+         CALL LEKTAB(IDOMA,'XXNORMAF',INORM)
+         IF(IERR .NE. 0) GOTO 9999
+         JGN = 4
+         JGM = 2
+         SEGINI MLMVIT
+         MLMVIT.MOTS(1) = 'UX  '
+         MLMVIT.MOTS(2) = 'UY  '
+         CALL QUEPO1(INORM, MELEMF, MLMVIT)
+         SEGSUP MLMVIT
+         IF(IERR .NE. 0) GOTO 9999
+      ELSE
+C        Les normales et les tangentes
+         TYPE = ' '
+         CALL ACMO(IDOMA,'MATROT',TYPE,INORM)
+         IF (TYPE .NE. 'CHPOINT ') THEN
+            CALL MATRAN(IDOMA,INORM)
+            IF(IERR .NE. 0) GOTO 9999
+         ENDIF
+         JGN = 4
+         JGM = 9
+         SEGINI MLMVIT
+         MLMVIT.MOTS(1) = 'UX  '
+         MLMVIT.MOTS(2) = 'UY  '
+         MLMVIT.MOTS(3) = 'UZ  '
+         MLMVIT.MOTS(4) = 'RX  '
+         MLMVIT.MOTS(5) = 'RY  '
+         MLMVIT.MOTS(6) = 'RZ  '
+         MLMVIT.MOTS(7) = 'MX  '
+         MLMVIT.MOTS(8) = 'MY  '
+         MLMVIT.MOTS(9) = 'MZ  '
+         CALL QUEPO1(INORM, MELEMF, MLMVIT)
+         SEGSUP MLMVIT
+      ENDIF
+C
+C********************************
+C**** Fin table domaine *********
+C********************************
+C********************************
+C****   La table IPGAZ    *******
+C********************************
+C
+C      write(*,*) 'Son qui prima di ipgaz'
+C
+C**** Lecture de la table des proprietes du gaz
+C
+      ICOND = 1
+      CALL QUETYP(TYPE,ICOND,IRET)
+      IF(IERR .NE. 0)GOTO 9999
+      IF(TYPE .NE. 'TABLE   ')THEN
+C
+C******* Message d'erreur standard
+C        37 2
+C        On ne trouve pas d'objet de type %m1:8
+C
+         MOTERR(1:8) = 'TABLE   '
+         CALL ERREUR(37)
+         GOTO 9999
+      ELSE
+         ICOND = 1
+         CALL LIROBJ(TYPE,IPGAS,ICOND,IRET)
+         IF(IERR .NE. 0)GOTO 9999
+      ENDIF
+C
+C**** Ordre des polynoms pour les cv_i
+C
+      MTYPI = 'MOT     '
+      MTYPR = '        '
+      CALL ACCTAB(IPGAS,MTYPI,IVALI,XVALI,'NORD',LOGII,IRETI,
+     &     MTYPR,NORD,XVALR,CHARR,LOGIR,IESP)
+      IF(MTYPR .NE. 'ENTIER  ')THEN
+C
+C******* Message d'erreur standard
+C        -301 0 %m1:40
+C
+         MOTERR(1:40) = 'TAB1 . NORD = ???                       '
+         WRITE(IOIMP,*) MOTERR(1:40)
+C
+C******* Message d'erreur standard
+C        21 2
+C        Données incompatibles
+C
+         CALL ERREUR(21)
+         GOTO 9999
+      ENDIF
+      NORDP1 = NORD + 1
+C
+C**** 'TMAX'
+C
+      MTYPI = 'MOT     '
+      MTYPR = '        '
+      CALL ACCTAB(IPGAS,MTYPI,IVALI,XVALI,'TMAX',LOGII,IRETI,
+     &     MTYPR,IVALR,XVALR,CHARR,LOGIR,IESP)
+      IF(MTYPR .NE. 'FLOTTANT')THEN
+C
+C******* Message d'erreur standard
+C        -301 0 %m1:40
+C
+         MOTERR(1:40) = 'TAB1 . TMAX = ???                       '
+         WRITE(IOIMP,*) MOTERR(1:40)
+C
+C******* Message d'erreur standard
+C        21 2
+C        Données incompatibles
+C
+         CALL ERREUR(21)
+         GOTO 9999
+      ENDIF
+      TMAX = XVALR
+C
+C**** 'RUNIV'
+C
+      MTYPI = 'MOT     '
+      MTYPR = '        '
+      CALL ACCTAB(IPGAS,MTYPI,IVALI,XVALI,'RUNIV',LOGII,IRETI,
+     &     MTYPR,IVALR,XVALR,CHARR,LOGIR,IESP)
+      IF(MTYPR .NE. 'FLOTTANT')THEN
+C
+C******* Message d'erreur standard
+C        -301 0 %m1:40
+C
+         MOTERR(1:40) = 'TAB1 . RUNIV = ???                      '
+         WRITE(IOIMP,*) MOTERR(1:40)
+C
+C******* Message d'erreur standard
+C        21 2
+C        Données incompatibles
+C
+         CALL ERREUR(21)
+         GOTO 9999
+      ENDIF
+      RUNIV = XVALR
+C
+C**** Les especes
+C
+      MTYPR = '        '
+      CALL ACMO(IPGAS,'SPECIES',MTYPR,MLMESP)
+      IF(MTYPR .NE. 'LISTMOTS')THEN
+C
+C******* Message d'erreur standard
+C        -301 0 %m1:40
+C
+         MOTERR(1:40) = 'TAB1 . SPECIES = ???                    '
+         WRITE(IOIMP,*) MOTERR(1:40)
+C
+C******* Message d'erreur standard
+C        21 2
+C        Données incompatibles
+C
+         CALL ERREUR(21)
+         GOTO 9999
+      ELSE
+         SEGACT MLMESP
+         NESP = MLMESP.MOTS(/2)
+         SEGDES MLMESP
+      ENDIF
+C
+C**** 'MASSFRA'
+C
+      MTYPR = '        '
+      CALL ACMO(IPGAS,'MASSFRA',MTYPR,MLRMFR)
+      IF(MTYPR .NE. 'LISTREEL')THEN
+C
+C******* Message d'erreur standard
+C        -301 0 %m1:40
+C
+         MOTERR(1:40) = 'TAB1 . MASSFRA  = ???                   '
+         WRITE(IOIMP,*) MOTERR(1:40)
+C
+C******* Message d'erreur standard
+C        21 2
+C        Données incompatibles
+C
+         CALL ERREUR(21)
+         GOTO 9999
+      ELSE
+         SEGACT MLRMFR
+         NESP1 = MLRMFR.PROG(/1)
+         IF (NESP1 .NE. NESP) THEN
+            MOTERR(1:40) = 'TAB1 . MASSFRA  = ???                   '
+            WRITE(IOIMP,*) MOTERR(1:40)
+            MOTERR(1:40) = 'TAB1 . SPECIES = ???                    '
+            WRITE(IOIMP,*) MOTERR(1:40)
+C
+C******* Message d'erreur standard
+C        21 2
+C        Données incompatibles
+C
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+         SEGDES MLRMFR
+      ENDIF
+C
+C**** 'CHEMCOEF'
+C
+      MTYPR = '        '
+      CALL ACMO(IPGAS,'CHEMCOEF',MTYPR,MLRCHE)
+      IF(MTYPR .NE. 'LISTREEL')THEN
+C
+C******* Message d'erreur standard
+C        -301 0 %m1:40
+C
+         write(IOIMP,*) MTYPR
+         MOTERR(1:40) = 'TAB1 . CHEMCOEF = ???                   '
+         WRITE(IOIMP,*) MOTERR(1:40)
+C
+C******* Message d'erreur standard
+C        21 2
+C        Données incompatibles
+C
+         CALL ERREUR(21)
+         GOTO 9999
+      ELSE
+         SEGACT MLRCHE
+         NESP1 = MLRCHE.PROG(/1)
+         IF (NESP1 .NE. NESP) THEN
+            MOTERR(1:40) = 'TAB1 . CHEMCOEF = ???                   '
+            WRITE(IOIMP,*) MOTERR(1:40)
+            MOTERR(1:40) = 'TAB1 . SPECIES = ???                    '
+            WRITE(IOIMP,*) MOTERR(1:40)
+C
+C******* Message d'erreur standard
+C        21 2
+C        Données incompatibles
+C
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+         SEGDES MLRCHE
+      ENDIF
+C
+C**** On rempli les segment PROPHY
+C     Ordre: IPGAS . 'SPECIES'
+C
+      N1 = NORDP1 + 2
+      N2 = NESP
+      SEGINI PROPHY
+      SEGACT MLMESP
+C
+C**** N.B. MOT1 est un CHARACTER*(4)
+C
+      DO I1 = 1, NESP
+         MOT1(1) = MLMESP.MOTS(I1)
+C
+C******* CALL ACMF(...)  ne marche pas parce que on a
+C        des blanches dans nos composantes
+C
+         MTYPI = 'MOT     '
+         MTYPR = '        '
+         CALL ACCTAB(IPGAS,MTYPI,IVALI,XVALI,MOT1(1), LOGII,IRETI,
+     &        MTYPR,IVALR,XVALR,CHARR,LOGIR,IESP)
+C
+C******* En IESP a la table IPGAS.MOT1(1)
+C
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'TABLE   ')) THEN
+
+C
+C********** Message d'erreur standard
+C           -301 0 %m1:40
+C
+            MOTERR = '                                        '
+            MOTERR(1:7) = 'TAB1 . '
+            MOTERR(8:11) = MOT1(1)
+            MOTERR(13:17) = '= ???'
+            WRITE(IOIMP,*) MOTERR(1:40)
+C
+C********** Message d'erreur standard
+C           21 2
+C           Données incompatibles
+C
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+C
+C******* W
+C
+         MTYPI = 'MOT     '
+         MTYPR = '        '
+         CALL ACCTAB(IESP,MTYPI,IVALI,XVALI, 'W' , LOGII,IRETI,
+     &                    MTYPR,IVALR, XVALR ,CHARR,LOGIR,IRETR)
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'FLOTTANT')) THEN
+C
+C********** Message d'erreur standard
+C           -301 0 %m1:40
+C
+            MOTERR = '                                        '
+            MOTERR(1:7) = 'TAB1 . '
+            MOTERR(8:11) = MOT1(1)
+            MOTERR(13:23) = ' . W = ??? '
+            WRITE(IOIMP,*) MOTERR(1:40)
+C
+C********** Message d'erreur standard
+C           21 2
+C           Données incompatibles
+C
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+C         PROPHY.W(I1)=XVALR
+         PROPHY.XTAB(NORDP1+1,I1)=XVALR
+C
+C******* H0K
+C
+         MTYPI = 'MOT     '
+         MTYPR = '        '
+         CALL ACCTAB(IESP,MTYPI,IVALI,XVALI, 'H0K' , LOGII,IRETI,
+     &                    MTYPR,IVALR, XVALR ,CHARR,LOGIR,IRETR)
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'FLOTTANT')) THEN
+
+C
+C********** Message d'erreur standard
+C           -301 0 %m1:40
+C
+            MOTERR = '                                        '
+            MOTERR(1:7) = 'TAB1 . '
+            MOTERR(8:11) = MOT1(1)
+            MOTERR(13:25) = ' . H0K = ??? '
+            WRITE(IOIMP,*) MOTERR(1:40)
+C
+C********** Message d'erreur standard
+C           21 2
+C           Données incompatibles
+C
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+C         PROPHY.H0K(I1)=XVALR
+         PROPHY.XTAB(NORDP1+2,I1)=XVALR
+C
+C******* A
+C
+         MTYPI = 'MOT     '
+         MTYPR = '        '
+         CALL ACCTAB(IESP,MTYPI,IVALI,XVALI, 'A' , LOGII,IRETI,
+     &                    MTYPR,IVALR, XVALR ,CHARR,LOGIR,IRETR)
+         IF((IERR .NE. 0) .OR. (MTYPR .NE. 'LISTREEL')) THEN
+
+C
+C********** Message d'erreur standard
+C           -301 0 %m1:40
+C
+            MOTERR = '                                        '
+            MOTERR(1:7) = 'TAB1 . '
+            MOTERR(8:11) = MOT1(1)
+            MOTERR(13:23) = ' . A = ??? '
+            WRITE(IOIMP,*) MOTERR(1:40)
+C
+C********** Message d'erreur standard
+C           21 2
+C           Données incompatibles
+C
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+         MLREEL = IRETR
+         SEGACT MLREEL
+         NORD1 = MLREEL.PROG(/1)
+         IF(NORD1 .NE. NORDP1)THEN
+C
+C********** Message d'erreur standard
+C           -301 0 %m1:40
+C
+            MOTERR = '                                        '
+            MOTERR(1:10) = 'DIME(TAB1.'
+            MOTERR(11:14) = MOT1(1)
+            MOTERR(15:37) = '.A) != (TAB1.NORD) + 1'
+            WRITE(IOIMP,*) MOTERR(1:40)
+C
+C********** Message d'erreur standard
+C           21 2
+C           Données incompatibles
+C
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+
+C
+C******* Dans le calcul, c'est plus utile ACV dans la forme
+C        ACV(exponente,espece)
+C
+         DO I2 = 1, NORDP1
+C            PROPHY.ACV(I2,I1)= MLREEL.PROG(I2)
+            PROPHY.XTAB(I2,I1) = MLREEL.PROG(I2)
+         ENDDO
+         SEGDES MLREEL
+      ENDDO
+      SEGDES MLMESP
+C
+C      write(*,*) 'Son qui dopo  ipgaz'
+C
+C**** La table IPGAZ donc a ete controllee et PROPHY est rempli
+C
+C
+C**** Lecture du CHPOINT ALPHA1
+C
+      TYPE='CHPOINT '
+      ICOND = 1
+      CALL LIROBJ(TYPE,IALP1,ICOND,IRET)
+      IF(IERR .NE. 0)GOTO 9999
+C
+C**** Control du CHPOINT: QUEPOI
+C
+C     INDIC = 1   -> on impose le pointeur du support geometrique (ICEN)
+C                   N.B. Le CHPOINT peut changer de structure pour
+C                        avoir SPG = ICEN!!!!
+C     INDIC = 0   -> on ne fait que verifier le support geometrique
+C                   (ICEN). Si le SPG sont differents INDIC = -4 en sortie
+C
+C     NBCOMP > 0 -> numero des composantes
+C
+C     MOT1(1) = ' ' obligatoire s'on connais pas les noms des composantes
+C
+      INDIC = 1
+      NBCOMP = 1
+      MOT1(1) = 'SCAL'
+      CALL QUEPOI(IALP1, MELEMC, INDIC, NBCOMP, MOT1)
+      IF(IERR .NE. 0)THEN
+C
+C******** Message d'erreur standard
+C        -301 0 %m1:40
+C
+         MOTERR  = 'IALP1 = ???                             '
+         WRITE(IOIMP,*) MOTERR(1:40)
+         GOTO 9999
+      ENDIF
+C
+C**** Lecture du CHPOINT ALPHA2
+C
+      TYPE='CHPOINT '
+      ICOND = 1
+      CALL LIROBJ(TYPE,IALP2,ICOND,IRET)
+C
+C**** Control du CHPOINT: QUEPOI
+C
+      INDIC = 1
+      NBCOMP = 1
+      MOT1(1) = 'SCAL'
+      CALL QUEPOI(IALP2, MELEMC, INDIC, NBCOMP, MOT1)
+      IF(IERR .NE. 0)THEN
+C
+C******** Message d'erreur standard
+C        -301 0 %m1:40
+C
+         MOTERR  = 'IALP2 = ???                             '
+         WRITE(IOIMP,*) MOTERR(1:40)
+         GOTO 9999
+      ENDIF
+C
+C**** On va lire les pointeurs des MCHAMLs
+C     Lecture du MCHAML 'FACEL' alpha
+C
+      TYPE='MCHAML  '
+      CALL  LIROBJ(TYPE,IALF1,1,IRET)
+      IF(IERR.NE.0) GOTO 9999
+      CALL  LIROBJ(TYPE,IALF2,1,IRET)
+      IF(IERR.NE.0) GOTO 9999
+C     Lecture du MCHAML 'FACEL' densité
+C
+      TYPE='MCHAML  '
+      CALL  LIROBJ(TYPE,IROF1,1,IRET)
+      IF(IERR.NE.0) GOTO 9999
+      CALL  LIROBJ(TYPE,IROF2,1,IRET)
+      IF(IERR.NE.0) GOTO 9999
+C
+C**** Lecture du MCHAML 'FACEL' vitesse
+C
+      TYPE='MCHAML  '
+      CALL  LIROBJ(TYPE,IVITF1,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+      CALL  LIROBJ(TYPE,IVITF2,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Lecture du MCHAML 'FACEL' contenant la pression
+C
+      TYPE='MCHAML  '
+      CALL  LIROBJ(TYPE,IPF1,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+      CALL  LIROBJ(TYPE,IPF2,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+C
+C**** Lecture du CHAMPOINT contenant grad(alpha)/|grad(alpha)|
+C
+      TYPE='CHPOINT '
+      ICOND = 1
+      CALL LIROBJ(TYPE,IGRALP,ICOND,IRET)
+      IF(IERR .NE. 0)GOTO 9999
+C
+C**** Control du CHPOINT
+C
+      JGN = 4
+      JGM = IDIM
+      SEGINI MLMOTS
+      MLMOTS.MOTS(1) = 'P1DX'
+      MLMOTS.MOTS(2) = 'P1DY'
+      IF(IDIM .EQ. 3) MLMOTS.MOTS(3) = 'P1DZ'
+C
+C**** On controlle l'ordre de composantes de IAGN1
+C
+      CALL QUEPO1(IGRALP, MELEMF, MLMOTS)
+      IF(IERR .NE. 0)THEN
+C
+C******** Message d'erreur standard
+C        -301 0 %m1:40
+C
+         MOTERR = 'GRAALP   = ???                          '
+         WRITE(IOIMP,*) MOTERR(1:40)
+
+         GOTO 9999
+      ENDIF
+      SEGSUP MLMOTS
+C
+C**** NINC = nombre d'inconnues
+C
+      NINC=(IDIM+3)*2
+C
+      TYPE='LISTMOTS'
+      CALL LIROBJ(TYPE,ILIINC,1,IRET)
+      IF(IERR .NE. 0) GOTO 9999
+      MLMOTS = ILIINC
+      SEGACT MLMOTS
+      NC = MLMOTS.MOTS(/2)
+      SEGDES MLMOTS
+      IF(NC .NE. NINC)THEN
+         MOTERR(1:40) = 'LISTINCO = ???'
+         WRITE(IOIMP,*) MOTERR
+C
+C******* Message d'erreur standard
+C        21 2
+C        Données incompatibles
+C
+         CALL ERREUR(21)
+         GOTO 9999
+      ENDIF
+C
+C**** Lecture du CHAMPOINT ou du REEL contenant K0
+C
+      IF (INDK0 .EQ. 1) THEN
+         ICOND = 1
+         CALL LIRREE(K0, ICOND, IRET)
+         IF(IERR .NE. 0)GOTO 9999
+      ELSE
+         TYPE='CHPOINT '
+         ICOND = 1
+         CALL LIROBJ(TYPE,ICHPK0,ICOND,IRET)
+         IF(IERR .NE. 0)GOTO 9999
+         INDIC = 1
+         NBCOMP = 1
+         MOT1(1) = 'SCAL'
+         CALL QUEPOI(ICHPK0, MELEMC, INDIC, NBCOMP, MOT1)
+         IF(IERR .NE. 0) GOTO 9999
+      ENDIF
+C
+C**** Lecture de EPS
+C
+      ICOND = 1
+      CALL LIRREE(EPS, ICOND, IRET)
+      IF(IERR .NE. 0)GOTO 9999
+C
+C**** Boundary condition
+C
+      IRET=0
+      TYPE='MAILLAGE'
+      CALL LIROBJ(TYPE,IFLIM,0,IRET)
+      IF(IERR.NE.0)GOTO 9999
+      IF(IRET .EQ. 0)THEN
+         MELLIM = 0
+      ELSE
+         MELEME=IFLIM
+         SEGACT MELEME
+         ITOTO=MELEME.NUM(/2)
+         IF(ITOTO .EQ. 0)THEN
+            MELLIM = 0
+         ELSE
+            MELLIM = IFLIM
+         ENDIF
+         SEGDES MELEME
+      ENDIF
+C
+C**** Bas Mach (AUSMPUP)
+C
+      IF(INDMET .EQ. 3) THEN
+         TYPE = 'CHPOINT '
+C
+C******* Reference speed
+C
+         CALL LIROBJ(TYPE,IUINF1,1,IRET)
+         IF(IERR .NE. 0) GOTO 9999
+         INDIC = 1
+         NBCOMP = 1
+         MOT1(1) = 'SCAL'
+         CALL QUEPOI(IUINF1, MELEMC, INDIC, NBCOMP, MOT1)
+         IF(IERR .NE. 0) GOTO 9999
+C
+C******* Minimal cutoff
+C
+         TYPE = 'CHPOINT '
+         CALL LIROBJ(TYPE,IUINF2,1,IRET)
+         IF(IERR .NE. 0) GOTO 9999
+         INDIC = 1
+         NBCOMP = 1
+         MOT1(1) = 'SCAL'
+         CALL QUEPOI(IUINF2, MELEMC, INDIC, NBCOMP, MOT1)
+         IF(IERR .NE. 0) GOTO 9999
+C
+      ELSE
+         IUINF1=0
+         IUINF2=0
+      ENDIF
+C
+C      write(*,*) 'Son qui dopo la lettura degli inputs'
+C
+C**** Creation du residu
+C
+      TYPE = 'CHPOINT '
+      CALL KRCHP1(TYPE, MELEMC, ICHRES, MLMOTS)
+C
+C**** Calcul des flux et du pas du temps.
+C
+      CALL KODFL1(INDK0,NESP,NORD,TMAX,RUNIV,PROPHY,
+     &     MLRCHE,MLRMFR,
+     &     INDMET,
+     &     IALP1, IALP2,
+     &     IALF1,IROF1,IVITF1,IPF1,
+     &     IALF2,IROF2,IVITF2,IPF2,
+     &     IUINF1, IUINF2,
+     &     K0,ICHPK0,
+     &     IGRALP,EPS,
+     &     ICHPSU,ICHPDI,ICHPVO,
+     &     MELEMC,MELEMF,MELEFE,MELLIM,
+     &     ICHRES,
+     &     DT,SURFL,
+     &     LOGNC,LOGAN,MESERR)
+C
+      IF(LOGAN)THEN
+C
+C******* Anomalie detectée
+C
+C
+C******* Message d'erreur standard
+C        -301 0
+C        %m1:40
+C
+         MOTERR(1:40) =  MESERR(1:40)
+         WRITE(IOIMP,*) MOTERR(1:40)
+C
+C******* Message d'erreur standard
+C        5 3
+C        Erreur anormale.contactez votre support
+C
+         CALL ERREUR(5)
+         GOTO 9999
+      ENDIF
+      IF(LOGNC)THEN
+C
+C******* Message d'erreur standard
+C        -301 0
+C        %m1:40
+C
+         MOTERR(1:40) =  MESERR(1:40)
+         WRITE(IOIMP,*) MOTERR(1:40)
+C
+C******* Message d'erreur standard
+C        460 2
+C        Pas de convergence dans les itérations internes
+C
+         CALL ERREUR(460)
+         GOTO 9999
+      ENDIF
+C
+C**** Ecriture des resultats
+C
+      CALL ECRREE(SURFL)
+      CALL ECRREE(DT)
+      TYPE = 'CHPOINT '
+      IF(ICHRES .NE. 0) CALL ECROBJ(TYPE,ICHRES)
+C
+      SEGSUP PROPHY
+C
+ 9999 CONTINUE
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

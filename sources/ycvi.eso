@@ -1,0 +1,693 @@
+C YCVI      SOURCE    CHAT      05/01/13    04:16:42     5004
+      SUBROUTINE YCVI
+C
+C
+C     VERSION VECTORISEE
+C
+C     Les {l{ments sont group{s en paquets de LRV {l{ments, LRV {tant
+C     la longueur des registres vectoriels de la machine cible, i.e
+C     64 sur Cray, 128 ou 256 sur IBM 3090VF. On prom}ne une fenetre
+C     de longueur LRV sur la boucle g{n{rale de longueur NEL.
+C
+C
+     &     (HR,RPG,DRR,LE,NEL,K0,NPTD,IES,NP,IAXI,IKOMP,IKAS,
+     &     COEFF,IK1,RGE,IKG,NELG,TN,IKT,TREF,IKREF,IPADS,
+     &     UN,IPADU,NPTU,GN,F,IPADI,VF,IPADF,NPTF,
+     &     VOLU,COTE,NELZ,IDCEN,IPG,
+     &     DTM1,DT,DTT1,DTT2,NUEL,DIAEL,FN)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+C***********************************************************************
+C
+C  CE SP DISCRETISE LES EQUATIONS DE NAVIER STOKES
+C    EN 2D SUR LES ELEMENTS QUA4 ET TRI3      PLAN OU AXI
+C    EN 3D SUR LES ELEMENTS CUB8 ET PRI6
+C  LES OPERATEURS SONT "SOUS-INTEGRES"
+C
+C  SYNTAXE :
+C
+C         NS(NU,UN,RGE,DE)  INCO GN :
+C
+C  COEFFICIENTS :
+C  --------------
+C
+C  UN(NPTD,IES)       CHAMPS DE VITESSE TRANSPORTANT
+C  COEFF(SCAL DOMA)  VISCOSITE CINEMATIQE MOLECULAIRE( NU )
+C       (SCAL ELEM)
+C   RGE(NELG,IES)       TERME SOURCE
+C
+C
+C  INCONNUES :
+C  -----------
+C
+C   UN(NPTD,IES)        CHAMPS DE VITESSE TRANSPORTANT
+C   GN(NPTD,IES)        CHAMPS DE VITESSE TRANSPORTE
+C   VN(NPTD,IES)        CHAMPS DE VITESSE DU FLUIDE
+C
+C
+C
+C
+C  TABLEAUX DE TRAVAIL :
+C  ---------------------        N     N-1
+C                     (D + D1) U - D U              N-1    T  N
+C                     -------------------  = F - A U    - C  P
+C                               DT
+C
+C                              N-1
+C   F(NPTD,IES)   CONTIENT   A U   - F     (VITESSE)
+C
+C
+C
+C***********************************************************************
+
+-INC CCVQUA4
+-INC CCREEL
+*-
+-INC CCOPTIO
+-INC SMCOORD
+C
+C Longueur des registres vectoriels de la machine cible
+C On prend 64 pour ne pas augmenter la taille des tableaux
+C n{cessaires @ la vectorisation.
+C
+      PARAMETER(LRV=64)
+      DIMENSION UN(NPTU,IES),GN(NPTD,IES),VF(NPTF,IES)
+      DIMENSION TN(*),TREF(*)
+      DIMENSION COEFF(*),RGE(NELG,IES)
+      DIMENSION COTE(NELZ,IES),VOLU(NELZ),KLIP(100)
+      DIMENSION IPADI(*),LE(NP,1),IPADU(*),IPADF(*),IPADS(*)
+      DIMENSION HR(NEL,NP,IES),RPG(1),DRR(NP,NEL)
+      DIMENSION QGGT(8,8),Q1(8,8),Q2(8,8),Q3(8,8)
+      DIMENSION COEF(LRV),AIRE(LRV)
+      DIMENSION WX(LRV,9),WY(LRV,9),WZ(LRV,9)
+      DIMENSION AL(LRV),AH(LRV),AP(LRV)
+C UIX,... vitesse transportante
+      DIMENSION UIX(LRV,9),UIY(LRV,9),UIZ(LRV,9)
+C GIX,... vitesse massique ou transportée ou inconnue du/dt
+      DIMENSION GIX(LRV,9),GIY(LRV,9),GIZ(LRV,9)
+C VIX,... vitesse du fluide
+      DIMENSION VIX(LRV,9),VIY(LRV,9),VIZ(LRV,9)
+      DIMENSION UMI(LRV,3),VMI(LRV,3)
+      DIMENSION COEFT(LRV),RGX(LRV),RGY(LRV),RGZ(LRV)
+      DIMENSION TO1(LRV),TO2X(LRV),TO2Y(LRV)
+      DIMENSION SAF1(LRV,9),SAF2(LRV,9),SAF3(LRV,9)
+      DIMENSION CHGLD(LRV),CHGLPX(LRV),CHGLPY(LRV),CHGLPZ(LRV)
+      DIMENSION F(NPTD,*),FN(NP,*)
+      SAVE IPAS,QGGT,Q1,Q2,Q3
+      DATA IPAS/0/
+C
+C           INITIALISATIONS DIVERSES
+C
+C      WRITE(IOIMP,*)' DEBUT YCVI ',' IKAS=',ikas,' IKOMP=',ikomp,
+C     $     'IDCEN=',idcen
+C      WRITE(IOIMP,*)' NPTD=',nptd,'IPAS=',IPAS
+      IF(IPAS.EQ.0)CALL CALHRH(QGGT,Q1,Q2,Q3,IES)
+
+C                           ********
+C                           *  2D  *
+C                           ********
+
+      IF(IES.EQ.3)GO TO 10
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C                           DIFFERENCES TRIANGLE / QUADRANGLE
+      IF(NP.EQ.4)THEN
+         QUA4=1.D0
+      ELSE
+         QUA4=0.D0
+      ENDIF
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+C
+C Calcul du nombre de paquets de LRV {l{ments
+C
+      NNN=MOD(NEL,LRV)
+      IF(NNN.EQ.0) NPACK=NEL/LRV
+      IF(NNN.NE.0) NPACK=1+(NEL-NNN)/LRV
+      KPACKD=1
+      KPACKF=NPACK
+C
+C ******* BOUCLE SUR LES PAQUETS DE LRV ELEMENTS **********
+C
+C     WRITE(IOIMP,*)' DEBUT YCVI 7001'
+      DO 7001 KPACK=KPACKD,KPACKF
+C
+C ======= A L'INTERIEUR DE CHAQUE PAQUET DE LRV ELEMENTS =======
+C
+C 1.D0 Calcul des limites du paquet courant.
+         KDEB=1+(KPACK-1)*LRV
+         KFIN=MIN(NEL,KDEB+LRV-1)
+C
+C Ben voil@, on peut y aller ... i.e. traiter le paquet courant.
+C
+         DO 7002 K=KDEB,KFIN
+            KP=K-KDEB+1
+            NK=K+K0
+            K1=1+(1-IK1)*(NK-1)
+            COEF(KP)=COEFF(K1)
+            AIRE(KP)=VOLU(NK)
+            AL(KP)=COTE(NK,1)+XPETIT
+            AH(KP)=COTE(NK,2)+XPETIT
+ 7002    CONTINUE
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+         DO 7006 I=1,NP
+            DO 7016 K=KDEB,KFIN
+               KP=K-KDEB+1
+               NU=IPADU(LE(I,K))
+               NG=IPADI(LE(I,K))
+               NF=IPADF(LE(I,K))
+               UIX(KP,I)=UN(NU,1)
+               UIY(KP,I)=UN(NU,2)
+               GIX(KP,I)=GN(NG,1)
+               GIY(KP,I)=GN(NG,2)
+               VIX(KP,I)=VF(NF,1)
+               VIY(KP,I)=VF(NF,2)
+ 7016       CONTINUE
+ 7006    CONTINUE
+         CALL KSUPG1(WX,UMI,CHGLD,CHGLPX,KDEB,KFIN,LRV,
+     &        GN(1,1),IPADI,UN,COEF,NPTD,NEL,NP,DRR,HR,FN,
+     &        AIRE,AL,AH,AP,IDCEN,IPADU,LE,QUA4,IKOMP,
+     &        DTM1,DT,DTT1,DTT2,DIAEL,NUEL)
+         CALL KSUPG1(WY,UMI,CHGLD,CHGLPY,KDEB,KFIN,LRV,
+     &        GN(1,2),IPADI,UN,COEF,NPTD,NEL,NP,DRR,HR,FN,
+     &        AIRE,AL,AH,AP,IDCEN,IPADU,LE,QUA4,IKOMP,
+     &        DTM1,DT,DTT1,DTT2,DIAEL,NUEL)
+C
+C Initialisation des variables d'accumulation SAF1,SAF2,SBF
+C
+         IF(IAXI.NE.0)THEN
+            DO 70050 N=1,IDIM
+               DO 70051 K=KDEB,KFIN
+                  KP=K-KDEB+1
+                  VMI(KP,N)=XPETIT
+70051          CONTINUE
+70050       CONTINUE
+            DO 70052 N=1,IDIM
+               DO 70053 I=1,NP
+                  DO 70054 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     NF=IPADF(LE(I,K))
+                     VMI(KP,N)=VMI(KP,N)+VF(NF,N)*DRR(I,K)
+70054             CONTINUE
+70053          CONTINUE
+70052       CONTINUE
+            DO 70055 K=KDEB,KFIN
+               KP=K-KDEB+1
+               VMI(KP,1)=VMI(KP,1)/AIRE(KP)
+               VMI(KP,2)=VMI(KP,2)/AIRE(KP)
+70055       CONTINUE
+         ENDIF
+         IF(IKOMP.EQ.0)THEN
+            IF(IKAS.EQ.1)THEN
+               DO 70061 I=1,NP
+                  DO 71161 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     SAF1(KP,I)=0.D0
+                     SAF2(KP,I)=0.D0
+71161             CONTINUE
+70061          CONTINUE
+            ELSEIF(IKAS.EQ.2)THEN
+               DO 70021 K=KDEB,KFIN
+                  KP=K-KDEB+1
+                  NK=K+K0
+                  NKG=1+(1-IKG)*(NK-1)
+                  RGX(KP)=RGE(NKG,1)
+                  RGY(KP)=RGE(NKG,2)
+70021          CONTINUE
+
+               IF(IPG.EQ.0)THEN
+                  DO 70062 I=1,NP
+                     DO 70162 K=KDEB,KFIN
+                        KP=K-KDEB+1
+                        SAF1(KP,I)=(-RGX(KP))*DRR(I,K)
+                        SAF2(KP,I)=(-RGY(KP))*DRR(I,K)
+70162                CONTINUE
+70062             CONTINUE
+               ELSE
+                  DO 71062 I=1,NP
+                     DO 71162 K=KDEB,KFIN
+                        KP=K-KDEB+1
+                        SAF1(KP,I)=(-RGX(KP))*WX(KP,I)
+                        SAF2(KP,I)=(-RGY(KP))*WY(KP,I)
+71162                CONTINUE
+71062             CONTINUE
+               ENDIF
+            ELSEIF(IKAS.EQ.4)THEN
+               DO 70022 K=KDEB,KFIN
+                  KP=K-KDEB+1
+                  NK=K+K0
+                  NKG=1+(1-IKG)*(NK-1)
+                  RGX(KP)=RGE(NKG,1)
+                  RGY(KP)=RGE(NKG,2)
+70022          CONTINUE
+               IF(IPG.EQ.0)THEN
+                  DO 70063 I=1,NP
+                     DO 70163 K=KDEB,KFIN
+                        KP=K-KDEB+1
+                        NF=1+(1-IKT)*(IPADS(LE(I,K))-1)
+                        NFR=1+(1-IKREF)*(IPADS(LE(I,K))-1)
+C?     WRITE(IOIMP,*)' NF=',NF,' NFR=',nfr
+                        SAF1(KP,I)=(-RGX(KP)*(TREF(NFR)-TN(NF)))*DRR(I,K
+     $                       )
+                        SAF2(KP,I)=(-RGY(KP)*(TREF(NFR)-TN(NF)))*DRR(I,K
+     $                       )
+70163                CONTINUE
+70063             CONTINUE
+               ELSE
+                  DO 71063 I=1,NP
+                     DO 71163 K=KDEB,KFIN
+                        KP=K-KDEB+1
+                        NF=1+(1-IKT)*(IPADS(LE(I,K))-1)
+                        NFR=1+(1-IKREF)*(IPADS(LE(I,K))-1)
+                        SAF1(KP,I)=(-RGX(KP)*(TREF(NFR)-TN(NF)))*WX(KP,I
+     $                       )
+                        SAF2(KP,I)=(-RGY(KP)*(TREF(NFR)-TN(NF)))*WY(KP,I
+     $                       )
+71163                CONTINUE
+71063             CONTINUE
+               ENDIF
+            ENDIF
+         ELSEIF(IKOMP.EQ.1)THEN
+            IF(IKAS.EQ.2)THEN
+               DO 70064 I=1,NP
+                  DO 70164 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     SAF1(KP,I)=0.D0
+                     SAF2(KP,I)=0.D0
+70164             CONTINUE
+70064          CONTINUE
+
+            ELSEIF(IKAS.EQ.3)THEN
+               DO 70024 K=KDEB,KFIN
+                  KP=K-KDEB+1
+                  NK=K+K0
+                  NKG=1+(1-IKG)*(NK-1)
+                  RGX(KP)=RGE(NKG,1)
+                  RGY(KP)=RGE(NKG,2)
+70024          CONTINUE
+
+               IF(IPG.EQ.0)THEN
+                  DO 70065 I=1,NP
+                     DO 70165 K=KDEB,KFIN
+                        KP=K-KDEB+1
+                        SAF1(KP,I)=-RGX(KP)*DRR(I,K)
+                        SAF2(KP,I)=-RGY(KP)*DRR(I,K)
+70165                CONTINUE
+70065             CONTINUE
+               ELSE
+                  DO 71065 I=1,NP
+                     DO 71165 K=KDEB,KFIN
+                        KP=K-KDEB+1
+                        SAF1(KP,I)=-RGX(KP)*WX(KP,I)
+                        SAF2(KP,I)=-RGY(KP)*WY(KP,I)
+71165                CONTINUE
+71065             CONTINUE
+               ENDIF
+            ENDIF
+         ENDIF
+C Le coeur du calcul ...
+         IF(IKOMP.EQ.0)THEN
+            DO 70140 I=1,NP
+               DO 70141 J= 1,NP
+                  DO 70142 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     ZVGGX=AIRE(KP)*CHGLPX(KP)*VGGT(J,I)
+                     ZVGGY=AIRE(KP)*CHGLPY(KP)*VGGT(J,I)
+                     ZVGT=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*COEF(KP)
+     &                    +    HR(K,I,2)*HR(K,J,2)*COEF(KP)
+     &                    +    CHGLD(KP)*VGGT(J,I) )
+                     V2=UMI(KP,1)*HR(K,J,1)+UMI(KP,2)*HR(K,J,2)
+                     SAF1(KP,I)=SAF1(KP,I)+(V2*WX(KP,I)+ZVGGX)*GIX(KP,J)
+     $                    +ZVGT*VIX(KP,J)
+                     SAF2(KP,I)=SAF2(KP,I)+(V2*WY(KP,I)+ZVGGY)*GIY(KP,J)
+     $                    +ZVGT*VIY(KP,J)
+70142             CONTINUE
+70141          CONTINUE
+70140       CONTINUE
+         ELSEIF(IKOMP.EQ.1)THEN
+            DO 70150 I=1,NP
+               DO 70151 J= 1,NP
+                  DO 70152 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     ZVGGX=AIRE(KP)*CHGLPX(KP)*VGGT(J,I)
+                     ZVGGY=AIRE(KP)*CHGLPY(KP)*VGGT(J,I)
+                     ZVGT=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*COEF(KP)
+     &                    +    HR(K,I,2)*HR(K,J,2)*COEF(KP)
+     &                    +    CHGLD(KP)*VGGT(J,I) )
+                     COEFT3=COEF(KP)/3.D0
+                     ZVGUU=AIRE(KP)*(1.D0/AL(KP)/AL(KP)/12.D0
+     &                    *VGGT(J,I)*QUA4  )*COEFT3*UIX(KP,J)
+                     ZVGUV=AIRE(KP)*( HR(K,I,1)*HR(K,J,2))*COEFT3*UIY(KP
+     $                    ,J)
+                     ZVGVU=AIRE(KP)*( HR(K,I,2)*HR(K,J,1))*COEFT3*UIX(KP
+     $                    ,J)
+                     ZVGVV=AIRE(KP)*(1.D0/AH(KP)/AH(KP)/12.D0
+     &                    *VGGT(J,I)*QUA4  )*COEFT3*UIY(KP,J)
+                     V2=UIX(KP,J)*HR(K,J,1)+UIY(KP,J)*HR(K,J,2)
+                     SAF1(KP,I)=SAF1(KP,I)+(V2*WX(KP,I)+ZVGGX)*GIX(KP,J)
+     $                    +ZVGT*UIX(KP,J)+ ZVGUU + ZVGUV
+                     SAF2(KP,I)=SAF2(KP,I)+(V2*WY(KP,I)+ZVGGY)*GIY(KP,J)
+     $                    +ZVGT*UIY(KP,J)+ ZVGVU + ZVGVV
+70152             CONTINUE
+70151          CONTINUE
+70150       CONTINUE
+         ENDIF
+         IF(IAXI.NE.0) THEN
+            DO 70160 I=1,NP
+               DO 70161 K=KDEB,KFIN
+                  KP=K-KDEB+1
+                  R2=1.D0/RPG(K)/RPG(K)*WX(KP,I)
+                  SAF1(KP,I)=SAF1(KP,I)+R2*COEF(KP)*VMI(KP,1)
+70161          CONTINUE
+70160       CONTINUE
+            IF(IKOMP.EQ.1)THEN
+               DO 7118 I=1,NP
+                  DO 71181 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     R1=1.D0/RPG(K)*WY(KP,I)
+                     SAF1(KP,I)=SAF1(KP,I)+R1*UMI(KP,1)*GIX(KP,I)
+                     SAF2(KP,I)=SAF2(KP,I)+R1*UMI(KP,1)*GIY(KP,I)
+71181             CONTINUE
+ 7118          CONTINUE
+            ENDIF
+         ENDIF
+C
+C     Fin de l'accumulation dans SAF1,SAF2.
+C     On ajoute ces incr{ments @ F.
+C
+         DO 7017 I=1,NP
+            DO 70171 K=KDEB,KFIN
+               KP=K-KDEB+1
+               NF=IPADI(LE(I,K))
+               F(NF,1)=F(NF,1)-SAF1(KP,I)
+               F(NF,2)=F(NF,2)-SAF2(KP,I)
+70171       CONTINUE
+ 7017    CONTINUE
+ 1960    FORMAT(/,' ***** SUB XCVTIT : IPAT=',I5,'  K=',I5,' *****')
+ 1961    FORMAT(2X,I5,' * ',4(1X,I5))
+ 1962    FORMAT(2X,8(1X,1PE11.4))
+ 1964    FORMAT(4(1X,1PE11.4))
+ 7001 CONTINUE
+C     WRITE(IOIMP,*)' ********** FIN YCVI 2D *****************'
+C     CALL ARRET(0)
+      IPAS=1
+      RETURN
+C                           ********
+C                           *  3D  *
+C                           ********
+ 10   CONTINUE
+C::::::BENET:::SUPPRESION CORRECTION HOURGLASS POUR LES PRISME::29:01:91
+      CUB8=0.D0
+      IF(NP.EQ.8)CUB8=1.D0
+C
+C Calcul du nombre de paquets de LRV {l{ments
+C
+      NNN=MOD(NEL,LRV)
+      IF(NNN.EQ.0) NPACK=NEL/LRV
+      IF(NNN.NE.0) NPACK=1+(NEL-NNN)/LRV
+      KPACKD=1
+      KPACKF=NPACK
+C
+C ******* BOUCLE SUR LES PAQUETS DE LRV ELEMENTS **********
+C
+      DO 8001 KPACK=KPACKD,KPACKF
+C
+C ======= A L'INTERIEUR DE CHAQUE PAQUET DE LRV ELEMENTS =======
+C
+C 1.D0 Calcul des limites du paquet courant.
+         KDEB=1+(KPACK-1)*LRV
+         KFIN=MIN(NEL,KDEB+LRV-1)
+C
+C Ben voil@, on peut y aller ... i.e. traiter le paquet courant.
+C
+         DO 8002 K=KDEB,KFIN
+            KP=K-KDEB+1
+            NK=K+K0
+            K1=1+(1-IK1)*(NK-1)
+            COEF(KP)=COEFF(K1)
+            AIRE(KP)=VOLU(NK)
+            AL(KP)=COTE(NK,1)+XPETIT
+            AH(KP)=COTE(NK,2)+XPETIT
+            AP(KP)=COTE(NK,3)+XPETIT
+ 8002    CONTINUE
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Initialisation des UMI avant accumulation
+         DO 8006 I=1,NP
+            DO 81161 K=KDEB,KFIN
+               KP=K-KDEB+1
+               NU=IPADU(LE(I,K))
+               NF=IPADF(LE(I,K))
+               NG=IPADI(LE(I,K))
+               UIX(KP,I)=UN(NU,1)
+               UIY(KP,I)=UN(NU,2)
+               UIZ(KP,I)=UN(NU,3)
+               VIX(KP,I)=VF(NF,1)
+               VIY(KP,I)=VF(NF,2)
+               VIZ(KP,I)=VF(NF,3)
+               GIX(KP,I)=GN(NG,1)
+               GIY(KP,I)=GN(NG,2)
+               GIZ(KP,I)=GN(NG,3)
+81161       CONTINUE
+ 8006    CONTINUE
+C     WRITE(IOIMP,*)'****************************'
+C     WRITE(IOIMP,*)' DT,DTT1,DTT2=',DT,DTT1,DTT2
+         CALL KSUPG1(WX,UMI,CHGLD,CHGLPX,KDEB,KFIN,LRV,
+     &        GN(1,1),IPADI,UN,COEF,NPTD,NEL,NP,DRR,HR,FN,
+     &        AIRE,AL,AH,AP,IDCEN,IPADU,LE,CUB8,IKOMP,
+     &        DTM1,DT,DTT1,DTT2,DIAEL,NUEL)
+C     WRITE(IOIMP,1002)umi
+C     WRITE(IOIMP,*)' DT,DTT1,DTT2=',DT,DTT1,DTT2
+         CALL KSUPG1(WY,UMI,CHGLD,CHGLPY,KDEB,KFIN,LRV,
+     &        GN(1,2),IPADI,UN,COEF,NPTD,NEL,NP,DRR,HR,FN,
+     &        AIRE,AL,AH,AP,IDCEN,IPADU,LE,CUB8,IKOMP,
+     &        DTM1,DT,DTT1,DTT2,DIAEL,NUEL)
+C     WRITE(IOIMP,*)' DT,DTT1,DTT2=',DT,DTT1,DTT2
+         CALL KSUPG1(WZ,UMI,CHGLD,CHGLPZ,KDEB,KFIN,LRV,
+     &        GN(1,3),IPADI,UN,COEF,NPTD,NEL,NP,DRR,HR,FN,
+     &        AIRE,AL,AH,AP,IDCEN,IPADU,LE,CUB8,IKOMP,
+     &        DTM1,DT,DTT1,DTT2,DIAEL,NUEL)
+C     WRITE(IOIMP,*)' DT,DTT1,DTT2=',DT,DTT1,DTT2
+C
+C Initialisation des variables d'accumulation SAF1,SAF2,SBF
+C
+         IF(IKOMP.EQ.0)THEN
+            IF(IKAS.EQ.1)THEN
+               DO 80061 I=1,NP
+                  DO 80161 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     SAF1(KP,I)=0.D0
+                     SAF2(KP,I)=0.D0
+                     SAF3(KP,I)=0.D0
+80161             CONTINUE
+80061          CONTINUE
+            ELSEIF(IKAS.EQ.2)THEN
+               DO 80021 K=KDEB,KFIN
+                  KP=K-KDEB+1
+                  NK=K+K0
+                  NKG=1+(1-IKG)*(NK-1)
+                  RGX(KP)=RGE(NKG,1)
+                  RGY(KP)=RGE(NKG,2)
+                  RGZ(KP)=RGE(NKG,3)
+80021          CONTINUE
+               IF(IPG.EQ.0)THEN
+                  DO 80062 I=1,NP
+                     DO 80162 K=KDEB,KFIN
+                        KP=K-KDEB+1
+                        SAF1(KP,I)=(-RGX(KP))*DRR(I,K)
+                        SAF2(KP,I)=(-RGY(KP))*DRR(I,K)
+                        SAF3(KP,I)=(-RGZ(KP))*DRR(I,K)
+80162                CONTINUE
+80062             CONTINUE
+               ELSE
+                  DO 81062 I=1,NP
+                     DO 81162 K=KDEB,KFIN
+                        KP=K-KDEB+1
+                        SAF1(KP,I)=(-RGX(KP))*WX(KP,I)
+                        SAF2(KP,I)=(-RGY(KP))*WY(KP,I)
+                        SAF3(KP,I)=(-RGZ(KP))*WZ(KP,I)
+81162                CONTINUE
+81062             CONTINUE
+               ENDIF
+            ELSEIF(IKAS.EQ.4)THEN
+               DO 80022 K=KDEB,KFIN
+                  KP=K-KDEB+1
+                  NK=K+K0
+                  NKG=1+(1-IKG)*(NK-1)
+                  RGX(KP)=RGE(NKG,1)
+                  RGY(KP)=RGE(NKG,2)
+                  RGZ(KP)=RGE(NKG,3)
+80022          CONTINUE
+               IF(IPG.EQ.0)THEN
+                  DO 80063 I=1,NP
+                     DO 80163 K=KDEB,KFIN
+                        KP=K-KDEB+1
+                        NF=1+(1-IKT)*(IPADS(LE(I,K))-1)
+                        NFR=1+(1-IKREF)*(IPADS(LE(I,K))-1)
+                        SAF1(KP,I)=(-RGX(KP)*(TREF(NFR)-TN(NF)))*DRR(I,K
+     $                       )
+                        SAF2(KP,I)=(-RGY(KP)*(TREF(NFR)-TN(NF)))*DRR(I,K
+     $                       )
+                        SAF3(KP,I)=(-RGZ(KP)*(TREF(NFR)-TN(NF)))*DRR(I,K
+     $                       )
+80163                CONTINUE
+80063             CONTINUE
+               ELSE
+                  DO 81063 I=1,NP
+                     DO 81163 K=KDEB,KFIN
+                        KP=K-KDEB+1
+                        NF=1+(1-IKT)*(IPADS(LE(I,K))-1)
+                        NFR=1+(1-IKREF)*(IPADS(LE(I,K))-1)
+                        SAF1(KP,I)=(-RGX(KP)*(TREF(NFR)-TN(NF)))*WX(KP,I
+     $                       )
+                        SAF2(KP,I)=(-RGY(KP)*(TREF(NFR)-TN(NF)))*WY(KP,I
+     $                       )
+                        SAF3(KP,I)=(-RGZ(KP)*(TREF(NFR)-TN(NF)))*WZ(KP,I
+     $                       )
+81163                CONTINUE
+81063             CONTINUE
+               ENDIF
+            ENDIF
+         ELSEIF(IKOMP.EQ.1)THEN
+            IF(IKAS.EQ.2)THEN
+               DO 80064 I=1,NP
+                  DO 80164 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     SAF1(KP,I)=0.D0
+                     SAF2(KP,I)=0.D0
+                     SAF3(KP,I)=0.D0
+80164             CONTINUE
+80064          CONTINUE
+            ELSEIF(IKAS.EQ.3)THEN
+               DO 80024 K=KDEB,KFIN
+                  KP=K-KDEB+1
+                  NK=K+K0
+                  NKG=1+(1-IKG)*(NK-1)
+                  RGX(KP)=RGE(NKG,1)
+                  RGY(KP)=RGE(NKG,2)
+                  RGZ(KP)=RGE(NKG,3)
+80024          CONTINUE
+               IF(IPG.EQ.0)THEN
+                  DO 80065 I=1,NP
+                     DO 80165 K=KDEB,KFIN
+                        KP=K-KDEB+1
+                        SAF1(KP,I)=-RGX(KP)*DRR(I,K)
+                        SAF2(KP,I)=-RGY(KP)*DRR(I,K)
+                        SAF3(KP,I)=-RGZ(KP)*DRR(I,K)
+80165                CONTINUE
+80065             CONTINUE
+               ELSE
+                  DO 81065 I=1,NP
+                     DO 81165 K=KDEB,KFIN
+                        KP=K-KDEB+1
+                        SAF1(KP,I)=-RGX(KP)*WX(KP,I)
+                        SAF2(KP,I)=-RGY(KP)*WY(KP,I)
+                        SAF3(KP,I)=-RGZ(KP)*WZ(KP,I)
+81165                CONTINUE
+81065             CONTINUE
+               ENDIF
+            ENDIF
+         ENDIF
+C Le coeur du calcul ...
+         IF(IKOMP.EQ.0)THEN
+            DO 80140 I=1,NP
+               DO 80141 J= 1,NP
+                  DO 80142 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     ZVGGX=AIRE(KP)*CHGLPX(KP)*QGGT(J,I)
+                     ZVGGY=AIRE(KP)*CHGLPY(KP)*QGGT(J,I)
+                     ZVGGZ=AIRE(KP)*CHGLPZ(KP)*QGGT(J,I)
+                     ZVGT=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*COEF(KP)
+     &                    +    HR(K,I,2)*HR(K,J,2)*COEF(KP)
+     &                    +    HR(K,I,3)*HR(K,J,3)*COEF(KP) )
+     &                    +    CHGLD(KP)*QGGT(J,I)
+                     V2=UMI(KP,1)*HR(K,J,1)+UMI(KP,2)*HR(K,J,2)
+     &                    +UMI(KP,3)*HR(K,J,3)
+                     SAF1(KP,I)=SAF1(KP,I)+(V2*WX(KP,I)+ZVGGX)*GIX(KP,J)
+     $                    +ZVGT*VIX(KP,J)
+                     SAF2(KP,I)=SAF2(KP,I)+(V2*WY(KP,I)+ZVGGY)*GIY(KP,J)
+     $                    +ZVGT*VIY(KP,J)
+                     SAF3(KP,I)=SAF3(KP,I)+(V2*WZ(KP,I)+ZVGGZ)*GIZ(KP,J)
+     $                    +ZVGT*VIZ(KP,J)
+80142             CONTINUE
+80141          CONTINUE
+80140       CONTINUE
+         ELSEIF(IKOMP.EQ.1)THEN
+            DO 80150 I=1,NP
+               DO 80151 J= 1,NP
+                  DO 80152 K=KDEB,KFIN
+                     KP=K-KDEB+1
+                     ZVGGX=AIRE(KP)*CHGLPX(KP)*QGGT(J,I)
+                     ZVGGY=AIRE(KP)*CHGLPY(KP)*QGGT(J,I)
+                     ZVGGZ=AIRE(KP)*CHGLPZ(KP)*QGGT(J,I)
+                     ZVGT=AIRE(KP)*(
+     &                    HR(K,I,1)*HR(K,J,1)*COEF(KP)
+     &                    +    HR(K,I,2)*HR(K,J,2)*COEF(KP)
+     &                    +    HR(K,I,3)*HR(K,J,3)*COEF(KP) )
+     &                    +    CHGLD(KP)*QGGT(J,I)
+                     COEFT3=COEF(KP)/3.D0
+                     GEO1=0.D0
+                     ZVGUU=(AIRE(KP)*(HR(K,I,1)*HR(K,J,1))+GEO1)*COEFT3
+     $                    *UIX(KP,J)
+                     ZVGUV=AIRE(KP)*( HR(K,I,1)*HR(K,J,2))*COEFT3*UIY(KP
+     $                    ,J)
+                     ZVGUW=AIRE(KP)*( HR(K,I,1)*HR(K,J,3))*COEFT3*UIZ(KP
+     $                    ,J)
+                     ZVGVU=AIRE(KP)*( HR(K,I,2)*HR(K,J,1))*COEFT3*UIX(KP
+     $                    ,J)
+                     ZVGVV=(AIRE(KP)*(HR(K,I,2)*HR(K,J,2))+GEO1)*COEFT3
+     $                    *UIY(KP,J)
+                     ZVGVW=AIRE(KP)*( HR(K,I,2)*HR(K,J,3))*COEFT3*UIZ(KP
+     $                    ,J)
+                     ZVGWU=AIRE(KP)*( HR(K,I,3)*HR(K,J,1))*COEFT3*UIX(KP
+     $                    ,J)
+                     ZVGWV=AIRE(KP)*( HR(K,I,3)*HR(K,J,2))*COEFT3*UIY(KP
+     $                    ,J)
+                     ZVGWW=(AIRE(KP)*(HR(K,I,3)*HR(K,J,3))+GEO1)*COEFT3
+     $                    *UIZ(KP,J)
+                     V2=(UIX(KP,J)*HR(K,J,1)+UIY(KP,J)*HR(K,J,2)+UIZ(KP
+     $                    ,J)*HR(K,J,3))*WZ(KP,I)
+                     SAF1(KP,I)=SAF1(KP,I)+(V2+ZVGGX)*GIX(KP,J)+ZVGT
+     $                    *UIX(KP,J)+ ZVGUU + ZVGUV + ZVGUW
+                     SAF2(KP,I)=SAF2(KP,I)+(V2+ZVGGY)*GIY(KP,J)+ZVGT
+     $                    *UIY(KP,J)+ ZVGVU + ZVGUV + ZVGVW
+                     SAF3(KP,I)=SAF3(KP,I)+(V2+ZVGGZ)*GIZ(KP,J)+ZVGT
+     $                    *UIZ(KP,J)+ ZVGWU + ZVGWV + ZVGWW
+80152             CONTINUE
+80151          CONTINUE
+80150       CONTINUE
+         ENDIF
+C
+C     Fin de l'accumulation dans SAF1,SAF2.
+C     On ajoute ces incr{ments @ F.
+C
+         DO 8017 I=1,NP
+            DO 80171 K=KDEB,KFIN
+               KP=K-KDEB+1
+               NF=IPADI(LE(I,K))
+               F(NF,1)=F(NF,1)-SAF1(KP,I)
+               F(NF,2)=F(NF,2)-SAF2(KP,I)
+               F(NF,3)=F(NF,3)-SAF3(KP,I)
+80171       CONTINUE
+ 8017    CONTINUE
+ 8001 CONTINUE
+C     WRITE(IOIMP,*)' ********** FIN YCVI 3D *****************'
+      IPAS=1
+      RETURN
+ 1002 FORMAT(10(1X,1PE11.4))
+ 1001 FORMAT(20(1X,I5))
+      END
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,651 @@
+C ROUSS     SOURCE    AS218369  09/12/01    21:15:47     6561
+       SUBROUTINE ROUSS(DEPST,NSTRS,MFR1,IB,IGAU,
+     1 DSIGT,NCOMAT,SIG0,VAR0,XMAT,XCAR,NVARI,ICARA,
+     2 SIGF,VARF,DEFP,TRAC,KERRE,necou)
+*
+*_________________________________________________________________
+*
+*
+*    ENTREES :
+*    ---------
+*
+* DEPST = INCREMENT DE DEFORMATIONS TOTALES
+* NSTRS = NBRE DE COMPOSANTES DES DEFORMATIONS
+* NCOMAT= NBRE DE CARACTERISTIQUES MECANIQUES DU MATERIAU
+* MFR1  = NUMERO DE LA FORMULATION
+* IB    = NUMERO DE L ELEMENT COURANT
+* IGAU  = NUMERO DU POINT COURANT
+* NVARI = NBRE DE VARIABLES INTERNES
+* SIG0(NSTRS) = CONTRAINTES AU DEBUT DU PAS D'INTEGRATION
+* VAR0(NVARI) = VARIABLES INTERNES AU DEBUT DU PAS DE TEMPS
+* XMAT(NCOMAT) = CARACTERISTIQUES MECANIQUES DU MATERIAU
+* ICARA = NBRE DE CARACTERISTIQUES GEOMETRIQUES DES ELEMENTS FINIS
+* XCARA(ICARA) = CARACTERISTIQUES GEOMETRIQUES DES ELEMENTS FINIS
+* TRAC = COURBE DE TRACTION NON ENDOMMAGEE
+*
+*    SORTIE :
+*    --------
+*
+* SIGF(NSTRS) = CONTRAINTES FINALES
+* VARF(NVARI) = VARIALES INTERNES A LA FIN DU PAS D'INTEGRATION
+* DEFP(NSTRS) = INCREMENT DE DEFORMATION PLASTIQUE A LA FIN
+*               DU PAS D'INTEGRATION
+* ============================================================
+*       ICI IL FAUT PROGRAMMER EN FORTRAN PUR
+*=============================================================
+*
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*
+-INC CCOPTIO
+*
+       SEGMENT NECOU
+*      COMMON/NECOU/NCOURB,IPLAST,IT,IMAPLA,ISOTRO,
+       INTEGER NCOURB,IPLAST,IT,IMAPLA,ISOTRO,
+     . ITYP,IFOURB,IFLUAG,
+     . ICINE,ITHER,IFLUPL,ICYCL,IBI,
+     . JFLUAG,KFLUAG,LFLUAG,
+     . IRELAX,JNTRIN,MFLUAG,JSOUFL,JGRDEF
+      ENDSEGMENT
+C      COMMON/NECOU/NCOURB,IPLAST,IT,IMAPLA,ISOTRO,
+C     . ITYP,IFOURB,IFLUAG,
+C     . ICINE,ITHER,IFLUPL,ICYCL,IBI,
+C     . JFLUAG,KFLUAG,LFLUAG,
+C     . IRELAX,JNTRIN,MFLUAG,JSOUFL,JGRDEF
+*
+      DIMENSION SIG0(*),DEPST(*),VAR0(*),XMAT(*),XCAR(*),SIGF(*),
+     &          VARF(*),DEFP(*),DSIGT(*),TRAC(*)
+      DIMENSION RDEPS0(6)
+      DIMENSION RSIG0(6),RDEPS(6),RSIGF(6),RDEFP(6),RDIGT(6)
+      DIMENSION DEVT(6),SIGT(6),DEFT(6),SIGT1(6)
+*
+*  Adaptation de l'option de calcul vers le 3D massif de SIG0 a RSIG0
+*====================================================================
+*
+
+*       IF (MFR1 .EQ. 1 .OR. MFR1 .EQ. 31)  THEN
+* as :
+      IF (MFR1 .EQ. 1 .OR. MFR1 .EQ. 31.OR.MFR1.EQ.63)  THEN
+*---> 1 formulation massive
+*---> 2 formulation quasi incompressible
+*---> MASSIF 3D
+*
+        IF (NSTRS .EQ. 6) THEN
+          DO 110 I=1,NSTRS
+            RSIG0(I)=SIG0(I)
+            RDEPS0(I)=DEPST(I)
+ 110      CONTINUE
+        ELSE IF ( NSTRS .EQ. 4 .AND. ((IFOUR .EQ. 0)
+     &    .OR.(IFOUR .EQ. -1).OR.(IFOUR.EQ.-2))) THEN
+*
+*---> Calcul en mode deformations planes ou axisymetrique
+*     ou contraintes planes
+*
+          DO 115 I=1,NSTRS
+            RSIG0(I)=SIG0(I)
+            RDEPS0(I)=DEPST(I)
+ 115      CONTINUE
+          RSIG0(5)=0.D0
+          RSIG0(6)=0.D0
+          RDEPS0(5)=0.D0
+          RDEPS0(6)=0.D0
+        ENDIF
+      ELSE
+        KERRE = 99
+        RETURN
+      ENDIF
+*
+*
+*   Passage des deformations de cisaillement exprimées
+*   en GAMA aux déformations de cisaillement exprimées
+*   en déformations
+*
+      DO 116 I=1,6
+         A=1.D0
+         IF (I.GT.3) A=2.D0
+         RDEPS0(I)=RDEPS0(I)/A
+         RDEPS(I)=0.D0
+ 116  CONTINUE
+*
+*   Données du materiau
+*===========================================================
+*
+      YOUNG=XMAT(1)
+      XNU=XMAT(2)
+      F0=XMAT(6)
+      XD0=XMAT(7)
+      SIG1=XMAT(8)
+      FC0=XMAT(9)
+      IF (F0.GE.1.D0) F0=3.D-4
+      RMAX0=(1.D0-FC0)/(1.D0-F0)
+      IF ((RMAX0.LE.1.D-5).OR.(RMAX0.GE.1.D0)) THEN
+        RMAX0=1.D-5
+      ENDIF
+*
+*  Calculs préliminaires
+*===================================
+*
+*---> Module de cisaillement G0 et de pression hydro XK0
+*
+      G0=YOUNG/(2.D0*(1.D0+XNU))
+      XK0=YOUNG/(3.D0*(1.D0-(2.D0*XNU)))
+      XLAM0=XK0-(2.D0*G0/3.D0)
+*
+*  Début des sous incrémentations
+*===================================
+*
+      recal0=-100.D0
+      iter2=0
+      nmax0=1
+*
+*---> Variables internes test
+*
+*   - déformation plastique équivalente
+*   - variable d'endommagement
+*   - densité relative
+*
+ 93   EPSPT=VAR0(1)
+      BETAT=VAR0(2)
+      RHOT=VAR0(3)
+*
+*   - initialisation de RHOT à 1.
+*
+      IF (RHOT.LT.1.D-30) THEN
+         RHOT=1.D0
+         VAR0(3)=1.D0
+      ENDIF
+      RHOT0=RHOT
+*
+*  Contraintes planes
+*    - on stocke les variables internes au début de
+*    chaque sous incrémentation
+*    - on stocke les déformations plastiques au début de
+*    chaque sous incrémentation
+*
+      IF (IFOUR.EQ.-2) THEN
+         EPSPT1=EPSPT
+         BETAT1=BETAT
+         RHOT1=RHOT
+         def1=0.D0
+         def2=0.D0
+         def3=0.D0
+         rdeps3=0.D0
+      ENDIF
+*
+*  Contraintes planes
+*    - on stocke les contraintes non endommagées au début de
+*    chaque sous incrémentation
+*
+      DO 171 I=1,6
+        IF (RHOT0.GT.RMAX0) THEN
+          SIGT(I)=RSIG0(I)/RHOT0
+        ELSE
+          SIGT(I)=0.D0
+          XLAM0=0.D0
+          G0=0.D0
+        ENDIF
+      IF (IFOUR.EQ.-2) SIGT1(I)=SIGT(I)
+ 171  CONTINUE
+      IF (RHOT0.GT.RMAX0) THEN
+        SMT0=(RSIG0(1)+RSIG0(2)+RSIG0(3))/(3.D0*RHOT0)
+      ELSE
+        SMT0=0.D0
+      ENDIF
+      IF (IFOUR.EQ.-2) SMT1=SMT0
+*
+*  On divise le chargement pour les sous incrementations
+*
+  95  DO 118 I=1,6
+         RDEPS(I)=RDEPS0(I)/nmax0
+ 118  CONTINUE
+      iter2=iter2+1
+*
+*  Initialisations
+*===================================
+*
+      iter1=0
+*
+*---> Calcul de la trace de l'incrément de déformation
+*
+      IF (IFOUR.EQ.-2) THEN
+        RDEPS(3)=-1.D0*(XNU/(1.D0-XNU))*(RDEPS(1)+RDEPS(2))
+      ENDIF
+ 98   treps0=RDEPS(1)+RDEPS(2)+RDEPS(3)
+*
+*
+*  Calculs des grandeurs élastiques test
+*====================================================
+*
+*---> Variables internes test: cas contraintes planes
+*
+*   - déformation plastique équivalente
+*   - variable d'endommagement
+*   - densité relative
+*
+      IF (IFOUR.EQ.-2) THEN
+         EPSPT=EPSPT1
+         BETAT=BETAT1
+         RHOT=RHOT1
+      ENDIF
+*
+*---> Calcul des contraintes test élastiques efficaces
+*     et de l'incrément des déformations plastiques test au
+*     cours du pas
+*
+      DO 101 I=1,6
+        A=0.D0
+        IF (I.LE.3) A=1.D0
+        IF (IFOUR.EQ.-2) SIGT(I)=SIGT1(I)
+        SIGT(I)=SIGT(I)+(2.D0*G0*RDEPS(I))
+        SIGT(I)=SIGT(I)+(XLAM0*treps0*A)
+        DEFT(I)=0.D0
+ 101  CONTINUE
+*
+*---> Déviateur et contrainte moyenne test
+*
+      SMT=(SIGT(1)+SIGT(2)+SIGT(3))/3.D0
+      DO 200 I=1,6
+        A=0.D0
+        IF (I.LE.3) A=1.D0
+        DEVT(I)=SIGT(I)-(A*SMT)
+ 200  CONTINUE
+*
+*---> Contrainte équivalente STEST
+*
+      STEST2=(SIGT(1)*SIGT(1))+(SIGT(2)*SIGT(2))
+      STEST2=STEST2+(SIGT(3)*SIGT(3))
+      STEST2=STEST2-(SIGT(1)*SIGT(2))-(SIGT(2)*SIGT(3))
+      STEST2=STEST2-(SIGT(3)*SIGT(1))
+      STEST3=(SIGT(4)*SIGT(4))+(SIGT(5)*SIGT(5))
+      STEST3=STEST3+(SIGT(6)*SIGT(6))
+      STEST2=STEST2+(3.D0*STEST3)
+      IF (STEST2.LE.1.D-20) STEST2=0.D0
+      Stest=(STEST2)**(0.5D0)
+*
+*---> Potentiel d'endommagement
+*
+      BT0=F0*SIG1*EXP(BETAT)
+      BT0=BT0/(1.D0-F0+(F0*EXP(BETAT)))
+      DBT0=BT0*(1.D0-F0)/(1.D0-F0+(F0*EXP(BETAT)))
+      Ftest=BT0*XD0*EXP(SMT/SIG1)
+*
+*---> Limite d'élasticité lue sur la courbe d'écrouissage
+*
+*   - Recherche des valeurs de déformations plastiques équivalentes
+*     encadrant la valeur courante
+*
+      EPSM0=TRAC(2*NCOURB)
+      IF (EPSPT.GE.EPSM0) THEN
+         Y1=TRAC(2*NCOURB-1)
+         Y2=TRAC(2*NCOURB-1)
+         EPS1=EPSM0
+         EPS2=2.D0*EPSM0
+      ELSE
+      DO 300 I=1,(NCOURB-1)
+         EPS1=TRAC(2*I)
+         EPS2=TRAC(2*(I+1))
+         IF ((EPSPT.GE.EPS1).AND.(EPSPT.LT.EPS2)) THEN
+            Y1=TRAC(2*I-1)
+            Y2=TRAC(2*(I+1)-1)
+            GOTO 96
+         ENDIF
+ 300  CONTINUE
+      ENDIF
+*
+*   - Limite d'élasticité
+*
+  96  H0=(Y2-Y1)/(EPS2-EPS1)
+      Ytest=(H0*(EPSPT-EPS2))+Y2
+*
+*---> Fonction de charge test PHIT
+*
+      PHIT=Stest-Ytest+Ftest
+*
+*
+*  Vérification du critère de plasticité
+*=========================================================
+*
+*---> Erreur admise
+*
+      ERR0=1.E-7*ABS(PHIT)
+      ERR0=MAX(ERR0,1.D-8*TRAC(1))
+*
+*---> Critère de plasticité
+*
+      PHI0=PHIT
+      IF (RHOT.LE.RMAX0) PHI0=0.D0
+      iter0=0
+*
+ 99   IF (PHI0.LE.ERR0) THEN
+*
+*  On est élastique
+*=========================================================
+*
+*--------------------------------------------------------------
+*     Cas particulier des contraintes planes
+*--------------------------------------------------------------
+*
+      IF (IFOUR.EQ.-2) THEN
+*
+*---> On vérifie qu'on est en contraintes planes
+*
+        iter1=iter1+1
+        SIG3=ABS(SIGT(3))
+        SIG30=MAX(Stest*1.D-5,1.D-3)
+        IF (SIG3.GT.SIG30) THEN
+          RDEPS(3)=-1.D0*(XNU/(1.D0-XNU))*
+     .     (RDEPS(1)-DEFT(1)+RDEPS(2)-DEFT(2)+def1+def2)
+          RDEPS(3)=RDEPS(3)+DEFT(3)-def3
+          IF (iter1.LE.200)THEN
+            GOTO 98
+          ELSE
+            KERRE=460
+          ENDIF
+        ELSE
+          EPSPT1=EPSPT
+          BETAT1=BETAT
+          RHOT1=RHOT
+          SIGT1(1)=SIGT(1)
+          SIGT1(2)=SIGT(2)
+          SIGT1(3)=SIGT(3)
+          SIGT1(4)=SIGT(4)
+          SIGT1(5)=SIGT(5)
+          SIGT1(6)=SIGT(6)
+          rdeps3=rdeps3+RDEPS(3)
+          def1=DEFT(1)
+          def2=DEFT(2)
+          def3=DEFT(3)
+        ENDIF
+      ENDIF
+*
+*-----------------------------------------------------
+*    Fin du cas particulier des contraintes planes
+*-----------------------------------------------------
+*
+      DO 400 I=1,6
+         RSIGF(I)=SIGT(I)*RHOT
+         RDEFP(I)=DEFT(I)
+         RDIGT(I)=RSIGF(I)-RSIG0(I)
+ 400  CONTINUE
+      VARF(1)=EPSPT
+      VARF(2)=BETAT
+      VARF(3)=RHOT
+*
+      ELSE
+*
+*  On plastifie
+*=========================================================
+*
+*---> Pente d'écrouissage H0 = d PHI / d EPSP
+*
+*     Ce terme est déjà calculé
+*
+*---> Condition de consistance
+*
+      Ftest0=1.D-6*Ftest
+      IF (Stest.GT.Ftest0) THEN
+        denom0=(DBT0-BT0*BT0*XK0/(SIG1*SIG1))*EXP(2.D0*SMT/SIG1)
+        denom0=H0+3.D0*G0-XD0*XD0*denom0
+      ELSE
+        denom0=(DBT0-BT0*BT0*XK0/(SIG1*SIG1))*EXP(2.D0*SMT/SIG1)
+        denom0=H0-XD0*XD0*denom0
+      ENDIF
+      IF (denom0.GT.1.D-5) THEN
+        dlam0=PHIT/denom0
+      ELSE
+        IF (recal0.LE.0.D0) THEN
+          recal0=100.D0
+          nmax0=2000
+          iter2=0
+          GOTO 93
+        ENDIF
+      ENDIF
+*
+*     Vérification des hypothèses de calcul
+*===============================================================
+*
+      IF (recal0.LE.0.D0) THEN
+*
+*      RMAX1=MIN(0.5D0,RMAX0*2.D0)
+*      RMAX1=MAX(RMAX1,0.1D0)
+*      IF (RHOT.LT.RMAX1) THEN
+*         xnum0=200.D0
+*      ELSE
+         xnum0=20.D0
+*      ENDIF
+*
+      xmax1=0.D0
+      xmax2=0.D0
+      xmax3=0.D0
+*
+*---> Condition: d SM / SIG1 << 1
+*
+      cri00=XK0*(ABS(RDEPS(1)+RDEPS(2)+RDEPS(3)))/SIG1
+      IF (cri00.GT.5.D-2) THEN
+         xmax1=ABS(xnum0*cri00+10.D0)
+      ENDIF
+*
+*---> Condition: 10.G.dp/Stest << 1
+*
+      IF (Stest.GT.Ftest0) THEN
+        cri01=10.D0*G0*dlam0/Stest
+        IF (cri01.GT.5.D-2) THEN
+          xmax2=ABS(xnum0*cri01+10.D0)
+        ENDIF
+      ENDIF
+*      xmax2=0.D0
+*
+*---> Condition: B'(beta).d beta / B(beta) << 1
+*
+*      cri02=DBT0*dlam0*XD0*EXP(SMT/SIG1)/BT0
+      cri02=dlam0*XD0*EXP(SMT/SIG1)
+      IF (cri02.GT.5.D-2) THEN
+        xmax3=(xnum0*cri02+10.D0)
+      ENDIF
+*
+      IF (xmax1.GT.xmax2) THEN
+         xmax00=xmax1
+      ELSE
+         xmax00=xmax2
+      ENDIF
+      IF (xmax3.GT.xmax00) xmax00=xmax3
+      nmax00=NINT(xmax00)
+      recal0=100.D0
+      IF (nmax00.GT.nmax0) nmax0=nmax00
+      IF (nmax0.GT.2000) nmax0=2000
+*
+*---> On recommence la calcul en sous incrémentant le
+*     pas de temps
+*
+      iter2=0
+      GOTO 93
+*
+      ENDIF
+*
+*  Mise à jour des grandeurs après écoulement plastique
+*============================================================
+*
+*---> Variable interne de plasticité mise à jour
+*
+      EPSPT=EPSPT+dlam0
+*
+*---> Contraintes mises à jour
+*
+      tremp0=XD0*BT0*EXP(SMT/SIG1)*dlam0/SIG1
+     .  +XD0*XD0*(DBT0-BT0*BT0*XK0/(SIG1*SIG1))*EXP(2.D0*SMT/SIG1)
+     .  *dlam0*dlam0/SIG1
+      SMT=SMT-XK0*tremp0
+      DO 601 I=1,6
+        A=0.D0
+        IF (I.LE.3) A=1.D0
+        IF (Stest.GT.Ftest0) THEN
+         DEVT(I)=DEVT(I)-3.D0*G0*DEVT(I)*dlam0/Stest
+        ELSE
+         DEVT(I)=0.D0
+        ENDIF
+        SIGT(I)=DEVT(I)+(SMT*A)
+ 601  CONTINUE
+*
+*---> Endommagement
+*
+      RHOT=RHOT*EXP(-tremp0)
+      IF (RHOT.LT.1.D-10) RHOT=1.D-10
+      BETAT=LOG((1.D0-(1.D0-F0)*RHOT)/(RHOT*F0))
+*
+      IF (RHOT.LE.RMAX0) THEN
+        SMT=0.D0
+        DO 103 I=1,6
+          SIGT(I)=0.D0
+          DEVT(I)=0.D0
+ 103    CONTINUE
+      ENDIF
+*
+*---> Incrément de déformations plastiques mise à jour
+*
+      treps1=(SMT-SMT0)/XK0
+      DO 610 I=1,6
+        A=0.D0
+        IF (I.LE.3) A=1.D0
+        IF (RHOT0.GT.RMAX0) THEN
+        depel0=(DEVT(I)-(RSIG0(I)/RHOT0)+(SMT0*A))/(2.D0*G0)
+        ELSE
+        depel0=(DEVT(I)+(SMT0*A))/(2.D0*G0)
+        ENDIF
+        depel0=depel0+(treps1*A/3.D0)
+        DEFT(I)=RDEPS0(I)*iter2/nmax0-depel0
+        IF ((IFOUR.EQ.-2).AND.(I.EQ.3)) THEN
+          DEFT(3)=rdeps3+RDEPS(3)-depel0
+        ENDIF
+ 610  CONTINUE
+*
+*---> Contrainte équivalente Stest mise à jour
+*
+      STEST2=(SIGT(1)*SIGT(1))+(SIGT(2)*SIGT(2))
+      STEST2=STEST2+(SIGT(3)*SIGT(3))
+      STEST2=STEST2-(SIGT(1)*SIGT(2))-(SIGT(2)*SIGT(3))
+      STEST2=STEST2-(SIGT(3)*SIGT(1))
+      STEST3=(SIGT(4)*SIGT(4))+(SIGT(5)*SIGT(5))
+      STEST3=STEST3+(SIGT(6)*SIGT(6))
+      STEST2=STEST2+(3.D0*STEST3)
+      IF (STEST2.LE.(Ftest0*Ftest0)) STEST2=0.D0
+      Stest=(STEST2)**(0.5D0)
+*
+*---> Potentiel d'endommagement mis à jour
+*
+      BT0=F0*SIG1*EXP(BETAT)
+      BT0=BT0/(1.D0-F0+(F0*EXP(BETAT)))
+      DBT0=BT0*(1.D0-F0)/(1.D0-F0+(F0*EXP(BETAT)))
+      Ftest=BT0*XD0*EXP(SMT/SIG1)
+*
+*---> Limite d'élasticité lue sur la courbe d'écrouissage
+*     mise à jour
+*
+*   - Recherche des valeurs de déformations plastiques équivalentes
+*     encadrant la valeur courante
+*
+      EPSM0=TRAC(2*NCOURB)
+      IF (EPSPT.GE.EPSM0) THEN
+         Y1=TRAC(2*NCOURB-1)
+         Y2=TRAC(2*NCOURB-1)
+         EPS1=EPSM0
+         EPS2=2.D0*EPSM0
+      ELSE
+      DO 700 I=1,(NCOURB-1)
+         EPS1=TRAC(2*I)
+         EPS2=TRAC(2*(I+1))
+         IF ((EPSPT.GE.EPS1).AND.(EPSPT.LT.EPS2)) THEN
+            Y1=TRAC(2*I-1)
+            Y2=TRAC(2*(I+1)-1)
+            GOTO 97
+         ENDIF
+ 700  CONTINUE
+      ENDIF
+*
+*   - Limite d'élasticité mise à jour
+*
+  97  H0=(Y2-Y1)/(EPS2-EPS1)
+      Ytest=(H0*(EPSPT-EPS2))+Y2
+*
+*---> Fonction de charge test PHIT mise à jour
+*
+      PHIT=Stest-Ytest+Ftest
+      PHI0=ABS(PHIT)
+*
+*---> Test de convergence ou itération suivante
+*
+      iter0=iter0+1
+*       if ((ib.eq.12).and.(rhot0.lt.0.45).and.(igau.eq.19))  write(6,*)
+*     &'13iter2,iter0:',iter2,iter0,'phi',phit,var0(3),depst(1),depst(2)
+      IF (RHOT.LE.RMAX0) PHI0=0.D0
+      IF (iter0.LT.200) THEN
+         GOTO 99
+      ELSE
+         PHI0=0.D0
+         KERRE=460
+         write(6,*) 'rho0,deps1 et 2',var0(3),depst(1),depst(2),ib,igau
+         GOTO 99
+      ENDIF
+*
+      ENDIF
+*
+*
+*   Vérification des sous incrémentations
+*
+      IF ((iter2.LT.nmax0).AND.(KERRE.EQ.0)) THEN
+         GOTO 95
+      ENDIF
+*
+*   Passage des deformations de cisaillement exprimées
+*   en déformations aux déformations de cisaillement exprimées
+*   en GAMA
+*
+      DO 117 I=1,6
+         A=1.D0
+         IF (I.GT.3) A=2.D0
+         RDEFP(I)=RDEFP(I)*A
+ 117  CONTINUE
+*
+*
+*  Passage a l'option de calcul pour les contraintes
+*=========================================================
+*
+*       IF (MFR1 .EQ. 1 .OR. MFR1 .EQ. 31)  THEN
+* as :
+      IF (MFR1 .EQ. 1 .OR. MFR1 .EQ. 31.OR.MFR1.EQ.63)  THEN
+        IF (NSTRS .EQ. 6) THEN
+*
+*---> MASSIF 3D
+*
+          DO 170 I=1,NSTRS
+            SIGF(I)=RSIGF(I)
+            DEFP(I)=RDEFP(I)
+            DSIGT(I)=RDIGT(I)
+ 170      CONTINUE
+        ELSE IF ( NSTRS .EQ. 4 ) THEN
+*
+*---> Calcul axisymétrique ou contraintes planes
+*
+          DO 180 I=1,NSTRS
+            SIGF(I)=RSIGF(I)
+            DEFP(I)=RDEFP(I)
+            DSIGT(I)=RDIGT(I)
+ 180      CONTINUE
+        ENDIF
+      ENDIF
+*      if (ib.eq.13)  write(6,*)
+*     &   '11:rho0,deps1,2,p',var0(3),depst(1),depst(2),var0(1),igau
+
+      RETURN
+*
+      END
+
+
+
+
+
+
+
+
+
+
+

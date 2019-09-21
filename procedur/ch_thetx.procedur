@@ -1,0 +1,554 @@
+$$$$ CH_THETX
+* CH_THETX  PROCEDUR  BP208322  18/06/11    21:15:00     9829
+*
+DEBPROC CH_THETX SUPTAB*TABLE ;
+*|=====================================================================|
+*|                                                                     |
+*|  << OBJET >> :                                                      |
+*|                                                                     |
+*|  Procedure analogue a CH_THETA mais utilisee avec des elements XFEM |
+*|  Procedure determinant un champ/point de type THETA, c'est-a-dire   |
+*|  un champ/point dont la norme est constante a l'interieur d'une     |
+*|  courronne entourant le front d'une fissure, zero a l'exterieur de  |
+*|  cette couronne. Le vecteur represente par le champ THETA indique   |
+*|  la direction de propagation eventuelle de la fissure.              |
+*|                                                                     |
+*|  << ENTREE >> :                                                     |
+*|                                                                     |
+*|  SUPTAB = Objet de type TABLE dont les indices sont des             |
+*|           objets de type MOT (a ecrire en toutes lettres) :         |
+*|                                                                     |
+*|  ARGUMENTS OBLIGATOIRES                                             |
+*|  °°°°°°°°°°°°°°°°°°°°°°                                             |
+*|                                                                     |
+*|  SUPTAB.'MAILLAGE' = Objet de type MAILLAGE representant soit       |
+*|                      la structure totale etudiee (maillage          |
+*|                      utilise dans l'analyse par elements finis,     |
+*|                      soit, pour reduire le temps de calcul, le      |
+*|                      maillage entourant le plus grand des contours  |
+*|                      qu'on a defini pour calculer le champ THETA.   |
+*|                                                                     |
+*|  SUPTAB.'PSI'  = Objet de type CHPOINT representant la 1ere level   |
+*|                  decrivant le repere local de la fissure            |
+*|  SUPTAB.'PHI'  = Objet de type CHPOINT representant la 2eme level   |
+*|                  decrivant le repere local de la fissure            |
+*|                                                                     |
+*|  SUPTAB.'FRONT_FISSURE' = Objet representant le front de fissure    |
+*|                     - facultatif et de type POINT en 2D             |
+*|                     - obligatoire et de type MAILLAGE (ligne) en 3D |
+*|                                                                     |
+*|  SUPTAB.'COUCHE'   = Objet de type ENTIER representant le nombre    |
+*|                      de couches d'elements (autour du point de      |
+*|                      fissure) qui se deplacent pour simuler la      |
+*|                      propagtion de la fissure.                      |
+*|                                                                     |
+*|                                                                     |
+*|                                                                     |
+*|  << SORTIE >> :                                                     |
+*|                                                                     |
+*|  TETA = Objet de type :                                             |
+*|                                                                     |
+*|       - TABLE INDICEE PAR DES OBJETS DE TYPE POINT CONTENANT        |
+*|         DES ELEMENTS DE TYPE CHPOINT DANS LE CAS 3 DIMENSIONS.      |
+*|         CHAQUE ELEMENT CONTIENT LE CHAMP THETA AU NOEUD DU          |
+*|         FRONT DE COORDONNEES CELLES DU POINT P : TETA.P. ELLE       |
+*|         EST EGALEMENT INDICEE PAR LE MOT 'GLOBAL' POUR DONNER       |
+*|         LE CHAMP THETA GLOBAL LE LONG DE TOUT FRONT DE LA FISSURE   |
+*|       - ELEMENT DE TYPE CHPOINT CONTENANT LE CHAMP THETA EN 2       |
+*|         DIMENSIONS (OU EN 3 DIMENSIONS AVEC DES ELEMENTS DE         |
+*|         COQUE MINCE) A LA POINTE DE FISSURE                         |
+*|                                                                     |
+*|  TABUTIL = Table avec la direction                                  |
+*|                                                                     |
+*|=====================================================================|
+&DIME = VALE DIME ;
+&MODE = VALE MODE ;
+
+*---------------------------------------------------------*
+*-------- RECUP  + TEST DE COMPABILITE DES DONNEES -------*
+*---------------------------------------------------------*
+
+SI (NON (EXIS SUPTAB 'MAILLAGE'));
+   MESS 'ERREUR : ON N A PAS TROUVE DANS LA'
+   MESS '         TABLE L OBJET MAILLAGE';
+   QUIT CH_THETX;
+SINON;
+   MAILLAGE = SUPTAB.'MAILLAGE' ;
+*   NB1 = NBNO (CHAN MAILLAGE 'POI1');
+FINSI;
+SI (NON (EXIS SUPTAB 'FRONT_FISSURE'));
+   MESS 'ERREUR : LE FRONT DE LA FISSURE N EST PAS DONNE';
+   QUIT CH_THETX;
+SINON;
+   PFISS = SUPTAB.'FRONT_FISSURE';
+   si(ega (type PFISS) 'POINT');
+     PFISS1 = MANU 'POI1' PFISS;
+   sino;
+     PFISS1 = CHAN 'POI1' PFISS;
+   fins;
+FINSI;
+SI ((NON (EXIS SUPTAB 'PSI')) ou (NON (EXIS SUPTAB 'PHI')));
+   MESS 'ERREUR : CHPOINT PSI et PHI NON FOURNIS';
+   QUIT CH_THETX;
+SINON;
+   psy1 = SUPTAB . 'PSI';
+   phy1 = SUPTAB . 'PHI';
+FINSI;
+SI (NON (EXIS SUPTAB 'COUCHE'));
+   MESS 'ERREUR : ON VEUT LE NOMBRE DE COUCHES D ELEMENTS';
+   MESS '         AUTOUR DE LA FISSURE QUI SE DEPLACE';
+   MESS '         POUR SIMULER LA PROPAGATION DE LA FISSURE';
+   QUIT CH_THETX;
+SINON;
+   COUCHE = SUPTAB.'COUCHE' ;
+FINSI;
+
+*--------------------------------------------------*
+* On veut savoir si une seule ou toutes les 2 levres
+* de la fissure ont été modelisees (bp, 2012-10-04)
+*--------------------------------------------------*
+XMULT = 1.;
+* si une demi-eprouvette est modelisee,
+* on espere que phi(x)>0 ou <0 qqsoit x
+miny1 = mini phy1;  maxy1 = maxi phy1;
+si ((maxy1*miny1) <eg 0.);
+  miny1a = mini (prog miny1 maxy1) 'ABS';
+  maxy1a = maxi (prog miny1 maxy1) 'ABS';
+  si( (miny1a/maxy1a) < 1.E-3);
+    XMULT = 2.;
+  fins;
+fins;
+
+
+TABUTIL = tabl;
+
+*------------------------------------------------*
+*-------       On determine TETA          -------*
+*------------------------------------------------*
+
+*------------------------------------------------*
+* CAS 2D ----------------------------------------*
+SI (&DIME EGA 2);
+
+*--- Element contenant la Pointe de fissure, et Couches ------*
+
+  EFISS0= MAILLAGE ELEM 'CONTENANT' PFISS;
+
+* test pour voir si on est sur un noeud, dans un element ou sur un bord
+  mod0 = MODE EFISS0 'MECANIQUE' 'ELASTIQUE' 'XQ4R';
+  psy10 = CHAN 'CHAM' mod0 (redu psy1 EFISS0) 'STRESSES';
+  phy10 = CHAN 'CHAM' mod0 (redu phy1 EFISS0) 'STRESSES';
+  logpsy10 = ((MAXI psy10) *  (MINI psy10)) < 0.;
+  logphy10 = ((MAXI phy10) *  (MINI phy10)) < 0.;
+  si(logpsy10 et logphy10);
+    MBOUGER = EFISS0;
+  sino;
+    MBOUGER = EFISS0 POIN 'PROCH' PFISS;
+    si((logpsy10 ou logphy10) et (ega COUCHE 0));
+      mess 'ATTENTION : UTILISATION DE 0 COUCHE + XFEM DELICATE';
+      mess '            RESULTAT PROBABLEMENT DE MAUVAISE PRECISION';
+    fins;
+  fins;
+
+  SI (COUCHE '>' 0);
+  REPE BCOUCH COUCHE ;
+       MBOUGER = ELEM MAILLAGE 'APPUYE' 'LARG' MBOUGER ;
+  FIN  BCOUCH ;
+  FINSI;
+  MAIL = ELEM MAILLAGE 'APPU' 'LARG' MBOUGER ;
+  mod7 = MODE MAIL 'MECANIQUE' 'ELASTIQUE';
+
+* Psi et Phi doivent etre entirement definis sur MAIL
+  MINTER = INTE (CHAN 'POI1' MAIL) (EXTR psy1 'MAILLAGE');
+  NBEL1  = NBEL (DIFF (CHAN 'POI1' MAIL) MINTER );
+  SI (NBEL1 NEG 0) ;
+    MESS NBEL1 'points des couches ou Psi et Phi sont indefinis';
+    ERRE 21;
+  FINS;
+
+
+*--- Vecteur direction unitaire ------*
+  lv7 = (NOMC 'UX' psy1 'NATU' 'DIFFUS') ET
+        (NOMC 'UY' phy1 'NATU' 'DIFFUS') ;
+  glv7 = GRAD mod7 lv7 ;
+
+* calcul basé sur grad de psi ou sur grad de phi ou les 2 ou autre...?
+* question delicate puisqu'elle met en jeu le pb des fissures courbes
+* et qui branchent.
+* grad(psi) est + facile a metter en oeuvre, notamment si presence de 2
+* pointes car le repere grad(psi), grad(phi) n'est pas direct des 2 cotés,
+* mais le vecteur direction ne semble pas tourner facilement
+  teta7a= EXCO glv7 (mots 'UX,X' 'UX,Y') (mots 'UX' 'UY');
+  teta7a= CHAN teta7a 'TYPE' 'SCALAIRE';
+*  vteta7a = vect (chan chpo mod7 teta7a) 1.E-2 ROSE;
+* avec grad(phi) il y a 2 produits vectoriel a faire
+  teta7b= EXCO glv7 (mots 'UY,X' 'UY,Y') (mots 'UX' 'UY');
+  teta7b= CHAN teta7b 'TYPE' 'SCALAIRE';
+  taw1 = ((exco teta7a 'UX' 'UZ') * (exco teta7b 'UY' 'UZ'))
+       - ((exco teta7a 'UY' 'UZ') * (exco teta7b 'UX' 'UZ'));
+  taw1 = CHAN  taw1 'TYPE' 'SCALAIRE';
+  teta7c=((exco teta7b 'UY' 'UX') * (exco taw1   'UZ' 'UX'))
+      et (-1.* ((exco teta7b 'UX' 'UY') * (exco taw1   'UZ' 'UY')));
+*        - ((exco teta7b 'UX' 'UY') * (exco taw1   'UZ' 'UY'));  bug !!!
+*  vteta7c = vect (chan chpo mod7 teta7c) (mots 'UX' 'UY') 1.E-2 BLEU;
+
+  teta7 = teta7c;
+* passage au noeud + normalisation du chamelem
+  teta7 = CHAN teta7 mod7 'NOEUD';
+  nteta7 = (PSCA teta7 teta7 (mots 'UX' 'UY') (mots 'UX' 'UY'))**(-0.5);
+*  mess (maxi nteta7) (mini nteta7);
+  teta7 = teta7 * nteta7;
+  TETA = CHAN 'CHPO' mod7 teta7 'MOYE';
+  TETA = REDU TETA MBOUGER;
+
+* normalisation du chpoint + elargissement à MAIL
+  nTETA = (PSCA TETA TETA (mots 'UX' 'UY') (mots 'UX' 'UY'))**(-0.5);
+  TETA = (TETA * (nTETA * XMULT))
+       + (MANU 'CHPO' MAIL 2 'UX' 0. 'UY' 0. 'NATURE' 'DIFFUS') ;
+*  vteta = vect TETA 1.E-2 BLEU;  trac vteta MAIL;
+
+
+*------ DIRECTIONs a garder dans la table TABUTIL ------*
+
+  VECTEUR1 = PROI PFISS1 teta7 ;
+*on utilise desormais un CHPOINT et plus un POINT
+    TABUTIL .'DIRECTION1' = VECTEUR1;
+*on calule systematiquement DIRCISA  = DIRTANG PVEC DIRTETA
+    VECTEUR2 =  (-1.*(EXCO VECTEUR1 'UY' 'UX'))
+                  et (EXCO VECTEUR1 'UX' 'UY');
+    TABUTIL .'DIRECTION2' =  VECTEUR2;
+
+FINSI;
+* FIN DU CAS 2D ---------------------------------*
+*------------------------------------------------*
+
+
+
+*------------------------------------------------*
+* CAS 3D ----------------------------------------*
+SI (&DIME EGA 3);
+*    MESS 'ERREUR : CH_THETX NON PREVU EN 3D POUR L INSTANT';
+*    MESS 'CH_THETX EN PHASE DE TEST EN 3D POUR L INSTANT';
+
+*------ EFISS0 = ELEMENTS CONTENANT LE FRONT DE FISSURE ------*
+*
+  MAILPSIP = EXTR psy1 'MAILLAGE';
+  MAILPSIP = ELEM MAILLAGE 'APPUYE' 'STRICTEMENT' MAILPSIP;
+  psy1e = CHAN 'CHAM' psy1 MAILPSIP;
+  phy1e = CHAN 'CHAM' phy1 MAILPSIP;
+  EFISS0 = ((ELEM psy1e 'EGSUPE' 0.) INTE (ELEM psy1e 'EGINFE' 0.))
+      INTE ((ELEM phy1e 'EGSUPE' 0.) INTE (ELEM phy1e 'EGINFE' 0.));
+  DX0 = ((MESU EFISS0 'VOLUME') / (nbel EFISS0)) ** (1./3.);
+  EPS0P = 1.E-4 * DX0;
+  EPS0N = -1.E-4 * DX0;
+  EFISS0= ((ELEM psy1e 'EGSUP' EPS0N) INTE (ELEM psy1e 'EGINF' EPS0P))
+     INTE ((ELEM phy1e 'EGSUP' EPS0N) INTE (ELEM phy1e 'EGINF' EPS0P));
+
+*------ Recup de MBOUGER et de MAIL ------*
+*
+  MBOUGER = EFISS0;
+* boucle sur les couches
+  SI (COUCHE '>' 1);
+  REPE BCOUCH (COUCHE - 1) ;
+       MBOUGER = ELEM MAILLAGE 'APPUYE' 'LARG' MBOUGER ;
+  FIN  BCOUCH ;
+  FINSI;
+
+* MAIL = maillage de definition de TETA
+  MAIL = ELEM MAILLAGE 'APPU' 'LARG' MBOUGER ;
+
+* Psi et Phi doivent etre entirement definis sur MAIL
+  MINTER = INTE (CHAN 'POI1' MAIL) (EXTR psy1 'MAILLAGE');
+  NBEL1  = NBEL (DIFF (CHAN 'POI1' MAIL) MINTER );
+  SI (NBEL1 NEG 0) ;
+    MESS NBEL1 'points des couches ou Psi et Phi sont indefinis';
+    ERRE 21;
+  FINS;
+
+* inutile de chercher a calculer + loin que le domaine de def de psi et phi
+  MAIL = MAIL inte MAILPSIP;
+  mod7 = MODE MAIL 'MECANIQUE' 'ELASTIQUE' ;
+
+*--- Travail sur les level set
+*    pour definir le repere local du front de fissure ------*
+*--- Creation du TETA global ------*
+*
+* Vecteur direction unitaire
+  lv7 = (NOMC 'UX' psy1 'NATU' 'DIFFUS') ET
+        (NOMC 'UY' phy1 'NATU' 'DIFFUS') ET
+        (MANU 'CHPO' MAIL 1 'UZ' 0. 'NATU' 'DIFFUS');
+  glv7 = GRAD mod7 lv7 ;
+  gpsy1= EXCO glv7 (mots 'UX,X' 'UX,Y' 'UX,Z') (mots 'UX' 'UY' 'UZ');
+  gpsy1= CHAN gpsy1 'TYPE' 'SCALAIRE';
+*   gpsy1= CHAN gpsy1 'TYPE' 'DEPLACEMENT';
+  gphy1s= EXCO glv7 (mots 'UY,X' 'UY,Y' 'UY,Z') (mots 'UX' 'UY' 'UZ');
+  gphy1s= CHAN gphy1s 'TYPE' 'SCALAIRE';
+*   gphy1= CHAN gpsy1 'TYPE' 'DEPLACEMENT';
+*  mess '* taw1 = (grad PSI) pvec (grad PHI)';
+* ~(grad PSI) mais pas tout a fait...
+  taw1s = ( ((exco gpsy1 'UY' 'UX') * (exco gphy1s 'UZ' 'UX'))
+          - ((exco gpsy1 'UZ' 'UX') * (exco gphy1s 'UY' 'UX')) )
+       et ( ((exco gpsy1 'UZ' 'UY') * (exco gphy1s 'UX' 'UY'))
+          - ((exco gpsy1 'UX' 'UY') * (exco gphy1s 'UZ' 'UY')) )
+       et ( ((exco gpsy1 'UX' 'UZ') * (exco gphy1s 'UY' 'UZ'))
+          - ((exco gpsy1 'UY' 'UZ') * (exco gphy1s 'UX' 'UZ')) );
+  taw1s = CHAN  taw1s 'TYPE' 'SCALAIRE';
+  teta1s = ( ((exco gphy1s 'UY' 'UX') * (exco taw1s 'UZ' 'UX'))
+           - ((exco gphy1s 'UZ' 'UX') * (exco taw1s 'UY' 'UX')) )
+        et ( ((exco gphy1s 'UZ' 'UY') * (exco taw1s 'UX' 'UY'))
+           - ((exco gphy1s 'UX' 'UY') * (exco taw1s 'UZ' 'UY')) )
+        et ( ((exco gphy1s 'UX' 'UZ') * (exco taw1s 'UY' 'UZ'))
+           - ((exco gphy1s 'UY' 'UZ') * (exco taw1s 'UX' 'UZ')) );
+
+* PASSAGE AU NOEUD DES CHAMELEMS (normalisation inutile?)
+  teta1 = CHAN teta1s mod7 'NOEUD';
+*   nteta1 = (PSCA teta1 teta1
+*   (mots 'UX' 'UY' 'UZ') (mots 'UX' 'UY' 'UZ'))**(-0.5);
+*   teta1 = teta1 * nteta1;
+  gphy1= CHAN gphy1s mod7 'NOEUD';
+  taw1 = CHAN taw1s mod7 'NOEUD';
+*   ntaw1 = (PSCA taw1  taw1
+*   (mots 'UX' 'UY' 'UZ') (mots 'UX' 'UY' 'UZ'))**(-0.5);
+*   taw1 = taw1 * ntaw1;
+
+* CREATION + NORMALISATION DES CHPOINTS
+* + REDU a  MBOUGER + (re)-elargissement à MAIL
+* TETA
+  TETA = CHAN 'CHPO' mod7 teta1 'MOYE';
+*   nTETA = (PSCA TETA TETA
+*   (mots 'UX' 'UY' 'UZ') (mots 'UX' 'UY' 'UZ'))**(-0.5);
+* si TETA quasi-nul, alors on a un point singulier -> on fait attention lors de la normalisation !
+  nTETA = PSCA TETA TETA (mots 'UX' 'UY' 'UZ') (mots 'UX' 'UY' 'UZ');
+  mTETA = (MASQ nTETA 'SUPERIEUR' 1.E-4);
+  nTETA = (BORN nTETA 'SCAL' 'MINIMUM' 1.E-4)**-0.5;
+  nTETA = mTETA * nTETA;
+  TETA = chan (TETA * nTETA) 'ATTRIBUT' 'NATURE' 'DIFFUS';
+  TABUTIL . 'V1' = TETA;
+  TETA = (REDU TETA MBOUGER);
+*   + (MANU 'CHPO' MAIL 3 'UX' 0. 'UY' 0. 'UZ' 0. 'NATURE' 'DIFFUS') ;
+* TAW
+  GPHY = CHAN 'CHPO' mod7 gphy1 'MOYE';
+  nGPHY = (PSCA  GPHY GPHY
+      (mots 'UX' 'UY' 'UZ') (mots 'UX' 'UY' 'UZ'))**(-0.5);
+* GPHY a priori jamais nul -> on laisse ci dessus
+  GPHY = chan (GPHY * nGPHY) 'ATTRIBUT' 'NATURE' 'DIFFUS';
+  TABUTIL . 'V2' = GPHY;
+  GPHY = (REDU GPHY MBOUGER);
+*   + (MANU 'CHPO' MAIL 3 'UX' 0. 'UY' 0. 'UZ' 0. 'NATURE' 'DIFFUS') ;
+* TAW
+  TAW = CHAN 'CHPO' mod7 taw1 'MOYE';
+*   nTAW = (PSCA  TAW TAW
+*       (mots 'UX' 'UY' 'UZ') (mots 'UX' 'UY' 'UZ'))**(-0.5);
+* si TAW quasi-nul, alors on a un point singulier -> on fait attention lors de la normalisation !
+  nTAW = PSCA TAW TAW (mots 'UX' 'UY' 'UZ') (mots 'UX' 'UY' 'UZ');
+  mTAW = (MASQ nTAW 'SUPERIEUR' 1.E-4);
+  nTAW = (BORN nTAW 'SCAL' 'MINIMUM' 1.E-4)**-0.5;
+  nTAW = mTAW * nTAW;
+  TAW = chan (TAW * nTAW) 'ATTRIBUT' 'NATURE' 'DIFFUS';
+  TABUTIL . 'V3' = TAW;
+  TAW = (REDU TAW MBOUGER);
+*   + (MANU 'CHPO' MAIL 3 'UX' 0. 'UY' 0. 'UZ' 0. 'NATURE' 'DIFFUS') ;
+*
+*  trac ((vect TETA 0.05 'BLEU') et (vect TAW  0.05 'VERT'))
+*       ((aret MAIL) et PFISS);
+
+
+*------ DIRECTIONs a garder dans la table TABUTIL ------*
+
+* repere local du front
+*   gphy7 = PROI gphy1 mod7 PFISS1;
+*   teta7 = PROI teta1 mod7 PFISS1;
+*   taw7  = PROI taw1  mod7 PFISS1;
+* => pas assez regulier => provoque des oscillations non symetrique
+* si 1 point du front (symetrique) appartient a la frontiere entre 2 elements
+  gphy7 = INT_COMP MBOUGER GPHY PFISS1;
+  teta7 = INT_COMP MBOUGER TETA PFISS1;
+  taw7  = INT_COMP MBOUGER TAW  PFISS1;
+* normalisation
+  ngphy7 = (PSCA gphy7  gphy7
+  (mots 'UX' 'UY' 'UZ') (mots 'UX' 'UY' 'UZ'))**(-0.5);
+  gphy7 = gphy7 * ngphy7;
+  nteta7 = (PSCA teta7  teta7
+  (mots 'UX' 'UY' 'UZ') (mots 'UX' 'UY' 'UZ'))**(-0.5);
+  teta7 = teta7 * nteta7;
+  ntaw7 = (PSCA taw7  taw7
+  (mots 'UX' 'UY' 'UZ') (mots 'UX' 'UY' 'UZ'))**(-0.5);
+  taw7 = taw7 * ntaw7;
+*on utilise desormais des CHPOINT et plus des POINTs
+  TABUTIL .'DIRECTION1' = chan teta7 'ATTRIBUT' 'NATURE' 'DIFFUS';
+  TABUTIL .'DIRECTION2' = chan gphy7 'ATTRIBUT' 'NATURE' 'DIFFUS';
+  TABUTIL .'DIRECTION3' = chan taw7 'ATTRIBUT' 'NATURE' 'DIFFUS';
+
+* mess '*------ identification de chaque element du front ------*';
+*------ identification de chaque element du front ------*
+*
+* pour identifier les elem a bouger, on boucle sur les points du front
+  nefiss1 = 0;
+  EFISSi = tabl;
+  nPFISS1 = NBEL PFISS1;
+  ipfiss1 = 0;
+* boucle sur les points du front
+  repe BPFISS1 nPFISS1;
+    ipfiss1 = ipfiss1 + 1;
+    PFISS1i = POIN PFISS1 ipfiss1;
+
+* mess 'ch_thetx: ' ipfiss1 ' -> noeud' (noeu PFISS1i)
+*      'on cherche le(s) element(s)' (nefiss1 + 1);
+
+*   on recupere le(s) element(s) contenant le ieme point
+*     Etesti = MBOUGER ELEM 'CONTENANT' PFISS1i;
+    Etesti = MBOUGER ELEM 'CONTENANT' PFISS1i 'TOUS';
+*     list Etesti;
+
+    si(ega ipfiss1 1);
+      nefiss1 = nefiss1 + 1;
+      EFISSi . nefiss1 = Etesti;
+* mess '1ere fois ->' nefiss1;
+    sino;
+
+*       Etesti = diff Etesti (inte Etesti (EFISSi . nefiss1) 'NOVERIF');
+*       si(neg (nbel Etesti) 0);
+*         nefiss1 = nefiss1 + 1;
+*         EFISSi . nefiss1 = Etesti;
+*       fins;
+
+*     de base on enleve l eventuel element n-2
+      si(nefiss1 >eg 2);
+        Einte2 = inte Etesti (EFISSi . (nefiss1-1)) 'NOVERIF';
+        si(neg (nbel Einte2) 0);
+          Etesti = diff Etesti Einte2;
+          si((nbel Etesti) ega 0);
+* mess 'tous les elements sont deja dans' (nefiss1-1) 'on itere' ;
+            iter BPFISS1;
+          fins;
+        fins;
+      fins;
+
+*     puis on fait le travail
+      Einte = inte Etesti (EFISSi . nefiss1) 'NOVERIF';
+* mess 'on a' (nbel Einte) 'elements en commun avec' (nefiss1);
+      si(ega (nbel Einte) 0);
+        nefiss1 = nefiss1 + 1;
+        EFISSi . nefiss1 = Etesti;
+* mess '                ->' nefiss1;
+      sino;
+*     il existe des elements en commun
+*        on a peut etre trop pris d element dans l ancien...
+         Etemp = diff (EFISSi . nefiss1) Einte;
+         si(neg (nbel Etemp) 0);
+* mess ' on parvient a enlever des elements de lancien' nefiss1
+*      ' qui existe encore' (nbel Etemp);
+*          on enleve ce qu il y a en trop et on met ce qui reste dans le nouveau
+           EFISSi . nefiss1 = Etemp;
+*            Etesti = diff Etesti Etemp ;
+             Einte = inte Etesti Etemp 'NOVERIF';
+             Etesti = diff Etesti Einte;
+           si(neg (nbel Etesti) 0);
+             nefiss1 = nefiss1 + 1;
+             EFISSi . nefiss1 = Etesti;
+* mess ' on stocke ce qui reste (soit ' (nbel Etesti) ' -> ' nefiss1;
+           finsi;
+         sino;
+*          on a peut etre trop pris d element dans le nouveau...
+           Etemp = diff Etesti Einte;
+           si(neg (nbel Etemp) 0);
+             nefiss1 = nefiss1 + 1;
+             EFISSi . nefiss1 = Etemp;
+* mess ' on parvient a enlever des elements du nouveau'
+*      ' qui existe encore' (nbel Etemp) ' -> ' nefiss1;
+           fins;
+         fins;
+
+      fins;
+    fins;
+*     list EFISSi;
+  fin BPFISS1;
+
+
+*------ creation des TETA de chaque element du front ------*
+*
+  TTETA = TABL;
+  coef2 = 1.E-2 * DX0;
+* boucle sur les elements du front
+  iefiss1 = 0;
+  REPE BEFISS2 nefiss1;
+    iefiss1 = iefiss1 + 1;
+
+*   chpoint TETA2 de chaque element contenant le front (=tranche)
+    TETA2 = REDU TETA  EFISSi . iefiss1;
+
+*   on replace les COUCHES ici en faisant une suite
+    MBOUGERi = EFISSi . iefiss1;
+    SI (COUCHE '>' 1);
+    XCOUCH = 1.;
+    REPE BCOUCH (COUCHE - 1) ;
+         XCOUCH = XCOUCH + 1.;
+         MBOUGERi = ELEM MAILLAGE 'APPUYE' 'LARG' MBOUGERi;
+         TETA2 = TETA2 + (REDU TETA MBOUGERi) ;
+*bp_exp         TETA2 = TETA2 + ((1./XCOUCH) * (REDU TETA MBOUGERi)) ;
+    FIN  BCOUCH ;
+*bp_lin     TETA2 = TETA2 / (COUCHE - 1);
+    FINSI;
+*bp_+loin    TETA2 = REDU TETA MBOUGERi;
+
+*      trac (vect TETA2 DEPL BLEU) EFISS0;
+*     TTETA . (EFISSi . iefiss1) = TETA2;
+*   avancee VECTEUR2 de chaque element du front (=segment)
+*    teta72 = PROI PFISS (redu teta7 EFISSi . iefiss1);
+*    teta72 = INT_COMP EFISSi . iefiss1 TETA2 PFISS;
+    teta72 = INT_COMP EFISS0 TETA2 PFISS;
+*      trac (vect teta72 DEPL BLEU 0.03) ( EFISS0 et PFISS);
+*   calcul de l'aire fracturee par cette avancee virtuelle
+*rem: si discretisation non conforme erreur/XAFISS2 peut etre importante
+    PFISS2 = PFISS PLUS (teta72 * coef2);
+    AFISS2 = PFISS2 REGL PFISS 1;
+*     trac (vect teta72 DEPL BLEU 0.03) (EFISS0 et PFISS et AFISS2);
+    XAFISS2 = (MESU AFISS2 'SURF') / coef2;
+*     mess iefiss1 'ieme element de surface = ' XAFISS2;
+*     trac (vect teta72 'DEPL') (AFISS2 et PFISS);
+    TTETA . (EFISSi . iefiss1) = TETA2 * (XMULT / XAFISS2);
+
+*     nom0 = mots 'UX' 'UY' 'UZ';
+*     nom1 = mots (chai 'UX' iefiss1)
+*                 (chai 'UY' iefiss1) (chai 'UZ' iefiss1);
+*     si(iefiss1 ega 1);
+*       toto = (TTETA . (EFISSi . iefiss1)) nomc nom0 nom1;
+*     sinon;
+*       toto = toto et
+*       ((TTETA . (EFISSi . iefiss1)) nomc nom0 nom1);
+*     finsi;
+*
+
+  FIN  BEFISS2;
+
+* opti sort  'THETA.inp';
+* sort 'AVS' MBOUGER toto;
+
+
+
+* champ TETA global
+  teta72 = INT_COMP EFISS0 TETA PFISS;
+  PFISS2 = PFISS PLUS (teta72 * coef2);
+  AFISS2 = PFISS2 REGL PFISS 1;
+  XAFISS2 = (MESU AFISS2 'SURF') / coef2;
+  TTETA . 'GLOBAL' = TETA * (XMULT / XAFISS2);
+
+* pour renvoyer la table TTETA
+  TETA = TTETA;
+
+FINSI;
+* FIN DU CAS 3D ---------------------------------*
+*------------------------------------------------*
+
+
+FINPROC TETA TABUTIL;
+*     Fin de la procedure CH_THETX
+*--------------------------------------------*
+
+
+
+
+
+
+
+

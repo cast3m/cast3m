@@ -1,0 +1,884 @@
+C PROPER    SOURCE    KICH      18/10/04    21:15:39     9946
+
+C-----------------------------------------------------------------------
+C  Ce sous programme gere les operateurs 'PLUS', 'MOIN' et 'TOUR',
+C  ainsi que les options 'TRAN' et 'ROTA' de de l'operateur 'DEDU'
+C
+C       OBJ2 = OBJ1 'PLUS' POIN1 / CHPO1 ;
+C  OBJ1 : type POINT, MAILLAGE, CHPOINT, MCHAML, MMODEL, RIGIDITE
+C
+C       OBJ2 = OBJ1 'MOIN' POIN1 / CHPO1 ;
+C  OBJ1 : type POINT, MAILLAGE, CHPOINT, MCHAML, MMODEL, RIGIDITE
+C
+C       CHPO1 = GEO2 'MOIN' GEO1 ;
+C  GEO2, GEO1 : type MAILLAGE, CHPO1 : type CHPO1
+C  determination du CHPOINT dont les points support correspond aux
+C  points de GEO1 et permettant d'obtenir GEO2 a partir de GEO1.
+C
+C       OBJ2 = OBJ1 'TOUR' FLOT1 POIN1 (POIN2) ;
+C  OBJ1 : type POINT, MAILLAGE, CHPOINT, MCHAML, MMODEL, (RIGIDITE ?)
+C  Certaines composantes subissent egalement la rotation.
+C  (Appel via tourne.eso - non disponible en DIMEnsion 1)
+C
+C       OBJ2 = OBJ1 'DEDU' 'TRAN' GEO1 GEO2 ;
+C  OBJ1 : type POINT, MAILLAGE, CHPOINT, MCHAML, MMODEL, RIGIDITE
+C  GEO1, GEO2 : type MAILLAGE (GEO2 image de GEO1)
+C  (Appel via dedu.eso)
+C
+C       OBJ2 = OBJ1 'DEDU' FLOT1 POIN1 (POIN2 si 3D) 'ROTA' GEO1 GEO2 ;
+C  OBJ1 : type POINT, MAILLAGE, CHPOINT, MCHAML, MMODEL, RIGIDITE
+C  GEO1, GEO2 : type MAILLAGE (GEO2 image de GEO1 par la ROTAtion)
+C  POIN1 (POIN2) : type POINT (centre ou axe de la rotation)
+C  FLOT1 : type FLOTTANT (angle de rotation)
+C  (Appel via dedu.eso - non disponible en DIMEnsion 1)
+C-----------------------------------------------------------------------
+C  Remarques :
+C  -----------
+C  Dans le cas des syntaxes particulieres (1) POIN2 = POIN1 'PLUS' VECT1
+C  (ou POIN2 = POIN1 'MOIN' VECT1), et (2) POIN2 = POIN1 'TOUR' FLOT1
+C  PT1 (PT2) , la densite du POIN2 obtenu est, dans le cas (1), la den-
+C  site COURANTE definie via l'operateur 'DENSITE', et, dans le cas (2),
+C  identique a celle du POIN1.
+C  Pour toutes les autres types d'objets et syntaxes, la densite des
+C  points transformes est identique a celle des points d'origine.
+C-----------------------------------------------------------------------
+C  11/1997 : KICH
+C  10/2003 : modifications pour le cas IDIM=1.
+*  07/2007 : PM initialisation de NBREF dans le cas d'un point en entrée
+c  07/2009 : BP pour DEDU 'TRAN' avec rigidite, DEDU3.eso teste si IPOIN1 = translation?
+C-----------------------------------------------------------------------
+
+      SUBROUTINE PROPER(ITYP)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCREEL
+-INC SMCOORD
+-INC SMELEME
+-INC CCGEOME
+-INC SMRIGID
+-INC SMCHPOI
+-INC SMMODEL
+-INC SMCHAML
+-INC SMTABLE
+
+
+      DIMENSION Y(3)
+      CHARACTER*4 MOT1
+      CHARACTER*8 ITOPE,MO8
+
+      COMMON / CTOURN / XPT1,YPT1,ZPT1,XV1,YV1,ZV1,XV2,YV2,ZV2,
+     .                  XVEC,YVEC,ZVEC,ANGLE,ICLE
+
+      SEGMENT ICPR(XCOOR(/1)/(IDIM+1))
+      SEGMENT ICP1(XCOOR(/1)/(IDIM+1))
+      SEGMENT MLITY
+        CHARACTER*8 LITY2(NTY2)
+      ENDSEGMENT
+      SEGMENT IPOSI
+        integer IPOSIT(mlotab)
+      ENDSEGMENT
+
+C  PILO : liste de pointeurs sur les objets DSOBJ a transformer
+      SEGMENT PILO(0)
+      SEGMENT DSOBJ
+        INTEGER INIPOI,INIFIN
+        CHARACTER*8 LETYP
+      ENDSEGMENT
+
+C  IPLMAIL : liste des maillages elementaires d'un objet a transformer
+      SEGMENT IPLMAIL(0)
+
+C  ITABEL : contient, initialement, tous les maillages elementaires du
+C  maillage initial GEO1, puis tous les maillages elementaires et refe-
+C  rence des objets initiaux qui ont deja ete transformes afin d'eviter
+C  de les transporter plusieurs fois
+C  INOUVEL : contient l'image des maillages elementaires et references
+C  par la transformation changeant GEO1 en GEO2
+C    GEO1 --> GEO2 et ITABEL(i) --> INOUVEL(i)
+      SEGMENT ITABEL(0)
+      SEGMENT INOUVEL(0)
+
+      idimp1=IDIM+1
+      ANGLE=0.
+
+C  Signification de ITYP (argument de PROPER) :
+C   - ITYP = 1 : operateur PLUS
+C   - ITYP = 2 : operateur MOIN
+C   - ITYP = 3 : operateur TOUR (via sp tourne.eso)
+C   - ITYP = 4 : operateur DEDU 'TRAN' (via sp dedu.eso)
+C   - ITYP = 5 : operateur DEDU 'ROTA' (via sp dedu.eso)
+      IF ((ITYP.EQ.1).OR.(ITYP.EQ.4)) THEN
+        ICLE=1
+        ISENS=1
+      ENDIF
+      IF (ITYP.EQ.2) THEN
+        ICLE=1
+        ISENS=-1
+      ENDIF
+      IF ((ITYP.EQ.3).OR.(ITYP.EQ.5)) THEN
+        ICLE=2
+C  Lecture (obligatoire) de l'angle de rotation
+        CALL LIRREE(FLO1,1,IRETOU)
+        IF (IRETOU.EQ.0) THEN
+          CALL ERREUR(884)
+          RETURN
+        ENDIF
+        ANGLE=FLO1-INT(FLO1/360.)*360.
+        IF (ANGLE.GT.180.) ANGLE=ANGLE-360.
+        IF (ANGLE.LT.(-180.)) ANGLE=ANGLE+360.
+        ANGLE=ANGLE*XPI/180.
+        CO=COS(ANGLE)
+        SI=SIN(ANGLE)
+      ENDIF
+C  Rappel : ICLE=2 (rotation) n'est disponible que si IDIM = 2 ou 3
+
+C  Nombre d'objets definissant l'operation a effectuer
+      IF ((ITYP.EQ.1).OR.(ITYP.EQ.2))  MINIOBJ=1
+      IF ((ITYP.EQ.3).AND.(IDIM.EQ.2)) MINIOBJ=1
+      IF ((ITYP.EQ.3).AND.(IDIM.GE.3)) MINIOBJ=2
+      IF (ITYP.EQ.4)                   MINIOBJ=2
+      IF ((ITYP.EQ.5).AND.(IDIM.EQ.2)) MINIOBJ=3
+      IF ((ITYP.EQ.5).AND.(IDIM.GE.3)) MINIOBJ=4
+
+C  Tableau des types d'objets pouvant etre transformes
+      NTY2=6
+      SEGINI MLITY
+      LITY2(1)='POINT   '
+      LITY2(2)='MAILLAGE'
+      LITY2(3)='CHPOINT '
+      LITY2(4)='MMODEL  '
+      LITY2(5)='MCHAML  '
+      LITY2(6)='RIGIDITE'
+      SEGDES MLITY
+      ITOPE='        '
+      itab=0
+C  Stockage dans le segment PILO (pointeur IP1) de tous les objets,
+C  donnes en entree a l'operateur et dont le type est inclus dans MLITY
+C  (type POINT,MAILLAGE,CHPOINT,MCHAML,MMODEL ou RIGIDITE)
+      CALL EMPIL1(IP1,MLITY,IRETOU,itab,iposi)
+       PILO=ip1
+       segact pilo
+       IF (IERR.NE.0) GO TO 100
+      IF (IRETOU.EQ.20) THEN
+        MOTERR(1:30) ='POINT ou MAILLAGE ou CHPOINT'
+        CALL ERREUR(881)
+        GOTO 100
+      ENDIF
+
+      PILO=IP1
+      SEGACT PILO
+      NIOBJ=PILO(/1)
+C  Erreur si pas assez d'objets (pas d'objets a transformer de donner)
+      IF (NIOBJ.LE.MINIOBJ) THEN
+        MOTERR(1:30) =' d autres arguments   '
+        CALL ERREUR(881)
+        GOTO 100
+      ENDIF
+
+C  Lecture des MINIOBJ objets definissant la transformation a effectuer
+C ======================================================================
+      DSOBJ=nint(PILO(NIOBJ))
+      SEGACT DSOBJ
+      ITOPE=LETYP
+      IPOIN1=INIPOI
+      SEGDES DSOBJ
+C  Option DEDU 'TRAN' :
+C ----------------------
+      IF (ITYP.EQ.4) THEN
+C  Syntaxe incorrecte : maillage GEO2 attendu
+        IF (ITOPE.NE.'MAILLAGE') THEN
+          MOTERR(1:30) ='un  MAILLAGE    '
+          CALL ERREUR(881)
+          GOTO 100
+        ENDIF
+        IPT2=IPOIN1
+        DSOBJ=nint(PILO(NIOBJ-1))
+        SEGACT DSOBJ
+        IPT1=INIPOI
+        ITOPE=LETYP
+        SEGDES DSOBJ
+C  Syntaxe incorrecte : maillage GEO1 attendu
+        IF (ITOPE.NE.'MAILLAGE') THEN
+          MOTERR(1:30) = 'un MAILLAGE   '
+          CALL ERREUR(881)
+          GOTO 100
+        ENDIF
+        CALL DEDU1(IPT1,IPT2,ICP1,ITABEL,INOUVEL,IPOIN1)
+        IF (IERR.NE.0) GOTO 100
+        ITOPE='CHPOINT '
+        ICPR=ICP1
+        SEGACT ITABEL*MOD,INOUVEL*MOD
+      ENDIF
+C  Option DEDU 'ROTA' :
+C ----------------------
+      IF (ITYP.EQ.5) THEN
+C  Syntaxe incorrecte : maillage GEO2 attendu
+        IF (ITOPE.NE.'MAILLAGE') THEN
+          MOTERR(1:30) ='un  MAILLAGE   '
+          CALL ERREUR(881)
+          GOTO 100
+        ENDIF
+        IPT2=IPOIN1
+        DSOBJ=nint(PILO(NIOBJ-1))
+        SEGACT DSOBJ
+        IPT1=INIPOI
+        ITOPE=LETYP
+        SEGDES DSOBJ
+C  Syntaxe incorrecte : maillage GEO1 attendu
+        IF (ITOPE.NE.'MAILLAGE') THEN
+          MOTERR(1:30) = 'un MAILLAGE    '
+          CALL ERREUR(881)
+          GOTO 100
+        ENDIF
+        CALL DEDU1(IPT1,IPT2,ICP1,ITABEL,INOUVEL,IPOIN1)
+        IF (IERR.NE.0) GOTO 100
+        DSOBJ=nint(PILO(NIOBJ-2))
+        SEGACT DSOBJ
+        IPOIN1=INIPOI
+        ITOPE=LETYP
+        SEGDES DSOBJ
+C  Syntaxe incorrecte : POINT attendu (centre 2D, 2nd point axe 3D)
+        IF (ITOPE.NE.'POINT   ') THEN
+          MOTERR(1:30) = 'un POINT   '
+          CALL ERREUR(881)
+          GOTO 100
+        ENDIF
+        SEGACT MCOORD
+        IREF=IPOIN1*idimp1-IDIM
+        XPT1=XCOOR(IREF)
+        YPT1=XCOOR(IREF+1)
+        IF (IDIM.LT.3) THEN
+          ZPT1=0.
+          XVEC=0.
+          YVEC=0.
+          ZVEC=1.
+        ELSE
+          DSOBJ=nint(PILO(NIOBJ-3))
+          SEGACT DSOBJ
+          ITOPE=LETYP
+          IPT2=INIPOI
+          SEGDES DSOBJ
+C  Syntaxe incorrecte : POIN1 attendu en 3D (1er point axe rotation)
+          IF (ITOPE.NE.'POINT   ') THEN
+            MOTERR(1:30) = 'deux POINTs   '
+            CALL ERREUR(881)
+            GOTO 100
+          ENDIF
+          XPT2=XPT1
+          YPT2=YPT1
+          ZPT2=XCOOR(IREF+2)
+          IREF=IPT2*idimp1-IDIM
+          XPT1=XCOOR(IREF)
+          YPT1=XCOOR(IREF+1)
+          ZPT1=XCOOR(IREF+2)
+          XVEC=XPT2-XPT1
+          YVEC=YPT2-YPT1
+          ZVEC=ZPT2-ZPT1
+          DVEC=SQRT(XVEC*XVEC+YVEC*YVEC+ZVEC*ZVEC)
+          XVEC=XVEC/DVEC
+          YVEC=YVEC/DVEC
+          ZVEC=ZVEC/DVEC
+        ENDIF
+        XV1=-YVEC
+        YV1=XVEC
+        DV1=XV1*XV1+YV1*YV1
+        IF (DV1.GE.0.1) THEN
+          ZV1=0.
+          DV1=SQRT(DV1)
+          XV1=XV1/DV1
+          YV1=YV1/DV1
+        ELSE
+          XV1=0.
+          YV1=-ZVEC
+          ZV1=YVEC
+          DV1=SQRT(YV1*YV1+ZV1*ZV1)
+          YV1=YV1/DV1
+          ZV1=ZV1/DV1
+        ENDIF
+        XV2=YVEC*ZV1-ZVEC*YV1
+        YV2=ZVEC*XV1-XVEC*ZV1
+        ZV2=XVEC*YV1-YVEC*XV1
+        ICPR=ICP1
+        SEGACT ITABEL*MOD,INOUVEL*MOD
+      ENDIF
+C  Operateurs PLUS et MOIN :
+C ---------------------------
+      IF ((ITYP.EQ.1).OR.(ITYP.EQ.2)) THEN
+        IF ((ITOPE.NE.'MAILLAGE').AND.(ITOPE.NE.'POINT   ').AND.
+     .      (ITOPE.NE.'CHPOINT ')) THEN
+C  Syntaxe incorrecte : le vecteur VEC1, le champ par point CHPO1 ou
+C  le maillage GEO1 etait attendu
+          MOTERR(1:30) ='un POINT, CHPOINT ou MAILLAGE'
+          CALL ERREUR(881)
+          GOTO 100
+        ENDIF
+C  Deplacement (translation) donne par un vecteur VEC1
+        IF (ITOPE.EQ.'POINT   ') THEN
+          IREF=(IPOIN1-1)*idimp1
+          SEGACT MCOORD
+          DO i=1,IDIM
+            Y(i)=XCOOR(IREF+i)*ISENS
+          ENDDO
+C  Deplacement donne par un champ point CHPO1
+        ELSE IF (ITOPE.EQ.'CHPOINT ') THEN
+C  Cas particulier : operateur MOINS - maillage GEO1 donne
+        ELSE IF (ITOPE.EQ.'MAILLAGE') THEN
+          IPT1=IPOIN1
+          DSOBJ=nint(PILO(NIOBJ-1))
+          SEGACT DSOBJ
+          IPT2=INIPOI
+          ITOPE=LETYP
+          SEGDES DSOBJ
+C  Syntaxe incorrecte : maillage GEO2 attendu
+          IF (ITOPE.NE.'MAILLAGE') THEN
+            MOTERR(1:30) = 'un MAILLAGE     '
+            CALL ERREUR(881)
+            GOTO 100
+          ENDIF
+          GOTO 500
+        ENDIF
+        SEGINI ICPR,INOUVEL,ITABEL
+      ENDIF
+C  Operateur TOUR :
+C ------------------
+      IF (ITYP.EQ.3) THEN
+C  Syntaxe incorrecte : POINT attendu (centre 2D, 2nd point axe 3D)
+        IF (ITOPE.NE.'POINT   ') THEN
+          MOTERR(1:30) = 'un POINT    '
+          CALL ERREUR(881)
+          GOTO 100
+        ENDIF
+        SEGACT MCOORD
+        IREF=IPOIN1*idimp1-IDIM
+        XPT1=XCOOR(IREF)
+        YPT1=XCOOR(IREF+1)
+        IF (IDIM.LT.3) THEN
+          ZPT1=0.
+          XVEC=0.
+          YVEC=0.
+          ZVEC=1.
+        ELSE
+          DSOBJ=nint(PILO(NIOBJ-1))
+          SEGACT DSOBJ
+          ITOPE=LETYP
+          IPT2=INIPOI
+          SEGDES DSOBJ
+C  Syntaxe incorrecte : POINT attendu en 3D (1er point axe rotation)
+          IF (ITOPE.NE.'POINT   ') THEN
+            MOTERR(1:30) = 'deux POINTs    '
+            CALL ERREUR(881)
+            GOTO 100
+          ENDIF
+          XPT2=XPT1
+          YPT2=YPT1
+          ZPT2=XCOOR(IREF+2)
+          IREF=IPT2*idimp1-IDIM
+          XPT1=XCOOR(IREF)
+          YPT1=XCOOR(IREF+1)
+          ZPT1=XCOOR(IREF+2)
+          XVEC=XPT2-XPT1
+          YVEC=YPT2-YPT1
+          ZVEC=ZPT2-ZPT1
+          DVEC=SQRT(XVEC*XVEC+YVEC*YVEC+ZVEC*ZVEC)
+          XVEC=XVEC/DVEC
+          YVEC=YVEC/DVEC
+          ZVEC=ZVEC/DVEC
+        ENDIF
+        XV1=-YVEC
+        YV1=XVEC
+        DV1=XV1*XV1+YV1*YV1
+        IF (DV1.GE.0.1) THEN
+          ZV1=0.
+          DV1=SQRT(DV1)
+          XV1=XV1/DV1
+          YV1=YV1/DV1
+        ELSE
+          XV1=0.
+          YV1=-ZVEC
+          ZV1=YVEC
+          DV1=SQRT(YV1*YV1+ZV1*ZV1)
+          YV1=YV1/DV1
+          ZV1=ZV1/DV1
+        ENDIF
+        XV2=YVEC*ZV1-ZVEC*YV1
+        YV2=ZVEC*XV1-XVEC*ZV1
+        ZV2=XVEC*YV1-YVEC*XV1
+        SEGINI ICPR,INOUVEL,ITABEL
+      ENDIF
+
+C  Boucle sur tous les objets a transformer
+C ==========================================
+      DO 200 L=1,NIOBJ-MINIOBJ
+        DSOBJ=nint(PILO(L))
+        SEGACT DSOBJ*MOD
+        SEGINI IPLMAIL
+C  IPLMAIL contient tous les maillages elementaires de l'objet L initial
+C  Creation objet transforme (INIFIN) par copie objet initial (INIPOI)
+        IF (LETYP.EQ.'MAILLAGE') THEN
+          IPLMAIL(**)=INIPOI
+        ELSE IF (LETYP.EQ.'CHPOINT ') THEN
+          MCHPO1=INIPOI
+          CALL COPIE2(MCHPO1,MCHPOI)
+          INIFIN=MCHPOI
+          SEGACT MCHPOI
+          DO i=1,IPCHP(/1)
+            MSOUPO=IPCHP(i)
+            SEGACT MSOUPO
+            IPLMAIL(**)=IGEOC
+            SEGDES MSOUPO
+          ENDDO
+          SEGDES MCHPOI
+        ELSE IF (LETYP.EQ.'MCHAML  ') THEN
+          MCHEL1=INIPOI
+          CALL COPIE8(MCHEL1,MCHELM)
+          INIFIN=MCHELM
+          SEGACT MCHELM
+          DO i=1,IMACHE(/1)
+            IPLMAIL(**)=IMACHE(i)
+          ENDDO
+          SEGDES MCHELM
+        ELSE IF (LETYP.EQ.'MMODEL  ') THEN
+          MMODE1=INIPOI
+          CALL COPIE9(MMODE1,MMODEL)
+          INIFIN=MMODEL
+          SEGACT MMODEL
+          DO i=1,KMODEL(/1)
+            IMODEL=KMODEL(i)
+            SEGACT IMODEL
+            IPLMAIL(**)=IMAMOD
+            SEGDES IMODEL
+          ENDDO
+          SEGDES MMODEL
+        ELSE IF (LETYP.EQ.'RIGIDITE') THEN
+C  Syntaxe incorrecte  SSI  objets RIGIDITE transformes via un CHPOINT
+c  IPOIN1 qui n'est pas une translation => test dans DEDU3
+          XERR1 = 0.D0
+          IF (ITOPE.EQ.'CHPOINT ') THEN
+            if(ITYP.eq.4)  call DEDU3(IPOIN1,XERR1)
+            if(ITYP.eq.5)  XERR1 = 1.D0
+          ENDIF
+          IF (XERR1.GT.(1.D-10)) THEN
+            CALL ERREUR(882)
+            GOTO 100
+          ENDIF
+          RI1=INIPOI
+          SEGINI,MRIGID=RI1
+          INIFIN=MRIGID
+          DO i=1,IRIGEL(/2)
+            IPLMAIL(**)=IRIGEL(1,i)
+          ENDDO
+          SEGDES MRIGID
+        ELSE IF (LETYP.EQ.'POINT   ') THEN
+C  Cas particulier syntaxe : POIN2 = POIN1 PLUS (MOIN) CHPO1;
+C  Creation d'un maillage IPT9 contenant un element POI1
+          IF (ITOPE.EQ.'CHPOINT ') THEN
+            NBNN=1
+            NBELEM=1
+            NBSOUS=0
+            NBREF=0
+            SEGINI MELEME
+            NUM(1,1)=INIPOI
+            SEGDES MELEME
+            IPT9=MELEME
+            IPLMAIL(**)=IPT9
+          ELSE
+C  Cas particulier syntaxe : POIN2 = POIN1 PLUS (MOIN) VECT1;
+            GOTO 210
+          ENDIF
+        ENDIF
+C  Boucle sur les sous-zones de l'objet L a transformer
+C  Pour ne transformer qu'une seule fois les maillages elementaires, on
+C  verifie si la zone elementaire est presente dans ITABEL. Si ce n'est
+C  pas le cas, on doit alors transformer cette zone et on met a jour
+C  ITABEL et INOUVEL en consequence.
+C  IPLMAIL contient initialement le maillage a transformer et a la fin
+C  de la boucle le maillage image (transforme)
+        DO IMEL=1,IPLMAIL(/1)
+          MELEME=IPLMAIL(IMEL)
+          SEGACT MELEME
+          NBSOUS=LISOUS(/1)
+          NBREF=LISREF(/1)
+C  Transformation des sous-objets s'ils existents
+          IF (NBSOUS.NE.0) THEN
+            NBNN=0
+            NBELEM=0
+            SEGINI IPT1
+C  Boucle sur les sous-objets
+            DO J=1,NBSOUS
+              IF (ITABEL(/1).NE.0) THEN
+                DO K=1,ITABEL(/1)
+C Verification si ce maillage n'a pas deja ete transforme
+                  IF (ITABEL(K).EQ.LISOUS(J)) THEN
+                    IPT1.LISOUS(J)=INOUVEL(K)
+                    GOTO 201
+                  ENDIF
+                ENDDO
+              ENDIF
+              MELE1=LISOUS(J)
+C  Verification pour DEDU que tous les POINTs de l'objet MELE1 subissent
+C  la transformation i.e. ont une image, soit ICP(i) non nul
+              IF ((ITYP.EQ.4).OR.(ITYP.EQ.5)) THEN
+                CALL DEDU2(MELE1,ICPR,IRETOU,ITYP)
+                IF (IERR.NE.0) THEN
+                  SEGSUP IPLMAIL
+                  GOTO 300
+                ENDIF
+                IF (IRETOU.NE.0) THEN
+                  INTERR(1)=L
+                  CALL ERREUR(883)
+                  SEGSUP IPLMAIL
+                  GOTO 300
+                ENDIF
+              ENDIF
+              ITABEL(**)=LISOUS(J)
+C  Operateur DEDU : activation obligatoire du segment ICPR
+              IF ((ITYP.EQ.4).OR.(ITYP.EQ.5)) SEGACT ICPR
+C  Transformation du maillage MELE1 en NOUV suivant ICLE
+              IF ((ITOPE.EQ.'POINT   ').AND.(ICLE.EQ.1)) THEN
+                CALL ADDITI(Y,MELE1,NOUV,ICPR)
+              ELSE IF ((ITOPE.EQ.'CHPOINT ').AND.(ICLE.EQ.1)) THEN
+                CALL CHDITI(IPOIN1,MELE1,NOUV,ICPR,ISENS)
+              ELSE IF (ICLE.EQ.2) THEN
+                CALL ADDITI(Y,MELE1,NOUV,ICPR)
+              ENDIF
+              INOUVEL(**)=NOUV
+              IPT1.LISOUS(J)=NOUV
+  201         CONTINUE
+            ENDDO
+C  Boucle sur les references si elles existent
+            IF (NBREF.NE.0) THEN
+              DO J=1,NBREF
+                DO K=1,ITABEL(/1)
+C Verification si ce maillage n'a pas deja ete transforme
+                  IF (ITABEL(K).EQ.LISREF(J)) THEN
+                    IPT1.LISREF(J)=INOUVEL(K)
+                    GOTO 202
+                  ENDIF
+                ENDDO
+                MELE1=LISREF(J)
+C  Verification pour DEDU que tous les POINTs de l'objet MELE1 subissent
+C  la transformation i.e. ont une image, soit ICP(i) non nul
+                IF ((ITYP.EQ.4).OR.(ITYP.EQ.5)) THEN
+                  CALL DEDU2(MELE1,ICPR,IRETOU,ITYP)
+                  IF (IERR.NE.0) THEN
+                    SEGSUP IPLMAIL
+                    GOTO 300
+                  ENDIF
+                  IF (IRETOU.NE.0) THEN
+                    INTERR(1)=L
+                    CALL ERREUR(883)
+                    SEGSUP IPLMAIL
+                    GOTO 300
+                  ENDIF
+                ENDIF
+                ITABEL(**)=LISREF(J)
+C  Operateur DEDU : activation obligatoire du segment ICPR
+                IF ((ITYP.EQ.4).OR.(ITYP.EQ.5)) SEGACT ICPR
+C  Transformation du maillage MELE1 en NOUV suivant ICLE
+                IF ((ITOPE.EQ.'POINT   ').AND.(ICLE.EQ.1)) THEN
+                  CALL ADDITI(Y,MELE1,NOUV,ICPR)
+                ELSE IF ((ITOPE.EQ.'CHPOINT ').AND.(ICLE.EQ.1)) THEN
+                  CALL CHDITI(IPOIN1,MELE1,NOUV,ICPR,ISENS)
+                ELSE IF (ICLE.EQ.2) THEN
+                  CALL ADDITI(Y,MELE1,NOUV,ICPR)
+                ENDIF
+                INOUVEL(**)=NOUV
+                IPT1.LISREF(J)=NOUV
+  202           CONTINUE
+              ENDDO
+            ENDIF
+            SEGDES IPT1
+            IPLMAIL(IMEL)=IPT1
+C L'objet est elementaire
+          ELSE
+            IF (ITABEL(/1).NE.0) THEN
+C Verification si ce maillage n'a pas deja ete transforme
+              DO K=1,ITABEL(/1)
+                IF (ITABEL(K).EQ.MELEME) THEN
+                  IPLMAIL(IMEL)=INOUVEL(K)
+                  GOTO 203
+                ENDIF
+              ENDDO
+            ENDIF
+C  Verification pour DEDU que tous les POINTs de l'objet MELE1 subissent
+C  la transformation i.e. ont une image, soit ICP(i) non nul
+            IF ((ITYP.EQ.4).OR.(ITYP.EQ.5)) THEN
+              CALL DEDU2(MELEME,ICPR,IRETOU,ITYP)
+              IF (IERR.NE.0) THEN
+                SEGSUP IPLMAIL
+                GOTO 300
+              ENDIF
+              IF (IRETOU.NE.0) THEN
+                INTERR(1)=L
+                CALL ERREUR(883)
+                SEGSUP IPLMAIL
+                GOTO 300
+              ENDIF
+            ENDIF
+            ITABEL(**)=MELEME
+C  Operateur DEDU : activation obligatoire du segment ICPR
+            IF ((ITYP.EQ.4).OR.(ITYP.EQ.5)) SEGACT ICPR
+C  Transformation du maillage MELE1 en NOUV suivant ICLE
+            IF ((ITOPE.EQ.'POINT   ').AND.(ICLE.EQ.1)) THEN
+              CALL ADDITI(Y,MELEME,NOUV,ICPR)
+            ELSE IF ((ITOPE.EQ.'CHPOINT ').AND.(ICLE.EQ.1)) THEN
+              CALL CHDITI(IPOIN1,MELEME,NOUV,ICPR,ISENS)
+            ELSE IF (ICLE.EQ.2) THEN
+              CALL ADDITI(Y,MELEME,NOUV,ICPR)
+            ENDIF
+            INOUVEL(**)=NOUV
+            IPLMAIL(IMEL)=NOUV
+          ENDIF
+ 203      CONTINUE
+          SEGDES MELEME
+        ENDDO
+C  Fin de la boucle : le maillage support de l'objet L a ete transforme
+C  Mise a jour de INIFIN (DSOBJ) en consequence avec transformation des
+C  composantes si l'objet est un CHPOINT ou MCHAML et ICLE=2 (rotation)
+ 210    IF (LETYP.EQ.'MAILLAGE') THEN
+          INIFIN=IPLMAIL(1)
+        ELSE IF (LETYP.EQ.'CHPOINT ') THEN
+          MCHPOI=INIFIN
+          SEGACT MCHPOI*MOD
+          DO i=1,IPCHP(/1)
+            MSOUPO=IPCHP(i)
+            SEGACT MSOUPO*MOD
+            IGEOC=IPLMAIL(i)
+            SEGDES MSOUPO
+          ENDDO
+          SEGDES MCHPOI
+          IF (ICLE.EQ.2) CALL TOCH1(MCHPOI,'CHPOINT ',IRETOU)
+        ELSE IF (LETYP.EQ.'MCHAML  ') THEN
+          MCHELM=INIFIN
+          SEGACT MCHELM*MOD
+          DO i=1,IMACHE(/1)
+            IMACHE(i)=IPLMAIL(i)
+          ENDDO
+          SEGDES MCHELM
+          IF (ICLE.EQ.2) CALL TOCH1(MCHELM,'MCHAML  ',IRETOU)
+        ELSE IF (LETYP.EQ.'MMODEL  ') THEN
+          MMODEL=INIFIN
+          SEGACT MMODEL*MOD
+          DO i=1,KMODEL(/1)
+            IMODEL=KMODEL(i)
+            SEGACT IMODEL*MOD
+            IMAMOD=IPLMAIL(i)
+            SEGDES IMODEL
+          ENDDO
+          SEGDES MMODEL
+        ELSE IF (LETYP.EQ.'RIGIDITE') THEN
+          MRIGID=INIFIN
+          SEGACT MRIGID*MOD
+          DO i=1,IRIGEL(/2)
+            IRIGEL(1,i)=IPLMAIL(i)
+          ENDDO
+          SEGDES MRIGID
+        ELSE IF (LETYP.EQ.'POINT   ') THEN
+C Cas particulier - Syntaxe : POIN2 = POIN1 'PLUS' VECT1 ;
+          IF (ITOPE.EQ.'POINT   ') THEN
+            IPOIN1=INIPOI
+            if(icpr(ipoin1).ne.0) then
+             inifin=icpr(ipoin1)
+            else
+             NBPTS=XCOOR(/1)/idimp1+1
+             inifin=nbpts
+             SEGADJ MCOORD
+             IREF=(IPOIN1-1)*idimp1
+             IPTFIN=(NBPTS-1)*idimp1
+             IF ((ICPR(IPOIN1).EQ.0).AND.(ICLE.EQ.1)) THEN
+              DO i=1,IDIM
+                XCOOR(IPTFIN+i)=XCOOR(IREF+i)+Y(i)
+              ENDDO
+              XCOOR(IPTFIN+idimp1)=DENSIT
+             ELSE IF ((ICPR(IPOIN1).EQ.0).AND.(ICLE.EQ.2)) THEN
+              XD=XCOOR(IREF+1)-XPT1
+              YD=XCOOR(IREF+2)-YPT1
+              ZD=0.
+              IF (IDIM.GE.3) ZD=XCOOR(IREF+3)-ZPT1
+              XE=XD*XV1+YD*YV1+ZD*ZV1
+              YE=XD*XV2+YD*YV2+ZD*ZV2
+              ZE=XD*XVEC+YD*YVEC+ZD*ZVEC
+              XD=XE*CO-YE*SI
+              YD=XE*SI+YE*CO
+              ZD=ZE
+              XCOOR(IPTFIN+1)=XD*XV1+YD*XV2+ZD*XVEC+XPT1
+              XCOOR(IPTFIN+2)=XD*YV1+YD*YV2+ZD*YVEC+YPT1
+              IF (IDIM.GE.3) XCOOR(IPTFIN+3)=XD*ZV1+YD*ZV2+ZD*ZVEC+ZPT1
+              XCOOR(IPTFIN+idimp1)=XCOOR(IREF+idimp1)
+C**         ELSE IF (ICPR(IPOIN1).NE.0) THEN
+             ENDIF
+             ICPR(IPOIN1)=INIFIN
+            endif
+          ELSE
+C Cas particulier - Syntaxe 2 : POIN2 = POIN1 'PLUS' CHPO1 ;
+            SEGSUP IPT9
+            IPT9=IPLMAIL(1)
+            SEGACT IPT9
+            INIFIN=IPT9.NUM(1,1)
+            SEGSUP IPT9
+          ENDIF
+        ENDIF
+        SEGDES DSOBJ
+        SEGSUP IPLMAIL
+ 200  CONTINUE
+C  Fin de la boucle sur les objets DSOBJ a transformer
+
+C  Ecriture dans la pile des objets transformes
+* cas particulier si on avait lu une table
+      if(itab.ne.0) then
+        mtable=itab
+        segact mtable*mod
+        segact iposi
+      endif
+      DO i=NIOBJ-MINIOBJ,1,-1
+        DSOBJ=nint(PILO(i))
+        SEGACT DSOBJ
+*
+        IF(LETYP.EQ.'MMODEL  ') THEN
+         MMODEL=INIFIN
+         SEGACT MMODEL
+         NSOUS = KMODEL(/1)
+* on change les maillages des modeles pointes par un modele MELANGE
+* et le pointeur du modele
+         do im = 1,NSOUS
+           imodel = kmodel(im)
+           segact imodel*mod
+           if (formod(1).eq.'MELANGE') then
+             if (ivamod(/1).ge.1) then
+             do ivm1 = 1,ivamod(/1)
+              if (tymode(ivm1).eq.'IMODEL') then
+                imode1 = ivamod(ivm1)
+                segini,imode2=imode1
+                imode2.imamod = imamod
+                ivamod(ivm1) = imode2
+                segdes imode2
+              endif
+             enddo
+             endif
+           endif
+           segdes imodel
+         enddo
+         SEGDES MMODEL
+        ENDIF
+*
+        IF(itab.ne.0)  then
+          ipotab=iposit(i)
+          mtabiv(ipotab)=inifin
+        ELSE
+          MO8  = LETYP
+          IPOI1=INIFIN
+          CALL ECROBJ(MO8,IPOI1)
+        ENDIF
+        SEGDES DSOBJ
+      ENDDO
+      if( itab.ne.0) then
+        call ecrobj('TABLE   ',mtable)
+        segdes mtable
+        segsup iposi
+      endif
+
+C  Un peu de menage
+ 300  SEGSUP ICPR,ITABEL,INOUVEL
+      GOTO 100
+
+C  Cas particulier - Operateur MOINS : CHPO1 = 'MOIN' GEO1 GEO2 ;
+c  Calcul du CHPOINT permettant de passer de GEO1 a GEO2
+ 500  SEGINI ICP1
+      SEGACT IPT1,IPT2
+      NBSOUS1=IPT1.LISOUS(/1)
+      NBSOUS2=IPT2.LISOUS(/1)
+*Gounand : Utilité ?      NBREF1=IPT1.LISREF(/1)
+*G      NBREF2=IPT2.LISREF(/1)
+      IF (NBSOUS1.NE.NBSOUS2) GOTO 502
+*G      IF (NBREF1.NE.NBREF2) GOTO 502
+      IF (NBSOUS1.EQ.0) THEN
+        IF (IPT1.ITYPEL.NE.IPT2.ITYPEL) GOTO 502
+        IF (IPT1.NUM(/1).NE.IPT2.NUM(/1)) GOTO 502
+        IF (IPT1.NUM(/2).NE.IPT2.NUM(/2)) GOTO 502
+        CALL PROCHP(IPT1,IPT2,IPOIN1,ICP1)
+        IF (IERR.NE.0) GOTO 502
+      ELSE IF (NBSOUS1.NE.0) THEN
+        DO j=1,NBSOUS1
+          IPT3=IPT1.LISOUS(j)
+          IPT4=IPT2.LISOUS(j)
+          SEGACT IPT3,IPT4
+          NBSOUS3=IPT3.LISOUS(/1)
+          NBSOUS4=IPT4.LISOUS(/1)
+*G          NBREF3=IPT3.LISREF(/1)
+*G          NBREF4=IPT4.LISREF(/1)
+          IF (NBSOUS3.NE.NBSOUS4) GOTO 501
+*G          IF (NBREF3.NE.NBREF4) GOTO 501
+          IF (IPT3.ITYPEL.NE.IPT4.ITYPEL) GOTO 501
+          IF (IPT3.NUM(/1).NE.IPT4.NUM(/1)) GOTO 501
+          IF (IPT3.NUM(/2).NE.IPT4.NUM(/2)) GOTO 501
+          SEGDES IPT3,IPT4
+          CALL PROCHP(IPT3,IPT4,IPOIN1,ICP1)
+          IF (IERR.NE.0) GOTO 501
+          IF (j.EQ.1) THEN
+            IPCHP0=IPOIN1
+          ELSE
+            CALL FUCHPO(IPCHP0,IPOIN1,IRET)
+            IPCHP0=IRET
+          ENDIF
+          IF (IERR.NE.0) GOTO 501
+        ENDDO
+        IPOIN1=IPCHP0
+      ENDIF
+      SEGDES IPT1,IPT2
+C  Ecriture du CHPOINT calcule
+      CALL ECROBJ('CHPOINT ',IPOIN1)
+C  Pour les autres objets DSOBJ, INIFIN=0 donc pas ecrits ?
+      DO i=NIOBJ-1,2,-1
+        DSOBJ=nint(PILO(i))
+        SEGACT DSOBJ
+        MO8  = LETYP
+        IPOI1=INIFIN
+        CALL ECROBJ(MO8,IPOI1)
+        SEGDES DSOBJ
+      ENDDO
+      GOTO 100
+
+C  Syntaxe particuliere : CHP1 = GEO1 'MOIN' GEO2 ;
+C  Erreur dans le calcul du CHPOINT, incompatibilite entre les maillages
+ 501  SEGDES IPT3,IPT4
+ 502  SEGDES IPT1,IPT2
+      CALL ERREUR(878)
+      SEGSUP ICP1
+
+C  Sortie du sousprogramme - Suppression des segments locaux
+ 100  if(PILO.NE.0) then
+       DO i=1,PILO(/1)
+         DSOBJ=nint(PILO(i))
+         SEGSUP DSOBJ
+       ENDDO
+       SEGSUP PILO
+      ENDIF
+      segsup MLITY
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

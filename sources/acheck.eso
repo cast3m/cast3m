@@ -1,0 +1,283 @@
+C ACHECK    SOURCE    BP208322  15/10/21    21:15:01     8690
+      SUBROUTINE ACHECK (IPRIGI,IPMASS,QUAD,SYM,SHIFT,N,FLAG,
+     &                                     INVER,PIRE,CHOLE,EPSI)
+
+
+***********************************************************************
+*
+*                          A C H E C K
+*
+* FONCTION:
+* ---------
+*
+*     VERIFICATION DE LA POSSIBILITE POUR ARPACK DE RESOUDRE +
+*     CHOIX DE LA MATRICE QUI DEFINIRA LE PRODUIT SCALAIRE DANS ARPACK
+*     + EVENTUELLE(S) SIMPLIFICATION(S) (CHOLESKY, PROBLEME SYM)
+*
+*
+* PARAMETRES:  (E)=ENTREE   (S)=SORTIE
+* -----------
+*
+*     IPRIGI  ENTIER     (E)    POINTEUR D'UNE RIGIDITE
+*
+*     IPMASS  ENTIER     (E)    POINTEUR D'UNE MASSE
+*
+*     QUAD    LOGIQUE    (E)    PROBLEME QUADRATIQUE OU NON
+*
+*     SYM     LOGIQUE    (S)    PROBLEME SYMETRIQUE OU NON
+*
+*     SHIFT   COMPLEX DP (E)    FREQUENCE DE SHIFT
+*
+*     N       ENTIER     (E)    DIMENSION DU PROBLEME
+*
+*     FLAG    LOGIQUE    (S)    PROBLEME SOLVABLE OU NON
+*
+*     INVER   LOGIQUE    (S)   .TRUE. -> PRODUIT SCALAIRE X'KX
+*                              .FALSE. -> PRODUIT SCALAIRE X'MX
+*
+*     CHOLE   LOGIQUE    (S)    CHOLESKY NON ALTERNATIVE POSSIBLE
+*
+*     EPSI    REEL DP    (E)    ZERO DE TOLERANCE
+*
+*
+* SOUS-PROGRAMMES APPELES:
+* ------------------------
+*
+*     DIAGN1
+*
+* AUTEUR, DATE DE CREATION:
+* -------------------------
+*
+*     PASCAL BOUDA     29 JUIN 2015
+*
+* LANGAGE:
+* --------
+*
+*     FORTRAN 77 & 90
+*
+***********************************************************************
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+-INC SMRIGID
+
+      INTEGER IPRIGI
+      INTEGER IPMASS
+      INTEGER N
+      LOGICAL QUAD
+      LOGICAL SYM
+      LOGICAL FLAG
+      LOGICAL INVER
+      LOGICAL PIRE
+      LOGICAL CHOLE
+      COMPLEX*16 SHIFT
+
+
+      INTEGER IPCHOI
+      INTEGER INEG
+      INTEGER NRG,NBR,IANTI
+      COMPLEX*16 ZERO
+
+
+      ZERO=CMPLX(0.D0,0.D0)
+
+* La decomposition de Cholesky n'est pas codee --> CHOLE toujours false
+      CHOLE=.FALSE.
+
+*** Cas lineaire:
+* Si le shift est nul, on peut resoudre tous les problemes (matrice de
+*                      masse ou rig utilisée pour le produit scalaire,
+*                      sinon matrice identité)
+* Sinon, par defaut, la matrice utilisee pour le produit scalaire est la
+*        matrice de masse
+*       Calcul du nombre de termes diagonaux negatifs:
+*         -si nul, ok
+*         -sinon on essaie d'echanger les roles
+*          (-> K pour le produit scalaire)
+*         -si nouvel echec,le probleme n'est pas solvable
+*
+*** Cas quadratique:
+* K ou M doit être symetrique semi-definie positive  pour le produit
+*scalaire.
+* Plus precisement, il s'agit de la matrice par blocs
+*                        | M  0 |      | K  0 |
+*                        | 0  M |  ou  | 0  K |
+* Il n'y a pas de conditions sur les autres matrices
+
+      FLAG=.FALSE.
+      INVER=.FALSE.
+      PIRE=.FALSE.
+
+c   --on va tester M--
+      MRIGID=IPMASS
+      SEGACT MRIGID
+      NRG = IRIGEL(/1)
+      NBR = IRIGEL(/2)
+
+      IF (NRG .GE. 7) THEN
+        DO i=1,NBR
+          IANTI=IRIGEL(7,i)
+          IF (IANTI .GT. 0) THEN
+            SEGDES MRIGID
+            GOTO 101
+          ENDIF
+        ENDDO
+      ENDIF
+
+      SEGDES MRIGID
+
+      CALL DIAGN1(IPMASS,INEG)
+*     M def >0 ou semi-def >0
+      IF (INEG .EQ. 0) THEN
+        FLAG=.TRUE.
+        GOTO 200
+      ENDIF
+
+101   CONTINUE
+
+
+c     cas M non-symetrique ou M non semi-def >0
+
+c       IF (SHIFT .NE. ZERO) THEN
+
+c     --on va tester K--
+        MRIGID=IPRIGI
+        SEGACT MRIGID
+        NRG = IRIGEL(/1)
+        NBR = IRIGEL(/2)
+
+        IF (NRG .GE. 7) THEN
+          DO i=1,NBR
+            IANTI=IRIGEL(7,i)
+            IF (IANTI .GT. 0) THEN
+              SEGDES MRIGID
+              GOTO 102
+            ENDIF
+          ENDDO
+        ENDIF
+
+        SEGDES MRIGID
+
+        CALL DIAGN1(IPRIGI,INEG)
+*       K def >0 ou semi-def >0
+        IF (INEG .EQ. 0) THEN
+          FLAG=.TRUE.
+          INVER=.TRUE.
+          GOTO 200
+        ENDIF
+
+c       ENDIF
+
+102   CONTINUE
+c   --cas M et K non-symetrique ou non semi-def >0 --
+
+
+*-- cas 'desespere' : aucune matrice n'est bien conditionnee;
+* on ne peut resoudre que pour des problemes lineaires a shift nul --
+*
+*     le probleme (matrice A=M^-1*K) n'est (probablement) pas symetrique
+
+      IF (.NOT. FLAG) THEN
+c       on peut resoudre avec un shift nul
+        IF (.NOT. QUAD) THEN
+          IF (SHIFT .EQ. ZERO) THEN
+              SYM=.FALSE.
+              PIRE=.TRUE.
+              FLAG=.TRUE.
+              GOTO 300
+          ENDIF
+        ENDIF
+      ENDIF
+
+
+200   CONTINUE
+c   --on a M ou K symetrique semi-def>0 --
+
+
+*     Identification du type de probleme :
+*     -symetrique     -> modes propres reels
+*     -non symetrique -> modes propres reels ou complexes
+
+      IF (QUAD) THEN
+*Le probleme n'est jamais symetrique
+        SYM=.FALSE.
+
+      ELSE
+*On regarde la symetrie de la matrice non utilisee pour le ps
+        SYM=.TRUE.
+
+c       M utilisee pour le ps : on regarde K
+        IF (.NOT. INVER) THEN
+          MRIGID=IPRIGI
+          SEGACT MRIGID
+          NRG = IRIGEL(/1)
+          NBR = IRIGEL(/2)
+          IF (NRG .GE. 7) THEN
+            DO i=1,NBR
+              IANTI=IRIGEL(7,i)
+              IF (IANTI .GT. 0) THEN
+                SYM=.FALSE.
+              ENDIF
+            ENDDO
+          ENDIF
+
+        ELSE
+c       K utilisee pour le ps : on regarde M
+*       La matrice M doit etre symetrique si on a inverse les roles
+          MRIGID=IPMASS
+          SEGACT MRIGID
+          NRG = IRIGEL(/1)
+          NBR = IRIGEL(/2)
+          IF (NRG .GE. 7) THEN
+            DO i=1,NBR
+              IANTI=IRIGEL(7,i)
+              IF (IANTI .GT. 0) THEN
+                FLAG=.FALSE.
+                INVER=.FALSE.
+                PIRE=.FALSE.
+                GOTO 102
+              ENDIF
+            ENDDO
+          ENDIF
+
+        ENDIF
+
+      SEGDES MRIGID
+
+      ENDIF
+
+
+
+300   CONTINUE
+
+c     ERREUR !
+      IF (.NOT.FLAG) THEN
+
+        WRITE(IOIMP,*) 'VIBR ne peut pas resoudre ce probleme :'
+        IF(QUAD) THEN
+         WRITE(IOIMP,*) 'M n est pas symetrique semi-definie positive !'
+        ELSE
+         IF(INVER) THEN
+           IF(SHIFT .NE. ZERO) THEN
+           WRITE(IOIMP,*) 'K n est pas symetrique semi-definie positive'
+           WRITE(IOIMP,*) 'ou M n est pas symetrique !'
+          ELSE
+           WRITE(IOIMP,*) 'on ne doit pas passer par la !'
+           CALL ERREUR(5)
+          ENDIF
+         ELSE
+           WRITE(IOIMP,*) 'on ne doit pas passer par la !'
+           CALL ERREUR(5)
+         ENDIF
+        ENDIF
+        CALL ERREUR(21)
+      ENDIF
+
+
+      END
+
+
+
+

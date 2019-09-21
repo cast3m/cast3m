@@ -1,0 +1,244 @@
+C TCOQ2C    SOURCE    BP208322  15/06/22    21:23:16     8543
+
+************************************************************************
+*
+*                             T C O Q 2 C
+*                             -----------
+*
+* FONCTION:
+* ---------
+*     TRAITEMENT DU CAS DES ELEMENTS-FINIS SEGMENT COQUE AXISYMETRIQUE
+*     A INTEGRATION-SEMI ANALYTIQUE (INTEGRATION ANALYTIQUE DANS L'
+*     EPAISSEUR )POUR UN MAILLAGE ELEMENTAIRE
+*
+*
+* PARAMETRES:   (E)=ENTREE   (S)=SORTIE   (+ = CONTENU DANS UN COMMUN)
+* -----------
+*
+*     NEF     (E)  NUMERO DE L'ELEMENT-FINI DANS NOMTP (VOIR CCHAMP)
+*     IMAIL   (E)  NUMERO DU MAILLAGE ELEMENTAIRE CONSIDERE,DANS
+*                  L'OBJET MODELE
+*     IPMODE  (E)  POINTEUR SUR UN SEGMENT IMODEL
+*     IPCHEM  (E)  POINTEUR SUR LE CHAMELEM DE CARACTERISTIQUE
+*     IPRIGI (E/S) POINTEUR SUR L'OBJET RESULTAT,DE TYPE RIGIDITE
+*
+* VARIABLES:
+* ----------
+*     NBNN     NOMBRE DE NOEUDS DANS L'ELEMENT CONSIDERE
+*     NEF      NUMERO DE L'ELEMENT FINI DANS NOMTP (VOIR CCHAMP)
+*     NBELEM   NOMBRE D'ELEMENTS DANS LE MAILLAGE ELEMENTAIRE
+*     NBPGAU   NOMBRE DE POINTS DE GAUSS DANS L'ELEMENT-FINI
+*     NDIM     NOMBRE DE LIGNES DE LA MATRICE GRADIENT
+*     CEL(2*NBNN,2*NBNN)  MATRICE DE CONDUCTIVITE ELEMENTAIRE
+*     XE(3,NBNN)      COORDONNEES DE L'ELEMENT DANS LE REPERE GLOBAL
+*     SHP(NBNN)     TABLEAU DE TRAVAIL
+*     GRAD(NBNN) MATRICE GRADIENT DES FONCTIONS DE FORME MONODIMENSIONNE
+*     VALMAT(4)       TABLEAU DE TRAVAIL
+************************************************************************
+*
+      SUBROUTINE TCOQ2C (NEF,IPMAIL,IPINTE,IMATE,IVAMAT,NVAMAT,
+     &                   IPMATR,NLIGR)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCREEL
+-INC CCHAMP
+
+-INC SMCHAML
+-INC SMCOORD
+-INC SMELEME
+-INC SMINTE
+-INC SMRIGID
+
+      SEGMENT,MMAT1
+         REAL*8 VALMAT(NMATR)
+         REAL*8 XE(3,NBNN),SHP(NBNN),GRAD(NBNN)
+         REAL*8 CEL1(NBNN,NBNN),CEL2(NBNN,NBNN)
+      ENDSEGMENT
+*
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS)    ,NSOF(NS)
+        INTEGER      IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+*
+C= Quelques constantes (dont 2.Pi)
+      PARAMETER (UNDE=0.5D0,UN=1.D0)
+      PARAMETER (X2Pi=6.283185307179586476925286766559D0)
+
+*     ELEMENT PUREMENT AXISYMETRIQUE
+      IF (IFOMOD.NE.0) THEN
+        CALL ERREUR (19)
+        RETURN
+      ENDIF
+*
+* MAILLAGE ELEMENTAIRE
+      MELEME = IPMAIL
+c*    SEGACT,MELEME
+      NBNN   = NUM(/1)
+      NBELEM = NUM(/2)
+*
+* CARACTERISTIQUES D'INTEGRATION DE L'ELEMENT COQ2 LIE A NOTRE MAILLAGE
+      MINTE = IPINTE
+c*      SEGACT,MINTE
+      NBPGAU = POIGAU(/1)
+*
+      XMATRI = IPMATR
+C*    SEGACT,XMATRI*MOD
+
+*  SEGMENTS MELVAL correspondant aux composantes de la conductivite et
+*  de l'epaisseur des elements (epaisseur toujours placee a la fin !)
+      MPTVAL = IVAMAT
+C*    SEGACT,MPTVAL
+* Verification de la constance de l'epaisseur :
+*     IPMELV = IVAL(NVAMAT)
+*     CALL QUELCH(IPMELV,ICONS)
+*     IF (ICONS.NE.0) THEN
+*       CALL ERREUR(566)
+*       RETURN
+*     ENDIF
+
+      NMATR = NVAMAT
+      NDIM = IDIM
+      SEGINI,MMAT1
+
+* BOUCLE SUR LES ELEMENTS DU MAILLAGE ELEMENTAIRE
+*
+      DO 10 iel = 1, NBELEM
+*
+*- Recherche des COORDONNEES DES NOEUDS DE L'ELEMENT IEL (REPERE GLOBAL)
+*
+        CALL DOXE(XCOOR,IDIM,NBNN,NUM,iel,XE)
+*
+*- Calcul de la "longueur" de l'element
+        D = (XE(1,2)-XE(1,1))**2+(XE(2,2)-XE(2,1))**2
+*  LA DISTANCE ENTRE LES DEUX NOEUDS DE L'ELEMENT EST NULLE
+        IF (D.LE.XPETIT) THEN
+          INTERR(1) = iel
+          CALL ERREUR(255)
+          GOTO 999
+        ENDIF
+        D = SQRT(D)
+*
+*  MATRICE DE GRADIENT (constante sur l'element)
+*
+        r_z = UN / D
+        GRAD(1) = -r_z
+        GRAD(2) =  r_z
+*
+*  "Partie" du JACOBIEN independante du point d'integration
+*
+        DJAC1 = X2Pi * UNDE * D
+*
+*  Quelques caracteristiques geometriques constantes
+        RO = (XE(1,1) + XE(1,2)) * UNDE
+        DR =  XE(1,2) - XE(1,1)
+*
+*  Epaisseur moyenne de la coque
+        EPAI = XZERO
+*
+*  MISE A ZERO DES TABLEAUX CEL1 ET CEL2
+*
+        CALL ZERO(CEL1,NBNN,NBNN)
+        CALL ZERO(CEL2,NBNN,NBNN)
+*
+* BOUCLE SUR LES POINTS DE GAUSS
+*
+        DO 20 igau = 1, NBPGAU
+*
+*        CALCUL DE LA MATRICE GRADIENT DES FONCTIONS DE FORME ET
+*        DU JACOBIAN,EN UN POINT DE GAUSS
+*
+*        MATRICE DE FONCTION DE FORME
+*
+          r_z = UNDE*QSIGAU(igau)
+          SHP(1) = UNDE - r_z
+          SHP(2) = UNDE + r_z
+*
+*        CALCUL DU RAYON DE LA COQUE
+*
+          RR = RO + DR * r_z
+*  L'AXE EST CONFONDU AVEC L'UN DES COTES DE L'ELEMENT ?
+          IF (ABS(RR/D).LE.1.D-03) THEN
+            INTERR(1)=IEL
+            CALL ERREUR (256)
+            GOTO 999
+          ENDIF
+          DJAC = DJAC1 * POIGAU(igau) * RR
+*
+*        ON CHERCHE LES VALEURS DES COMPOSANTES DE LA CONDUCTIVITE
+*        ET L'EPAISSEUR DE LA COQUE
+*
+          DO  i = 1, NMATR
+c*          IF (IVAL(i).NE.0) THEN
+              MELVAL = IVAL(i)
+              ibmn = MIN(iel ,VELCHE(/2))
+              igmn = MIN(igau,VELCHE(/1))
+              VALMAT(i) = VELCHE(igmn,ibmn)
+c*          ELSE
+c*            VALMAT(i)=0.
+c*          ENDIF
+          ENDDO
+
+          EP = VALMAT(NMATR)
+*   L'ELEMENT (IEL) AU POINT DE GAUSS (igau) DE TYPE (NOMTP(NEF)) A
+*     UNE EPAISSEUR NULLE
+          IF (EP.LE.XPETIT) THEN
+            INTERR(1) = iel
+            INTERR(2) = igau
+            MOTERR(1:4) = NOMTP(NEF)
+            CALL ERREUR(355)
+            GOTO 999
+          ENDIF
+          EPAI = EPAI + EP
+*
+*        MATERIAU ISOTROPE
+*
+          IF (IMATE.EQ.1) THEN
+*
+            XK1 = VALMAT(1) * DJAC
+            XK2 = XK1
+*
+          ELSE IF (IMATE.EQ.2) THEN
+*
+            COSA = VALMAT(4)
+            IF (COSA.EQ.XZERO) THEN
+              XK1 = VALMAT(2) * DJAC
+              XK2 = VALMAT(1) * DJAC
+            ELSE
+              XK1 = VALMAT(1) * DJAC
+              XK2 = VALMAT(2) * DJAC
+            ENDIF
+
+          ENDIF
+*
+*        ON AJOUTE LE PRODUIT XK1*DJAC*TRANSPOSEE(GRAD)*GRAD
+*        POUR LE POINT DE GAUSS CONSIDERE A LA MATRICE CEL1
+*
+          CALL NTNST(GRAD,XK1,NBNN,1,CEL1)
+*
+*        ON AJOUTE LE PRODUIT XK2*DJAC*TRANSPOSEE(SHP)*SHP
+*        POUR LE POINT DE GAUSS CONSIDERE A LA MATRICE CEL2
+*
+          CALL NTNST(SHP,XK2,NBNN,1,CEL2)
+*
+ 20     CONTINUE
+*
+*       REMPLISSAGE DE XMATRI
+*       EN SUPPOSANT UNE EPAISSEUR MOYENNE (CONSTANTE) !
+*
+        EPAI = EPAI / NBPGAU
+        CALL MCONDT(CEL1,CEL2,NBNN,EPAI,RE(1,1,iel))
+
+ 10   CONTINUE
+*
+ 999  CONTINUE
+      SEGSUP,MMAT1
+*
+      RETURN
+      END
+
+
+

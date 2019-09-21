@@ -1,0 +1,1854 @@
+* fichier : xfem04.dgibi
+************************************************************************
+* Section : Mecanique Endommagement
+* Section : Mecanique Endommagement
+************************************************************************
+************************************************************************
+*
+* Mots-clés : Mécanique de la rupture, XFEM, contact, frottement, LATIN
+*
+* Etude de reponse d'une plaque en compression avec fissure inclinee
+* via une formulation mixte a trois champs. Le contact frottant et la
+* resolution par la LATIN sont pris en compte par des procedures perso.
+* test des operateurs : RELA ACCRO FAIBLE, G_THETA
+* creation : 2013-02-13, Benoit Trolle (these SNCF-Lamcos)
+* integration dans Cast3m : 2013-12-17, Benoit Prabel (#)
+*
+************************************************************************
+
+OPTION DIME 2 MODE PLAN DEFO ELEM QUA4;
+
+
+* Masquer lignes excutées
+*  'OPTION' echo 0;
+
+************************************************************************
+*                           PROCEDURES INTERNES                        *
+************************************************************************
+
+*-----------------------------------------------------------------------
+* PLOTITER : Affichage des champs locaux au cours des itérations de la LATIN
+*----------------------------------------------------------------------
+'DEBPROC' PLOTITER Tplus*CHPOINT Tmoins*CHPOINT Wplus*CHPOINT
+                     Wmoins*CHPOINT meshint*MAILLAGE;
+   fac2 = 20;
+   fac1 = 1E-12;
+   VTplus = vect Tplus forc rouge;
+   VTmoins = vect Tmoins forc  vert;
+   def1 = defo wplus meshint   VTplus rouge;
+   def2 = defo wmoins meshint  VTmoins vert;
+   def3 = def1 'ET' def2;
+   'TRACER' def3 'NCLK';
+'FINPROC';
+
+
+*----------------------------------------------------------------------
+* LATIN  : contient les étapes du solveur non linéaires LATIN
+*
+* ENTREE :
+*  - crack : maillage de l'interface
+*  - RHS0  : Chargement mécanique
+*  - K1tot : matrice totale sans Kuwt (avec C.L.)
+*  - Kuwt  : matrice issu de RELA ACCRO FAIBLE
+*  - Ktot1 : Kuwt et K1tot
+*  - mod1tot : modele de tout le massif
+*  - WPglo, WMglo, WPglo, WMglo : w+,w-,t+,t- solution du pas précédent
+*  - f_crack : Coefficient de frottement entre les lèvres de la fissure
+*  - ItMax : Nombre d'itération maximum
+*  - eps1 : Précision demandée
+*
+* SORTIE :
+*  - (U, W, T)
+*  - erreur à chaque itération
+*----------------------------------------------------------------------
+'DEBPROC' LATIN Tdisplay*TABLE crack*MAILLAGE K1tot*RIGIDITE
+ mod1tot*MMODEL RHS0*CHPOINT IdPasT*ENTIER Ktot1*RIGIDITE Kuwt*RIGIDITE
+ cht1*CHPOINT chn*CHPOINT ItMax*ENTIER eps1*FLOTTANT k*FLOTTANT
+ f_crack*FLOTTANT mai1tot*MAILLAGE cht2/CHPOINT TPglo/CHPOINT
+ TMglo/CHPOINT WPglo/CHPOINT WMglo/CHPOINT;
+
+
+* initialisation avec second menbre incomplet uniquement pour le premier pas de de temps
+* pour les suivants on initialise avec les champs locaux du pas précédents
+
+*'SI' ((IdPasT 'EGA' 1) 'OU' ouv1);
+'SI'  (IdPasT 'EGA' 1);
+
+*-----------------------------< Résolution initiale: étape globale
+   ma1 = 'EXTRAIRE' mod1 'MAIL';
+   cl2 =  ('BLOQUE' 'AX'ma1) 'ET' ('BLOQUE' 'B1X'ma1)  'ET'
+   ('BLOQUE' 'C1X'ma1) 'ET' ('BLOQUE' 'D1X'ma1) 'ET'
+   ('BLOQUE' 'E1X'ma1) 'ET' ('BLOQUE' 'AY'ma1)  'ET'
+   ('BLOQUE' 'B1Y'ma1) 'ET' ('BLOQUE' 'C1Y'ma1) 'ET'
+   ('BLOQUE' 'D1Y'ma1) 'ET' ('BLOQUE' 'E1Y'ma1) 'ET'
+   ('BLOQUE' 'AZ'ma1)  'ET' ('BLOQUE' 'B1Z'ma1) 'ET'
+   ('BLOQUE' 'C1Z'ma1) 'ET' ('BLOQUE' 'D1Z'ma1) 'ET'
+   ('BLOQUE' 'E1Z'ma1) ;
+   ktot2 = ktot1 'ET' cl2;
+*   u1 = RESO Ktot2 RHS0;
+
+   u1 = RESO Ktot1 RHS0;
+
+*-----------------------------< extrait w et t fissure de u1
+* (dans leur formalisme global = moyenne + saut)
+   wsauv fsauv = EXTCRACK u1 crack dim1;
+
+*-----------------------------< recuperation champ + et -
+   Wmoins Wplus Tmoins Tplus = SPLIT crack fsauv wsauv;
+   'SI' (Tdisplay.iteration);
+         'TITRE' 'apres etape GLOBALE INITIALE';
+      PLOTITER Tplus Tmoins  Wplus Wmoins crack;
+   'FINSI';
+*-----------------------------< Projection dans la base locale xxx_b = xxx_before (local step)
+   'SI' (('VALEUR' 'DIME')  'EGA' 3);
+   TlocP_b TlocM_b WlocP_b WlocM_b = GLO2LOC cht1 chn Tplus Tmoins Wplus
+   Wmoins cht2;
+   'SINON' ;
+   TlocP_b TlocM_b WlocP_b WlocM_b = GLO2LOC cht1 chn Tplus Tmoins Wplus
+   Wmoins ;
+   'FINSI';
+
+
+*-----------------------------< Etape locale pour la première itération
+   TlocP TlocM WlocP WlocM  = LOCSTEPI k f_crack crack TlocP_b TlocM_b
+                                          WlocP_b WlocM_b;
+
+*-----------------------------< Projection des w+- et  t+- (i +1/2) dans le repère global
+   'SI' (('VALEUR' 'DIME')  'EGA' 3);
+      WMglo WPglo TMglo TPglo = LOC2GLO cht1 chn TlocP TlocM WlocP WlocM
+                                                     crack cht2;
+    'SINON';
+      WMglo WPglo TMglo TPglo = LOC2GLO cht1 chn TlocP TlocM WlocP WlocM
+                                                     crack;
+    'FINSI';
+
+ 'FINSI';
+*---> initialisation itérations
+   it1 = 1 ;
+
+* utlise solutions locales au pas de temps précédent pour initialiser
+ 'SI' (IdPasT > 1);
+
+* 'SI' (idpasT  < 6); itmax = 10; 'FINSI';
+
+*-----------------------------< Projection dans la base locale xxx_b = xxx_before (local step)
+   'SI' (('VALEUR' 'DIME')  'EGA' 3);
+      TlocP_b TlocM_b WlocP_b WlocM_b = GLO2LOC cht1 chn TPglo TMglo
+                                                   WPglo WMglo cht2;
+   'SINON' ;
+      TlocP_b TlocM_b WlocP_b WlocM_b = GLO2LOC cht1 chn TPglo TMglo
+                                                   WPglo WMglo ;
+   'FINSI';
+
+   TlocP = TlocP_b;
+   TlocM = TlocM_b;
+   WlocP = WlocP_b;
+   WlocM = WlocM_b;
+ 'FINSI';
+* sauvegarde champ locaux après étape locale
+ ttlocp = table;  ttlocm = table;  twlocp = table;  twlocm = table;
+ ttlocp.it1 = tlocp_b; ttlocm.it1 = tlocm_b;
+ twlocp.it1 = wlocp_b; twlocm.it1 = wlocm_b;
+   'SI' (Tdisplay.iteration);
+      'TITRE' 'apres etape LOCALE';
+      PLOTITER TPglo TMglo  WPglo WMglo crack;
+   'FINSI';
+*-----------------------------< Recombine les champs
+ Wglo Tglo = LIPSRECO WMglo WPglo TMglo TPglo;
+
+*-----------------------------< Mise à jour du second membre
+ rhs1 = UPDATRHS Kuwt Tglo Wglo crack it1 rhs0;
+
+*-----------------------------< Etape globale
+ u1 = 'RESOUD' ktot1 rhs1;
+
+*-----------------------------< extrait w et t fissure de u1
+* (dans leur formalisme global = moyenne + saut)
+ wfiss fcon = EXTCRACK u1 crack dim1;
+
+*-----------------------------< recuperation champ + et -
+ Wmoins Wplus Tmoins Tplus = SPLIT Crack fcon wfiss;
+ 'SI' (Tdisplay.iteration);
+       'TITRE' 'apres etape GLOBALE';
+   PLOTITER Tplus Tmoins  Wplus Wmoins crack;
+ 'FINSI';
+
+
+*---< Projection dans la base locale
+ 'SI' (('VALEUR' 'DIME')  'EGA' 3);
+   TlocP_n TlocM_n WlocP_n WlocM_n = GLO2LOC cht1 chn Tplus Tmoins
+   Wplus Wmoins cht2;
+ 'SINON' ;
+   TlocP_n TlocM_n WlocP_n WlocM_n = GLO2LOC cht1 chn Tplus Tmoins
+   Wplus Wmoins ;
+ 'FINSI';
+
+
+ 'REPETER' blo7 (Itmax);
+   it1 = it1 '+' 1;
+
+   TlocP_b = TlocP_n;
+   TlocM_b = TlocM_n;
+   WlocP_b = WlocP_n;
+   WlocM_b = WlocM_n;
+
+*-----------------------------< Etape locale (_a = after ; _b = before)
+   TlocP_a TlocM_a WlocP_a WlocM_a ouv1 = LOCSTEP1
+   k f_crack crack TlocP_b TlocM_b WlocP_b WlocM_b it1
+   (twlocp.(it1-1)) (twlocm.(it1-1));
+
+   'SI' (ouv1 'ET' (it1 > 15));
+      'QUITTER' blo7;
+   'FINSI';
+
+
+*-----------------------------< Projection des des w+- et  t+- (i +1/2) dans le repère global
+   'SI' (('VALEUR' 'DIME')  'EGA' 3);
+      WMglo WPglo TMglo TPglo = LOC2GLO cht1 chn TlocP_a TlocM_a WlocP_a
+                                       WlocM_a crack cht2;
+   'SINON';
+      WMglo WPglo TMglo TPglo = LOC2GLO cht1 chn TlocP_a TlocM_a WlocP_a
+                                       WlocM_a crack;
+   'FINSI';
+
+   'SI' (Tdisplay.iteration);
+         'TITRE' 'apres etape LOCALE';
+      PLOTITER TPglo TMglo  WPglo WMglo crack;
+   'FINSI';
+*-----------------------------< Recombine les champs
+   Wglo Tglo = LIPSRECO WMglo WPglo TMglo TPglo;
+
+*-----------------------------< Mise à jour du second membre
+   rhs1 = UPDATRHS Kuwt Tglo Wglo crack it1 rhs0;
+
+*-----------------------------< Etape globale
+   u1 = 'RESOUD' ktot1 rhs1;
+
+*-----------------------------< extrait w et t fissure de u1
+* (dans leur formalisme global = moyenne + saut)
+   wfiss fcon = EXTCRACK u1 crack dim1;
+
+*-----------------------------< recuperation champ + et -
+   Wmoins Wplus Tmoins Tplus = SPLIT crack fcon wfiss;
+   'SI' (Tdisplay.iteration);
+         'TITRE' 'apres etape GLOABLE';
+      PLOTITER Tplus Tmoins Wplus Wmoins crack;
+   'FINSI';
+
+*-----------------------------< Projection dans la base locale
+   'SI' (('VALEUR' 'DIME')  'EGA' 3);
+      TlocP_n TlocM_n WlocP_n WlocM_n = GLO2LOC cht1 chn Tplus Tmoins
+               Wplus Wmoins cht2;
+   'SINON' ;
+      TlocP_n TlocM_n WlocP_n WlocM_n = GLO2LOC cht1 chn Tplus Tmoins
+               Wplus Wmoins ;
+   'FINSI';
+
+* sauvegarge de l'histoire au cours des itérations
+*   ttlocp.it1 = tlocp_n;
+*   ttlocm.it1 = tlocm_n;
+*   twlocp.it1 = wlocp_n;
+*   twlocm.it1 = wlocm_n;
+
+   ttlocp.it1 = tlocp_a;
+   ttlocm.it1 = tlocm_a;
+   twlocp.it1 = wlocp_a;
+   twlocm.it1 = wlocm_a;
+
+   'SI' (it1 'EGA' 2);
+*-----------------------------< Calcul de l'indicateur d'erreur INITIAL
+      TotalErr denN denT etaT etaN = ERRORINI TlocP_n TlocM_n WlocP_n
+      WlocM_n TlocP TlocM WlocP WlocM k;
+      lerror = 'PROG' TotalErr;letaT = 'PROG'etaT;letaN = 'PROG' etaN;
+   'SINON';
+*-----------------------------< Calcul de l'indicateur d'erreur (dénominateur fixé)
+      TotalErr etaT etaN = GETERROR TlocP_n TlocM_n WlocP_n WlocM_n
+      TlocP_a TlocM_a WlocP_a WlocM_a denN denT k;
+      lerror = lerror'ET'TotalErr;letaT=letaT'ET'etaT;
+      letaN=letaN'ET'etaN;
+   'FINSI';
+*   'MESSAGE' '';
+*   'MESSAGE' 'denN =' denN;
+*   'MESSAGE' 'denT =' denT;
+*   'MESSAGE' '';
+
+   SI (TotalErr < eps1) ;
+      MESS 'La precision demandee a ete atteinte';
+      QUITTER blo7 ;
+   FINSI ;
+
+   SI (TotalErr > 1000000) ;
+      'MESSAGE' ' ';
+      'MESSAGE' ' ';
+      'MESSAGE' ' ';
+      MESS '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!';
+      MESS '!!!                                                 !!!';
+      MESS '!!!     LE CALCUL DIVERGE !! -> ARRET DU CALCUL     !!!';
+      MESS '!!!                                                 !!!';
+      MESS '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!';
+      'MESSAGE' ' ';
+      'MESSAGE' ' ';
+      'MESSAGE' ' ';
+      QUITTER blo7 ;
+   FINSI ;
+
+   MESS ' ';
+   MESS ' ';
+   MESS '-----------> iteration :' it1 ;
+   MESS 'Erreur :' totalerr;
+
+ 'FIN' blo7;
+* fin de la boucle sur les itération du solveur non-linéaire
+
+ 'MESSAGE' 'fin du cas fermeture';
+* 'FINSI';
+* fin du cas fermeture
+
+* cas fissure complètement ouverte -> résoluion directe -> w = u sur la fissure et t = 0
+ 'SI' ouv1;
+   'MESSAGE'  ' ' ;
+   'MESSAGE' 'Fisssure COMPLETEMENT ouverte -> résolution DIRECTE';
+   'MESSAGE'  ' ' ;
+   u2 = 'RESOUD' k1tot RHS0;
+   WMglo WPglo = XFEM 'FISS' crack u2 mod1tot;
+   TPglo = 0.*Tplus;   TMglo = 0.*Tplus;lerror = 'PROG' 0.;
+ 'SINON';
+    u2 = 'REDU' u1 mai1tot;
+ 'FINSI';
+
+
+'FINPROC' u2 TPglo TMglo WPglo WMglo lerror;
+
+
+*----------------------------------------------------------------------
+*
+* SAVFIELD : sauvegarde les champs dans les tables
+*
+*----------------------------------------------------------------------
+
+'DEBPROC' SAVFIELD u1*CHPOINT tplus*CHPOINT tmoins*CHPOINT wplus*CHPOINT
+            wmoins*CHPOINT it1*ENTIER;
+
+'SI' (it1 'EGA' 0);
+  ttplus = 'TABLE';
+  ttmoins = 'TABLE';
+  twplus = 'TABLE';
+  twmoins = 'TABLE';
+  tu = 'TABLE';
+'FINSI';
+  ttplus.it1 = tplus;
+  ttmoins.it1 = tmoins;
+  twplus.it1 = wplus;
+  twmoins.it1 = wmoins;
+  tu.it1 = u1;
+'FINPROC' ttplus ttmoins twplus twmoins tu;
+
+
+*----------------------------------------------------------------------
+*
+* EXTCRACK : extrait les inconnus relatives à la fissure de u1
+*
+*----------------------------------------------------------------------
+
+'DEBPROC' EXTCRACK u1*CHPOINT meshint*MAILLAGE dim1*ENTIER;
+
+'SI' (dim1 'EGA' 2);
+ lmot1 = 'MOTS' 'UX  ' 'UY  ' 'AX  ' 'AY  ';
+ lmot2 = 'MOTS' 'FX  ' 'FY  ' 'FAX ' 'FAY ';
+'SINON';
+ lmot1 = 'MOTS' 'UX  ' 'UY  ' 'UZ  ' 'AX  ' 'AY  ' 'AZ  ' ;
+ lmot2 = 'MOTS' 'FX  ' 'FY  ' 'FZ  ' 'FAX ' 'FAY ' 'FAZ ' ;
+'FINSI';
+
+ wsauv = 'ENLEVER' ('REDU' meshint u1) lmot2;
+ fsauv = 'ENLEVER' ('REDU' meshint u1) lmot1;
+
+'FINPROC' wsauv fsauv;
+
+
+*----------------------------------------------------------------------
+*
+* SPLIT : Différencie les champs locaux sur les lèvres de la fissure
+*              à partir des inconnus XFEM issus de l'étape globale
+*
+*----------------------------------------------------------------------
+
+'DEBPROC' SPLIT MeshInt*MAILLAGE fint1*CHPOINT uint1*CHPOINT;
+
+ 'SI' (('VALEUR' 'DIME') 'EGA' 2);
+   lmot1 = 'MOTS' 'UX  ' 'UY  ';
+   lmot2 = 'MOTS' 'AX  ' 'AY  ';
+   lmot3 = 'MOTS' 'FX  ' 'FY  ';
+   lmot4 = 'MOTS' 'FAX ' 'FAY ';
+ 'SINON';
+   lmot1 = 'MOTS' 'UX  ' 'UY  '  'UZ  ';
+   lmot2 = 'MOTS' 'AX  ' 'AY  '  'AZ  ';
+   lmot3 = 'MOTS' 'FX  ' 'FY  '  'FZ  ';
+   lmot4 = 'MOTS' 'FAX ' 'FAY '  'FAZ ';
+ 'FINSI';
+
+*-----------------------------< Déplacement
+ umoy = 'EXCO' lmot1 uint1;
+ uH = 'EXCO' lmot2 uint1;
+ uH = 'NOMC' lmot2 lmot1 uH;
+ usup = umoy '+' uH;
+ uinf = umoy '-' uH;
+*-----------------------------< Effort
+ tmoy = 'EXCO' lmot3 fint1;
+ tH = 'EXCO' lmot4 fint1;
+ tH = 'NOMC' lmot4 lmot3 tH;
+ tsup = tmoy '+' tH;
+ tinf = tmoy '-' tH;
+
+
+'FINPROC' uinf usup tinf tsup;
+
+
+*----------------------------------------------------------------------
+*
+* LOCABA3D : Définit une lèvre plus et moins pour tous les éléments
+*            d'interface à partir de la normale orienté dans le sens
+*            de parcours des éléments d'interface
+*
+*----------------------------------------------------------------------
+
+'DEBPROC' LOCABA3D MeshInt*MAILLAGE mod_int*MMODEL;
+
+ chn = vsur mod_int 'NORM';
+ mo1 = 'EXTRAIRE' chn 'COMP';
+ mo2 = 'MOTS' 'NX  ' 'NY  ' 'NZ  ';
+ chn = 'CHANGER' 'CHPO' mod_int chn 'MOYE';
+ chn = 'NOMC' chn mo1 mo2;
+ cht1 = 0. * chn;
+* creation des tangentes arbitrairement orienté à partir de la normale
+ xt1 = 'NOMC' 'T1X ' ('EXCO' 'NY  ' chn);
+ yt1 = 'NOMC' 'T1Y ' ('EXCO' 'NX  ' chn);
+ zt1 = 'NOMC' 'T1Z ' ('EXCO' 'NZ  ' cht1);
+ 'SI' ((('MAXIMUM' xt1) 'EGA' 0) 'ET' (('MAXIMUM' yt1) 'EGA' 0));
+   xt1 = 'MANUEL' chpo ('EXTRAIRE' xt1 mail) 'T1X ' 1.;
+ 'FINSI';
+ cht1 = xt1 '+'   yt1 '+'   zt1;
+* on norme cht1
+ m1 = 'EXTRAIRE' cht1 'COMP';
+ cht1 = cht1 '/' (('PSCAL' cht1 cht1 m1 m1)**0.5);
+
+* creation de la dernière tangente comme résultat du produit vectoriel
+ xn1 = 'NOMC' 'NX  ' ('EXCO' 'NX  ' chn);
+ yn1 = 'NOMC' 'NY  ' ('EXCO' 'NY  ' chn);
+ zn1 = 'NOMC' 'NZ  ' ('EXCO' 'NZ  ' chn);
+ xt1 = 'NOMC' 'T1X ' ('EXCO' 'T1X ' cht1);
+ yt1 = 'NOMC' 'T1Y ' ('EXCO' 'T1Y ' cht1);
+ zt1 = 'NOMC' 'T1Z ' ('EXCO' 'T1Z ' cht1);
+ mxt1 = 'MOTS' 'T1X '; myt1 = 'MOTS' 'T1Y '; mzt1 = 'MOTS' 'T1Z ';
+ mxt2 = 'MOTS' 'T2X '; myt2 = 'MOTS' 'T2Y '; mzt2 = 'MOTS' 'T2Z ';
+ mxn1 = 'MOTS' 'NX  '; myn1 = 'MOTS' 'NY  '; mzn1 = 'MOTS' 'NZ  ';
+
+* pvec ne fonctionne pas avec les CHPO contrairement à ce qui est dit dans l'aide
+* on le fait à la main
+ xt2 = (yn1 '*' zt1 myn1 mzt1 mxt2) '-' (zn1 '*' yt1 mzn1 myt1 mxt2);
+ yt2 = (zn1 * xt1 mzn1 mxt1 myt2) '-' (xn1 * zt1 mxn1 mzt1 myt2);
+ zt2 = (xn1 * yt1 mxn1 myt1 mzt2) '-' (yn1 * xt1 myn1 mxt1 mzt2);
+ cht2 = xt2 '+' yt2 '+' zt2;
+
+
+'FINPROC' chn cht1 cht2;
+
+
+*----------------------------------------------------------------------
+*
+* LOCABASE : Définit une lèvre plus et moins pour tous les éléments
+*            d'interface à partir de la normale orienté dans le sens
+*            de parcours des éléments d'interface
+* utiliser chn = vsur modele_interface 'NORM'; pour la création des normales
+*----------------------------------------------------------------------
+
+'DEBPROC' LOCABASE MeshInt*MAILLAGE;
+
+
+ Nbe1em = 'NBEL' MeshInt;
+
+* 'SI' (nbe1em '>EG' 6);
+   'SI' (nbe1em '>EG' 6E6);
+ cht chn chb = @FRENET MeshInt;
+
+ nbn1 = 'NBNO' MeshInt;
+ po1 = MeshInt 'POIN' 1;
+* Mise à zéro des normales pour le premier et dernier noeud
+ chp1 = 'MANUEL' chpo po1 1 'SCAL' 0. natu discret;
+ po2 = MeshInt 'POIN' nbn1;
+ chp2 = 'MANUEL' chpo po2 1 'SCAL' 0.  natu discret;
+ chp3 = chp1  'ET' chp2;
+
+ idnode = 2;
+ 'REPETER' blo1 (nbn1 '-' 2);
+ po1 = MeshInt 'POIN' idnode;
+ chp1 = 'MANUEL' chpo po1 1 'SCAL' 1. natu discret;
+ chp3 = chp3 'ET' chp1;
+ idnode = idnode '+' 1;
+ 'FIN' blo1;
+
+ lmot1 = 'MOTS' 'SCAL';
+ lmot2 = 'MOTS' 'UX  '  'UX  ';
+
+ cht = chp3 * cht;
+ chn = chp3 * chn;
+
+* Cas du premier et dernier noeud de l'interface
+
+* Premier noeud
+ po1 = MeshInt 'POIN' 1;
+ x1 = 'COORDONNEE' 1 po1;
+ y1 = 'COORDONNEE' 2 po1;
+
+ po2 = MeshInt 'POIN' 2;
+ x2 = 'COORDONNEE' 1 po2;
+ y2 = 'COORDONNEE' 2 po2;
+
+ pmilieu = 'POIN' (x1 '+' ((x2'-' x1) '/' 2))
+ (y1 '+' ((y2 '-' y1) '/' 2));
+
+ Lseg = (((x1 '-' x2) '**' 2) '+'  ((y1 '-' y2) '**' 2 )) '**' (0.5);
+ a = (x2 '-' x1) '/' Lseg;
+ b = (y2 '-' y1) '/' Lseg;
+ b2 = -1. * b;
+
+
+ chp1 = 'MANUEL' chpo po1 2 'TX  ' a 'TY  ' b ;
+ chp2 = 'MANUEL' chpo po1 2 'NX  ' b2 'NY  ' a;
+
+ cht = cht '+' chp1;
+ chn = chn '+' chp2;
+
+
+* Dernier noeud
+ po1 = MeshInt 'POIN' (nbn1 '-' 1);
+ x1 = 'COORDONNEE' 1 po1;
+ y1 = 'COORDONNEE' 2 po1;
+
+ po2 = MeshInt 'POIN' nbn1;
+ x2 = 'COORDONNEE' 1 po2;
+ y2 = 'COORDONNEE' 2 po2;
+
+ pmilieu = 'POIN' (x1 '+' ((x2'-' x1) '/' 2))
+ (y1 '+' ((y2 '-' y1) '/' 2));
+
+ Lseg = (((x1 '-' x2) '**' 2) '+'  ((y1 '-' y2) '**' 2 )) '**' (0.5);
+ a = (x2 '-' x1) '/' Lseg;
+ b = (y2 '-' y1) '/' Lseg;
+ b2 = -1. * b;
+
+ chp1 = 'MANUEL' chpo po2 2 'TX  ' a 'TY  ' b ;
+ chp2 = 'MANUEL' chpo po2 2 'NX  ' b2 'NY  ' a;
+
+ cht = cht '+' chp1;
+ chn = chn '+' chp2;
+
+ co1 = 'EXTRAIRE' cht 'COMP';
+ co2 = 'MOTS' 'T1X ' 'T1Y ';
+
+ cht = 'NOMC' cht co1 co2;
+
+*  cas avec moins de 5 éléments (@frenet ne fonctionne avec moins de 5 éléments)
+ 'SINON';
+
+   cht = 'MANUEL' chpo MeshInt 'T1X ' 0. 'T1Y ' 0.;
+   chn = 'MANUEL' chpo MeshInt 'NX  ' 0. 'NY  ' 0.;
+   Nbe1em = 'NBEL' MeshInt;
+   Nbnode =  'NBNO' MeshInt;
+   idnode = 1;
+
+   'REPETER' blo1 (Nbnode);
+
+      'SI' ((idnode 'EGA' 1) 'OU' (idnode 'EGA' Nbnode));
+         'SI' (idnode 'EGA' 1);
+            ele1 = 'ELEM' MeshInt 1;
+         'SINON';
+            ele1 = 'ELEM' MeshInt nbe1em;
+         'FINSI';
+         po1 = (ele1 point 1);
+         x1 = 'COORDONNEE' 1 po1;
+         y1 = 'COORDONNEE' 2 po1;
+
+         po2 = (ele1 point 2);
+         x2 = 'COORDONNEE' 1 po2;
+         y2 = 'COORDONNEE' 2 po2;
+
+   Lseg = (((x1 '-' x2) '**' 2) '+'  ((y1 '-' y2) '**' 2 )) '**' (0.5);
+         a = (x2 '-' x1) '/' Lseg;
+         b = (y2 '-' y1) '/' Lseg;
+         b2 = -1. * b;
+
+         'SI' (idnode 'EGA' 1);
+            chp1 = 'MANUEL' chpo po1 2 'T1X ' a 'T1Y ' b ;
+            chp2 = 'MANUEL' chpo po1 2 'NX  ' b2 'NY  ' a;
+         'SINON';
+            chp1 = 'MANUEL' chpo po2 2 'T1X ' a 'T1Y ' b ;
+            chp2 = 'MANUEL' chpo po2 2 'NX  ' b2 'NY  ' a;
+         'FINSI';
+
+      'SINON';
+         po1 = (MeshInt point (idnode '-' 1));
+         x1 = 'COORDONNEE' 1 po1;
+         y1 = 'COORDONNEE' 2 po1;
+         po2 = (MeshInt point idnode);
+         x2 = 'COORDONNEE' 1 po2;
+         y2 = 'COORDONNEE' 2 po2;
+         po3 = (MeshInt point (idnode '+' 1));
+         x3 = 'COORDONNEE' 1 po3;
+         y3 = 'COORDONNEE' 2 po3;
+
+   Lseg1 = (((x1 '-' x2) '**' 2) '+'  ((y1 '-' y2) '**' 2 )) '**' (0.5);
+   Lseg2 = (((x3 '-' x2) '**' 2) '+'  ((y3 '-' y2) '**' 2 )) '**' (0.5);
+
+         a1 = (x2 '-' x1) '/' Lseg1;
+         b1 = (y2 '-' y1) '/' Lseg1;
+         a2 = (x3 '-' x2) '/' Lseg2;
+         b2 = (y3 '-' y2) '/' Lseg2;
+         Lseg3 = (((a1 '+' a2)**2) '+' ((b1 '+' b2)**2)) '**' (0.5);
+         chp1 = 'MANUEL' chpo po2 2 'T1X ' ((a1 + a2) '/' Lseg3) 'T1Y '
+               ((b1 '+' b2) '/' Lseg3) ;
+         chp2 = 'MANUEL' chpo po2 2 'NX  '(-1 * (b2 '+' b1) '/' Lseg3)
+                              'NY  '  ((a1 + a2) '/' Lseg3);
+      'FINSI' ;
+
+      cht = cht '+' chp1;
+      chn = chn '+' chp2;
+      idnode = idnode '+' 1;
+
+   'FIN' blo1;
+
+ 'FINSI';
+
+'FINPROC' chn cht;
+
+
+*----------------------------------------------------------------------
+*
+* GLO2LOC : Projection des champs de l'interface du repère global
+*           vers le repère local
+*
+*----------------------------------------------------------------------
+
+'DEBPROC' GLO2LOC cht1*CHPOINT chn*CHPOINT Tplus*CHPOINT Tmoins*CHPOINT
+Wplus*CHPOINT Wmoins*CHPOINT cht2/CHPOINT;
+
+ fg1 = 'EXTRAIRE' tplus 'COMP';
+ wg1 = 'EXTRAIRE' wplus 'COMP';
+ t1 = 'EXTRAIRE' cht1 'COMP';
+ n1 = 'EXTRAIRE' chn 'COMP' ;
+ 'SI' (dim1 'EGA' 3);
+   t2 = 'EXTRAIRE' cht2 'COMP';
+ 'FINSI' ;
+
+ a = 'NOMC' 'FT1 ' (psca cht1 Tplus t1 fg1);
+ b = 'NOMC' 'FN  ' (psca chn Tplus n1 fg1);
+ TlocP = a '+' b;
+
+ a = 'NOMC' 'FT1 ' (psca cht1 Tmoins t1 fg1);
+ b = 'NOMC' 'FN  ' (psca chn Tmoins n1 fg1);
+ TlocM = a '+' b;
+
+ a = 'NOMC' 'UT1 ' (psca cht1 Wplus t1 wg1);
+ b = 'NOMC' 'UN  ' (psca chn Wplus n1 wg1);
+ WlocP = a '+' b;
+
+ a = 'NOMC' 'UT1 ' (psca cht1 Wmoins t1 wg1);
+ b = 'NOMC' 'UN  ' (psca chn Wmoins  n1 wg1);
+ WlocM = a '+' b;
+
+ 'SI' (('DIME' fg1) 'EGA' 3);
+   c = 'NOMC' 'FT2 ' (psca cht2 Tplus t2 fg1);
+   TlocP = TlocP '+' c;
+   c = 'NOMC' 'FT2 ' (psca cht2 Tmoins t2 fg1);
+   TlocM = TlocM '+' c;
+   c = 'NOMC' 'UT2 ' (psca cht2 Wplus t2 wg1);
+   WlocP = WlocP '+' c;
+   c = 'NOMC' 'UT2 ' (psca cht2 Wmoins t2 wg1);
+   WlocM = WlocM '+' c;
+ 'FINSI';
+
+ 'FINPROC' TlocP TlocM WlocP WlocM;
+
+
+*----------------------------------------------------------------------
+*
+* LOCSTEP1 : Etape locale pour le premier par de temps
+*
+*----------------------------------------------------------------------
+
+ 'DEBPROC' LOCSTEP1 Klatin*FLOTTANT f_crack*FLOTTANT MeshInt*MAILLAGE
+    TlocP*CHPOINT TlocM*CHPOINT WlocP*CHPOINT WlocM*CHPOINT it1*ENTIER
+    WlocPOld*CHPOINT WlocMOld*CHPOINT;
+
+ meshloc = 'CHANGER' POI1 meshint;
+ wdiffold= wlocmold '-' wlocpold;
+
+ wdiff= wlocm '-' wlocp;
+ tdiff= tlocm '-' tlocp;
+ k_tan = klatin;
+ k_nor = klatin;
+
+ TlocPnor = 'EXCO' 'FN  ' TlocP;
+ TlocPta1 = 'EXCO' 'FT1 ' TlocP;
+ TlocMnor = 'EXCO' 'FN  ' TlocM;
+ TlocMta1 = 'EXCO' 'FT1 ' TlocM;
+
+ WlocPnor = 'EXCO' 'UN  ' WlocP;
+ WlocPta1 = 'EXCO' 'UT1 ' WlocP;
+ WlocMnor = 'EXCO' 'UN  ' WlocM;
+ WlocMta1 = 'EXCO' 'UT1 ' WlocM;
+
+ w1old = 'EXCO' 'UT1 ' wdiffold;
+ wm1old = 'EXCO' 'UT1 ' wlocmold;
+ wp1old = 'EXCO' 'UT1 ' wlocpold;
+
+* initialisation booleen pour détecter fissure complètement ouverte
+ ouv1 = vrai;
+
+ 'SI' (('DIME' ('EXTRAIRE' tlocp 'COMP')) 'EGA' 3);
+ TlocPta2 = 'EXCO' 'FT2 ' TlocP; TlocMta2 = 'EXCO' 'FT2 ' TlocM;
+ WlocPta2 = 'EXCO' 'UT2 ' WlocP; WlocMta2 = 'EXCO' 'UT2 ' WlocM;
+ TMta2 = 0. * TlocMta2;TPta2 = 0. * TlocPta2;
+ WMta2 = 0. * WlocMta2;WPta2 = 0. * WlocPta2;
+ w2old = 'EXCO' 'UT2 ' wdiffold;
+ wm2old = 'EXCO' 'UT2 ' wlocmold;
+ wp2old = 'EXCO' 'UT2 ' wlocpold;
+ B3D = vrai;
+ 'SINON';
+ B3D = faux;
+ 'FINSI';
+*
+* Cacul des indicateur de contact et de frottement initial
+ ConIni = 0.5 * (('EXCO' 'UN  'wdiff)'-'(('EXCO' 'FN' tdiff)'/'k_nor));
+
+* btrolle le 5 novembre pour coller avec ceux qui est écrit dans NewlocalStepOnInterface dans ELFE
+ GliIni1 =(0.5*((K_tan*('EXCO' 'UT1 'wdiff))'-'('EXCO' 'FT1' tdiff)))'-'
+ (0.5 * K_tan * w1old);
+
+ 'SI' B3D;
+ GliIni2 =(0.5*((K_tan*('EXCO' 'UT2 'wdiff))'-'('EXCO' 'FT2' tdiff)))'-'
+ (0.5 * K_tan * w2old);
+ GliIni = ((gliIni1**2)'+'(gliIni2**2))'**'(0.5);
+ 'SINON';
+   GliIni = GliIni1;
+ 'FINSI' ;
+
+* seuil pour le glissement
+ GSeuil =  f_crack * ('ABS' (K_nor * ConIni));
+
+* Initialisation des champs correspondant à l'itération i + 1/2
+ TMnor = 0. * TlocMnor; TMta1 = 0. * TlocMta1;
+ TPnor = 0. * TlocMnor; TPta1 = 0. * TlocPta1;
+ WMnor = 0. * WlocMnor; WMta1 = 0. * WlocMta1;
+ WPnor = 0. * WlocMnor; WPta1 = 0. * WlocPta1;
+
+* initialisation des compteurs
+Ncon = 0;
+Nouv = 0;
+
+*
+* Loi de comportement local i --> i + 1/2 avec Contact with friction (coulomb)
+*---
+ Nbn1 = 'NBNO' Meshloc;
+ idnode = 1;
+* boucle sur les noeuds de l'interface
+ 'REPETER' blo1 (Nbn1);
+
+   ptemp = Meshloc 'POIN' idnode;
+   ValCI = 'EXTRAIRE' ConIni 'SCAL' ptemp;
+
+*  Valeur à l'itération i
+   wpn = 'EXTRAIRE' WlocPnor 'SCAL' ptemp;
+   wmn = 'EXTRAIRE' WlocMnor 'SCAL' ptemp;
+   wpt1 = 'EXTRAIRE' WlocPta1 'SCAL' ptemp;
+   wmt1 = 'EXTRAIRE' WlocMta1 'SCAL' ptemp;
+
+   tpn = 'EXTRAIRE' TlocPnor 'SCAL' ptemp;
+   tmn = 'EXTRAIRE' TlocMnor 'SCAL' ptemp;
+   tpt1 = 'EXTRAIRE' TlocPta1 'SCAL' ptemp;
+   tmt1 = 'EXTRAIRE' TlocMta1 'SCAL' ptemp;
+
+   wpo1 = 'EXTRAIRE' wp1old 'SCAL' ptemp;
+   wmo1 = 'EXTRAIRE' wm1old 'SCAL' ptemp;
+
+   'SI' B3D;
+      tpt2 = 'EXTRAIRE' TlocPta2 'SCAL' ptemp;
+      tmt2 = 'EXTRAIRE' TlocMta2 'SCAL' ptemp;
+      wpt2 = 'EXTRAIRE' WlocPta2 'SCAL' ptemp;
+      wmt2 = 'EXTRAIRE' WlocMta2 'SCAL' ptemp;
+      wpo2 = 'EXTRAIRE' wp2old 'SCAL' ptemp;
+      wmo2 = 'EXTRAIRE' wm2old 'SCAL' ptemp;
+   'FINSI';
+
+*  Si ouverture  : >EG 0. pour le cas ou on bloque les sauts passe par là ;-)
+   'SI' (ValCI '>EG' 0.);
+      Nouv = Nouv '+' 1;
+*     'MESSAGE' '---> Ouvert';
+*     calcul des nouveaux déplacemtents  (t= 0)
+      chp1 = 'MANUEL' chpo ptemp 'SCAL'  (wpn  '-' (tpn '/' K_nor));
+      chp2 = 'MANUEL' chpo ptemp 'SCAL'  (wmn  '-' (tmn '/' K_nor));
+      chp3 = 'MANUEL' chpo ptemp 'SCAL'  (wpt1  '-' (tpt1 '/' K_nor));
+      chp4 = 'MANUEL' chpo ptemp 'SCAL'  (wmt1  '-' (tmt1 '/' K_nor));
+      WPnor = WPnor '+' chp1; WMnor = WMnor '+' chp2;
+      WPta1 = WPta1 '+' chp3; WMta1 = WMta1 '+' chp4;
+
+   'SI' B3D;
+      chp5 = 'MANUEL' chpo ptemp 'SCAL'  (wpt2  '-' (tpt2 '/' K_nor));
+      chp6 = 'MANUEL' chpo ptemp 'SCAL'  (wmt2  '-' (tmt2 '/' K_nor));
+      WPta2 = WPta2 '+' chp5; WMta2 = WMta2 '+' chp6;
+   'FINSI';
+
+*  Si contact
+   'SINON';
+   Ncon = Ncon '+' 1;
+
+* Pas de test d'ouverture pour le premier et le dernier noeud.. il faudrait le faire juste pour le ou les fronts pour faire les choses correctements...
+   'SI' ((idnode > 1) 'ET' (idnode < Nbn1)); ouv1 = faux; 'FINSI';
+*  problème normal
+*     w
+      chp1 = 'MANUEL' chpo ptemp 'SCAL'  (0.5 * ((wpn '+' wmn )  '-'
+      ((tpn  '+' tmn) '/'  K_nor)));
+      WPnor = WPnor '+' chp1; WMnor = WMnor '+' chp1;
+
+*     t
+      chp2 = 'MANUEL' chpo ptemp 'SCAL'  (K_nor * ValCI);
+      TPnor = TPnor '+' chp2; TMnor = TMnor '-' chp2;
+
+*     extrait les valeurs pour tester adhérence ou glissement
+      ValGI = 'EXTRAIRE' GliIni 'SCAL' ptemp;
+      G = 'EXTRAIRE' GSeuil 'SCAL' ptemp;
+      ValGI1 = 'EXTRAIRE' GliIni1 'SCAL' ptemp;
+      si B3D;
+         ValGI2 = 'EXTRAIRE' GliIni2 'SCAL' ptemp;
+      'FINSI';
+
+*     Adhérence
+      'SI' (('ABS' ValGI) '<'  G);
+*         'MESSAGE' '---> ADHERENCE';
+*         'MESSAGE' 'ValGI1 = ' ValGI1 'G =' G 'ValCI =' ValCI;
+*        t
+         chp31 = 'MANUEL' chpo ptemp 'SCAL' valGI1;
+         TPta1 = TPta1 '+' chp31; TMta1 = TMta1 '-' chp31;
+
+*        w
+         chp41='MANU' chpo ptemp'SCAL'((wpt1 '-' wpo1) '+'((valGI1'-'
+         tpt1) '/' K_tan));
+         WPta1 = WPta1 '+' chp41'+' ('MANU' chpo ptemp'SCAL' wpo1);
+         WMta1 = WMta1 '+' chp41'+' ('MANU' chpo ptemp'SCAL' wmo1);
+
+         'SI' B3D;
+*        t
+         chp32 = 'MANUEL' chpo ptemp 'SCAL' valGI2;
+         TPta2 = TPta2 '+' chp32; TMta2 = TMta2 '-' chp32;
+
+*        w
+         chp42='MANU' chpo ptemp 'SCAL' ((wpt2 '-' wpo2)'+'((valGI2'-'
+         tpt2) '/' K_tan));
+         WPta2 = WPta2 '+' chp42'+' ('MANU' chpo ptemp'SCAL' wpo2);
+         WMta2 = WMta2 '+' chp42'+' ('MANU' chpo ptemp'SCAL' wmo2);
+         'FINSI';
+
+*     Glissement
+      'SINON';
+*         'LISTE' ptemp;
+*         'MESSAGE' '---> Glissement';
+*         'MESSAGE' 'ValGI = ' ValGI 'G =' G 'ValCI =' ValCI;
+
+*        t
+         'SI' (valGI 'EGA' 0.);
+*         chp31 = 'MANUEL' chpo ptemp 'SCAL' 0.;
+         'SINON' ;
+         chp31 = 'MANUEL' chpo ptemp 'SCAL'(G*valGI1'/'('ABS' valGI));
+*      chp31 = 'MANUEL' chpo ptemp 'SCAL'(G*valGI1'/'(2*('ABS' valGI)));
+         'FINSI';
+         TPta1 = TPta1 '+' chp31; TMta1 = TMta1 '-' chp31;
+
+*        w
+* newlocalstep oninterface
+        chp41 = 'MANUEL' chpo ptemp 'SCAL'
+(wpt1 '-' wpo1 '+'( ( (G*valGI1'/'('ABS' valGI)) '-' tpt1) '/' K_tan));
+        chp51 = 'MANUEL' chpo ptemp 'SCAL'
+(wmt1 '-' wmo1 '+'(((-1.*G*valGI1'/'('ABS' valGI))'-'tmt1) '/' K_tan));
+        WPta1 = WPta1 '+' chp41 '+' ('MANU' chpo ptemp'SCAL' wpo1);
+        WMta1 = WMta1 '+' chp51 '+' ('MANU' chpo ptemp'SCAL' wmo1);
+
+      'SI' B3D;
+         'SI' (valGI 'EGA' 0.);
+            chp32 = 'MANUEL' chpo ptemp 'SCAL' 0.;
+         'SINON' ;
+          chp32 = 'MANUEL' chpo ptemp 'SCAL'(G*valGI2'/'('ABS' valGI));
+         'FINSI';
+         chp42 = 'MANUEL' chpo ptemp 'SCAL'
+((wpt2 '- 'wpo2) '+' ( ( (G*valGI2'/'('ABS' valGI))'-'tpt2)'/'K_tan));
+         chp52 = 'MANUEL' chpo ptemp 'SCAL'
+((wmt2 '-' wmo2)'+'(((-1.*G*valGI2'/'('ABS' valGI))'-'tmt2)'/'K_tan));
+         TPta2 = TPta2 '+' chp32; TMta2 = TMta2 '-' chp32;
+         WPta2 = WPta2 '+' chp42'+' ('MANU' chpo ptemp'SCAL' wpo2);
+         WMta2 = WMta2 '+' chp52'+' ('MANU' chpo ptemp'SCAL' wmo2);
+      'FINSI';
+
+      'FINSI';
+
+   'FINSI';
+
+   idnode = idnode '+' 1;
+
+'FIN' blo1;
+
+ tpnor = 'NOMC' 'FN  ' tpnor natu discret;
+ tpta1 = 'NOMC' 'FT1 ' tpta1 natu discret;
+ tmnor = 'NOMC' 'FN  ' tmnor natu discret;
+ tmta1 = 'NOMC' 'FT1 ' tmta1 natu discret;
+ wpnor = 'NOMC' 'UN  ' wpnor natu diffus;
+ wpta1 = 'NOMC' 'UT1 ' wpta1 natu diffus;
+ wmnor = 'NOMC' 'UN  ' wmnor natu diffus;
+ wmta1 = 'NOMC' 'UT1 ' wmta1 natu diffus;
+
+ TlocP_a = TPta1 'ET' TPnor;
+ TlocM_a = TMta1 'ET' TMnor;
+ WlocP_a = WPta1 'ET' WPnor;
+ WlocM_a = WMta1 'ET' WMnor;
+
+ 'SI' B3D;
+   tpta2 = 'NOMC' 'FT2 ' tpta2 natu discret;
+   tmta2 = 'NOMC' 'FT2 ' tmta2 natu discret;
+   wpta2 = 'NOMC' 'UT2 ' wpta2 natu diffus;
+   wmta2 = 'NOMC' 'UT2 ' wmta2 natu diffus;
+   TlocP_a = TlocP_a 'ET' Tpta2;
+   TlocM_a = TlocM_a 'ET' Tmta2;
+   WlocP_a = WlocP_a 'ET' WPta2;
+   WlocM_a = WlocM_a 'ET' WPta2;
+ 'FINSI' ;
+
+
+ 'MESSAGE' ' ';
+ 'MESSAGE' 'Nombre de noeud en contact = ' Ncon;
+ 'MESSAGE' 'Nombre de noeud ouvert     = ' Nouv;
+ 'MESSAGE' ' ';
+
+ 'FINPROC' TlocP_a TlocM_a WlocP_a WlocM_a ouv1;
+
+
+*----------------------------------------------------------------------
+*
+* LOC2GLO : Projetion des champs à l'interface du repère local vers
+*           le repère global
+*
+*----------------------------------------------------------------------
+
+'DEBPROC' LOC2GLO cht1*CHPOINT chn*CHPOINT TlocP*CHPOINT TlocM*CHPOINT
+ WlocP*CHPOINT WlocM*CHPOINT MeshInt*MAILLAGE cht2/CHPOINT;
+
+ fl1 = 'EXTRAIRE' TlocM 'COMP' ;
+ wl1 = 'EXTRAIRE' WlocM 'COMP' ;
+ t1 = 'EXTRAIRE' cht1 'COMP' ;
+ n1 = 'EXTRAIRE' chn 'COMP' ;
+ vecx = 'MANUEL' chpo MeshInt 'UX  ' 1. 'UY  ' 0.;
+ vecy = 'MANUEL' chpo MeshInt 'UX  ' 0. 'UY  ' 1.;
+
+ 'SI' (('DIME' fl1) 'EGA' 3);
+   vecx = 'MANUEL' chpo MeshInt 'UX  ' 1. 'UY  ' 0. 'UZ  ' 0. ;
+   vecy = 'MANUEL' chpo MeshInt 'UX  ' 0. 'UY  ' 1. 'UZ  ' 0. ;
+   vecz = 'MANUEL' chpo MeshInt 'UX  ' 0. 'UY  ' 0. 'UZ  ' 1. ;
+   t2 = 'EXTRAIRE' cht2 'COMP';
+   B3D = vrai;
+ 'SINON';
+   B3D = faux;
+ 'FINSI';
+
+ mx1 = 'EXTRAIRE' vecx 'COMP';
+
+  a = 'NOMC' 'UT1 ' ('PSCA' vecx cht1 mx1 t1);
+  b = 'NOMC' 'UN  ' ('PSCA' vecx chn mx1 n1);
+  chx = a '+' b;
+  'SI' B3D;
+      c = 'NOMC' 'UT2 '('PSCA' vecx cht2 mx1 t2);
+      chx = chx '+' c;
+  'FINSI';
+
+  a = 'NOMC' 'UT1 ' ('PSCA' vecy cht1 mx1 t1);
+  b = 'NOMC' 'UN  ' ('PSCA' vecy chn mx1 n1);
+  chy = a '+' b;
+  'SI' B3D;
+      c = 'NOMC' 'UT2 '('PSCA' vecy cht2 mx1 t2);
+      chy = chy '+' c;
+      a = 'NOMC' 'UT1 ' ('PSCA' vecz cht1 mx1 t1);
+      b = 'NOMC' 'UN  ' ('PSCA' vecz chn mx1 n1);
+      c = 'NOMC' 'UT2 '('PSCA' vecz cht2 mx1 t2);
+      chz = a '+' b '+' c;
+  'FINSI';
+
+  a = 'NOMC' 'FY  ' (psca chy TlocP wl1 fl1);
+  b = 'NOMC' 'FX  ' (psca chx TlocP wl1 fl1);
+  TPglo = b '+' a;
+
+  a = 'NOMC' 'FY  ' (psca chy TlocM wl1 fl1);
+  b = 'NOMC' 'FX  ' (psca chx TlocM wl1 fl1);
+  TMglo = b '+' a;
+
+  a = 'NOMC' 'UY  ' (psca chy WlocP wl1 wl1);
+  b = 'NOMC' 'UX  ' (psca chx WlocP wl1 wl1);
+  WPglo = b '+' a;
+
+  a = 'NOMC' 'UY  ' (psca chy WlocM wl1 wl1);
+  b = 'NOMC' 'UX  ' (psca chx WlocM wl1 wl1);
+  WMglo = b '+'a;
+
+  'SI' B3D;
+   c = 'NOMC' 'FZ  ' (psca chz TlocP wl1 fl1);
+   TPglo = TPglo '+' c;
+   c = 'NOMC' 'FZ  ' (psca chz TlocM wl1 fl1);
+   TMglo = TMglo '+' c;
+   c = 'NOMC' 'UZ  ' (psca chz WlocP wl1 wl1);
+   WPglo = WPglo '+' c;
+   c = 'NOMC' 'UZ  ' (psca chz WlocM wl1 wl1);
+   WMglo = WMglo '+' c;
+ 'FINSI';
+
+'FINPROC'  WMglo WPglo TMglo TPglo;
+
+
+*----------------------------------------------------------------------
+*
+* LIPSRECO : Recombine les champs locaux des 2 lèvres de la fissure
+*            issus de l'étape locale
+*            sur les maillages de l'étape globale en différenciant
+*            et en calculant les inconnus XFEM correspondantes
+*
+*----------------------------------------------------------------------
+
+'DEBPROC' LIPSRECO  Wmoins*CHPOINT Wplus*CHPOINT Tmoins*CHPOINT
+                                                 Tplus*CHPOINT;
+
+ Tmoy = (Tmoins '+' Tplus) '/' 2;
+ Wmoy = (Wmoins '+' Wplus) '/' 2;
+ tmo1 = 'EXTRAIRE' tmoy 'COMP';
+ wmo1 = 'EXTRAIRE' wmoy 'COMP';
+ 'SI' (('DIME' wmo1) 'EGA' 2);
+   tmo2 = 'MOTS' 'FAX ' 'FAY ';
+   wmo2 = 'MOTS' 'AX  ' 'AY  ';
+ 'SINON';
+   tmo2 = 'MOTS' 'FAX ' 'FAY ' 'FAZ ';
+   wmo2 = 'MOTS' 'AX  ' 'AY  ' 'AZ  ';
+ 'FINSI';
+
+ Tsaut = 'NOMC' tmo1 tmo2 ((Tplus '-' Tmoy));
+ Wsaut = 'NOMC' wmo1 wmo2 ((Wplus '-' Wmoy));
+ Tglo = Tmoy '+' Tsaut;
+ Wglo = Wmoy '+' Wsaut;
+
+'FINPROC' Wglo Tglo;
+
+
+*----------------------------------------------------------------------
+*
+* UPDATRHS : Mise à jour du second membre du sytème linéaire
+*
+*----------------------------------------------------------------------
+
+'DEBPROC' UPDATRHS Kuwt*RIGIDITE Tglo*CHPOINT Wglo*CHPOINT
+         meshint*MAILLAGE it1*ENTIER f1*CHPOINT;
+
+ lmot1 = 'EXTRAIRE' wglo 'COMP';
+ lmot2 = 'EXTRAIRE' Tglo 'COMP';
+ f2 = 'ENLEVER' ('REDU' (kuwt * wglo) MeshInt) lmot1;
+ f3 = 'ENLEVER' ('REDU' (kuwt * tglo) MeshInt) lmot1;
+ f4 = enle ('REDU' (kuwt * tglo) MeshInt) lmot2;
+ f5 = f3 '+' f2  '+' f4;
+ RHS1 = f1 '+' f5;
+
+'FINPROC' rhs1;
+
+
+*----------------------------------------------------------------------
+*
+* ERRORINI : Calcul de l'indicateur d'erreur INITIALE
+*            basé sur les quantités w et t sur l'interface
+*            dans les bases locales
+*            entre la solition i + 1/2 et i + 1
+*            fixe les dénominateurs pour les appels suivant -> GETERROR
+*----------------------------------------------------------------------
+
+'DEBPROC' ERRORINI TlocP_n*CHPOINT TlocM_n*CHPOINT WlocP_n*CHPOINT
+WlocM_n*CHPOINT TlocP*CHPOINT TlocM*CHPOINT WlocP*CHPOINT WlocM*CHPOINT
+Klatin*FLOTTANT;
+
+
+*-> i + 1/2 :   TlocP TlocM WlocP WlocM
+ TPnor = 'EXCO' 'FN  ' TlocP;
+ TPta1 = 'EXCO' 'FT1  ' TlocP;
+ TMnor = 'EXCO' 'FN  ' TlocM;
+ TMta1 = 'EXCO' 'FT1  ' TlocM;
+
+ WPnor = 'EXCO' 'UN  ' WlocP;
+ WPta1 = 'EXCO' 'UT1 ' WlocP;
+ WMnor = 'EXCO' 'UN  ' WlocM;
+ WMta1 = 'EXCO' 'UT1 ' WlocM;
+
+*-> i + 1   :   TlocP_n TlocM_n WlocP_n WlocM_n ( _n = new )
+ TPnor_n = 'EXCO' 'FN  ' TlocP_n;
+ TPta1_n = 'EXCO' 'FT1 ' TlocP_n;
+ TMnor_n = 'EXCO' 'FN  ' TlocM_n;
+ TMta1_n = 'EXCO' 'FT1 ' TlocM_n;
+
+ WPnor_n = 'EXCO' 'UN  ' WlocP_n;
+ WPta1_n = 'EXCO' 'UT1 ' WlocP_n;
+ WMnor_n = 'EXCO' 'UN  ' WlocM_n;
+ WMta1_n = 'EXCO' 'UT1 ' WlocM_n;
+
+
+* ---> NUMERATEUR
+
+* problème normal
+numN = 'MAXIMUM' (
+((((TPnor_n '-' TPnor)**2)'+' ((TMnor_n '-' TMnor)**2)) '/' Klatin) '+'
+((((WPnor_n '-' WPnor)**2)'+' ((WMnor_n '-' WMnor)**2)) '*'  Klatin));
+
+* problème tangentiel
+numT= 'MAXIMUM' (
+((((TPta1_n '-' TPta1)**2)'+' ((TMta1_n '-' TMta1)**2)) '/' Klatin) '+'
+((((WPta1_n '-' WPta1)**2)'+' ((WMta1_n '-' WMta1)**2)) '*'  Klatin));
+
+
+* ---> DENOMINATEUR
+
+* problème normal
+SNor_n = (((TPnor_n * TPnor_n) '+' (TMnor_n * TMnor_n) ) '/' Klatin) '+'
+(Klatin * ((WPnor_n *  WPnor_n) '+' (WMnor_n *  WMnor_n)));
+
+SNor = (((TPnor * TPnor) '+' (TMnor * TMnor) ) '/' Klatin) '+'
+(Klatin * ((WPnor *  WPnor) '+' (WMnor *  WMnor)));
+
+denN = ('MAXIMUM' SNor_n ) '+' ('MAXIMUM' SNor );
+
+
+* problème tangentiel
+STa1_n = (((TPta1_n * TPta1_n) '+' (TMta1_n * TMta1_n) ) '/' Klatin) '+'
+(Klatin * ((WPta1_n *  WPta1_n) '+' (WMta1_n *  WMta1_n)));
+
+STa1 = (((TPta1 * TPta1) '+' (TMta1 * TMta1) ) '/' Klatin) '+'
+(Klatin * ((WPta1 *  WPta1) '+' (WMta1 *  WMta1)));
+
+denT = ('MAXIMUM' STa1_n ) '+' ('MAXIMUM' STa1 );
+
+* ---> ERREUR
+
+*-> erreur normale
+etaN = numN '/' denN;
+
+
+*-> erreur tangentielle
+etaT = numT '/' denT;
+
+*-> erreur totale : ComputeLatinErrorNew dans ELFE-3D
+ totalErr = ((etaN) '+' (etaT )) '**' 0.5;
+
+*-> erreur totale : publi récente (= manuscrit Epierres)
+*ler1 = 'PROG' (etaT**0.5) (etaN**0.5);
+*totalerr = 'MAXIMUM' ler1;
+*   'SI' (etaT > etaN);
+*   totalErr = etaT;
+* 'SINON';
+*   totalErr = etaN
+* 'FINSI';
+
+'FINPROC' totalErr (denN) (denT) (etaT**0.5) (etaN**0.5);
+
+
+*----------------------------------------------------------------------
+*
+* GETERROR : Calcul de l'indicateur d'erreur
+*            basé sur les quantités w et t sur l'interface
+*            dans les bases locales
+*            entre la solition i + 1/2 et i + 1
+*            Les DENOMINATEURS DOIVENT ETRE FOURNIT EN ENTREE !
+*----------------------------------------------------------------------
+
+'DEBPROC' GETERROR TlocP_n*CHPOINT TlocM_n*CHPOINT WlocP_n*CHPOINT
+WlocM_n*CHPOINT TlocP*CHPOINT TlocM*CHPOINT WlocP*CHPOINT WlocM*CHPOINT
+den_N*FLOTTANT den_T*FLOTTANT Klatin*FLOTTANT ;
+
+* exclusion des points anciennement et actuellement extrémités
+* de la fissure pour le calcul de l'erreur
+
+
+*-> i + 1/2 :   TlocP TlocM WlocP WlocM
+ TPnor = 'EXCO' 'FN  ' TlocP;
+ TPta1 = 'EXCO' 'FT1 ' TlocP;
+ TMnor = 'EXCO' 'FN  ' TlocM;
+ TMta1 = 'EXCO' 'FT1 ' TlocM;
+
+ WPnor = 'EXCO' 'UN  ' WlocP;
+ WPta1 = 'EXCO' 'UT1 ' WlocP;
+ WMnor = 'EXCO' 'UN  ' WlocM;
+ WMta1 = 'EXCO' 'UT1 ' WlocM;
+
+*-> i + 1   :   TlocP_n TlocM_n WlocP_n WlocM_n ( _n = new )
+ TPnor_n = 'EXCO' 'FN  ' TlocP_n;
+ TPta1_n = 'EXCO' 'FT1 ' TlocP_n;
+ TMnor_n = 'EXCO' 'FN  ' TlocM_n;
+ TMta1_n = 'EXCO' 'FT1 ' TlocM_n;
+
+ WPnor_n = 'EXCO' 'UN  ' WlocP_n;
+ WPta1_n = 'EXCO' 'UT1 ' WlocP_n;
+ WMnor_n = 'EXCO' 'UN  ' WlocM_n;
+ WMta1_n = 'EXCO' 'UT1 ' WlocM_n;
+
+
+* ---> NUMERATEUR
+
+* problème normal
+numN = 'MAXIMUM' (
+((((TPnor_n '-' TPnor)**2)'+' ((TMnor_n '-' TMnor)**2)) '/' Klatin) '+'
+((((WPnor_n '-' WPnor)**2)'+' ((WMnor_n '-' WMnor)**2)) '*' Klatin));
+
+
+* problème tangentiel
+numT= 'MAXIMUM' (
+((((TPta1_n '-' TPta1)**2)'+' ((TMta1_n '-' TMta1)**2)) '/' Klatin) '+'
+((((WPta1_n '-' WPta1)**2)'+' ((WMta1_n '-' WMta1)**2)) '*' Klatin));
+
+
+* ---> ERREUR
+
+*-> erreur normale
+ etaN = numN '/' den_N;
+
+
+*-> erreur tangentielle
+ etaT = numT '/' den_T;
+
+*-> erreur totale : ComputeLatinErrorNew dans ELFE-3D
+ totalErr = ((etaN) '+' (etaT )) '**' 0.5;
+
+*-> erreur totale : publi récente (= manuscrit Epierres)
+*ler1 = 'PROG' (etaT**0.5) (etaN**0.5);
+*totalerr = ('MAXIMUM' ler1)'**'(0.5);
+*'SI' (etaT > etaN);
+*   totalErr = etaT;
+* 'SINON';
+*   totalErr = etaN
+* 'FINSI';
+
+'FINPROC' totalerr (etaT**0.5) (etaN**0.5);
+
+
+*----------------------------------------------------------------------
+*
+* LOCSTEPI : Etape locale pour le premier par de temps
+*
+*----------------------------------------------------------------------
+
+ 'DEBPROC' LOCSTEPI Klatin*FLOTTANT f_crack*FLOTTANT MeshInt*MAILLAGE
+    TlocP*CHPOINT TlocM*CHPOINT WlocP*CHPOINT WlocM*CHPOINT;
+
+ meshloc = 'CHANGER' POI1 meshint;
+ wdiff= wlocm '-' wlocp;
+ tdiff= tlocm '-' tlocp;
+ k_tan = klatin;
+ k_nor = klatin;
+
+ TlocP = 1.*TlocP;
+ TlocM = 1.*TlocM;
+ WlocP = 1.*WlocP;
+ WlocM = 1.*WlocM;
+
+ TlocPnor = 'EXCO' 'FN  ' TlocP;
+ TlocPta1 = 'EXCO' 'FT1 ' TlocP;
+ TlocMnor = 'EXCO' 'FN  ' TlocM;
+ TlocMta1 = 'EXCO' 'FT1 ' TlocM;
+
+ WlocPnor = 'EXCO' 'UN  ' WlocP;
+ WlocPta1 = 'EXCO' 'UT1 ' WlocP;
+ WlocMnor = 'EXCO' 'UN  ' WlocM;
+ WlocMta1 = 'EXCO' 'UT1 ' WlocM;
+
+* initialisation booleen pour détecter fissure complètement ouverte
+ ouv1 = vrai;
+
+ 'SI' (('DIME' ('EXTRAIRE' tlocp 'COMP')) 'EGA' 3);
+ TlocPta2 = 'EXCO' 'FT2 ' TlocP; TlocMta2 = 'EXCO' 'FT2 ' TlocM;
+ WlocPta2 = 'EXCO' 'UT2 ' WlocP; WlocMta2 = 'EXCO' 'UT2 ' WlocM;
+ TMta2 = 0. * TlocMta2;TPta2 = 0. * TlocPta2;
+ WMta2 = 0. * WlocMta2;WPta2 = 0. * WlocPta2;
+ B3D = vrai;
+ 'SINON';
+ B3D = faux;
+ 'FINSI';
+*
+* Cacul des indicateur de contact et de frottement initial
+ ConIni = 0.5 * (('EXCO' 'UN  'wdiff)'-'(('EXCO' 'FN' tdiff)'/'k_nor));
+ GliIni1 = 0.5*((K_tan*('EXCO' 'UT1 'wdiff))'-'('EXCO' 'FT1' tdiff));
+
+ 'SI' B3D;
+ GliIni2 = 0.5*((K_tan*('EXCO' 'UT2 'wdiff))'-'('EXCO' 'FT2' tdiff));
+ GliIni = ((gliIni1**2)'+'(gliIni2**2))'**'(0.5);
+ 'SINON';
+   GliIni = GliIni1;
+ 'FINSI' ;
+
+* seuil pour le glissement
+ GSeuil =  f_crack * ('ABS' (K_nor * ConIni));
+
+* Initialisation des champs correspondant à l'itération i + 1/2
+ TMnor = 0. * TlocMnor; TMta1 = 0. * TlocMta1;
+ TPnor = 0. * TlocMnor; TPta1 = 0. * TlocPta1;
+ WMnor = 0. * WlocMnor; WMta1 = 0. * WlocMta1;
+ WPnor = 0. * WlocMnor; WPta1 = 0. * WlocPta1;
+
+* initialisation des compteurs
+Ncon = 0;
+Nouv = 0;
+*
+* Loi de comportement local i --> i + 1/2 avec Contact with friction (coulomb)
+*---
+ Nbn1 = 'NBNO' Meshloc;
+ idnode = 0;
+
+ 'REPETER' blo1 (Nbn1);
+   idnode = idnode '+' 1;
+   ptemp = Meshloc 'POIN' idnode;
+   ValCI = 'EXTRAIRE' ConIni 'SCAL' ptemp;
+
+*  Valeur à l'itération i
+   wpn = 'EXTRAIRE' WlocPnor 'SCAL' ptemp;
+   wmn = 'EXTRAIRE' WlocMnor 'SCAL' ptemp;
+   wpt1 = 'EXTRAIRE' WlocPta1 'SCAL' ptemp;
+   wmt1 = 'EXTRAIRE' WlocMta1 'SCAL' ptemp;
+
+   tpn = 'EXTRAIRE' TlocPnor 'SCAL' ptemp;
+   tmn = 'EXTRAIRE' TlocMnor 'SCAL' ptemp;
+   tpt1 = 'EXTRAIRE' TlocPta1 'SCAL' ptemp;
+   tmt1 = 'EXTRAIRE' TlocMta1 'SCAL' ptemp;
+
+   'SI' B3D;
+      tpt2 = 'EXTRAIRE' TlocPta2 'SCAL' ptemp;
+      tmt2 = 'EXTRAIRE' TlocMta2 'SCAL' ptemp;
+      wpt2 = 'EXTRAIRE' WlocPta2 'SCAL' ptemp;
+      wmt2 = 'EXTRAIRE' WlocMta2 'SCAL' ptemp;
+   'FINSI';
+
+*  Si ouverture  : >EG 0. pour le cas ou on bloque les sauts passe par là ;-)
+   'SI' (ValCI '>EG' 0.);
+*      'MESSAGE' 'OUVERTURE pour le noeud' idnode;
+      Nouv = Nouv '+' 1;
+*     calcul des noueaux déplacemtents  (t= 0)
+      chp1 = 'MANUEL' chpo ptemp 'SCAL'  (wpn  '-' (tpn '/' K_nor));
+      chp2 = 'MANUEL' chpo ptemp 'SCAL'  (wmn  '-' (tmn '/' K_nor));
+      chp3 = 'MANUEL' chpo ptemp 'SCAL'  (wpt1  '-' (tpt1 '/' K_nor));
+      chp4 = 'MANUEL' chpo ptemp 'SCAL'  (wmt1  '-' (tmt1 '/' K_nor));
+      WPnor = WPnor '+' chp1; WMnor = WMnor '+' chp2;
+      WPta1 = WPta1 '+' chp3; WMta1 = WMta1 '+' chp4;
+
+   'SI' B3D;
+      chp5 = 'MANUEL' chpo ptemp 'SCAL'  (wpt2  '-' (tpt2 '/' K_nor));
+      chp6 = 'MANUEL' chpo ptemp 'SCAL'  (wmt2  '-' (tmt2 '/' K_nor));
+      WPta2 = WPta2 '+' chp5; WMta2 = WMta2 '+' chp6;
+   'FINSI';
+
+*  Si contact
+   'SINON';
+         Ncon = Ncon '+' 1;
+*         'MESSAGE' 'CONTACT pour le noeud' idnode;
+   'SI' ((idnode > 1) 'ET' (idnode < Nbn1)); ouv1 = faux; 'FINSI';
+
+*  problème normal
+*     w
+      chp1 = 'MANUEL' chpo ptemp 'SCAL'  (0.5 * ((wpn '+' wmn )  '-'
+      ((tpn  '+' tmn) '/'  K_nor)));
+      WPnor = WPnor '+' chp1; WMnor = WMnor '+' chp1;
+*     t
+      chp2 = 'MANUEL' chpo ptemp 'SCAL'  (K_nor * ValCI);
+      TPnor = TPnor '+' chp2; TMnor = TMnor '-' chp2;
+
+*     extraction seuil adhérence
+      ValGI = 'EXTRAIRE' GliIni 'SCAL' ptemp;
+      G = 'EXTRAIRE' GSeuil 'SCAL' ptemp;
+      ValGI1 = 'EXTRAIRE' GliIni1 'SCAL' ptemp;
+      si B3D;
+         ValGI2 = 'EXTRAIRE' GliIni2 'SCAL' ptemp;
+      'FINSI';
+
+*     Adhérence
+      'SI' (('ABS' ValGI) '<'  G);
+
+*        t
+         chp31 = 'MANUEL' chpo ptemp 'SCAL' valGI1;
+         TPta1 = TPta1 '+' chp31; TMta1 = TMta1 '-' chp31;
+
+*        w
+        chp41='MANU' chpo ptemp'SCAL'(wpt1'+'((valGI1'-'tpt1)'/'K_tan));
+         WPta1 = WPta1 '+' chp41; WMta1 = WMta1 '+' chp41;
+
+         'SI' B3D;
+        chp32 = 'MANUEL' chpo ptemp 'SCAL' valGI2;
+        chp42='MANU' chpo ptemp'SCAL'(wpt2'+'((valGI2'-'tpt2)'/'K_tan));
+        TPta2 = TPta2 '+' chp32; TMta2 = TMta2 '-' chp32;
+        WPta2 = WPta2 '+' chp42; WMta2 = WMta2 '+' chp42;
+         'FINSI';
+
+*     Glissement
+      'SINON';
+*         'LISTE' ptemp;
+*         'MESSAGE' '---> Glissement';
+
+*        t
+         'SI' (valGI 'EGA' 0.);
+*         chp31 = 'MANUEL' chpo ptemp 'SCAL' 0.;
+         'SINON' ;
+         chp31 = 'MANUEL' chpo ptemp 'SCAL'(G*valGI1'/' ('ABS' valGI));
+         'FINSI';
+         TPta1 = TPta1 '+' chp31; TMta1 = TMta1 '-' chp31;
+
+
+*        w
+         chp41 = 'MANUEL' chpo ptemp 'SCAL'
+         (wpt1 '+'( ( (G*valGI1'/'('ABS' valGI)) '-' tpt1) '/' K_tan));
+         chp51 = 'MANUEL' chpo ptemp 'SCAL'
+         (wmt1 '+'(((-1.*G*valGI1'/'('ABS' valGI))'-'tmt1) '/' K_tan));
+         WPta1 = WPta1 '+' chp41; WMta1 = WMta1 '+' chp51;
+
+      'SI' B3D;
+         'SI' (valGI 'EGA' 0.);
+            chp32 = 'MANUEL' chpo ptemp 'SCAL' 0.;
+         'SINON' ;
+          chp32 = 'MANUEL' chpo ptemp 'SCAL'(G*valGI2'/'('ABS' valGI));
+         'FINSI';
+         chp32 = 'MANUEL' chpo ptemp 'SCAL'(G*valGI2'/'('ABS' valGI));
+         chp42 = 'MANUEL' chpo ptemp 'SCAL'
+         (wpt2 '+'( ( (G*valGI2'/'('ABS' valGI)) '-' tpt2) '/' K_tan));
+         chp52 = 'MANUEL' chpo ptemp 'SCAL'
+         (wmt2 '+'(((-1.*G*valGI2'/'('ABS' valGI))'-'tmt2) '/' K_tan));
+         TPta2 = TPta2 '+' chp32; TMta2 = TMta2 '-' chp32;
+         WPta2 = WPta2 '+' chp42; WMta2 = WMta2 '+' chp52;
+      'FINSI';
+
+      'FINSI';
+
+   'FINSI';
+
+'FIN' blo1;
+
+ tpnor = 'NOMC' 'FN  ' tpnor natu discret;
+ tpta1 = 'NOMC' 'FT1 ' tpta1 natu discret;
+ tmnor = 'NOMC' 'FN  ' tmnor natu discret;
+ tmta1 = 'NOMC' 'FT1 ' tmta1 natu discret;
+ wpnor = 'NOMC' 'UN  ' wpnor natu diffus;
+ wpta1 = 'NOMC' 'UT1 ' wpta1 natu diffus;
+ wmnor = 'NOMC' 'UN  ' wmnor natu diffus;
+ wmta1 = 'NOMC' 'UT1 ' wmta1 natu diffus;
+
+ TlocP_a = TPta1 'ET' TPnor;
+ TlocM_a = TMta1 'ET' TMnor;
+ WlocP_a = WPta1 'ET' WPnor;
+ WlocM_a = WMta1 'ET' WMnor;
+
+ 'SI' B3D;
+   tpta2 = 'NOMC' 'FT2 ' tpta2 natu discret;
+   tmta2 = 'NOMC' 'FT2 ' tmta2 natu discret;
+   wpta2 = 'NOMC' 'UT2 ' wpta2 natu diffus;
+   wmta2 = 'NOMC' 'UT2 ' wmta2 natu diffus;
+   TlocP_a = TlocP_a 'ET' Tpta2;
+   TlocM_a = TlocM_a 'ET' Tmta2;
+   WlocP_a = WlocP_a 'ET' WPta2;
+   WlocM_a = WlocM_a 'ET' WPta2;
+ 'FINSI' ;
+
+ 'MESSAGE' ' ';
+ 'MESSAGE' 'Nombre de noeud en contact = ' Ncon;
+ 'MESSAGE' 'Nombre de noeud ouvert     = ' Nouv;
+ 'MESSAGE' ' ';
+
+ 'FINPROC' TlocP_a TlocM_a WlocP_a WlocM_a;
+
+
+************************************************************************
+*                               AFFICHAGE                              *
+************************************************************************
+
+OPTI TRAC PSC EPTR 6 POTR HELVETICA_16;
+GRAPH = vrai;
+COMPLET = faux;
+* opti debug 1;
+
+* Gestion de l'affichage au cours d'un calcul*
+  Tdisplay = tabl ;
+* Affichage des levels set en début de cycle
+  Tdisplay . levelset = GRAPH;
+* Affichage du repère locale
+  Tdisplay . rep_local = GRAPH;
+* Affichage des déplacement, déformés, contraintes, au cours de itérations de la LATIN
+*  (pour chaque pas de temps !)
+  Tdisplay . Iteration = faux;
+* Affichage des pressions de contact sur déforméee locale
+  Tdisplay . PasTemps = GRAPH;
+*  Affichage de la convergence de la LATIN
+*  (pour chaque pas de temps !)
+  Tdisplay . convergence = GRAPH;
+* Affichage des FICS
+  Tdisplay . fics = GRAPH;
+* Affichage du champ de déplacement global
+  Tdisplay . dep_global = vrai;
+
+
+
+************************************************************************
+*                        PARAMETRES DU CALCUL                          *
+************************************************************************
+
+ dim1 = 2;
+
+*----------------- < Précision pour solveur non-linéaire
+si COMPLET;
+*  eps1 = 1E-6;
+  eps1 = 1E-8;
+sino;
+  eps1 = 1E-3;
+fins;
+
+*----------------- < Nombre d'itéraion max
+ Itmax = 1000;
+
+*----------------- < Materiau
+ Ey1  = 2.06E11;
+ nu1  = 0.3;
+ rho1 = 7800.0;
+
+*----------------- < Frottement des levres de la Fissure
+ f_crack = 0.1;
+
+*----------------- < Chargement
+ f_ext = -1.0E9;
+
+*----------------- < facteur d'amplification pour les tracés
+* effort
+* fac1 = 0;
+ fac1 =  0.05 /(('ABS' f_ext));
+
+* déformée
+ fac2 = 0.01*('ABS' (Ey1 '/' f_ext));
+
+*----------------- < Paramètre géométrique Hammouda
+ L = 0.4;
+ W = 0.2;
+ a = 0.02;
+ beta = 45.;
+*----------------- < Maillage structure
+ N1 = 10;
+* taille élément
+ den4 = a '/' N1;
+*----------------- < Taille élément interface
+ den3 = den4 '/' 1;
+
+
+************************************************************************
+*                              MAILLAGE                                *
+************************************************************************
+
+*----------------- < Maillage structure 1
+
+*----< surface fine de propagation
+ p2 = (W '+' (2 *  a)) (W '+' (2*a));
+ p3 = (W '+' (2 * a)) (W '-' (2*a));
+ p4 = (W '-' (2 * a)) (W '+' (2*a));
+ p5 = (W '-' (2 * a)) (W '-' (2*a));
+
+ l5 = 'DROIT' p2 p3 'DINI' den4 'DFIN' den4;
+ l6 = 'DROIT' p3 p5 'DINI' den4 'DFIN' den4;
+ l7 = 'DROIT' p5 p4 'DINI' den4 'DFIN' den4;
+ l8 = 'DROIT' p4 p2 'DINI' den4 'DFIN' den4;
+ lfi1 = l5 'ET' l6 'ET' l7 'ET' l8;
+ s2 = 'DALLER' l5 l6 l7 l8 'PLAN';
+
+*----< contour grossier
+ p0 = 0. 0.;
+ p1 = (2*W) 0.;
+ p9 = (2*W) L;
+ p8 = 0. L;
+ l1 = 'DROIT' p0 N1 p1 ;
+ l2 = 'DROIT' p1 (N1) p9 ;
+ l3 = 'DROIT' p9 N1 p8 ;
+ l4 = 'DROIT' p8 (N1) p0 ;
+ lco1 = l1 'ET' l2 'ET' l3 'ET' l4;
+ lto1 = lco1 'ET' lfi1;
+ s1 = 'SURFACE' lto1 'PLANE';
+ linbas1 = l1;
+ linhaut = l3;
+ ling = l2;
+ lind = l4;
+ s3 = s1 'ET' s2;
+
+*----------------- < Maillage interface (fissure) (si 1 seule front,
+*                    définir tip1 comme le front)
+ tip2 = (W '+' (a * ('COS' beta))) (W '+' (a * ('SIN' beta)));
+ tip1 = (W '-' (a * ('COS' beta))) (W '-' (a * ('SIN' beta)));
+ crack = 'DROIT' tip2 tip1 'DINI' den3 'DFIN' den3 'COULEUR' viol;
+ stot1 = s3 'ET' crack;
+ si (GRAPH); TRAC stot1 'TITR' 'Maillage'; fins;
+
+* Creation des Levels Sets
+*---------------
+ psi0 phi0  = PSIPHI s2 crack 'DEUX' tip1 tip2;
+ si( Tdisplay.levelset);
+   TRAC phi0 s2 'TITR' 'Level Set \f';
+   TRAC psi0 s2 'TITR' 'Level Set \y';
+ finsi;
+
+
+************************************************************************
+*        MODELE, ENRICHISSEMENT, MATÉRIAU, MATRICE, RELATIONS          *
+************************************************************************
+
+*----------------- < Modele
+ mod1a = MODE s1 MECANIQUE ELASTIQUE ISOTROPE;
+ mod1b = MODE s2 MECANIQUE ELASTIQUE ISOTROPE xq4r;
+* Il faut d'abord donner le modèle X-FEM pour qu'il soit défini en
+* premier dans le modèle totale
+ mod1 = mod1b 'ET' mod1a;
+
+*----------------- < Enrichissement
+ Che1X = tabl;
+* Che1X . 0 = TRIE mod1 psi0 phi0 saut;
+ Che1X . 0 = TRIE mod1 psi0 phi0;
+
+* constructionsion des blocages des ddl X-fem non actifs dans
+* les éléments de transition.
+ Rel1X = tabl;
+ Rel1X . 0 = RELA mod1;
+
+*----------------- < Matériau
+ mat1 = MATE mod1 'YOUN' Ey1 'NU' nu1 'RHO' rho1;
+
+*----------------- < Latin
+ Klatin = 1*(Ey1/('MESURE' crack)) ;
+
+*----------------- < Stabilisation
+ xi = 1*(-1) '/' (Klatin);
+*'OPTION' donn 5;
+*-----------------------------< Creation des differentes matrices blocs
+*                               du système
+ kuwt = RELA 'ACCRO' 'FAIBL' 'PENA' Klatin 'STAB' xi 'NOMU' mod1 Crack;
+* multiplication par facteur 2 à cause de l'utilisation d'enrichissement
+* saut sur l'interface
+ kuwt = 2 * kuwt;
+
+*-----------------------------< Rigidité formulation XFEM 1 champ
+ k1 = 'RIGIDITE' mod1 mat1;
+
+*-----------------------------< Condition aux limites
+ cl1 = (BLOQ  'DEPL' (linbas1 'POIN' 'INITIAL')) 'ET'
+       (BLOQ  'DEPL' (linbas1 'POIN' 'FINAL'));
+ cl1 = cl1 'ET' ('BLOQUE' 'DEPL' 'DIRECTION' (0. 1.) linbas1);
+
+*-----------------------------< Matrice globale 1 champ
+ K1tot  = k1  'ET' cl1 'ET' (Rel1X.0);
+
+*-----------------------------< Matrice globale 3 champs
+ Ktot1  = K1tot  'ET' Kuwt;
+
+*-----------------------------< Effort imposé
+ RHS0 = PRES 'MASS' mod1 (-1.*f_ext) linhaut;
+ si (GRAPH); TRAC (vect RHS0 FORC roug) stot1 'TITR' 'chargement'; fins;
+
+*-----------------------------< Construction repère local
+ mod_int = 'MODELISER' crack 'MECANIQUE' 'ZCO2';
+ chn cht1  = LOCABASE crack ;
+ chn = -1.*chn;
+ cht1 = -1.*cht1;
+
+*-----------------------------< Affichage repère local
+ vn = vect chn 'NX  ' 'NY  '  jaune;
+ vt1 = vect cht1 'T1X ' 'T1Y '  blanc;
+ vloc = vn 'ET' vt1;
+ 'SI' Tdisplay.rep_local;
+   'TRACER' vloc (crack coul bleu);
+ 'FINSI';
+
+
+************************************************************************
+*                               CALCUL                                 *
+************************************************************************
+
+*-----------------------------< Calcul avec un unique pas de temps,
+*     seule la solution du problème de rupture nous interresse ici
+ IdPasT = 1;
+
+
+*-----------------------------<  Resolution
+ 'SI' (IdPasT 'EGA' 1);
+   u0 Tplus Tmoins Wplus Wmoins err = LATIN Tdisplay crack
+   K1tot mod1 RHS0 IdPasT ktot1 kuwt cht1 chn ItMax eps1 klatin
+   f_crack s3;
+ 'SINON' ;
+   u0 Tplus Tmoins Wplus Wmoins err = LATIN Tdisplay crack
+   K1tot mod1 RHS0 IdPasT ktot1 kuwt cht1 chn ItMax eps1 klatin
+   f_crack v1 cht2 Tplus Tmoins Wplus Wmoins;
+ 'FINSI';
+
+
+************************************************************************
+*                        POST-TRAITEMENTS                              *
+************************************************************************
+
+*-----------------------------< Affichage de la pressions de contact
+*                               sur la déformée
+'SI'(Tdisplay.PasTemps);
+   b = xfem reco u0 mod1;
+   def0 =  defo s3 b fac2;
+   VTplus = vect Tplus forc fac1 rouge;
+   VTmoins = vect Tmoins forc fac1 vert;
+   def1 = defo wplus crack fac2  VTplus rouge;
+   def2 = defo wmoins crack fac2  VTmoins vert;
+   def3 = def1 'ET' def2 'ET' def0;
+   'TRACER' def3 TITR 'deformee';
+   'TRACER' (def1 et def2) TITR 'deformee';
+ 'FINSI';
+*-----------------------------< Convergence
+ 'SI' (Tdisplay.convergence);
+*  Réglage de la fenêtre de tracé
+   min1 = ('MINIMUM' err);
+   max1 = ('MAXI' err);
+   abs2 = 'MAXI' ('PROG' ('DIME' err));
+   abs1 = 'PROG' 1. PAS 1. abs2;
+
+*  Erreur
+   evo1 = 'EVOL' 'MANUEL' abs1 err;
+   DESS  evo1
+   'GRIL' 'POIN' 'GRIS'
+   'LOGX' 'XBOR' 1 abs2 'TITX' 'Iterations' POSX CENT
+   'LOGY' 'YBOR' min1 max1 'TITY' 'Erreur' POSY CENT
+   TITR 'Convergence de la LATIN';
+ 'FINSI';
+
+
+*-----------------------------< Ajout des termes de contacts dans le
+*                               calcul des FICs
+   wsaut = wplus '-' wmoins;
+   lmow = 'EXTRAIRE' wsaut 'COMP';
+   mow1 = 'MOTS' 'AX  ' 'AY  ';
+   wsaut = 'NOMC' lmow mow1 wsaut;
+
+   tpglo = EXCO (tplus) (mots 'FX' 'FY') 'NOID';
+   lmo1 = 'EXTRAIRE' tpglo  'COMP';
+   lmo2 = 'MOTS' 'SMX ' 'SMY  ';
+   tpglo = 'NOMC' lmo1 lmo2 tpglo;
+
+*-----------------------------< Calcul des FICs : front 1
+   'MESSAGE' ' ';'MESSAGE' '----------------------------';
+   'MESSAGE' 'Calcul des FICs : front 1';
+   'MESSAGE' '----------------------------';'MESSAGE' ' ';
+   KTAB1 = TABL;
+   KTAB1 . 'OBJECTIF' = MOT 'DECOUPLAGE';
+   KTAB1 . 'PSI' = psi0;
+   KTAB1 . 'PHI' = phi0;
+   KTAB1 . 'FRONT_FISSURE' = tip1;
+   KTAB1 . 'MODELE' = mod1;
+   KTAB1 . 'CARACTERISTIQUES' = mat1;
+   KTAB1 . 'SOLUTION_RESO' = u0;
+   KTAB1 . 'CHARGEMENTS_MECANIQUES' = RHS0;
+   KTAB1 . 'COUCHE' = 2;
+   KTAB1 . 'MODELE_FISSURE' = mod_int;
+   KTAB1 . 'DEPLACEMENT_FISSURE' = wsaut;
+   KTAB1 . 'PRESSION_FISSURE' = TPglo ;
+
+   G_THETA KTAB1;
+
+   K1G_1 = KTAB1 . 'RESULTATS' . 'I';
+   K2G_1 = KTAB1 . 'RESULTATS' . 'II';
+   GK1K2_1 = Ey1 * ((K1G_1**2) + (K2G_1**2)) ;
+* * pas de valeur négative pour KI
+*    'SI' (K1G_1 < 0.);
+*       K1G_1 = 0.;
+*    'FINSI' ;
+
+*-----------------------------< Calcul des FICs : front 2
+   'MESSAGE' ' ';'MESSAGE' '----------------------------';
+   'MESSAGE' 'Calcul des FICs : front 2';
+   'MESSAGE' '----------------------------';'MESSAGE' ' ';
+   KTAB2 = TABL;
+   KTAB2 . 'OBJECTIF' = MOT 'DECOUPLAGE';
+   KTAB2 . 'PSI' = psi0;
+   KTAB2 . 'PHI' = phi0;
+   KTAB2 . 'FRONT_FISSURE' = tip2;
+   KTAB2 . 'MODELE' = mod1;
+   KTAB2 . 'CARACTERISTIQUES' = mat1;
+   KTAB2 . 'SOLUTION_RESO' = u0;
+   KTAB2 . 'CHARGEMENTS_MECANIQUES' = RHS0;
+   KTAB2 . 'COUCHE' = 2;
+   KTAB2 . 'MODELE_FISSURE' = mod_int;
+   KTAB2 . 'DEPLACEMENT_FISSURE' = wsaut;
+   KTAB2 . 'PRESSION_FISSURE' = TPglo ;
+
+   G_THETA KTAB2;
+   K1G_2 = KTAB2 . 'RESULTATS' . 'I';
+   K2G_2 = KTAB2 . 'RESULTATS' . 'II';
+   GK1K2_2 = Ey1 * ((K1G_2**2) + (K2G_2**2)) ;
+* * pas de valeur négative pour KI
+*    'SI' (K1G_2 < 0.);
+*       K1G_2 = 0.;
+*    'FINSI' ;
+
+ 'SI' (Tdisplay.fics);
+* Affichage de la nouvelle fissure
+   q7v1 = VECT 2.E-3 (KTAB1 . CHAMP_THET1) 'VERT';
+   q7v2 = VECT 2.E-3 (KTAB2 . CHAMP_THET1) 'BLEU';
+   'TRACER'  (q7v1 et q7v2) (s2 et crack) TITR 'champs \q';
+   'MESSAGE' ' ';'MESSAGE' ' ';'MESSAGE' ' ';
+   'MESSAGE' '----------------------------';
+   'MESSAGE' 'K1 front1 = ' K1G_1;
+   'MESSAGE' 'K2 front1 = ' K2G_1;
+   'MESSAGE' '----------------------------';
+   'MESSAGE' ' ';'MESSAGE' ' ';'MESSAGE' ' ';
+   'MESSAGE' '----------------------------';
+   'MESSAGE' 'K1 front2 = ' K1G_2;
+   'MESSAGE' 'K2 front2 = ' K2G_2;
+   'MESSAGE' '----------------------------';
+ 'FINSI';
+
+
+'SI' (Tdisplay . dep_global);
+*-----------------------------<AFfichage champ de déplacement
+ u2 = enle u0 'LX  ';
+ u2 = 'REDU' u2 s3;
+ u2 = xfem reco u2 mod1;
+ ux2 =  'NOMC' 'SCAL' ('EXCO' 'UX  ' u2);
+ uy2 =  'NOMC' 'SCAL'('EXCO' 'UY  ' u2);
+ uxy2 = 1.*(((ux2 **2)'+'(uy2 **2)));
+ 'TRACER' uxy2 s3 10;
+'FINSI';
+
+mess ' ';mess ' ';mess ' ';
+'MESSAGE' '----------------------';
+'MESSAGE' 'FIN DES POST-TRAITEMENTS';
+
+
+
+************************************************************************
+***                    TEST DE BON FONCTIONNEMENT                    ***
+************************************************************************
+
+* valeur de reference obtenue en 2013 :
+K2ref = -11.5E7;
+xtol  = 0.10;
+err21 = abs ((K2G_1 - K2ref) / K2ref);
+err22 = abs ((K2G_2 - K2ref) / K2ref);
+mess 'ecart relatif sur K2:' err21 err22;
+si ((err21 >eg xtol) ou (err22 >eg xtol));
+  ERRE 5;
+fins;
+
+* OPTI donn 5 trac X;
+fin ;
+
+
+
+
+
+
+
+
+
+
+
+
+

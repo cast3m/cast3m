@@ -1,0 +1,536 @@
+C MENISM    SOURCE    CHAT      11/03/16    21:27:52     6902
+      SUBROUTINE MENISM
+*********************************************************************
+*
+*     T_CHPO1 T_CHML1=MESM MOD1 BLOQ1 (('TOUT') or 'ROTA');
+*
+*     CALCUL DES MECHANISMES ELEMENTAIRES D'UNE STRUCTURE
+*     COMPOSEE DE POUTRE.
+*
+*     P.PEGON (ISPRA) AOUT 1996
+*********************************************************************
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+-INC CCOPTIO
+-INC SMRIGID
+-INC SMMODEL
+-INC SMCOORD
+-INC SMELEME
+-INC SMCHAML
+-INC SMCHPOI
+-INC SMTABLE
+      SEGMENT ICPR(XCOOR(/1)/(IDIM+1))
+      SEGMENT WORK0
+        REAL*8 C(MRIGI,2*NCOMP)
+        REAL*8 Q(2*NCOMP,2*NCOMP)
+        REAL*8 Q1(2*NCOMP,2*NCOMP+MECAN)
+        REAL*8 C1(MRIGI,2*NCOMP)
+        REAL*8 C2(MRIGI,2*NCOMP+MECAN)
+        REAL*8 XE(3,2)
+        REAL*8 V1(2*NCOMP)
+        REAL*8 TH(MRIGI)
+      ENDSEGMENT
+      SEGMENT WORK1
+        REAL*8 A(NEQUA,NINCO)
+      ENDSEGMENT
+      SEGMENT WORK2
+        REAL*8 B(NINCO,NINCO)
+      ENDSEGMENT
+      SEGMENT WORK3
+        REAL*8 B1(NNNCO,NMECA)
+      ENDSEGMENT
+*
+      PARAMETER(NCOMP=3,NECAN=3,MRIGI=3)
+      CHARACTER*4 COMP(NCOMP),CCOMP,CANI(NECAN)
+      PARAMETER (NMOCLE=2)
+      CHARACTER*4 MOTCLE(NMOCLE)
+*
+      DATA COMP/'UX  ','UY  ','RZ  '/
+      DATA CANI/'RZP1','RZP2','UP2 '/
+      DATA MOTCLE/'TOUT','ROTA'/
+*
+*     Lecture des donnees
+*
+      CALL LIROBJ('MMODEL  ',MMODEL,1,IRET)
+      IF(IRET.EQ.0)RETURN
+      CALL LIROBJ('RIGIDITE',MRIGID,1,IRET)
+      IF(IRET.EQ.0)RETURN
+      CALL LIRMOT(MOTCLE,NMOCLE,IVAL,0)
+      IF(IVAL.EQ.0.OR.IVAL.EQ.1) THEN
+         MECAN=3
+      ELSE IF(IVAL.EQ.2)THEN
+         MECAN=2
+      ENDIF
+*
+*     On verifie que l'on est en 2D et que les elements sont de
+*     poutre ou de timo
+*
+      IF (IDIM.NE.2)THEN
+        WRITE(IOIMP,*)'MENISM: ne fonctionne que en 2D'
+        CALL ERREUR(19)
+        RETURN
+      ENDIF
+*
+      IRET=0
+      SEGACT,MMODEL
+      NZONE=KMODEL(/1)
+      DO IZONE=1,NZONE
+        IMODEL=KMODEL(IZONE)
+        SEGACT,IMODEL
+        IF(NEFMOD.NE.29.AND.NEFMOD.NE.84)THEN
+          IRET=IRET+1
+        ENDIF
+      ENDDO
+      IF(IRET.GT.0)THEN
+        WRITE(IOIMP,*)
+     >   'MENISM: ne fonctionne que pour des POUT ou des TIMO'
+        CALL ERREUR(16)
+        GOTO 9999
+      ENDIF
+*
+*     On numerote les points support actifs
+*
+      SEGINI,ICPR
+      DO  I=1,XCOOR(/1)/(IDIM+1)
+        ICPR(I)=0
+      ENDDO
+      NPOI=0
+      NBEL=0
+      DO IZONE=1,NZONE
+        IMODEL=KMODEL(IZONE)
+        MELEME=IMAMOD
+        SEGACT,MELEME
+        NBELEM=NUM(/2)
+        NBEL=NBEL+NBELEM
+        DO I=1,NUM(/1)
+          DO J=1,NBELEM
+            IKI=NUM(I,J)
+            IF (ICPR(IKI).EQ.0)THEN
+              NPOI=NPOI+1
+              ICPR(IKI)=NPOI
+            ENDIF
+          ENDDO
+        ENDDO
+      ENDDO
+*
+*     Verification que les c.l. s'appliquent a des points
+*     et a des d.o.f.s du probleme
+*
+      NLIM=0
+      SEGACT,MRIGID
+      NRI=IRIGEL(/1)
+      NR=IRIGEL(/2)
+      DO I=1,NR
+        MELEME=IRIGEL(1,I)
+        DESCR =IRIGEL(3,I)
+        xMATRI=IRIGEL(4,I)
+        NEGALI=IRIGEL(6,I)
+        IF (NEGALI.NE.0)THEN
+          WRITE(IOIMP,*)
+     >   'MENISM: on ne veut que des rigidites d"egalites'
+          CALL ERREUR(21)
+          GOTO 9997
+        ENDIF
+        SEGACT,MELEME
+        IF (ITYPEL.NE.22)THEN
+          WRITE(IOIMP,*)
+     >   'MENISM: on ne veut que des rigidites de blocage'
+          CALL ERREUR(21)
+          GOTO 9997
+        ENDIF
+        NBELEM=NUM(/2)
+        NBNN=NUM(/1)
+        NLIM=NLIM+NBELEM
+        DO J=1,NBELEM
+          DO K=2,NBNN
+            IF(ICPR(NUM(K,J)).EQ.0)THEN
+              WRITE(IOIMP,*)'MENISM: ',
+     >          'un point soumis a blocage n"est pas dans le modele'
+              CALL ERREUR(21)
+              GOTO 9997
+            ENDIF
+          ENDDO
+        ENDDO
+        SEGACT,xMATRI
+        NELRIG=re(/3)
+        IF(NBELEM.NE.NELRIG)THEN
+          WRITE(IOIMP,*)
+     >      'MENISM: il y a un probleme sioux dans une des rigidites'
+          CALL ERREUR(21)
+          GOTO 9997
+        ENDIF
+        SEGACT,DESCR
+        NLIGRP=LISINC(/2)
+        IF(NBNN.NE.NLIGRP)THEN
+          WRITE(IOIMP,*)
+     >      'MENISM: il y a un probleme sioux dans une des rigidites'
+          CALL ERREUR(21)
+          GOTO 9997
+        ENDIF
+        DO K=2,NLIGRP
+          CCOMP=LISINC(K)
+          DO 1 J=1,NCOMP
+            IF(COMP(J).EQ.CCOMP)GOTO 2
+ 1        CONTINUE
+          WRITE(IOIMP,*)
+     >      'MENISM: un des d.o.f. de blocage n"est pas dans le modele'
+          CALL ERREUR(21)
+          GOTO 9997
+ 2        CONTINUE
+        ENDDO
+      ENDDO
+*
+*     On est en mesure de commencer le travail en se souvenant que
+*
+*       NCOMP=nb de d.o.f par point
+*       MECAN=nb de mecanisme par element
+*       MRIGI=nb de contrainte rigide
+*       NPOI=nb de point support de NCOMP dof
+*       NBEL=nb d'elements
+*       NLIM=nb de condition aux limites
+*
+*     En consequence on peut allouer le pb avec
+*
+*       NINCO=nb d'inconnues
+*       NEQUA=nb d'equations
+*
+      NINCO=NCOMP*NPOI+MECAN*NBEL
+      NEQUA=MRIGI*NBEL+NLIM
+      NNNCO=NCOMP*NPOI
+      NMECA=NINCO-NEQUA
+*
+*     On commence par la matrice A
+*
+      SEGINI,WORK1
+      CALL ZERO(A,NEQUA,NINCO)
+*
+*     Boucle sur les elements
+*
+      SEGINI,WORK0
+      IEL=0
+      DO IZONE=1,NZONE
+        IMODEL=KMODEL(IZONE)
+        MELEME=IMAMOD
+        DO I=1,NUM(/2)
+          IEL=IEL+1
+*
+*     Calcul de C2 elementaire
+*
+          CALL DOXE(XCOOR,IDIM,2,NUM,I,XE)
+          CALL TIPOCQ(XE, C,Q,MRIGI,2*NCOMP)
+          CALL TIPOQ1(Q,2*NCOMP, Q1,2*NCOMP+MECAN)
+          CALL MATMAT(C,Q1,MRIGI,2*NCOMP,2*NCOMP+MECAN,C2)
+*
+*     Assemblage de C2 dans A
+*
+*         1) noeud 1 de l'element
+*
+          ILIGN=MRIGI*(IEL-1)
+          ICOLO=NCOMP*(ICPR(NUM(1,I))-1)
+          DO J=1,MRIGI
+            DO K=1,NCOMP
+              A(ILIGN+J,ICOLO+K)=C2(J,K)
+            ENDDO
+          ENDDO
+*
+*         2) noeud 2 de l'element
+*
+          ICOLO=NCOMP*(ICPR(NUM(2,I))-1)
+          DO J=1,MRIGI
+            DO K=1,NCOMP
+              A(ILIGN+J,ICOLO+K)=C2(J,K+NCOMP)
+            ENDDO
+          ENDDO
+*
+*         3) degres suplementaires de l'element
+*
+          ICOLO=NCOMP*NPOI+MECAN*(IEL-1)
+          DO J=1,MRIGI
+            DO K=1,MECAN
+              A(ILIGN+J,ICOLO+K)=C2(J,K+2*NCOMP)
+            ENDDO
+          ENDDO
+        ENDDO
+      ENDDO
+*
+*     Assemblage des conditions aux limites
+*
+      ILIGN=MRIGI*NBEL
+      NRI=IRIGEL(/1)
+      NR=IRIGEL(/2)
+      DO I=1,NR
+        MELEME=IRIGEL(1,I)
+        DESCR=IRIGEL(3,I)
+        xMATRI=IRIGEL(4,I)
+        DO J=1,NUM(/2)
+          ILIGN=ILIGN+1
+*          XMATRI=IMATTT(J)
+*          SEGACT,XMATRI
+          DO K=2,NUM(/1)
+            CCOMP=LISINC(K)
+            DO 3 L=1,NCOMP
+              IF(COMP(L).EQ.CCOMP)GOTO 4
+ 3          CONTINUE
+ 4          CONTINUE
+            ICOLO=NCOMP*(ICPR(NUM(K,J))-1)
+            A(ILIGN,ICOLO+L)=RE(1,K,j)
+          ENDDO
+*          SEGDES,XMATRI
+        ENDDO
+      ENDDO
+*
+*     On alloue B et on appelle le solveur
+*
+      SEGINI,WORK2
+      CALL GAJOME(A,NEQUA,NINCO,B,IRET,IOIMP)
+      SEGSUP,WORK1
+      IF (IRET.NE.0)THEN
+        SEGSUP,WORK2
+        WRITE(IOIMP,*)
+     >  'MENISM: il y a un mecanisme global'
+        CALL ERREUR(26)
+        GOTO 9997
+      ENDIF
+*
+*     On ne garde que la partie active de B dans B1
+*
+      SEGINI,WORK3
+      DO J=1,NMECA
+        DO I=1,NNNCO
+          B1(I,J)=B(I,J+NEQUA)
+        ENDDO
+      ENDDO
+      SEGSUP,WORK2
+*
+*     On prepare les tables de sortie
+*
+      M=NMECA+1
+      SEGINI,MTABLE
+      MLOTAB=M
+      MTABTI(1)='MOT'
+      CALL POSCHA('SOUSTYPE',IRET)
+      MTABII(1)=IRET
+      MTABTV(1)='MOT'
+      CALL POSCHA('MECANISMES_PAR_NOEUDS',IRET)
+      MTABIV(1)=IRET
+      DO I=1,NMECA
+        MTABTI(I+1)='ENTIER'
+        MTABII(I+1)=I
+        MTABTV(I+1)='CHPOINT '
+        MTABIV(I+1)=0
+      ENDDO
+      MTAB1=MTABLE
+*
+      SEGINI,MTABLE=MTAB1
+      CALL POSCHA('MECANISMES_PAR_ELEMENTS',IRET)
+      MTABIV(1)=IRET
+      DO I=1,NMECA
+        MTABTV(I+1)='MCHAML  '
+      ENDDO
+      MTAB2=MTABLE
+*
+*     Maillage support des chanpoint solution
+*
+      NBSOUS=0
+      NBREF=0
+      NBELEM=NPOI
+      NBNN=1
+      SEGINI IPT1
+      IPT1.ITYPEL=1
+      DO I=1,XCOOR(/1)/(IDIM+1)
+        IF (ICPR(I).NE.0)THEN
+          IPT1.NUM(1,ICPR(I))=I
+        ENDIF
+      ENDDO
+      SEGDES,IPT1
+*
+*     Generation des chanpoint solution
+*
+      DO I=1,NMECA
+        IF(I.EQ.1)THEN
+*     prototype MCHPOI
+          NAT=2
+          NSOUPO=1
+          SEGINI,MCHPOI
+          MOCHDE='             CHPOINT CREE PAR MENISM'
+          MTYPOI='MECANISM'
+          JATTRI(1)=1
+          IFOPOI=IFOUR
+          MCHPO1=MCHPOI
+*     prototype MSOUPO
+          NC=NCOMP
+          SEGINI,MSOUPO
+          DO J=1,NCOMP
+            NOCOMP(J)=COMP(J)
+          ENDDO
+          IGEOC=IPT1
+          MSOUP1=MSOUPO
+        ELSE
+          SEGINI,MCHPOI=MCHPO1
+          SEGINI,MSOUPO=MSOUP1
+        ENDIF
+        IPCHP(1)=MSOUPO
+        SEGDES,MCHPOI
+        N=NPOI
+        SEGINI,MPOVAL
+        IPOVAL=MPOVAL
+        SEGDES,MSOUPO
+        DO J=1,NPOI
+          DO K=1,NCOMP
+            VPOCHA(J,K)=B1(NCOMP*(J-1)+K,I)
+          ENDDO
+        ENDDO
+        SEGDES,MPOVAL
+        MTAB1.MTABIV(I+1)=MCHPOI
+      ENDDO
+      SEGDES,MTAB1
+*
+*     Generation des mchaml solution
+*
+      DO I=1,NMECA
+*
+*     Chapeau
+*
+        IF(I.EQ.1)THEN
+*     prototype MCHAML
+          N2=MECAN
+          SEGINI,MCHAML
+          DO J=1,MECAN
+            NOMCHE(J)=CANI(J)//'    '
+            TYPCHE(J)='REAL*8          '
+          ENDDO
+          MCHAM1=MCHAML
+*     prototype MCHELM
+          N1=NZONE
+          L1=9
+          N3=6
+          SEGINI,MCHELM
+          TITCHE='MECANISME'
+          IFOCHE=IFOUR
+          DO IZONE=1,NZONE
+            IMODEL=KMODEL(IZONE)
+            IMACHE(IZONE)=IMAMOD
+            INFCHE(IZONE,1)=1
+            INFCHE(IZONE,2)=0
+            INFCHE(IZONE,3)=NIFOUR
+            INFCHE(IZONE,4)=0
+            INFCHE(IZONE,5)=0
+            INFCHE(IZONE,6)=0
+          ENDDO
+          MCHEL1=MCHELM
+*
+          N1PTEL=1
+          N2PTEL=0
+          N2EL=0
+        ELSE
+          SEGINI,MCHELM=MCHEL1
+        ENDIF
+*
+*     Boucle sur les elements
+*
+        DO IZONE=1,NZONE
+          SEGINI,MCHAML=MCHAM1
+          ICHAML(IZONE)=MCHAML
+          IMODEL=KMODEL(IZONE)
+          MELEME=IMAMOD
+          N1EL=NUM(/2)
+          DO J=1,MECAN
+            SEGINI,MELVAL
+            IELVAL(J)=MELVAL
+          ENDDO
+          DO J=1,N1EL
+*
+*     Calcul de C1 elementaire
+*
+            CALL DOXE(XCOOR,IDIM,2,NUM,J,XE)
+            CALL TIPOCQ(XE, C,Q,MRIGI,2*NCOMP)
+            CALL MATMAT(C,Q,MRIGI,2*NCOMP,2*NCOMP,C1)
+*
+*     On remplit V1
+*
+*           1) noeud 1 de l'element
+*
+            ICOLO=NCOMP*(ICPR(NUM(1,J))-1)
+            DO K=1,NCOMP
+              V1(K)=B1(ICOLO+K,I)
+            ENDDO
+*
+*           2) noeud 2 de l'element
+*
+            ICOLO=NCOMP*(ICPR(NUM(2,J))-1)
+            DO K=1,NCOMP
+              V1(K+NCOMP)=B1(ICOLO+K,I)
+            ENDDO
+*
+*     Calcul de THeta elementaire
+*
+            CALL MATVE1(C1,V1,MRIGI,2*NCOMP,TH,2)
+*
+*     Remplissage des MELVAL
+*
+            DO K=1,MECAN
+              MELVAL=IELVAL(K)
+              VELCHE(1,J)=TH(K)
+            ENDDO
+          ENDDO
+          DO J=1,MECAN
+            MELVAL=IELVAL(J)
+            SEGDES,MELVAL
+          ENDDO
+          SEGDES,MCHAML
+        ENDDO
+        SEGDES,MCHELM
+        MTAB2.MTABIV(I+1)=MCHELM
+      ENDDO
+      SEGDES,MTAB2
+      SEGSUP,MCHAM1
+*
+*     A faire ...
+*
+*     WARNING!!!!!!!!! SIGNE DES ROTATIONS!!!!!!! fait en modifiant C
+      SEGSUP,WORK3
+      SEGSUP,WORK0
+*
+*     On rend la main a GIBIANE
+*
+      CALL ECROBJ('TABLE',MTAB2)
+      CALL ECROBJ('TABLE',MTAB1)
+*
+*     Desactivation de la rigidite (imatri, descripteur et maillage)
+*
+ 9997 DO I=1,NR
+        MELEME=IRIGEL(1,I)
+        SEGDES,MELEME
+        DESCR=IRIGEL(3,I)
+        SEGDES,DESCR
+        xMATRI=IRIGEL(4,I)
+        SEGDES,xMATRI
+      ENDDO
+      SEGDES,MRIGID
+*
+*     Supression de ICPR
+*
+      SEGSUP,ICPR
+*
+*     Desactivation des maillages du modele
+*
+      DO IZONE=1,NZONE
+        IMODEL=KMODEL(IZONE)
+        MELEME=IMAMOD
+        SEGDES,MELEME
+      ENDDO
+*
+*     Desactivation du modele
+*
+ 9999 DO IZONE=1,NZONE
+        IMODEL=KMODEL(IZONE)
+        SEGDES,IMODEL
+      ENDDO
+      SEGDES,MMODEL
+*
+      RETURN
+      END
+
+
+
+

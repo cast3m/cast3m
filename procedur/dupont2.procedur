@@ -1,0 +1,495 @@
+$$$$ DUPONT2
+* DUPONT2   PROCEDUR  FD218221  17/10/18    21:15:04     9590
+'DEBPROC' DUPONT2 PRECED*'TABLE';
+
+*----------------------------------------------------------------------*
+*                                                                      *
+*                             D U P O N T 2                            *
+*                             -------------                            *
+*                                                                      *
+*     RESOLUTION D'UN PROBLEME DE THERMIQUE TRANSITOIRE NON-LINEAIRE   *
+*     METHODE A UN PAS DE TEMPS ( TETA SCHEMA )                        *
+*                                                                      *
+*     ETAB, TABLE CONTENANT EN ENTREE :                                *
+*                                                                      *
+*     INDICE 'TET0'         CHAMP DE TEMPERATURE INITIAL AU PAS 0      *
+*     INDICE 'TET1'         CHAMP DE TEMPERATURE INITIAL AU PAS 1      *
+*                           ( LA DONNEE DE CE CHAMP EST FACULTATIVE )  *
+*     INDICE 'VIEUXPAS'     PAS DE TEMPS ENTRE TET0 ET TET1            *
+*                           (DONNEE INDISPENSABLE SI EXISTE TET1)      *
+*     INDICE 'RAYO'         LOGIQUE VALANT VRAI POUR UNE CONDITION     *
+*                           DE RAYONNEMENT                             *
+*     INDICE 'CELSIUS'      LOGIQUE VALANT VRAI SI L'UNITE EST LE      *
+*                           DEGRE CELSIUS (CAPITAL SI RAYONNEMENT)     *
+*     INDICE 'MOD_THE'      MODELE       THERMIQUE                     *
+*     INDICE 'MOD_CON'      MODELE       CONVECTION                    *
+*     INDICE 'MOD_TOT'      MODELE       CONVECTION + THERMIQUE        *
+*     INDICE 'MAT_TOT'      MATERIAU     CONVECTION + THERMIQUE        *
+*     INDICE 'BLOCAGES_THERMIQUES'      MATRICE DE BLOCAGE             *
+*     INDICE 'CHARGEMENT'   CHARGEMENT DECRIVANT LES :                 *
+*                           VALEURS DES VARIABLES EXTERNES (EX: TE,    *
+*                           FLUX,TEMPERATURES IMPOSEES ,...)           *
+*                           VALEURS DES VARIABLES EXTERNES             *
+*     INDICE 'PHASE'        LOGIQUE VALANT VRAI SI CHGT DE PHASE       *
+*     INDICE 'TEMPS0'       TEMPS INITIAL (CORRESPOND A TET0)          *
+*     INDICE 'PAS'          VALEUR DU PAS DE TEMPS                     *
+*     INDICE 'TEM_CALC'     LISTREEL : TEMPS DES RESULTATS A CALCULER  *
+*     INDICE 'RELAXATION_DUPONT'  VALEUR DU COEFFICIENT DE RELAXATION  *
+*                           (VALEUR PAR DEFAUT 0.25)                   *
+*     INDICE 'SOUS-RELAXATION'  VALEUR DU COEFF. DE SOUS-RELAXATION    *
+*                           (VALEUR PAR DEFAUT 0.5)                    *
+*     INDICE PROJECTION     LOGIQUE VALANT VRAI SI COUPLAGE ET SI LE   *
+*                           MAILLAGE DE LA MECANIQUE ET DE LA THERMIQUE*
+*                           EST DIFFERENT                              *
+*                                                                      *
+*     ETAB CONTIENT EN SORTIE                                          *
+*                                                                      *
+*     INDICE INITIAL(2)     DERNIER CHAMP DE TEMPERATURE CALCULE       *
+*                                                                      *
+*     REMARQUE :  CERTAINES VARIABLES ONT DES NOMS IMPOSES.            *
+*                 LE TEMPS                      : TEMP                 *
+*                 LA TEMPERATURE                : T                    *
+*                 LA TEMPERATURE EXTERIEURE     : TE                   *
+*                 LES TEMPERATURES IMPOSEES     : TIMP                 *
+*                 LES FLUX                      : Q                    *
+*                                                                      *
+*                 LE NOM DES AUTRES VARIABLES EST LAISSE AU CHOIX DE   *
+*                 L'UTILISATEUR                                        *
+*                                                                      *
+*     D.R., LE 29 JUIN 1988.                                           *
+*     E.J., MODIFICATIONS SEPTEMBRE 1994                               *
+*                                                                      *
+*----------------------------------------------------------------------*
+'REPETER' PROC 1 ;
+
+ETAB=PRECED.'WTABLE';
+
+ERR_VAL = FAUX;
+MAIL_TOT = 'EXTR' ETAB.'MOD_TOT' 'MAIL';
+
+********************************************************************
+*        Recuperation de l'information contenue dans ETAB          *
+********************************************************************
+
+*---------------- Initialisation du pas de temps ------------------
+
+T_PAS = ETAB.'NOUV_PAS' ;
+'SI' ('EXISTE' ETAB 'VIEUXPAS');
+   T_VPAS = ETAB.'VIEUXPAS';
+'FINSI';
+
+*------- Initialisation de la liste des temps a calculer ---------
+
+TE_CALC = ETAB.'TEM_CALC' ;
+DCALC = 'DIME' TE_CALC;
+
+*------------ Initialisation des variables externes ---------------
+
+LNOM = 'EXTR' ETAB.'CHARGEMENT' 'COMP';
+
+*----------- y-a-t-il definition du coefficient lambda -----------
+
+'SI' ( 'EXISTE' ETAB 'RELAXATION_DUPONT' ) ;
+   LAMBDA = ETAB.'RELAXATION_DUPONT' ;
+   A_SUPPR = FAUX ;
+'SINON' ;
+   LAMBDA   = 0.25 ;
+   ETAB.'RELAXATION_DUPONT' = LAMBDA ;
+   A_SUPPR = VRAI ;
+'FINSI' ;
+'SI' ( 'EXISTE' ETAB 'SOUS_RELAXATION' ) ;
+   LAMBDA2   = ETAB.'SOUS_RELAXATION' ;
+'SINON' ;
+   LAMBDA2   = 0.5 ;
+'FINSI' ;
+
+*-------- Recherche des variables selon lesquelles varie ----------
+*---------------------- le champ de materiau ----------------------
+
+LVAREX = 'EXTR' ETAB.'MAT_TOT' 'DEVA';
+ILVA = 'DIME' LVAREX;
+'SI' ('NEG' ILVA 0);
+   NONLIN1 = VRAI;
+   'SI' (ETAB.'COUPLAGE');
+       CONTI=PRECED.'CONTINUATION';
+*--- Creation du MCHAML contenant tous les parametres mecaniques --
+*-------- Ces parametres sont determines au temps TEM0 ------------
+*----- Ces parametres sont projetes sur le maillage thermique -----
+
+      DEP1 = 'CHAN' 'CHAM' CONTI.'DEPLACEMENTS'
+                           ETAB.'MO_TOT'  'NOEUD';
+      CON1 = 'CHAN' 'NOEUD' CONTI.'CONTRAINTES'
+                            ETAB.'MO_TOT' ;
+      CHAR1_ME = DEP1 'ET' CON1;
+*      'SI' ('EXISTE' CONTI 'VITESSES');
+*        VIT1 = 'CHAN' 'CHAM' CONTI.'VITESSES'
+*                             ETAB.'MO_TOT'  'NOEUD';
+*        CHAR1_ME = CHAR1_ME 'ET' VIT1;
+*      'FINSI';
+      'SI' ('EXISTE' CONTI 'VARIABLES_INTERNES');
+         VAR1 = 'CHAN'  'NOEUD'   CONTI.'VARIABLES_INTERNES'
+                                 ETAB.'MO_TOT' ;
+*         DEF1 ='CHAN' 'NOEUD' (ETAB.'DEI_EST')
+*                      (ETAB.'MO_TOT') ;
+          CHAR1_ME = CHAR1_ME 'ET' VAR1 ;
+*         CHAR1_ME = CHAR1_ME 'ET' VAR1 'ET' DEF1;
+      'FINSI';
+     'SI' ETAB.'PROJECTION';
+         CHAR_ME =  'CHAN' 'CHAM' ('PROI' MAIL_TOT CHAR1_ME)
+                (ETAB.'MO_TOT')  'RIGIDITE';
+     'SINON';
+         CHAR_ME =  'CHAN' 'CHAM' ('CHAN' 'CHPO' CHAR1_ME
+                (ETAB.'MO_TOT'))  (ETAB.'MO_TOT')  'RIGIDITE';
+     'FINSI';
+   'FINSI';
+'SINON';
+   NONLIN1 = FAUX;
+'FINSI';
+
+*------- Cas particulier ou il n'y a pas de CAPACITE ------------------*
+*- Ceci correspond au cas ou, au moins, une des 2 composantes 'C   '  -*
+*- et/ou 'RHO ' n'est pas definie dans le materiau (facultatives).    -*
+
+ICPCONS = ETAB.'CAPACONST' ;
+IKCONS  = ETAB.'CONDCONST' ;
+
+LCOMPM = 'EXTRAIRE' ETAB.'MAT_TOT' 'COMP' ;
+ICAPA = ('EXISTE' LCOMPM 'C   ') 'ET' ('EXISTE' LCOMPM 'RHO ') ;
+ICAPA = ICAPA 'OU' ICPCONS ;
+* En regime stationnaire (sans CAPACITE), on force LAMBDA2 a 1.
+* Sinon on ne resout pas le bon probleme !
+* Quelle valeur pour LAMBDA ? 0.5 ? A voir !
+* On peut aussi se demander s'il est judicieux, dans le cas present,
+* d'utiliser cette methode d'integration !
+'SI' ('NON' ICAPA) ;  LAMBDA2 = 1. ;  'FINSI' ;
+
+*---------- Initialisation de l'unité de température --------------
+
+'SI' ('EXISTE' ETAB 'CELSIUS');
+   ICELS = ETAB.'CELSIUS';
+'SINON';
+   ICELS = FAUX;
+'FINSI';
+
+*---------- Initialisation de la temperature de reference----------
+
+'SI' ICELS ;
+   TREF = 273.15 ;
+'SINON';
+   TREF = 0. ;
+'FINSI';
+
+*----------- Initialisation des champs de temperatures ------------
+*------------------------ et du temps -----------------------------
+
+INIT = 0;
+
+TYP_0 = 'TYPE' (ETAB.'TET0');
+'SI' ('NEG' TYP_0 'ENTIER  ') ;
+   'SI' ((ABS(T_PAS-T_VPAS)/T_PAS) '<EG' 1E-5);
+      TEM1 = ETAB.'TEMPS0' ;
+      TEM0 = TEM1 - T_VPAS;
+      TEM2 = TEM1 + T_PAS;
+      U0 = ETAB.'TET0' ;
+      U1 = ETAB.'TET1' ;
+   'SINON';
+      U1 = ETAB.'TET1' ;
+      INIT = 1;
+   'FINSI';
+'SINON';
+   INIT = 1;
+   U1 = ETAB.'TET1' ;
+'FINSI';
+
+'SI' (INIT 'EGA' 1);
+   TEM0 = ETAB.'TEMPS0';
+   TEM1 = TEM0 + T_PAS;
+   TEM2 = TEM1 + T_PAS;
+   LI_TEM =  ETAB.'TEM_CALC';
+   ETAB.'TEM_CALC' = 'PROG' TEM1;
+   TIN1 = TRANSNON PRECED;
+   ETAB.'TEM_CALC' = LI_TEM;
+   ERR_VAL = TIN1.'ERREUR' ;
+   'SI' ETAB.'RAYO';
+      ETAB.'RAYONNEMENT' = TIN1.'RAYONNEMENT';
+   'FINSI' ;
+*
+   'SI' ('EGA' DCALC 1);
+      STAB = TIN1 ;
+      STAB.'RELAXATION_DUPONT' = LAMBDA ;
+      'QUITTER' PROC;
+   'FINSI';
+
+****************************************************************
+*             calculer U2 a partir de U1                       *
+****************************************************************
+*  je suis passe dans TRANSNON
+   U2 = TIN1.'INITIAL(2)' ;
+   U0 = U1;
+   U1 = U2;
+'FINSI' ;
+
+'SI' ICELS ;
+  U0 = U0 + TREF ;  U1 = U1 + TREF ;
+'FINSI' ;
+
+********************************************************************
+*                  Boucle sur les pas de temps                     *
+********************************************************************
+
+'REPETER' BOUC_SO ;
+   ITE3 = &BOUC_SO;
+
+*-------------------- Condition de fin de boucle ------------------
+
+   TEMM = (LAMBDA2 * TEM2)  + ((1 - LAMBDA2) * TEM1);
+   UC_T = 'COLI' U1 ((TEMM - TEM0)/(TEM1 - TEM0))
+                 U0 ((TEM1 - TEMM)/(TEM1 - TEM0)) ;
+   TH_COUR = UC_T ;  'SI' ICELS ; TH_COUR = TH_COUR - TREF ; 'FINSI' ;
+   ETAB.'THER_COURANT' = TH_COUR ;
+
+   'MESS' ' ';
+   'MESS' '---- Calcul du champ de temperature au temps :'TEM2;
+   'MESS' ' ';
+
+*****************************************************************
+*               Gestion des variables externes                  *
+*****************************************************************
+
+   'SI' NONLIN1;
+
+*-------------- Cas de la temperature et du temps ---------------
+
+      CHVAR = 'CHAN' 'CHAM' TH_COUR ETAB.'MOD_TOT' 'RIGIDITE'    ;
+      CHVAR2 = 'MANU' 'CHML' ETAB.'MOD_TOT' 'TEMP' TEMM 'RIGIDITE' ;
+      CHVAR = CHVAR 'ET' CHVAR2 ;
+
+*-------------- Cas des variables mecaniques --------------------
+*---- si il y a couplage on les "rentre" toutes dans CHVAR ------
+
+      'SI' (ETAB.'COUPLAGE');
+         CHVAR = CHVAR 'ET' CHAR_ME;
+      'FINSI';
+
+*-------------- Mise a jour des variables externes --------------
+
+      'SI' (ETAB.'PROCEDURE_PARATHER') ;
+         PARATHER PRECED TEMM ;
+      'FINSI' ;
+
+*-------------- Cas des autres variables --------------------
+
+      'REPETER' BOU_NU2 ILVA;
+         MOTI = 'EXTR' LVAREX &BOU_NU2 ;
+         'SI' (('EGA' MOTI 'TEMP    ') OU ('EGA' MOTI 'T       '));
+            'ITERER' BOU_NU2;
+         'FINSI';
+         'SI' (ETAB.'COUPLAGE');
+            'SI' ('EXISTE' CHAR_ME MOTI );
+               'SI' ('NEG' LAMBDA2 0.);
+ 'MESS' '*** Le materiau thermique depend de parametres mecaniques';
+ 'ERRE' '*** Il faut initialiser SOUS-RELAXATION à 0.';
+               'FINSI';
+               'ITERER' BOU_NU2;
+            'FINSI';
+         'FINSI';
+         'SI' ('EXISTE' (ETAB.'CHARGEMENT') MOTI);
+            CH_1 = 'TIRE' (ETAB.'CHARGEMENT') MOTI TEMM;
+            TYP_1 = 'TYPE' CH_1;
+
+* on suppose que les chargements qui ne sont pas d'origine mecanique
+* sont appuyes sur le maillage thermique .
+
+            'SI' ('EGA' TYP_1 'CHPOINT ');
+               CHVAR2 = 'CHAN' 'CHAM' CH_1 ETAB.'MOD_TOT' 'RIGIDITE';
+            'SINON';
+               CHVAR2 = 'CHAN' 'RIGIDITE' CH_1 ETAB.'MOD_TOT';
+            'FINSI';
+            CHVAR = CHVAR + CHVAR2;
+         'SINON';
+            'MESS' '*** Il manque une donnee du chargement ***';
+            'MESS' '*** Variable concernee : 'MOTI;
+            'ERREUR' ' ';
+         'FINSI';
+      'FIN' BOU_NU2;
+   'FINSI';
+
+*--------------------- On cherche les flux -----------------------
+
+   'SI' ('EXISTE' (ETAB.'CHARGEMENT') 'Q   ');
+      CH_FL = 'TIRE' (ETAB.'CHARGEMENT') 'Q   ' TEMM;
+   'FINSI';
+
+*----------------- Calcul du champ de matériau ---------------------
+
+   'SI' NONLIN1;
+      CHVAR1 = 'REDU' CHVAR (ETAB.'MOD_TOT');
+      CHMAT = 'VARI' 'NUAG' (ETAB.'MOD_TOT') (ETAB.'MAT_TOT')
+                            CHVAR1 'RIGIDITE';
+   'SINON';
+      CHMAT = ETAB.'MAT_TOT';
+   'FINSI';
+   ETAB.'CHMAT'=CHMAT;
+
+*------------- Calcul de la matrice de conductivité ----------------
+
+   CHMAT1   = 'REDU' CHMAT ETAB.'MOD_THE';
+   MAT_COND = 'COND' ETAB.'MOD_THE' CHMAT1;
+   'SI' IKCONS ;
+     MAT_COND = MAT_COND 'ET' ETAB.'CONDUCTIVITE_CONSTANTE' ;
+   'FINS' ;
+
+*----------------- y-a-t-il des blocages ---------------------------
+
+   'SI' ('EGA'  ETAB.'BLOCAGES_THERMIQUES'   'INCONNU' ) ;
+      MAT_BLOC = 'EXTR' MAT_COND 'RIGI' 'MULT';
+   'SINON';
+      MAT_BLOC = ETAB.'BLOCAGES_THERMIQUES';
+  'FINSI';
+  'SI' ('NON' ('EXISTE' (ETAB.'CHARGEMENT') 'TIMP'));
+      CH_TI = 'DEPI' MAT_BLOC 0.;
+  'SINON';
+      CH_TI = 'TIRE' (ETAB.'CHARGEMENT') 'TIMP' TEM2 ;
+      'SI' ICELS ;  CH_TI = CH_TI + TREF ;  'FINSI' ;
+  'FINSI';
+
+*----------------- Calcul de la matrice de capacite -----------------
+
+   'SI' ICAPA ;
+        MAT_CAPA = 'CAPA' ETAB.'MOD_THE' CHMAT1;
+   'FINSI' ;
+   'SI' ICPCONS ;
+      MAT_CAPA = MAT_CAPA 'ET' ETAB.'CAPACITE_CONSTANTE' ;
+   'FINSI' ;
+
+*******************************************************************
+*              On genere les termes de convection                 *
+*******************************************************************
+
+   'SI' ETAB.'CONVECTION';
+      CHMAT2   = 'REDU' CHMAT ETAB.'MOD_CON';
+*      RIG_CON = 'COND' ETAB.'MOD_CON' CHMAT2       ;
+*---------- Si convection, on cherche TECO -------------------------
+      'SI'  ('EXISTE' ETAB.'CHARGEMENT' 'TECO') ;
+         CH_TEC = 'TIRE' ETAB.'CHARGEMENT' 'TECO' TEMM ;
+         'SI' ICELS ;  CH_TEC = CH_TEC + TREF ;  'FINSI' ;
+         CHAL_TE = 'CONV' ETAB.'MOD_CON' CHMAT2 CH_TEC ;
+         CH_TI = CH_TI + CHAL_TE;
+      'FINSI' ;
+*      MAT_COND = MAT_COND 'ET' RIG_CON;
+   'FINSI';
+
+******************************************************************
+*            On genere les termes de rayonnement                 *
+******************************************************************
+
+   'SI' ETAB.'RAYO' ;
+      IAPPEL = 1 ;
+      t_rayo = PAS_RAYO PRECED TEMM IAPPEL ;
+      'SI' ('EXIS' t_rayo 'ADDI_MATRICE') ;
+         MAT_COND = MAT_COND 'ET' t_rayo.'ADDI_MATRICE';
+      'FINSI';
+      'SI' ('EXIS' t_rayo 'ADDI_SECOND') ;
+         CH_TI = CH_TI 'ET' t_rayo.'ADDI_SECOND' ;
+      'FINSI';
+      'OUBLIER' t_rayo ;
+   'FINSI';
+
+******************************************************************
+*            En cas de procedure utilisateur CHARTHER            *
+******************************************************************
+
+   'SI' ETAB.'PROCEDURE_CHARTHER' ;
+      taat = CHARTHER PRECED TEMM ;
+      'SI'( 'EXIS' taat 'ADDI_SECOND') ;
+         CH_TI = CH_TI 'ET' taat.'ADDI_SECOND' ;
+      'FINSI' ;
+      'SI' ('EXIS' taat 'ADDI_MATRICE') ;
+         MAT_COND = MAT_COND 'ET' taat.'ADDI_MATRICE' ;
+      'FINSI' ;
+      taat = 'MOT' 'INCONNU' ;
+   'FINSI';
+
+*---------------- Calcul de la matrice regularisee -----------------
+
+    SCA1 = 0.5 + LAMBDA          ;
+    SCA2 = ( 2. * LAMBDA ) - 0.5 ;
+    SCA3 = -1. * LAMBDA          ;
+    MAT_RIGI = MAT_COND * SCA1 ;
+    B1       = MAT_COND * SCA2 ;
+    B2       = MAT_COND * SCA3 ;
+    MAT_CHPO = B2 * U0 ;
+    'SI' ICAPA ;
+       A1 = MAT_CAPA / T_PAS  ;
+       MAT_RIGI = A1 'ET' MAT_RIGI ;
+       B1 = A1 'ET' B1 ;
+    'FINSI' ;
+    MAT_RIGI = MAT_RIGI 'ET' MAT_BLOC ;
+    MAT_CHPO = MAT_CHPO + (B1 * U1) ;
+   'SI' ('EXISTE' (ETAB.'CHARGEMENT') 'Q   ');
+       MAT_CHPO = MAT_CHPO + CH_FL ;
+    'FINSI' ;
+    MAT_CHPO = MAT_CHPO + CH_TI ;
+
+*--------------------- Calcul d'un pas ----------------------------
+
+   U2 = 'RESOUDRE' MAT_RIGI MAT_CHPO ;
+   'DETR' MAT_RIGI;
+
+   TH_COUR = U2 ;  'SI' ICELS ; TH_COUR = TH_COUR - TREF ; 'FINSI' ;
+   ETAB.'THER_COURANT' = TH_COUR ;
+
+*---------------- Appel a une procedure utilisateur -----------------
+
+     'SI' (ETAB.'PROCEDURE_PERSO2');
+        tab_z = 'INDEX' (PRECED.'TEMPERATURES') ;
+        IND0 = tab_z. ('DIMENSION' tab_z) ;
+        ETAB.'TEMI' =  PRECED.'TEMPERATURES' . IND0 ;
+        'OUBLIER' tab_z ;
+        PERSO2 PRECED ;
+        ETAB = 'ENLEVER' ETAB 'TEMI' ;
+        'SI' ('EXIS' PRECED 'ARRET') ;
+          ETAB . 'ARRET' = PRECED . 'ARRET' ;
+        'FINS' ;
+     'FINSI';
+
+*******************************************************************
+*      Reinitialisation des variables en vue du pas suivant       *
+*******************************************************************
+
+   'SI' ((ITE3 + 1 + INIT) '<EG' DCALC);
+      TEM0 = TEM1;
+      TEM1 = TEM2;
+      TEM2 = 'EXTR' TE_CALC (ITE3 + 1 + INIT);
+      T_PAS = TEM2 - TEM1;
+      U0 = U1;
+      U1 = U2;
+   'SINON';
+      'QUITTER' BOUC_SO;
+   'FINSI';
+
+*------------------------ On fait le menage -----------------------
+
+   'MENAGE' ;
+
+'FIN' BOUC_SO ;
+
+'SI' A_SUPPR ;
+   ETAB = 'ENLE' ETAB 'RELAXATION_DUPONT' ;
+'FINSI' ;
+
+STAB = 'TABLE' ;
+STAB.'ERREUR' = ERR_VAL ;
+STAB.'RELAXATION_DUPONT' = LAMBDA ;
+'SI' ETAB.'RAYO' ;
+   STAB.'RAYONNEMENT' = ETAB.'RAYONNEMENT' ;
+'FINSI' ;
+STAB.'INITIAL(2)' = TH_COUR ;
+STAB.'CLIT' = MAT_BLOC ;
+
+'FIN' PROC ;
+
+'FINPROC' STAB ;
+
+
+

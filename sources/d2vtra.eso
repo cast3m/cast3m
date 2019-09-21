@@ -1,0 +1,646 @@
+C D2VTRA    SOURCE    BP208322  18/12/20    21:15:17     10048
+C
+      SUBROUTINE D2VTRA(ITBAS,ITKM,ITA,KTKAM,IPMAIL,KTRES,KTNUM,KPREF,
+     &                  KTPHI,KTLIAB,RIGIDE,ITCARA,LMODYN,IALGO,BETA)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*--------------------------------------------------------------------*
+*                                                                    *
+*     Operateur DYNE : algorithme de Fu - de Vogelaere               *
+*     ________________________________________________               *
+*                                                                    *
+*     Transpose l'information des objets de Castem2000 dans des      *
+*     tableaux de travail.                                           *
+*                                                                    *
+*     Parametres:                                                    *
+*                                                                    *
+* e   ITBAS   Table representant une base modale                     *
+* e   ITKM    Table contenant les matrices XK et XM                  *
+* e   ITA     Table contenant la matrice XASM                        *
+* es  KTKAM   Segment contenant les matrices XK, XASM et XM          *
+* e   IPMAIL  Maillage de reference pour les CHPOINTs resultats      *
+* es  KTRES   Segment de sauvegarde des resultats                    *
+* e   KPREF   Segment des points de reference                        *
+* es  KTPHI   Segment des deformees modales                          *
+* e   KTLIAB  Segment des liaisons sur base B                        *
+* e   RIGIDE  Vrai si corps rigide, faux sinon                       *
+* e   IALGO   =1 SI DE_VOGELAERE, =2 SI DIFFERENCES_CENTREES         *
+*             =3 si ACCELERATION_MOYENNE, =4 si FOX_GOODWIN          *
+*                                                                    *
+*     Auteur, date de creation:                                      *
+*                                                                    *
+*     Denis ROBERT-MOUGIN, le 26 mai 1989.                           *
+*                                                                    *
+*--------------------------------------------------------------------*
+-INC SMRIGID
+-INC SMELEME
+-INC CCOPTIO
+-INC CCREEL
+*
+      SEGMENT,MTKAM
+         REAL*8 XK(NA1,NB1K),XASM(NA1,NB1C),XM(NA1,NB1M)
+         REAL*8 XOPER(NB1,NB1,NOPER)
+      ENDSEGMENT
+      SEGMENT,MTPHI
+         INTEGER IBASB(NPLB),IPLSB(NPLB),INMSB(NSB),IORSB(NSB)
+         INTEGER IAROTA(NSB)
+         REAL*8  XPHILB(NSB,NPLSB,NA2,IDIMB)
+      ENDSEGMENT
+      SEGMENT MTLIAB
+         INTEGER IPALB(NLIAB,NIPALB),IPLIB(NLIAB,NPLBB),JPLIB(NPLB)
+         REAL*8 XPALB(NLIAB,NXPALB)
+         REAL*8 XABSCI(NLIAB,NIP),XORDON(NLIAB,NIP)
+      ENDSEGMENT
+      SEGMENT,MTNUM
+         REAL*8 XDT(NPC1),XTEMPS(NPC1)
+      ENDSEGMENT
+      SEGMENT,MPREF
+         INTEGER IPOREF(NPREF)
+      ENDSEGMENT
+*
+*
+      segment mtbas
+        integer itbmod,lsstru(np1),nsstru
+      endsegment
+
+c     segment local : enregistre les positions d'indices
+      segment IN2IA(LVAL)
+c     segment local : calcule l operateur et son inverse
+      SEGMENT   MOP
+        REAL*8  XOP(NB1,NB1)
+        INTEGER INVOP(NB1)
+        REAL*8  XOPM1(NB1,NB1)
+      ENDSEGMENT
+
+      LOGICAL L0,L1,RIGIDE,LMODYN,LPLEIN(3)
+      CHARACTER*4 CMOT,MOINC
+      CHARACTER*8 TYPRET,CHARRE
+      CHARACTER*40 MONMOT
+      REAL*8 GAMMA,BETA
+      DATA GAMMA /0.5D0/
+*
+      MTKAM  = KTKAM
+      MTPHI  = KTPHI
+      MTLIAB = KTLIAB
+      MPREF  = KPREF
+      MTNUM  = KTNUM
+*
+      NPLB  = IBASB(/1)
+      NSB   = INMSB(/1)
+      NA2   = XPHILB(/3)
+      IDIMB = XPHILB(/4)
+      NLIAB = IPALB(/1)
+      NA1  = XASM(/1)
+      NB1K = XK(/2)
+      NB1C = XASM(/2)
+      NB1M = XM(/2)
+      NB1  = XOPER(/1)
+      NOPER= XOPER(/3)
+      NPREF=IPOREF(/1)
+*
+      IA1 = 0
+      DEUXPI = 2.D0 * XPI
+      RIGIDE =.FALSE.
+      LPLEIN(1)=.FALSE.
+      LPLEIN(2)=.FALSE.
+      LPLEIN(3)=.FALSE.
+*
+************************************************************************
+*     Traitement des matrices de variables generalisees K et M
+************************************************************************
+*
+      IF (ITBAS.NE.0 .AND.ITKM.EQ.0.AND.(.NOT.LMODYN)) THEN
+         CALL ACCTAB(ITBAS,'MOT',IMODE,X0,'SOUSTYPE',L0,IP0,
+     &                     'MOT',I1,X1,MONMOT,L1,IP1)
+         IF (IERR.NE.0) RETURN
+*
+*------- Cas ou la base est unique ------------------------------------*
+*
+         IF (MONMOT(1:11).EQ.'BASE_MODALE') THEN
+*
+*           On recupere la base de modes
+*
+            CALL ACCTAB(ITBAS,'MOT',IMODE,X0,'MODES',L0,IP0,
+     &                        'TABLE',I1,X1,' ',L1,IBAS)
+            IF (IERR.NE.0) RETURN
+            CALL DYNE26(IBAS,KTKAM,KTLIAB,KTPHI,IA1,1,ICOMP,
+     &                  RIGIDE,ITCARA,LMODYN,ITKM)
+c            IF (RIGIDE) THEN
+c                RIGIDE =.FALSE.
+c                DO 80 ILIA =1,NLIAB
+c                    ITYP = IPALB(ILIA,1)
+c                    IF (ITYP.EQ.35.OR.ITYP.EQ.36) THEN
+c                        RIGIDE =.TRUE.
+c                    ENDIF
+c 80             CONTINUE
+c            ENDIF
+            IF (IERR.NE.0) RETURN
+*
+*------- Cas ou on a un ensemble de bases -----------------------------*
+*
+         ELSE IF (MONMOT(1:17).EQ.'ENSEMBLE_DE_BASES') THEN
+*
+*           On boucle sur le nombre de bases
+*
+            IT = 0
+            NPLSB = 0
+ 10         CONTINUE
+            TYPRET = ' '
+            IT = IT + 1
+            CALL ACCTAB(ITBAS,'ENTIER',IT,X0,' ',L0,IP0,
+     &                          TYPRET,I1,X1,CHARRE,L1,ITTBAS)
+            IF (IERR.NE.0) RETURN
+            IF (ITTBAS.NE.0) THEN
+               IF (TYPRET.EQ.'TABLE   ') THEN
+                  CALL ACCTAB(ITTBAS,'MOT',IMODE,X0,'MODES',L0,IP0,
+     &                             'TABLE',I1,X1,' ',L1,IBAS)
+                  IF (IERR.NE.0) RETURN
+                  CALL DYNE26(IBAS,KTKAM,KTLIAB,KTPHI,IA1,IT,ICOMP,
+     &                        RIGIDE,ITCARA,LMODYN,ITKM)
+                  IF (IERR.NE.0) RETURN
+                  NPLSB = MAX(NPLSB,ICOMP)
+                  GOTO 10
+               ELSE
+                  CALL ERREUR(491)
+                  RETURN
+               ENDIF
+            ENDIF
+
+*         le segadj n'est plus necessaire
+*         on le fait dans dyne26
+*                  MP
+*           SEGADJ,MTPHI
+         ENDIF
+c       write(ioimp,*) 'fin du traitement de la base',ITBAS
+*
+*     ELSE IF (ITBAS.NE.0.AND.ITKM.NE.0) THEN
+*        WRITE(IOIMP,*)
+*   &    'DYNE : TBAS et TKM coexistent ---> @ implementer.'
+*        IERR = 2
+*        RETURN
+*
+*------- Cas d'une table PASAPAS en entree ----------------------------*
+*
+      ELSE IF (LMODYN) THEN
+         mtbas = itbas
+         NPLSB = 0
+         do isstru = 1,nsstru
+            CALL DYNE26(itbas,KTKAM,KTLIAB,KTPHI,IA1,isstru,ICOMP,
+     &                        RIGIDE,ITCARA,LMODYN,ITKM)
+                  IF (IERR.NE.0) RETURN
+                  NPLSB = MAX(NPLSB,ICOMP)
+         enddo
+*
+*------- Cas d'une table 'RAIDEUR_ET_MASSE' en entree -----------------*
+*
+      ELSE IF (ITKM.NE.0) THEN
+         TYPRET = ' '
+         CALL ACCTAB(ITKM,'MOT',I0,X0,'RAIDEUR',L0,IP0,
+     &                   TYPRET,I1,X1,CHARRE,L1,IRIGI)
+         IF (IERR.NE.0) RETURN
+         IF (IRIGI.NE.0 .AND. TYPRET.EQ.'RIGIDITE') THEN
+c           nature de la matrice : DIAGONALE (defaut) ou PLEINE ...
+              TYPRET= ' '
+              CALL ACCTAB(ITKM,'MOT',I0,X0,'NATURE_RAIDEUR',L0,IP0,
+     &                        TYPRET,I1,X1,CHARRE,L1,IP1)
+              IF(TYPRET(1:3).eq.'MOT') THEN
+               if(iimpi.EQ.333) write(ioimp,*) 'Nature de K =',CHARRE
+               IF(CHARRE(1:6).eq.'PLEINE') THEN
+                LPLEIN(1)=.TRUE.
+                NB1K=NA1
+                NB1=max(NB1,NB1K)
+                SEGADJ,MTKAM
+               ELSEIF(CHARRE(1:6).ne.'DIAGONALE') THEN
+                write(ioimp,*) 'Nature de K =',CHARRE,' non comprise !'
+                call erreur(251)
+               ENDIF
+              ELSEIF(TYPRET(1:8).NE.'        ') THEN
+          write(ioimp,*) 'NATURE doit etre un MOT (DIAGONALE ou PLEINE)'
+          write(ioimp,*) 'et pas un ',TYPRET
+               MOTERR(1:8)='MOT     '
+               call erreur(37)
+              ENDIF
+            MRIGID = IRIGI
+            SEGACT,MRIGID
+            NRIGI = IRIGEL(/2)
+            DO 20 I=1,NRIGI
+               COEF = COERIG(I)
+               MELEME = IRIGEL(1,I)
+               DESCR  = IRIGEL(3,I)
+               XMATRI = IRIGEL(4,I)
+               SEGACT,DESCR,MELEME,XMATRI
+               NRIG = RE(/3)
+               LVAL = RE(/1)
+               DO 30 IRIG=1,NRIG
+                  IF(LPLEIN(1)) segini,IN2IA
+c                 boucle sur les lignes (ddls duals)
+                  DO 35 IN=1,LVAL
+                    INODE=NOELED(IN)
+                    IF(INODE.ne.NOELEP(IN)) THEN
+                       WRITE(IIOMP,*) 'Incoherence entre les inconnues',
+     &                 'primales et duales de la matrice RAIDEUR'
+                       CALL ERREUR(47)
+                       RETURN
+                    ENDIF
+                    NNODE=NUM(INODE,IRIG)
+c                   position de cette inconnue dans IPOREF de MPREF
+                    DO 36 IA=1,NPREF
+                      IF (IPOREF(IA).EQ.NNODE) GOTO 39
+ 36                 CONTINUE
+                    write(ioimp,*) 'D2VTRA: Incoherence entre les ',
+     &              'points de reference et la matrice RAIDEUR'
+                    CALL ERREUR(504)
+ 39                 CONTINUE
+c          write(ioimp,*) 'DEVTRA:   + noeud dual trouvé en position',IA
+                    IF(LPLEIN(1)) THEN
+c                     on enregistre la position
+                      IN2IA(IN)=IA
+c                     boucle sur les ddl duals JN >= IN (depuis le coin)
+                      DO 37 JN=1,IN
+                        IB = IN2IA(JN)
+*                       Matrice pleine ...
+                        XK(IA,IB) = XK(IA,IB)
+     &                              + (RE(IN,JN,IRIG) * COEF)
+c                       attention a ne pas remplir 2 fois la diagonale...
+                        IF(IA.eq.IB) GOTO 37
+                        XK(IB,IA) = XK(IB,IA)
+     &                              + (RE(JN,IN,IRIG) * COEF)
+ 37                   CONTINUE
+                    ELSE
+*                     Partie diagonale seulement ...
+                      XK(IA,1) = XK(IA,1) + (RE(IN,IN,IRIG) * COEF)
+                    ENDIF
+ 35               CONTINUE
+                  IF(LPLEIN(1)) segsup,IN2IA
+ 30               CONTINUE
+               SEGDES,XMATRI,MELEME,DESCR
+ 20            CONTINUE
+            SEGDES,MRIGID
+         ELSE
+            CALL ERREUR(483)
+            RETURN
+         ENDIF
+*
+         TYPRET = ' '
+         CALL ACCTAB(ITKM,'MOT',I0,X0,'MASSE',L0,IP0,
+     &                   TYPRET,I1,X1,CHARRE,L1,IMASS)
+         IF (IERR.NE.0) RETURN
+         IF (IMASS.NE.0 .AND. TYPRET.EQ.'RIGIDITE') THEN
+c           nature de la matrice : DIAGONALE (defaut) ou PLEINE ...
+              TYPRET= ' '
+              CALL ACCTAB(ITKM,'MOT',I0,X0,'NATURE_MASSE',L0,IP0,
+     &                        TYPRET,I1,X1,CHARRE,L1,IP1)
+              IF(TYPRET(1:3).eq.'MOT') THEN
+               if(iimpi.EQ.333) write(ioimp,*) 'Nature de M =',CHARRE
+               IF(CHARRE(1:6).eq.'PLEINE') THEN
+                LPLEIN(3)=.TRUE.
+                NB1M=NA1
+                NB1=max(NB1,NB1M)
+                NOPER=1
+                SEGADJ,MTKAM
+               ELSEIF(CHARRE(1:6).ne.'DIAGONALE') THEN
+                write(ioimp,*) 'Nature de M =',CHARRE,' non comprise !'
+                call erreur(251)
+               ENDIF
+              ELSEIF(TYPRET(1:8).NE.'        ') THEN
+          write(ioimp,*) 'NATURE doit etre un MOT (DIAGONALE ou PLEINE)'
+          write(ioimp,*) 'et pas un ',TYPRET
+               MOTERR(1:8)='MOT     '
+               call erreur(37)
+              ENDIF
+            MRIGID = IMASS
+            SEGACT,MRIGID
+            NMASS = IRIGEL(/2)
+            DO 40 I=1,NMASS
+               COEF = COERIG(I)
+               MELEME = IRIGEL(1,I)
+               DESCR  = IRIGEL(3,I)
+               XMATRI = IRIGEL(4,I)
+               SEGACT,DESCR,MELEME,XMATRI
+               NRIG = RE(/3)
+               LVAL = RE(/1)
+               DO 50 IRIG=1,NRIG
+                  IF(LPLEIN(3)) segini,IN2IA
+c                 boucle sur les lignes (ddls duals)
+                  DO 55 IN=1,LVAL
+                    INODE=NOELED(IN)
+                    IF(INODE.ne.NOELEP(IN)) THEN
+                       WRITE(IIOMP,*) 'Incoherence entre les inconnues',
+     &                 'primales et duales de la matrice MASSE'
+                       CALL ERREUR(47)
+                       RETURN
+                    ENDIF
+                    NNODE=NUM(INODE,IRIG)
+c                   position de cette inconnue dans IPOREF de MPREF
+                    DO 56 IA=1,NPREF
+                      IF (IPOREF(IA).EQ.NNODE) GOTO 59
+ 56                 CONTINUE
+                    write(ioimp,*) 'D2VTRA: Incoherence entre les ',
+     &              'points de reference et la matrice MASSE'
+                    CALL ERREUR(504)
+ 59                 CONTINUE
+                    IF(LPLEIN(3)) THEN
+c                     on enregistre la position
+                      IN2IA(IN)=IA
+c                     boucle sur les ddl duals JN >= IN (depuis le coin)
+                      DO 57 JN=1,IN
+                        IB = IN2IA(JN)
+*                       Matrice pleine ...
+                        XM(IA,IB) = XM(IA,IB)
+     &                              + (RE(IN,JN,IRIG) * COEF)
+c                       attention a ne pas remplir 2 fois la diagonale...
+                        IF(IA.eq.IB) GOTO 57
+                        XM(IB,IA) = XM(IB,IA)
+     &                              + (RE(JN,IN,IRIG) * COEF)
+ 57                   CONTINUE
+                    ELSE
+*                     Partie diagonale seulement ...
+                      XM(IA,1) = XM(IA,1) + (RE(IN,IN,IRIG) * COEF)
+                    ENDIF
+ 55               CONTINUE
+                  IF(LPLEIN(3)) segsup,IN2IA
+ 50            CONTINUE
+               SEGDES,XMATRI,MELEME,DESCR
+ 40         CONTINUE
+            SEGDES,MRIGID
+         ELSE
+            CALL ERREUR(484)
+            RETURN
+         ENDIF
+
+*        traitement de la base modale (necessaire si liaison B)
+*        --> remplissage de XPHILB
+         TYPRET = ' '
+         CALL ACCTAB(ITKM,'MOT',I0,X0,'BASE_MODALE',L0,IP0,
+     &               TYPRET,I1,X1,CHARRE,L1,ITBAS2)
+         IF(ITBAS2.eq.0) GOTO 599
+         TYPRET = ' '
+         CALL ACCTAB(ITBAS2,'MOT',IMODE,X0,'SOUSTYPE',L0,IP0,
+     &                      'MOT',I1,X1,MONMOT,L1,IP1)
+         IF (IERR.NE.0) RETURN
+*        Cas ou la base est unique
+         IF (MONMOT(1:11).EQ.'BASE_MODALE') THEN
+*           On recupere la base de modes
+            CALL ACCTAB(ITBAS2,'MOT',IMODE,X0,'MODES',L0,IP0,
+     &                        'TABLE',I1,X1,' ',L1,IBAS2)
+            IF (IERR.NE.0) RETURN
+            CALL DYNE26(IBAS2,KTKAM,KTLIAB,KTPHI,IA1,1,ICOMP,
+     &                  RIGIDE,ITCARA,LMODYN,ITKM)
+*        Cas ou la base est un ensemble de bases
+         ELSEIF(MONMOT(1:17).EQ.'ENSEMBLE_DE_BASES') THEN
+            IT = 0
+            NPLSB = 0
+ 510        CONTINUE
+            TYPRET = ' '
+            IT = IT + 1
+            CALL ACCTAB(ITBAS2,'ENTIER',IT,X0,' ',L0,IP0,
+     &                          TYPRET,I1,X1,CHARRE,L1,ITTBAS)
+            IF (IERR.NE.0) RETURN
+            IF (ITTBAS.NE.0) THEN
+               IF (TYPRET.EQ.'TABLE   ') THEN
+                  CALL ACCTAB(ITTBAS,'MOT',IMODE,X0,'MODES',L0,IP0,
+     &                             'TABLE',I1,X1,' ',L1,IBAS2)
+                  IF (IERR.NE.0) RETURN
+                  CALL DYNE26(IBAS2,KTKAM,KTLIAB,KTPHI,IA1,IT,ICOMP,
+     &                        RIGIDE,ITCARA,LMODYN,ITKM)
+                  IF (IERR.NE.0) RETURN
+                  NPLSB = MAX(NPLSB,ICOMP)
+                  GOTO 510
+               ELSE
+                  CALL ERREUR(491)
+                  RETURN
+               ENDIF
+            ENDIF
+         ENDIF
+ 599     CONTINUE
+         IF (IERR.NE.0) RETURN
+      ENDIF
+
+
+************************************************************************
+*     Traitement de la matrice d'amortissement
+************************************************************************
+*
+      IF (ITA.NE.0) THEN
+         if (lmodyn) then
+           iamor = ita
+           typret='RIGIDITE'
+         else
+           TYPRET = ' '
+           CALL ACCTAB(ITA,'MOT',I0,X0,'AMORTISSEMENT',L0,IP0,
+     &                    TYPRET,I1,X1,CHARRE,L1,IAMOR)
+           IF (IERR.NE.0) RETURN
+         endif
+         IF (IAMOR.NE.0 .AND. TYPRET.EQ.'RIGIDITE') THEN
+c           nature de la matrice : DIAGONALE (defaut) ou PLEINE ...
+            if(.not.lmodyn) then
+              TYPRET= ' '
+              CALL ACCTAB(ITA,'MOT',I0,X0,'NATURE',L0,IP0,
+     &                        TYPRET,I1,X1,CHARRE,L1,IP1)
+              IF(TYPRET(1:3).eq.'MOT') THEN
+               if(iimpi.EQ.333) write(ioimp,*) 'Nature de C =',CHARRE
+               IF(CHARRE(1:6).eq.'PLEINE') THEN
+                LPLEIN(2)=.TRUE.
+                NB1C=NA1
+                NB1=max(NB1,NB1C)
+                NOPER=max(1,NOPER)
+                SEGADJ,MTKAM
+               ELSEIF(CHARRE(1:6).ne.'DIAGONALE') THEN
+                write(ioimp,*) 'Nature de C =',CHARRE,' non comprise !'
+                call erreur(251)
+               ENDIF
+              ELSEIF(TYPRET(1:8).NE.'        ') THEN
+          write(ioimp,*) 'NATURE doit etre un MOT (DIAGONALE ou PLEINE)'
+          write(ioimp,*) 'et pas un ',TYPRET
+               MOTERR(1:8)='MOT     '
+               call erreur(37)
+              ENDIF
+            endif
+            MRIGID = IAMOR
+            SEGACT,MRIGID
+            NAMOR = IRIGEL(/2)
+            DO 60 I=1,NAMOR
+               COEF = COERIG(I)
+c          write(ioimp,*) 'D2VTRA: sous rigidite ',I,'/',NAMOR,COEF
+               MELEME = IRIGEL(1,I)
+               DESCR  = IRIGEL(3,I)
+               XMATRI = IRIGEL(4,I)
+               SEGACT,DESCR,MELEME,XMATRI
+               NRIG = RE(/3)
+               LVAL = RE(/1)
+               DO 70 IRIG=1,NRIG
+c          write(ioimp,*) 'D2VTRA: + element',IRIG,'/',NRIG
+                  IF(LPLEIN(2)) segini,IN2IA
+c                 boucle sur les lignes (ddls duals)
+                  DO 75 IN=1,LVAL
+                    INODE=NOELED(IN)
+                    IF(INODE.ne.NOELEP(IN)) THEN
+                       WRITE(IIOMP,*) 'Incoherence entre les inconnues',
+     &                 'primales et duales de la matrice AMORTISSEMENT'
+                       CALL ERREUR(47)
+                       RETURN
+                    ENDIF
+                    NNODE=NUM(INODE,IRIG)
+c          write(ioimp,*) 'D2VTRA:   + noeud dual',IN,'/',LVAL,' #',NNODE
+c                   position de cette inconnue dans IPOREF de MPREF
+                    DO 76 IA=1,NPREF
+                      IF (IPOREF(IA).EQ.NNODE) GOTO 79
+ 76                 CONTINUE
+                    write(ioimp,*) 'D2VTRA: Incoherence entre les ',
+     &              'points de reference et la matrice AMORTISSEMENT'
+                    CALL ERREUR(504)
+ 79                 CONTINUE
+c          write(ioimp,*) 'D2VTRA:   + noeud dual trouvé en position',IA
+                    IF(LPLEIN(2)) THEN
+c                     on enregistre la position
+                      IN2IA(IN)=IA
+c                     boucle sur les ddl duals JN >= IN (depuis le coin)
+                      DO 77 JN=1,IN
+                        IB = IN2IA(JN)
+*                       Matrice pleine ...
+                        XASM(IA,IB) = XASM(IA,IB)
+     &                              + (RE(IN,JN,IRIG) * COEF)
+c                       attention a ne pas remplir 2 fois la diagonale...
+                        IF(IA.eq.IB) GOTO 77
+                        XASM(IB,IA) = XASM(IB,IA)
+     &                              + (RE(JN,IN,IRIG) * COEF)
+ 77                   CONTINUE
+                    ELSE
+*                     Partie diagonale seulement ...
+                      XASM(IA,1) = XASM(IA,1) + (RE(IN,IN,IRIG) * COEF)
+                    ENDIF
+ 75               CONTINUE
+                  IF(LPLEIN(2)) segsup,IN2IA
+ 70            CONTINUE
+               SEGDES,XMATRI,MELEME,DESCR
+ 60         CONTINUE
+            SEGDES,MRIGID
+         ELSE
+            CALL ERREUR(485)
+            RETURN
+         ENDIF
+      ENDIF
+
+************************************************************************
+*     on calcule 1 operateur = inverse de :
+*     IALGO=2 : XOP = M + 0.5dt*C
+*     IALGO=3 : XOP = M + 0.5dt*C
+*     IALGO=4 : XOP = M + 0.5dt*C
+************************************************************************
+
+c       IF(LPLEIN(2).OR.LPLEIN(3)) THEN
+      IF(NOPER.GT.0) THEN
+         SEGINI,MOP
+c        le pas de temps est constant (seule possibilite aujourd'hui)
+         B3 = GAMMA*xdt(1)
+c     ...C pleine, M pleine
+         IF(LPLEIN(2).AND.LPLEIN(3)) THEN
+           DO 61 IA=1,NA1
+           DO 61 IB=1,NA1
+             XOP(IA,IB) = XM(IA,IB) + B3*XASM(IA,IB)
+ 61        CONTINUE
+c     ...C pleine, M diago
+         ELSEIF(LPLEIN(2)) THEN
+           DO 62 IA=1,NA1
+             XOP(IA,IA) = XM(IA,1)
+           DO 62 IB=1,NA1
+             XOP(IA,IB) = XOP(IA,IB) + B3*XASM(IA,IB)
+ 62        CONTINUE
+c     ...C diago, M pleine
+         ELSEIF(LPLEIN(3)) THEN
+           DO 63 IA=1,NA1
+             XOP(IA,IA) = B3*XASM(IA,1)
+           DO 63 IB=1,NA1
+             XOP(IA,IB) = XOP(IA,IB) + XM(IA,IB)
+ 63        CONTINUE
+         ELSEIF(.NOT.LPLEIN(1).OR.IALGO.LE.2) THEN
+           WRITE(IOIMP,*) 'D2VTRA: option PLEINE incoherente !'
+           CALL ERREUR(5)
+           RETURN
+         ENDIF
+c        Ajout de K si implicite
+         IF(IALGO.GE.3) THEN
+           B4 = BETA*(xdt(1)**2)
+           IF(LPLEIN(1)) THEN
+             DO 64 IA=1,NA1
+             DO 64 IB=1,NA1
+               XOP(IA,IB) = XOP(IA,IB) + B4*XK(IA,IB)
+ 64          CONTINUE
+           ELSE
+             DO 65 IA=1,NA1
+               XOP(IA,IA) = XOP(IA,IA) + B4*XK(IA,1)
+ 65          CONTINUE
+           ENDIF
+         ENDIF
+*       -Inversion de l'operateur
+         CALL IVMAT(NA1,XOP,INVOP,XOPM1,DETOP,0,IRET)
+         IF(IRET.ne.0) RETURN
+*        rem : ici IVMAT, mais il existe aussi INVER, INVER1 ...
+         DO 69 IA=1,NA1
+         DO 69 IB=1,NB1
+            XOPER(IA,IB,1)=XOPM1(IA,IB)
+ 69      CONTINUE
+         SEGSUP,MOP
+      ENDIF
+*
+      IF (IIMPI.EQ.333) THEN
+         WRITE(IOIMP,*)'     segment MTPHI'
+         WRITE(IOIMP,*)'D2VTRA : valeur de NPLB  :',IBASB(/1)
+         WRITE(IOIMP,*)'D2VTRA : valeur de NSB   :',XPHILB(/1)
+         WRITE(IOIMP,*)'D2VTRA : valeur de NPLSB :',XPHILB(/2)
+         WRITE(IOIMP,*)'D2VTRA : valeur de NA2   :',XPHILB(/3)
+         WRITE(IOIMP,*)'D2VTRA : valeur de IDIMB :',XPHILB(/4)
+         if(NB1K.gt.1) then
+            do iou=1,NA1
+               WRITE(IOIMP,*) 'XK=',(XK(iou,jou),jou=1,NB1K)
+            enddo
+         else
+            do iou=1,NA1
+               WRITE(IOIMP,*) 'XK(',iou,',1)=',XK(iou,1)
+            enddo
+         endif
+         if(NB1C.gt.1) then
+            do iou=1,NA1
+              WRITE(IOIMP,*) 'XASM=',(XASM(iou,jou),jou=1,NB1C)
+            enddo
+         else
+            do iou=1,NA1
+              WRITE(IOIMP,*) 'XASM(',iou,',1)=',XASM(iou,1)
+            enddo
+         endif
+         if(NB1M.gt.1) then
+            do iou=1,NA1
+               WRITE(IOIMP,*) 'XM=',(XM(iou,jou),jou=1,NB1M)
+            enddo
+         else
+            do iou=1,NA1
+               WRITE(IOIMP,*) 'XM(',iou,',1)=',XM(iou,1)
+            enddo
+         endif
+         if(NOPER.ge.1) then
+         do iop=1,NOPER
+           do iou=1,NB1
+             WRITE(IOIMP,*) 'XOPER(',iou,',:,',iop,')=',
+     &                      (XOPER(iou,jou,iop),jou=1,NB1)
+           enddo
+         enddo
+         endif
+      ENDIF
+*
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

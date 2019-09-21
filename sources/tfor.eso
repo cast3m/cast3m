@@ -1,0 +1,667 @@
+C TFOR      SOURCE    BP208322  18/10/08    21:15:22     9952
+      SUBROUTINE TFOR(IOPT)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-V)
+      IMPLICIT COMPLEX*16 (W-Z)
+      CHARACTER *72 TI
+      CHARACTER *24 MOTY
+      CHARACTER *4  NSORT(2),MCLE(2)
+      LOGICAL INV
+C
+C=======================================================================
+C  =  CALCUL DE LA TRANSFORMEE DE FOURIER RAPIDE D'UN SIGNAL          =
+C  =                                                                  =
+C  =  SYNTAXE :                                                       =
+C  =                                                                  =
+C  =  TRANSFORMEE DE FOURIER DIRECTE    (IOPT=-1)                     =
+C  =    FFTR = TFR  EXP2 EVO1 SORT FMIN V1 FMAX V2 (COU1) (COU2) ;    =
+C  =                                                                  =
+C  =  TRANSFORMEE DE FOURIER INVERSE    (IOPT=1)                      =
+C  =    FFTR = TFRI EXP2 EVO1 SORT FMIN V1 FMAX V2 (COU1) (COU2) ;    =
+C  =  TFRI appelle TFRINV                                             =
+C  =                                                                  =
+C  =    EXP2    : EXPOSANT DANS NPOINT=2^EXP2, NPOINT ETANT           =
+C  =              LE NOMBRE DE REELS DANS LISTREEL                    =
+C  =    EVO1    : OBJET DE TYPE EVOLUTIO CONTENANT LE SIGNAL A TRAITER=
+C  =    SORT    : TYPE DE SORTIE ;                                    =
+C  =               = 'REIM'   PART REEL & PART IMAG / FREQ            =
+C  =               = 'MOPH'   MODULE    & PHASE     / FREQ            =
+C  =    FMIN    : MOT-CLE                                             =
+C  =    V1      : FREQUENCE MINIE A VISUALISER                        =
+C  =    FMAX    : MOT-CLE                                             =
+C  =    V2      : FREQUENCE MAXIE A VISUALISER                        =
+C  =    COU1    : COULEUR ATTRIBUEE A LA PREMIERE COURBE (FACULTATIF) =
+C  =    COU2    : COULEUR ATTRIBUEE A LA DEUXIEME COURBE (FACULTATIF) =
+C  =                                                                  =
+C  =                                                                  =
+C  =  CREATION    : 16/04/87, BEAUFILS                                =
+C  =  extension aux LISTCHPO, 20/05/2015, Benoit Prabel               =
+C  =  branchement de FFTPACK5.1, 2018-10-01, Benoit Prabel            =
+c  =  TODO : brancher aussi les lischpo a FFTPACK                     =
+c            en inversant les boucles + //iser sur les inconnues      =
+C=======================================================================
+C
+-INC CCGEOME
+-INC CCOPTIO
+-INC SMEVOLL
+-INC SMLREEL
+-INC SMLCHPO
+-INC SMCHPOI
+C
+c     segments pour appel a WEXP + FFTL
+      SEGMENT MTRAV2
+          IMPLIED W(NEXP)
+      ENDSEGMENT
+
+      SEGMENT MTRAV3
+          IMPLIED XXX(NCOU,NDDL),YYY(NCOU)
+      ENDSEGMENT
+
+      SEGMENT,LIPOV(NIPOV)
+      SEGMENT,LIPOV2(NIPOV)
+      SEGMENT,LIPOV3(NIPOV)
+
+c     segment pour appel a fftpack5.1
+      segment wfft51
+      real*8 work(lenwrk)
+      real*8 wsave(lensav)
+      real*8 XX51(NCOU)
+      endsegment
+C
+      DATA NSORT(1),NSORT(2)/'REIM','MOPH'/
+      DATA MCLE(1),MCLE(2)/'FMIN','FMAX'/
+C
+C==== INITIALISATIONS ==================================================
+C
+
+      IPSIG=0
+      IPTAB=0
+      IF (IOPT.EQ.-1) THEN
+        INV=.FALSE.
+      ELSE
+        INV=.TRUE.
+      ENDIF
+C
+C==== LECTURES =========================================================
+C
+C     LECTURE DE EXP2
+C
+      CALL LIRENT(N2,1,IRET1)
+      IF(IRET1.EQ.0)GOTO 666
+      NPOINT=2**N2
+      IF(IIMPI.EQ.1) write(ioimp,*) 'NPOINT=2**',N2,'=',NPOINT
+C
+C     LECTURE DE L'OBJET EVOLUTIO CONTENANT LE SIGNAL
+C     ou de L'OBJET LISTCHPO contenant la suite de chpoint + liste des temps
+C
+      CALL LIROBJ('EVOLUTIO',IPSIG,0,IRET2)
+      IF(IRET2.EQ.0) THEN
+        CALL LIROBJ ('LISTCHPO',IPLCH,1,IRET2)
+        IF(IRET2.EQ.0)GOTO 666
+        CALL LIROBJ ('LISTREEL',IPREE1,1,IRET2)
+        IF(IRET2.EQ.0)GOTO 666
+      ENDIF
+      IF(IIMPI.EQ.1) write(ioimp,*) 'signal=',IPSIG,IPLCH,IPREE1
+C
+C     LECTURE DU TYPE DE SORTIE
+C
+      CALL LIRMOT(NSORT,2,ISORT,0)
+      IF(ISORT.EQ.0) ISORT=1
+      IF(IIMPI.EQ.1) write(ioimp,*) 'sortie :',ISORT
+C
+C     LECTURE DE LA FREQUENCE MINI FMIN -> FRMI
+C
+      CALL LIRMOT(MCLE(1),1,IRET,0)
+      IF(IRET.EQ.1) THEN
+          CALL LIRREE(FRMI,0,IRET1)
+          IF(IRET1.EQ.0) THEN
+              MOTERR(1:4)=MCLE(1)(1:4)
+              CALL ERREUR(166)
+              GOTO 666
+          ENDIF
+          IF(FRMI.LT.(-1.D-20)) FRMI=-FRMI
+          IF(ABS(FRMI).LT.1.D-20) FRMA=-1.D0
+      ELSE
+          FRMI=-1.D0
+      ENDIF
+C
+C     LECTURE DE LA FREQUENCE MAXI FMAX -> FRMA
+C
+      CALL LIRMOT(MCLE(2),1,IRET,0)
+      IF(IRET.EQ.1) THEN
+          CALL LIRREE(FRMA,0,IRET1)
+          IF(IRET1.EQ.0) THEN
+              MOTERR(1:4)=MCLE(2)(1:4)
+              CALL ERREUR(166)
+              GOTO 666
+          ENDIF
+          IF(FRMA.LT.(-1.D-20)) FRMA=-FRMA
+          IF(ABS(FRMA).LT.1.D-20) FRMA=-1.D0
+      ELSE
+          FRMA=-1.D0
+      ENDIF
+      IF(IIMPI.EQ.1) write(ioimp,*) FRMI,' < FREQ <',FRMA
+C
+C     LECTURE DE LA COULEUR
+C
+      CALL LIRMOT(NCOUL,NBCOUL,ICOU1,0)
+      IF (ICOU1.EQ.0) ICOU1=IDCOUL+1
+      ICOU1=ICOU1-1
+      CALL LIRMOT(NCOUL,NBCOUL,ICOU2,0)
+      IF (ICOU2.EQ.0) ICOU2=IDCOUL+1
+      ICOU2=ICOU2-1
+      IF(IIMPI.EQ.1) write(ioimp,*) 'couleurs=',ICOU1,ICOU2
+C
+      IF(IERR.NE.0) GOTO 666
+C
+C     VERIFICATION DU NOMBRE DE PAS DE TEMPS ...
+C
+      IF(IPSIG.NE.0) THEN
+C     ...POUR L'EVOLUTION EN ENTREE
+        MEVOL1=IPSIG
+        SEGACT MEVOL1
+        IF(MEVOL1.IEVOLL(/1).NE.1) THEN
+          CALL ERREUR(687)
+        ENDIF
+        KEVOL1=MEVOL1.IEVOLL(1)
+        SEGACT KEVOL1
+        MLREE1=KEVOL1.IPROGX
+        MLREE2=KEVOL1.IPROGY
+        SEGACT MLREE1,MLREE2
+        L1=MLREE1.PROG(/1)
+        DT=MLREE1.PROG(2)-MLREE1.PROG(1)
+        IF(DT.LE.0.) THEN
+          CALL ERREUR(206)
+          SEGDES MLREE1,MLREE2
+          SEGDES KEVOL1,MEVOL1
+          GO TO 666
+        ENDIF
+        SEGDES MLREE1
+      ELSE
+C     ...POUR LA LISTE DE CHPOINTs EN ENTREE
+        MLCHPO=IPLCH
+        SEGACT,MLCHPO
+        N1=ICHPOI(/1)
+        MLREE1=IPREE1
+        SEGACT MLREE1
+        L1=MLREE1.PROG(/1)
+        DT=MLREE1.PROG(2)-MLREE1.PROG(1)
+        IF(IIMPI.EQ.1) write(ioimp,*) 'N1,L1,DT=',N1,L1,DT
+        IF(DT.LE.0.) THEN
+          CALL ERREUR(206)
+          SEGDES MLREE1,MLCHPO
+          GO TO 666
+        ENDIF
+        SEGDES MLREE1
+        IF(N1.LT.L1) THEN
+          CALL ERREUR(217)
+          SEGDES MLREE1,MLCHPO
+          goto 666
+        ENDIF
+      ENDIF
+
+c     qq ecritures pour le debuggage
+      IF(IIMPI.EQ.1) THEN
+        IF(NPOINT.GT.L1) THEN
+          WRITE(IOIMP,1000) L1,N2,NPOINT
+ 1000     FORMAT(1H ,'LE NOMBRE DE POINTS DANS LISTEMPS ',I6, ' EST ',
+     &    'INFERIEURE @ 2**',I5,
+     &    /' ON PRENDRA UNE LONGUEUR DE LISTEMPS DE ',I6,' MOTS     ',
+     &    /' ET ON COMPLETERA PAR DES ZEROS')
+        ELSE
+           IF(NPOINT.LT.L1) THEN
+               WRITE(IOIMP,1010) N2
+ 1010          FORMAT(1H ,'ON TRONQUE LE SIGNAL A 2**',I5,' MOTS',/)
+           ELSE
+               WRITE(IOIMP,1030)N2,NPOINT
+ 1030          FORMAT(1H ,'LA LONGUEUR DU LISTEMP EST EGALE A 2**',I5,
+     &        ' = ',I6,/)
+           ENDIF
+        ENDIF
+      ENDIF
+
+C     CALCUL DE QUELQUES VARIABLES UTILES
+cbp : inutile?      NDIBLK=NPOINT
+C     IND1 = indice max pour le remplissage temporel
+      IND1=L1
+      IF(NPOINT.LT.L1) IND1 = NPOINT
+      DUREE=DT*REAL(NPOINT)
+      DUR05=0.5D0*DUREE
+      DFREQ=1.D0/DUREE
+      KHALF=INT(NPOINT/2)+1
+      KMIN=INT(FRMI/DFREQ)+1
+      KMAX=INT(FRMA/DFREQ)+1
+      KDEBU=1
+      IF(KMIN.GT.0) KDEBU=KMIN
+      IF((KMAX.LT.KHALF).AND.(FRMA.GT.0.D0)) THEN
+        KHALF=KMAX
+        KFIN =KHALF
+      ELSE
+        KFIN =KHALF-1
+      ENDIF
+      NNN=KHALF-KDEBU+1
+
+c     si pas d'evolution (alors listchpo) -> on go en 700
+      IF(IPSIG.eq.0) GOTO 700
+
+
+C=======================================================================
+C     CAS EVOLUTION
+C=======================================================================
+      IF(IIMPI.EQ.1) write(ioimp,*) '=== CAS EVOLUTION ==='
+C
+C==== CHARGEMENT DES TABLEAUX DE TRAVAIL ===============================
+C
+C     creation du tableau de travail pour FFTPACK5.1
+      NCOU=NPOINT
+      lenwrk = 2 * NPOINT
+      lensav = NPOINT + int(log ( real (NPOINT) ) / log (2.0) ) + 4
+      segini,wfft51
+      DO 10 I=1,IND1
+        XX51(I)=MLREE2.PROG(I)
+c         write(*,FMT="(I6,A,E24.16)") I,' ',XX51(I)
+  10  CONTINUE
+      SEGDES MLREE2
+C     On complete avec des 0 (utile meme apres SEGINI)
+      IF(NPOINT.GT.L1) THEN
+          L2=L1+1
+          DO 11 I=L2,NPOINT
+             XX51(I)=0.d0
+  11      CONTINUE
+      ENDIF
+      do ii=1,lenwrk
+      work(ii)=0.d0
+      enddo
+      do iii=1,lensav
+      wsave(iii)=0.d0
+      enddo
+C
+C==== CALCUL DE LA FFT =================================================
+C
+      IF(IIMPI.EQ.1) WRITE(IOIMP,*)' CALCUL DE LA FFT DU SIGNAL '
+
+c +++ via FFTPACK5.1 +++
+
+c     Initialize the WSAVE array.
+      call rfft1i (NPOINT,wsave,lensav,ier)
+      IF (IERR.ne.0) RETURN
+c       do iou=1,lensav
+c         write(*,FMT="(I6,A,E24.16)") iou,' ',wsave(iou)
+c       enddo
+c
+c     Compute the FFT coefficients.
+      inc = 1
+      lenr = NPOINT
+c       do iou=1,NPOINT
+c         write(*,*) 'XX51_avant (',iou,')=',XX51(iou)
+c       enddo
+      call rfft1f (NPOINT,inc,XX51,lenr,wsave,lensav,work,lenwrk,ier)
+      IF (IERR.ne.0) RETURN
+      IF(IIMPI.EQ.1) WRITE(IOIMP,*)' FFT CALCULEE '
+C
+C     CREATION ET CALCUL DES LISTES DE LA FFT
+C
+      IF(IIMPI.EQ.1) WRITE(IOIMP,*)' CHARGEMENT DE LA FFT '
+      JG=NNN
+      SEGINI MLREE1
+      SEGINI MLREE2
+      SEGINI MLREE3
+
+C
+C==== PARTIE REELLE & IMAGINAIRE / FREQUENCE (par defaut) ==============
+C
+          ITY=0
+c         souhaite-t-on le terme constant (f=0Hz) ?
+          IF (KDEBU.EQ.1) THEN
+c             WRITE(*,*) 'on remplit: 1 (ordre 0)'
+            MLREE1.PROG(1)=0.d0
+            MLREE2.PROG(1)=DUREE*XX51(1)
+            MLREE3.PROG(1)=0.d0
+            KDEBU=KDEBU+1
+            ITY=ITY+1
+          ENDIF
+c           DO 20 I=KDEBU,(KHALF-2)
+          DO 20 I=KDEBU,KFIN
+            FREQ=REAL(I-1)*DFREQ
+            ITY=ITY+1
+c             WRITE(*,*) 'LOOP20: on remplit: ',ITY,'(ordre',I,')f=',FREQ
+            MLREE1.PROG(ITY)=FREQ
+            MLREE2.PROG(ITY)=(-1)**(2*I)  *DUR05*XX51(2*I-2)
+            MLREE3.PROG(ITY)=(-1)**(2*I+1)*DUR05*XX51(2*I-1)
+  20      CONTINUE
+c         derniere valeur seulement si :
+c         + on a un nombre pair en entree (tjrs vrai car NPOINT=2**N2)
+c         + on cherche la dernier valeur
+          IF (KFIN.EQ.(KHALF-1)) THEN
+            FREQ=FREQ+DFREQ
+            ITY=ITY+1
+c           WRITE(*,*) 'on remplit: ',ITY,'(ordre',I,')f=',FREQ
+            MLREE1.PROG(ITY)=FREQ
+            MLREE2.PROG(ITY)=DUREE*XX51(NPOINT)
+            MLREE3.PROG(ITY)=0.D0
+          ENDIF
+          MOTY(1:24)='PART REEL   PART IMAG'
+C
+C==== SORTIE EN MODULE & PHASE / FREQUENCE : on retraite ===============
+C
+      IF (ISORT.EQ.2) THEN
+          DO 21 ITY=1,NNN
+            PREEL=MLREE2.PROG(ITY)
+            PIMAG=MLREE3.PROG(ITY)
+            PMODU=SQRT(PREEL**2+PIMAG**2)
+            MLREE2.PROG(ITY)=PMODU
+            CALL FACOMP(PREEL,PIMAG,PMODU)
+            MLREE3.PROG(ITY)=PMODU
+  21      CONTINUE
+          MOTY(1:8)='MODULE'
+          MOTY(9:12)=' '
+          MOTY(13:20)='PHASE'
+          MOTY(21:24)=' '
+      ENDIF
+C
+      SEGDES MLREE1,MLREE2,MLREE3
+C
+C==== CREATION DE L'OBJET EVOLUTIO FFT =================================
+C
+      N=2
+      SEGINI MEVOLL
+      IPVO=MEVOLL
+      TI(1:72)=TITREE
+      IEVTEX=TI
+      ITYEVO='COMPLEXE'
+C
+C     PREMIERE COURBE
+C
+      SEGINI KEVOLL
+      IEVOLL(1)=KEVOLL
+      TYPX='LISTREEL'
+      TYPY='LISTREEL'
+c       KEVTEX=TI
+      CALL LENCHA(KEVOL1.KEVTEX,LEN1)
+      LEN1=min(LEN1,62)
+C
+      IPROGX=MLREE1
+      NOMEVX='FREQ      HZ'
+C
+      IPROGY=MLREE2
+      NOMEVY=MOTY(1:12)
+C
+      NUMEVX=ICOU1
+      IF(ISORT.EQ.1) THEN
+          NUMEVY='PREE'
+          KEVTEX='Re TF('//KEVOL1.KEVTEX(1:LEN1)//')'
+      ELSE
+          NUMEVY='MODU'
+          KEVTEX='Amp TF('//KEVOL1.KEVTEX(1:LEN1)//')'
+      ENDIF
+C
+      SEGDES KEVOLL
+C
+C     DEUXIEME COURBE
+C
+      SEGINI KEVOLL
+      IEVOLL(2)=KEVOLL
+      TYPX='LISTREEL'
+      TYPY='LISTREEL'
+c       KEVTEX=TI
+C
+      IPROGX=MLREE1
+      NOMEVX='FREQ      HZ'
+C
+      IPROGY=MLREE3
+      NOMEVY=MOTY(13:24)
+C
+      NUMEVX=ICOU2
+      IF(ISORT.EQ.1) THEN
+          NUMEVY='PIMA'
+          KEVTEX='Im TF('//KEVOL1.KEVTEX(1:LEN1)//')'
+      ELSE
+          NUMEVY='PHAS'
+          KEVTEX='\j TF('//KEVOL1.KEVTEX(1:LEN1)//')'
+      ENDIF
+C
+      SEGDES KEVOLL
+C
+      SEGSUP wfft51
+      SEGDES KEVOL1,MEVOL1
+C
+      SEGDES MEVOLL
+      CALL ECROBJ('EVOLUTIO',IPVO)
+ 666  CONTINUE
+      RETURN
+
+
+ 700  CONTINUE
+
+C=======================================================================
+C     CAS LISTCHPO
+C=======================================================================
+      IF(IIMPI.EQ.1) write(ioimp,*) '=== CAS LISTCHPO ==='
+C
+C==== CALCUL DE L'EXPONENTIEL ==========================================
+C
+      IF(IIMPI.EQ.1) WRITE(IOIMP,*)' CALCUL DE L EXPONENTIEL'
+      NEXP=NPOINT/2
+      SEGINI MTRAV2
+      CALL WEXP(INV,NPOINT,W(1))
+      IF(IIMPI.EQ.1) write(ioimp,*) 'W=',(W(iou),iou=1,NEXP)
+
+C     creation des listchpo de sortie
+      N1=NNN
+      SEGINI,MLCHP2,MLCHP3
+
+C---- boucle sur les ddls des chpoints----------------------------------
+c     on suppose tous les chpoints de la meme forme que le 1er !
+
+C     on stocke les MPOVAL dans le tableau LIPOV
+      NIPOV =IND1
+      segini,LIPOV
+      NIPOV =NNN
+      segini,LIPOV2,LIPOV3
+
+C==== BOUCLE SUR LES MSOUPO DES CHPOINTS ===============================
+      ISOUPO=0
+ 710  ISOUPO=ISOUPO+1
+      IF(IIMPI.EQ.1) write(ioimp,*) '-------- zone',ISOUPO,' --------'
+
+c---- on ouvre les MSOUPO de tous les chpoints ----
+c       DO I1=1,L1
+      DO I1=1,IND1
+        MCHPOI=ICHPOI(I1)
+        IF(ISOUPO.EQ.1) THEN
+c           IF(IIMPI.EQ.1) write(ioimp,*) 'Time',I1,': on ouvre',MCHPOI
+          SEGACT,MCHPOI
+          NSOUPO=IPCHP(/1)
+          IF(I1.EQ.1) NSOUP1=NSOUPO
+          IF(NSOUP1.NE.NSOUPO) THEN
+            CALL ERREUR(214)
+            return
+          ENDIF
+        ENDIF
+        MSOUPO=IPCHP(ISOUPO)
+        SEGACT,MSOUPO
+        MPOVAL=IPOVAL
+        LIPOV(I1)=MPOVAL
+        SEGACT,MPOVAL
+        NC=VPOCHA(/2)
+        N =VPOCHA(/1)
+        IF(I1.EQ.1) THEN
+          NC1=NC
+          N1=N
+        ENDIF
+        IF(NC1.NE.NC.OR.N1.NE.N) THEN
+          CALL ERREUR(214)
+          return
+        ENDIF
+c       rem : on pourrait aussi verifier les noms de composantes, etc...
+C       qq desactivations
+        SEGDES,MSOUPO
+        IF(ISOUPO.EQ.NSOUP1) THEN
+          SEGDES,MCHPOI
+        ENDIF
+      ENDDO
+
+C---- creation du chpoint de sortie ----
+      DO I1=1,NNN
+        IF(ISOUPO.EQ.1) THEN
+          NAT=2
+          SEGINI,MCHPO2,MCHPO3
+          MLCHP2.ICHPOI(I1)=MCHPO2
+          MCHPO2.MTYPOI='REEL   '
+          MCHPO2.MOCHDE='CHAMP PAR POINTS CREE PAR TFR '
+          MLCHP3.ICHPOI(I1)=MCHPO3
+          MCHPO3.MTYPOI='IMAG   '
+          MCHPO3.MOCHDE='CHAMP PAR POINTS CREE PAR TFR '
+        ELSE
+          MCHPO2=MLCHP2.ICHPOI(I1)
+          MCHPO3=MLCHP3.ICHPOI(I1)
+        ENDIF
+C       creation du MSOUP2 et du MPOVA2 de sortie
+        SEGINI,MSOUP2=MSOUPO
+        MCHPO2.IPCHP(ISOUPO)=MSOUP2
+        SEGINI,MPOVA2=MPOVAL
+        MSOUP2.IPOVAL=MPOVA2
+        LIPOV2(I1)=MPOVA2
+        SEGINI,MSOUP3=MSOUPO
+        MCHPO3.IPCHP(ISOUPO)=MSOUP3
+        SEGINI,MPOVA3=MPOVAL
+        MSOUP3.IPOVAL=MPOVA3
+        LIPOV3(I1)=MPOVA3
+C       qq desactivations
+        SEGDES,MSOUP2,MSOUP3
+        IF(ISOUPO.EQ.NSOUP1) THEN
+          SEGDES,MCHPO2,MCHPO3
+        ENDIF
+      ENDDO
+
+
+C==== CHARGEMENT DU TABLEAU DE TRAVAIL =================================
+
+C     creation du tableau de travail pour ce MSOUPO
+      NCOU=NPOINT
+      NDDL=N*NC
+      SEGINI MTRAV3
+
+C     boucle sur les pas de temps = boucle sur les chpoints
+      DO 720 I=1,IND1
+C     => pour ce MSOUPO, boucle sur les pas de temps = boucle sur les MPOVAL
+        MPOVAL=LIPOV(I)
+C       boucle sur les ddls = boucle sur sur les composantes + noeuds
+        IDDL=0
+C       boucle sur les composantes
+        DO 730 IC=1,NC
+C       boucle sur les noeuds
+        DO 730 IN=1,N
+            IDDL=IDDL+1
+            XXX(I,IDDL)= VPOCHA(IN,IC)
+ 730    CONTINUE
+c       IF(IIMPI.EQ.1)
+c      & write(ioimp,*) 'XXX(',I,')=',(XXX(I,iou),iou=1,IDDL)
+ 720  CONTINUE
+C     On ne complete pas avec des 0 (inutile apres SEGINI MTRAV3)
+
+C==== CALCUL DE LA FFT =================================================
+
+c     boucle sur les ddls
+      IDDL=0
+      DO 740 IC=1,NC
+      DO 740 IN=1,N
+        IDDL=IDDL+1
+        IF(IIMPI.EQ.1) WRITE(IOIMP,*)' CALCUL DE LA FFT DU SIGNAL ',IDDL
+        CALL FFTL(XXX(1,IDDL),YYY(1),W(1),NPOINT)
+ 740  CONTINUE
+      IF(IIMPI.EQ.1) WRITE(IOIMP,*)' FFT CALCULEE '
+C
+C==== REMPLISSAGE DES LISTES DE CHPOINTS DE LA FFT =====================
+C
+C     creation de la liste des frequences
+      IF(ISOUPO.eq.1) THEN
+        JG=NNN
+        SEGINI MLREE1
+      ENDIF
+
+      IF(IIMPI.EQ.1) WRITE(IOIMP,*)' SORTIE DE ',NNN,' POINTS '
+
+      IF(ISORT.EQ.1) THEN
+C
+C     SORTIE EN PARTIE REELLE & IMAGINAIRE / FREQUENCE
+C
+c       Boucle sur les frequences = sur les chpoints
+        DO 750 I=KDEBU,KHALF
+          FREQ=REAL(I-1)*DFREQ
+c           IF(IIMPI.EQ.1) write(ioimp,*) I,' FREQ=',FREQ
+c           IF(IIMPI.EQ.1)
+c      &    write(ioimp,*)'XXX(',I,')=',(XXX(I,iou),iou=1,IDDL)
+          ITY=I-KDEBU+1
+          IF(ISOUPO.eq.1) MLREE1.PROG(ITY)=FREQ
+          MPOVA2=LIPOV2(ITY)
+          MPOVA3=LIPOV3(ITY)
+C         boucle sur les ddls = boucle sur sur les composantes + noeuds
+          IDDL=0
+C         boucle sur les composantes
+          DO 760 IC=1,NC
+C         boucle sur les noeuds
+          DO 760 IN=1,N
+              IDDL=IDDL+1
+              MPOVA2.VPOCHA(IN,IC)=DT*CXTORE(XXX(I,IDDL))
+              MPOVA3.VPOCHA(IN,IC)=DT*CXTOIM(XXX(I,IDDL))
+ 760      CONTINUE
+
+ 750    CONTINUE
+
+      ELSE
+C
+C     SORTIE EN MODULE & PHASE / FREQUENCE
+C
+      ENDIF
+
+C     SUPPRESSION, DESACTIVATION
+      SEGSUP,MTRAV3
+      DO I1=1,IND1
+          MPOVAL = LIPOV(I1)
+          SEGDES,MPOVAL
+      ENDDO
+      DO I=KDEBU,KHALF
+          ITY=I-KDEBU+1
+          MPOVA2=LIPOV2(ITY)
+          MPOVA3=LIPOV3(ITY)
+          SEGDES,MPOVA2,MPOVA3
+      ENDDO
+c       DO I=1,LIPOV2(/1)
+c           MPOVA2=LIPOV2(I)
+c           IF(MPOVA2.ne.0) SEGDES,MPOVA2
+c           MPOVA3=LIPOV3(I)
+c           IF(MPOVA2.ne.0) SEGDES,MPOVA3
+c       ENDDO
+      IF(ISOUPO.LT.NSOUPO) GOTO 710
+C     ici, on boucle sur les SOUPO...
+
+C
+C==== DESACTIVATION ET ECRITURE DES LISTCHPOINT ET LISTREEL ============
+C
+      IF(IIMPI.EQ.1) WRITE(IOIMP,*)'NETTOYAGE'
+      SEGSUP MTRAV2
+      SEGSUP LIPOV,LIPOV2,LIPOV3
+      SEGDES MLCHPO,MLCHP2,MLCHP3,MLREE1
+      CALL ECROBJ('LISTREEL',MLREE1)
+      CALL ECROBJ('LISTCHPO',MLCHP3)
+      CALL ECROBJ('LISTCHPO',MLCHP2)
+
+ 777  CONTINUE
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

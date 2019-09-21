@@ -1,0 +1,1239 @@
+C AMOR1     SOURCE    PV        17/10/03    21:15:01     9581
+
+      SUBROUTINE AMOR1(MODORI,IPCHE1,ICAS,IPRIG)
+
+*---------------------------------------------------------------------*
+*                                                                     *
+*                      OPERATEUR AMORTISSEMENT VISQUEUX               *
+*                                                                     *
+*---------------------------------------------------------------------*
+*                                                                     *
+*       CE SOUS-PROGRAMME SERT A TRAITER ET A METTRE EN FORME         *
+*         LES INFORMATIONS NECESSAIRES POUR LES CALCULS               *
+*                                                                     *
+*---------------------------------------------------------------------*
+*                                                                     *
+*   ENTREES :                                                         *
+*   ________                                                          *
+*                                                                     *
+*        IPMODL   Pointeur sur le modele                              *
+*        IPCHE1   Pointeur sur le chamelem de carateristiques         *
+*        ICAS     1 si matrice d amortissement                        *
+*                 2 si matrice de rigidite antisymetrique             *
+*                 3 si matrice d amortissement en frequentiel         *
+*                   (amortissement corotatif)                         *
+*                                                                     *
+*   SORTIES :                                                         *
+*   ________                                                          *
+*                                                                     *
+*        IPRIG    pointeur sur la rigidite construite                 *
+*                 =0 en cas d'erreur (et IERR non nul)                *
+*                                                                     *
+*---------------------------------------------------------------------*
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*
+-INC CCOPTIO
+-INC CCHAMP
+-INC CCGEOME
+-INC CCREEL
+*
+-INC SMCHAML
+-INC SMINTE
+-INC SMELEME
+-INC SMRIGID
+-INC SMMODEL
+-INC SMCOORD
+-INC SMLREEL
+*
+      INTEGER oooval
+
+      SEGMENT INFO
+       INTEGER INFELL(JG)
+      ENDSEGMENT
+*
+      SEGMENT NOTYPE
+        CHARACTER*16 TYPE(NBTYPE)
+      ENDSEGMENT
+*
+      SEGMENT MPTVAL
+        INTEGER IPOS(NS)    ,NSOF(NS)
+        INTEGER      IVAL(NCOSOU)
+        CHARACTER*16 TYVAL(NCOSOU)
+      ENDSEGMENT
+*
+      segment modsta
+       integer pimoda(nmoda),pistat(nstat)
+       integer ivmoda(nmoda),ivstat(nstat)
+      endsegment
+*
+      CHARACTER*8 CMATE
+      CHARACTER*(NCONCH) CONM
+
+      PARAMETER ( INTTYP=3 )
+*                 INTTYP DEFINIT LE TYPE DE POINTS D'INTEGRATION
+*                                UTILISE PAR RIGI
+      PARAMETER ( NINF=3 )
+      INTEGER INFOS(NINF)
+*
+      LOGICAL lsupfo,lsupde,BDPGE,brend,lsupma,dcmate,dcmat2
+*
+      IPRIG = 0
+*
+*               ACTIVATION DU MODELE
+*               --------------------
+*  MODORI = Modele initial complet
+*  IPMODL = Modele "deroule" (uniquement "MECANIQUE", "LIQUIDE" ou "POREUX")
+      CALL PIMODL(MODORI,IPMODL)
+      IF (IPMODL.EQ.0) RETURN
+*
+*    VERIFICATION DU LIEU SUPPORT DU MCHAML DE CARACTERISTIQUES
+*    ZZZZZZZZ  PEUT ETRE A FAIRE PLUTOT SUR LES SOUS-ZONES
+*
+      ISUP1 = 0
+      CALL QUESUP(IPMODL,IPCHE1,INTTYP,0,ISUP1,IRET1)
+      IF (ISUP1.GT.1) RETURN
+*
+      ISUPM = ISUP1
+      ISUPC = ISUP1
+      IPCHE2 = 0
+*  IPMODL est ACTIF en retour (nouveau pointeur pouvant etre detruit)
+      MMODEL=IPMODL
+      NSOUS = KMODEL(/1)
+*
+*      INITIALISATION DU CHAPEAU DE L'OBJET RIGIDITE
+*      ---------------------------------------------
+      JRIGE = 0
+      NRIGEL = 0
+      SEGINI MRIGID
+      MTYMAT = 'AMORTISS'
+*     IFORIG = IFOMOD
+      IFORIG = IFOUR
+      ICHOLE = 0
+      IMGEO1 = 0
+      IMGEO2 = 0
+      ISUPEQ = 0
+* termes croises STATIQUE et/ou MODAL
+       nstat = 100
+       kstat = 0
+       nmoda = 100
+       kmoda = 0
+       segini modsta
+*
+*--------------------------------------------------------------------*
+*
+*       BOUCLE SUR LES ZONES ELEMENTAIRES ( MEME TYPE D'EF )
+*
+*--------------------------------------------------------------------*
+*
+      DO 500 ISOMO=1,NSOUS
+
+        IMODEL = KMODEL(ISOMO)
+        SEGACT,IMODEL
+*
+        IF (FORMOD(1).EQ.'LIAISON') GOTO 5990
+*
+*    INITIALISATIONS
+*
+        IPMINT = 0
+        IPMIN1 = 0
+
+        MOMATR = 0
+        MOCARA = 0
+        MOTYPM = 0
+        MOTYPC = 0
+
+        MODEPL = 0
+        MOFORC = 0
+        lsupde = .false.
+        lsupfo = .false.
+
+        IDESCR = 0
+
+C- Recuperation d'informations sur le maillage elementaire
+        IPMAIL = imodel.IMAMOD
+        CONM   = imodel.CONMOD
+
+        IPT1 = imodel.IMAMOD
+        SEGACT,IPT1
+        NBNOE1 = IPT1.NUM(/1)
+        NBELE1 = IPT1.NUM(/2)
+
+C- Quelques informations sur le modele
+
+        IIPDPG = imodel.IPDPGE
+        IIPDPG = IPTPOI(IIPDPG)
+
+        CMATE = CMATEE
+        MATE  = IMATEE
+        INAT  = INATUU
+
+          dcmate = .false.
+          dcmat2 = .false.
+            do im = 1,matmod(/2)
+             if (matmod(im).eq.'IMPEDANCE') then
+               dcmate =.true.
+               if(tymode(/2).gt.0)then
+                 if(tymode(1).eq.'LISTMOTS') dcmat2 = .true.
+               endif
+             endif
+            enddo
+
+        IRTD = 1
+        CALL IDENT(IPT1,CONM,IPCHE1,IPCHE2, INFOS,IRTD)
+        IF (IRTD.EQ.0) GOTO 5991
+C
+C- Recuperation d'informations sur l'element fini
+        MELE  = NEFMOD
+C Cas particulier : POI1/SEG2 et IMPEDANCE
+        IF (dcmate) THEN
+          IF (ipt1.itypel.EQ.1) MELE = 45
+          IF (ipt1.itypel.EQ.2) MELE = 2
+        ENDIF
+c
+C   COQUE INTEGREE OU PAS ?
+        IF (INFMOD(/1).NE.0)THEN
+          NPINT=INFMOD(1)
+        ELSE
+          NPINT=0
+        ENDIF
+
+        if (infmod(/1).lt.2+inttyp) then
+          CALL ELQUOI(MELE,0,INTTYP,IPINF,IMODEL)
+          IF ( IERR.NE.0 ) GOTO 5991
+          INFO = IPINF
+          LHOOK = INFELL(10)
+          NSTRS = INFELL(16)
+          MFR   = INFELL(13)
+          LW    = INFELL(7)
+          LRE   = INFELL(9)
+          NDDL  = INFELL(15)
+          IELE  = INFELL( 14)
+          IPORE = INFELL(8)
+          IPMINT= INFELL(11)
+          IPMIN1= INFELL(12)
+          NBPGAU= INFELL(  6)
+C*          ICARA = INFELL(  5)
+          segsup info
+        ELSE
+          LHOOK = INFELE(10)
+          NSTRS = INFELE(16)
+          MFR   = INFELE(13)
+          LW    = INFELE(7)
+          LRE   = INFELE(9)
+          NDDL  = INFELE(15)
+          IELE  = INFELE( 14)
+          IPORE = INFELE(8)
+          IPMINT=INFMOD(2+INTTYP)
+C*          IPMINT = INFELE(11)
+          IPMIN1= INFMOD(8)
+          NBPGAU= INFELE(  6)
+C*          ICARA = INFELE(  5)
+        ENDIF
+c*        LHOO2 = LHOOK*LHOOK
+
+        CALL INFDPG(MFR,IFOUR, BDPGE,NDPGE)
+        IF (BDPGE) THEN
+          IF (IIPDPG.LE.0) THEN
+            CALL ERREUR(925)
+            GOTO 5991
+          ENDIF
+        ENDIF
+
+        IPPORE=0
+        IF(MFR.EQ.33.OR.MFR.EQ.57.OR.MFR.EQ.59)  THEN
+          IPPORE=NBNNE(NUMGEO(MELE))
+        ENDIF
+
+        MINTE = IPMINT
+        IF (IPMINT.NE.0) SEGACT,MINTE
+*
+C- RECHERCHE DES NOMS D'INCONNUES ET DES DUAUX
+*
+        if (lnomid(1).ne.0) then
+          modepl=lnomid(1)
+        else
+          lsupde=.true.
+          CALL IDPRIM(IMODEL,MFR,MODEPL,NDEPL,NDUM)
+        endif
+        nomid=MODEPL
+        segact nomid
+        ndepl=lesobl(/2)
+c*        ndum = lesfac(/1)
+*
+        if (lnomid(2).ne.0) then
+          moforc = lnomid(2)
+        else
+          lsupfo=.true.
+          CALL IDDUAL(IMODEL,MFR,MOFORC,NFORC,NDUM)
+        endif
+        nomid=MOFORC
+        segact nomid
+        nforc=lesobl(/2)
+c*        ndum = lesfac(/1)
+*
+        IF (NDEPL.EQ.0.OR.NFORC.EQ.0.OR.NDEPL.NE.NFORC) THEN
+          CALL ERREUR(5)
+          GOTO 598
+        ENDIF
+*
+*  REMPLISSAGE DU SEGMENT DESCRIPTEUR
+*
+        NCOMP = NDEPL
+        NBNNS = NBNOE1
+        NBNN  = NBNOE1
+*PV idecap pas defini
+**        IF (MFR.EQ.33.OR.MFR.EQ.57.OR.MFR.EQ.59) THEN
+**          NCOMP = NDEPL-IDECAP
+**        ENDIF
+        IF (BDPGE) THEN
+          NCOMP = NDEPL - NDPGE
+          NBNN  = NBNOE1 + 1
+        ENDIF
+        IF (MFR.EQ.19.OR.MFR.EQ.21) THEN
+          NBNNS = NBNN / 2
+        ENDIF
+*
+        NFAC = NBNNS
+        IF (MELE.GE.108.AND.MELE.LE.110)
+     &    NFAC = MIN(NFAC,(3*NBNN-IPORE)/2)
+*
+        NLIGRP = LRE
+        NLIGRD = LRE
+*         erreur dans les dimensions de DESCR
+*         le mode de calcul n'est pas correct
+        IF (NBNNS*NCOMP .GT. NLIGRD) THEN
+          CALL ERREUR(717)
+          GOTO 598
+        ENDIF
+
+        SEGINI,DESCR
+
+        IDDL = 1
+        DO 1004 INOEUD=1,NFAC
+          DO 1005 ICOMP=1,NCOMP
+            NOMID=MODEPL
+            LISINC(IDDL)=LESOBL(ICOMP)
+                 if (dcmat2) then
+                  if (inoeud.eq.2) then
+                   LISINC(IDDL)=LESFAC(ICOMP)
+                  endif
+                 endif
+            NOMID=MOFORC
+            LISDUA(IDDL)=LESOBL(ICOMP)
+                 if (dcmat2) then
+                  if (inoeud.eq.2) then
+                   LISDUA(IDDL)=LESFAC(ICOMP)
+                  endif
+                 endif
+            NOELEP(IDDL)=INOEUD
+            NOELED(IDDL)=INOEUD
+            IDDL=IDDL+1
+1005      CONTINUE
+1004    CONTINUE
+*
+*          CAS DES ELEMENT RACCORD
+*
+        IF (MFR.EQ.19.OR.MFR.EQ.21) THEN
+          CALL IDPRIM(IMODEL,MFR+1000,MODPL,NDEPL,NDUM)
+          CALL IDDUAL(IMODEL,MFR+1000,MOFRC,NFORC,NDUM)
+          NOMID=MODPL
+          SEGACT NOMID
+          NOMID=MOFRC
+          SEGACT NOMID
+          DO 1106 INOEUD=NBNNS+1,NBNN
+            DO 1107 ICOMP=1,NDEPL
+              NOMID=MODPL
+              LISINC(IDDL)=LESOBL(ICOMP)
+              NOMID=MOFRC
+              LISDUA(IDDL)=LESOBL(ICOMP)
+              NOELEP(IDDL)=INOEUD
+              NOELED(IDDL)=INOEUD
+              IDDL=IDDL+1
+1107        CONTINUE
+1106      CONTINUE
+          NOMID=MODPL
+          SEGSUP,NOMID
+          NOMID=MOFRC
+          SEGSUP,NOMID
+        ENDIF
+*
+        SEGDES,DESCR
+        IDESCR = DESCR
+ 1999 continue
+*
+*       TRAITEMENT DES CHAMPS EN ENTREE
+*       -------------------------------
+*
+        NBROBL = 0
+        NBRFAC = 0
+        NOMID  = 0
+        NOTYPE = 0
+*
+*   >>>  CHAMP DE MATERIAU
+*
+C*      IF (FORMOD(1).EQ.'MECANIQUE'.AND.CMATE.EQ.'ISOTROPE') THEN
+        IF (FORMOD(1).EQ.'MECANIQUE'.AND.MATE.EQ.1.AND..NOT.dcmate) THEN
+          IF (MFR.EQ.35) THEN
+            NBROBL=2
+            SEGINI NOMID
+            LESOBL(1)='KS  '
+            LESOBL(2)='KN  '
+          ELSE IF(MFR.EQ.53) THEN
+            NBROBL=1
+            SEGINI,NOMID
+            LESOBL(1)='KS  '
+          ELSE
+            NBROBL=2
+            SEGINI NOMID
+            LESOBL(1)='VISQ'
+            LESOBL(2)='NU  '
+          ENDIF
+          NBTYPE=1
+          SEGINI NOTYPE
+          TYPE(1)='REAL*8'
+C*      ELSE IF (FORMOD(1).EQ.'MECANIQUE'.AND.CMATE.EQ.'UNIDIREC') THEN
+        ELSE IF (FORMOD(1).EQ.'MECANIQUE'.AND.MATE.EQ.4) THEN
+          IF (MFR.EQ.1.AND.IDIM.EQ.3) THEN
+            NBROBL=7
+            SEGINI NOMID
+            LESOBL(1)='VISQ'
+            LESOBL(2)='V1X '
+            LESOBL(3)='V1Y '
+            LESOBL(4)='V1Z '
+            LESOBL(5)='V2X '
+            LESOBL(6)='V2Y '
+            LESOBL(7)='V2Z '
+          ELSE
+            NBROBL=3
+            SEGINI NOMID
+            LESOBL(1)='VISQ'
+            LESOBL(2)='V1X '
+            LESOBL(3)='V1Y '
+          ENDIF
+          NBTYPE=1
+          SEGINI NOTYPE
+          TYPE(1)='REAL*8'
+*
+C*      ELSE IF (INAT.EQ.67.AND.CMATE.EQ.'ORTHOTRO') THEN
+        ELSEIF(INAT.EQ.67.AND. MATE.EQ.2) THEN
+          NBROBL=6
+          SEGINI NOMID
+          LESOBL(1)='YG1 '
+          LESOBL(2)='YG2 '
+          LESOBL(3)='NU12'
+          LESOBL(4)='G12 '
+          LESOBL(5)='V1X '
+          LESOBL(6)='V1Y '
+          NBTYPE=1
+          SEGINI NOTYPE
+          TYPE(1)='REAL*8'
+*
+C*      ELSEIF (CMATE.EQ.'SECTION') THEN
+        ELSE IF (MATE.EQ.11) THEN
+C
+C      MODELE ET MATERIAU DE LA SECTION DU MODELE A FIBRE
+C
+          NBROBL=2
+          SEGINI NOMID
+          LESOBL(1)='MODS'
+          LESOBL(2)='MATS'
+          NBTYPE=2
+          SEGINI NOTYPE
+          TYPE(1)='POINTEURMMODEL'
+          TYPE(2)='POINTEURMCHAML'
+C
+        ELSEIF (CMATE.EQ.'MODAL') THEN
+               NBROBL=3
+               NBRFAC=1
+               SEGINI NOMID
+               LESOBL(1)='FREQ'
+               LESOBL(2)='MASS'
+               LESOBL(3)='DEFO'
+               LESFAC(1) ='AMOR'
+               NBTYPE=4
+               SEGINI NOTYPE
+               TYPE(1)='REAL*8'
+               TYPE(2)='REAL*8'
+               TYPE(3)='POINTEURCHPOINT'
+               TYPE(4)='REAL*8'
+
+        ELSEIF (CMATE.EQ.'STATIQUE') THEN
+               NBROBL=3
+               NBRFAC=1
+               SEGINI NOMID
+               LESOBL(1)='DEFO'
+               LESOBL(2)='RIDE'
+               LESOBL(3)='MADE'
+               LESFAC(1) ='AMOR'
+               NBTYPE=4
+               SEGINI NOTYPE
+               TYPE(1)='POINTEURCHPOINT'
+               TYPE(2)='POINTEURCHPOINT'
+               TYPE(3)='POINTEURCHPOINT'
+              TYPE(4)='REAL*8'
+
+        ELSE IF (dcmate) THEN
+         IF (CMATE.EQ.'IMPCOMPL') THEN
+*
+* IMPEDANCE COMPLEXE
+*
+          NBROBL=0
+          NBRFAC=1
+          SEGINI NOMID
+          MOMATR=NOMID
+          LESFAC(1)='VISC'
+*
+          NBTYPE=1
+          SEGINI NOTYPE
+          MOTYPE=NOTYPE
+          TYPE(1)='REAL*8'
+
+         ELSE
+          NBROBL=0
+          NBRFAC=2
+          SEGINI NOMID
+          MOMATR=NOMID
+          LESFAC(1) ='AMOR'
+          LESFAC(2) ='AROT'
+*
+          NBTYPE=1
+          SEGINI NOTYPE
+          MOTYPE=NOTYPE
+          TYPE(1)='REAL*8'
+
+         ENDIF
+
+*
+        ELSE
+C*          CALL IDMATR(MFR,IMODEL,MOMATR,NBROBL,NBRFAC)
+C*          NOMID  = MOMATR
+C*          NBTYPE=1
+C*          SEGINI NOTYPE
+C*          TYPE(1)='REAL*8'
+        ENDIF
+*
+*
+        MOMATR = NOMID
+        MOTYPM = NOTYPE
+*
+        NMATR = NBROBL
+        NMATF = NBRFAC
+        NMATT = NMATR+NMATF
+*
+*   >>>     CHAMPS DE CARACTERISTIQUES
+*
+        NBROBL = 0
+        NBRFAC = 0
+        IVECT  = 0
+        NOMID  = 0
+        NOTYPE = 0
+*
+* EPAISSEUR DANS LE CAS MASSIF EN CONTRAINTES PLANES
+*
+        IF ((MFR.EQ.1.OR.MFR.EQ.31.OR.
+     +      ((MELE.GE.79.AND.MELE.LE.83).OR.
+     +      (MELE.GE.173.AND.MELE.LE.182)))
+     +      .AND.IFOUR.EQ.-2)THEN
+           NBRFAC=1
+           SEGINI NOMID
+           LESFAC(1)='DIM3'
+*
+           NBTYPE=1
+           SEGINI NOTYPE
+           TYPE(1)='REAL*8'
+*
+* EPAISSEUR ET EXCENTREMENT DANS LE CAS DES COQUES
+*
+        ELSEIF (MFR.EQ.3.OR.MFR.EQ.5.OR.MFR.EQ.9) THEN
+          NBROBL=1
+          IF(MFR.EQ.3.AND.IFOUR.EQ.-2) THEN
+            NBRFAC=2
+          ELSE
+            NBRFAC=1
+          ENDIF
+          SEGINI NOMID
+          LESOBL(1)='EPAI'
+          LESFAC(1)='EXCE'
+          IF(MFR.EQ.3.AND.IFOUR.EQ.-2)  LESFAC(2)='DIM3'
+*
+          NBTYPE=1
+          SEGINI NOTYPE
+          TYPE(1)='REAL*8'
+*
+* SECTION POUR LES BARRES ET LES CERCES
+*
+         ELSE IF (MFR.EQ.27) THEN
+         IF(.NOT.dcmate)  THEN
+             NBROBL=1
+             SEGINI NOMID
+             LESOBL(1)='SECT'
+*
+             NBTYPE=1
+             SEGINI NOTYPE
+             TYPE(1)='REAL*8'
+         ENDIF
+*
+* section, excentrements et orientation pour les barres excentrees
+*
+        ELSE IF (MFR.EQ.49) THEN
+          NBROBL=6
+          SEGINI NOMID
+          LESOBL(1)='SECT'
+          LESOBL(2)='EXCZ'
+          LESOBL(3)='EXCY'
+          LESOBL(4)='VX  '
+          LESOBL(5)='VY  '
+          LESOBL(6)='VZ  '
+
+          NBTYPE=1
+          SEGINI NOTYPE
+          TYPE(1)='REAL*8'
+
+* CARACTERISTIQUES POUR LES POUTRES
+*
+        ELSE IF (MFR.EQ.7 ) THEN
+           if (dcmate) then
+               NBROBL=0
+               NBRFAC=1
+               SEGINI NOMID
+               MOCARA=NOMID
+               LESFAC(1)='VECT'
+               IVECT=1
+*
+               NBTYPE=1
+               SEGINI NOTYPE
+               MOTYPE=NOTYPE
+               TYPE(1)='POINTEURPOINT   '
+           else
+C MODELE A FIBRE
+C*        IF (CMATE.EQ.'SECTION') THEN
+          IF (MATE.EQ.11) THEN
+            IF (ICAS.EQ.2) THEN
+              NBRFAC=2
+              SEGINI NOMID
+              LESFAC(1)='OMEG'
+              LESFAC(2)='VECT'
+              IVECT=1
+              NBTYPE=2
+              SEGINI NOTYPE
+              TYPE(1)='REAL*8'
+              TYPE(2)='POINTEURPOINT   '
+            ELSE
+              NBRFAC=1
+              SEGINI NOMID
+              LESFAC(1)='VECT'
+              IVECT=1
+              NBTYPE=1
+              SEGINI NOTYPE
+              TYPE(1)='POINTEURPOINT   '
+            ENDIF
+*
+* POUTRE STANDARD
+* CAS 2D
+*
+          ELSE IF (IFOUR.EQ.-2.OR.IFOUR.EQ.-1.OR.IFOUR.EQ.-3) THEN
+            NBROBL=2
+            NBRFAC=1
+            SEGINI NOMID
+            LESOBL(1)= 'SECT'
+            LESOBL(2)= 'INRZ'
+            LESFAC(1)= 'SECY'
+*
+            NBTYPE=1
+            SEGINI NOTYPE
+            TYPE(1)='REAL*8'
+
+* CAS 3D
+*
+          ELSE
+*
+* AMORTISSEMENT COROTATIF
+*
+            IF (ICAS.EQ.2) THEN
+              NBROBL=4
+              NBRFAC=4
+              SEGINI NOMID
+              LESOBL(1)='TORS'
+              LESOBL(2)='INRY'
+              LESOBL(3)='INRZ'
+              LESOBL(4)='SECT'
+              LESFAC(1)='SECY'
+              LESFAC(2)='SECZ'
+              LESFAC(3)='OMEG'
+              LESFAC(4)='VECT'
+              IVECT=1
+*
+              NBTYPE=8
+              SEGINI NOTYPE
+              TYPE(1)='REAL*8'
+              TYPE(2)='REAL*8'
+              TYPE(3)='REAL*8'
+              TYPE(4)='REAL*8'
+              TYPE(5)='REAL*8'
+              TYPE(6)='REAL*8'
+              TYPE(7)='REAL*8'
+              TYPE(8)='POINTEURPOINT   '
+            ELSE
+*
+* AMORTISSEMENT STANDARD
+*
+              NBROBL=4
+              NBRFAC=3
+              SEGINI NOMID
+              LESOBL(1)='TORS'
+              LESOBL(2)='INRY'
+              LESOBL(3)='INRZ'
+              LESOBL(4)='SECT'
+              LESFAC(1)='SECY'
+              LESFAC(2)='SECZ'
+              LESFAC(3)='VECT'
+              IVECT=1
+*
+              NBTYPE=7
+              SEGINI NOTYPE
+              TYPE(1)='REAL*8'
+              TYPE(2)='REAL*8'
+              TYPE(3)='REAL*8'
+              TYPE(4)='REAL*8'
+              TYPE(5)='REAL*8'
+              TYPE(6)='REAL*8'
+              TYPE(7)='POINTEURPOINT   '
+            ENDIF
+          ENDIF
+           endif
+*
+* CARACTERISTIQUES POUR LES TUYAUX
+*
+        ELSE IF (MFR.EQ.13) THEN
+          IF (ICAS.EQ.2) THEN
+            NBROBL=2
+            NBRFAC=5
+            SEGINI NOMID
+            LESOBL(1)='EPAI'
+            LESOBL(2)='RAYO'
+            LESFAC(1)='RACO'
+            LESFAC(2)='PRES'
+            LESFAC(3)='CISA'
+            LESFAC(4)='OMEG'
+            LESFAC(5)='VECT'
+            IVECT=1
+*
+            NBTYPE=7
+            SEGINI NOTYPE
+            TYPE(1)='REAL*8'
+            TYPE(2)='REAL*8'
+            TYPE(3)='REAL*8'
+            TYPE(4)='REAL*8'
+            TYPE(5)='REAL*8'
+            TYPE(6)='REAL*8'
+            TYPE(7)='POINTEURPOINT   '
+          ELSE
+            NBROBL=2
+            NBRFAC=4
+            SEGINI NOMID
+            LESOBL(1)='EPAI'
+            LESOBL(2)='RAYO'
+            LESFAC(1)='RACO'
+            LESFAC(2)='PRES'
+            LESFAC(3)='CISA'
+            LESFAC(4)='VECT'
+            IVECT=1
+*
+            NBTYPE=6
+            SEGINI NOTYPE
+            TYPE(1)='REAL*8'
+            TYPE(2)='REAL*8'
+            TYPE(3)='REAL*8'
+            TYPE(4)='REAL*8'
+            TYPE(5)='REAL*8'
+            TYPE(6)='POINTEURPOINT   '
+          ENDIF
+*
+        ELSE IF (MFR.EQ.39) THEN
+          IF (ICAS.EQ.2) THEN
+            NBROBL=2
+            NBRFAC=4
+            SEGINI NOMID
+            LESOBL(1)='EPAI'
+            LESOBL(2)='RAYO'
+            LESFAC(1)='RACO'
+            LESFAC(2)='PRES'
+            LESFAC(3)='OMEG'
+            LESFAC(4)='VECT'
+            IVECT=1
+
+            NBTYPE=6
+            SEGINI NOTYPE
+            TYPE(1)='REAL*8'
+            TYPE(2)='REAL*8'
+            TYPE(3)='REAL*8'
+            TYPE(4)='REAL*8'
+            TYPE(5)='REAL*8'
+            TYPE(6)='POINTEURPOINT   '
+
+          ELSE
+            NBROBL=2
+            NBRFAC=3
+            SEGINI NOMID
+            LESOBL(1)='EPAI'
+            LESOBL(2)='RAYO'
+            LESFAC(1)='RACO'
+            LESFAC(2)='PRES'
+            LESFAC(3)='VECT'
+            IVECT=1
+
+            NBTYPE=5
+            SEGINI NOTYPE
+            TYPE(1)='REAL*8'
+            TYPE(2)='REAL*8'
+            TYPE(3)='REAL*8'
+            TYPE(4)='REAL*8'
+            TYPE(5)='POINTEURPOINT   '
+          ENDIF
+        ENDIF
+
+* Rendement :
+* Notion non utilisee actuellement (mais conserver a titre historique !)
+        IF (NOMID.LE.0) THEN
+          NBROBL = 0
+          NBRFAC = 0
+          SEGINI,NOMID
+          NBTYPE = 0
+          SEGINI,NOTYPE
+        ENDIF
+        ncar1  = NBROBL + NBRFAC + 1
+        ifac   = NBRFAC
+        NBRFAC = NBRFAC + 10
+        SEGADJ,NOMID
+        LESFAC(ifac +  1) = 'REND'
+        LESFAC(ifac +  2) = 'W1X '
+        LESFAC(ifac +  3) = 'W1Y '
+        LESFAC(ifac +  4) = 'W1Z '
+        LESFAC(ifac +  5) = 'W2X '
+        LESFAC(ifac +  6) = 'W2Y '
+        LESFAC(ifac +  7) = 'W2Z '
+        LESFAC(ifac +  8) = 'REN1'
+        LESFAC(ifac +  9) = 'REN2'
+        LESFAC(ifac + 10) = 'REN3'
+        NBTYPE = NBTYPE + 1
+        SEGADJ,NOTYPE
+        TYPE(NBTYPE) = 'REAL*8'
+*
+        MOCARA = NOMID
+        MOTYPC = NOTYPE
+        NCARA = NBROBL
+        NCARF = NBRFAC
+        NCARR = NCARA+NCARF
+
+C- Partionnement si necessaire de la matrice d'amortissement
+C- determinant ainsi le nombre d'objets elementaires de MRIGID
+        LTRK = oooval(1,4)
+        IF (LTRK.EQ.0) LTRK = oooval(1,1)
+* Ajout a la taille en mots de la matrice des infos du segment
+        LSEG = LRE*LRE*NBELE1 + 16
+        NBLPRT = (LSEG-1)/LTRK + 1
+        NBLMAX = (NBELE1-1)/NBLPRT + 1
+        NBLPRT = (NBELE1-1)/NBLMAX + 1
+*        write(ioimp,*) ' amor1 : nblprt nblmax = ',nblprt,nblmax,nbele1
+
+        descr  = IDESCR
+        meleme = IPT1
+        nbnn   = NBNOE1
+        nbelem = NBELE1
+        nbsous = 0
+        nbref  = 0
+*
+************************************************************************
+*                          P H A S E   2
+*
+* Boucle sur les PARTITIONS elementaires de la matrice
+*
+************************************************************************
+        isous = 0
+        DO irige = 1, NBLPRT
+
+          IF (NBLPRT.GT.1) THEN
+C- Partitionnement du maillage support de la matrice elementaire
+C- (IPT1 peut etre desactive suite a l'appel a KOMCHA !)
+            SEGACT,IPT1
+            ielem = (irige-1)*NBLMAX
+            nbelem = MIN(NBLMAX,NBELE1-ielem)
+*          write(ioimp,*) ' creation segment ',nbnn,nbelem
+            SEGINI,meleme
+            itypel = IPT1.itypel
+            DO ielt = 1, nbelem
+              jelt = ielt + ielem
+              DO inoe = 1, nbnn
+                num(inoe,ielt) = IPT1.NUM(inoe,jelt)
+              ENDDO
+              icolor(ielt) = IPT1.ICOLOR(jelt)
+            ENDDO
+C- Recopie du descripteur
+            des1 = IDESCR
+            SEGINI,descr=des1
+            SEGDES,descr
+          ENDIF
+
+C- Cas particulier en DEFO PLAN GENE
+          IF (BDPGE) THEN
+c*          nbelem = NUM(/2)
+            nbnn   = NBNOE1 + 1
+            SEGINI,ipt2
+            ipt2.itypel = 28
+            DO ielt = 1,nbelem
+              DO inoe = 1,NBNOE1
+                ipt2.num(inoe,ielt) = NUM(inoe,ielt)
+              ENDDO
+              ipt2.num(nbnn,ielt) = IIPDPG
+              ipt2.icolor(ielt) = ICOLOR(jelt)
+            ENDDO
+            SEGDES,IPT2
+            nbnn = NBNOE1
+          ELSE
+            ipt2 = meleme
+          ENDIF
+
+          ipmail = meleme
+          ipdesc = descr
+          ipmadg = ipt2
+
+C- Initialisation de la matrice de rigidite elementaire (xmatri)
+          NELRIG = nbelem
+          SEGINI,xmatri
+          ipmatr = xmatri
+
+C- Recuperation des valeurs des proprietes materiau et geometriques
+          IVAMAT = 0
+          IVACAR = 0
+          brend = .FALSE.
+*
+          CALL KOMCHA(IPCHE1,ipmail,CONM,MOMATR,MOTYPM,1,INFOS,3,IVAMAT)
+          IF (IERR.NE.0) GOTO 597
+          IF (ISUPM.EQ.1) THEN
+            CALL VALCHE(IVAMAT,NMATT,IPMINT,IPPORE,MOMATR,MELE)
+            IF (IERR.NE.0) THEN
+              ISUPM = 0
+              GOTO 597
+            ENDIF
+          ENDIF
+
+          if (cmate.eq.'STATIQUE'.or.cmate.eq.'MODAL') then
+            mptval = ivamat
+            segact mptval
+            if (ival(/1).lt.3) call erreur(5)
+          endif
+          if (cmate.eq.'STATIQUE') then
+           kstat = kstat + 1
+           ivstat(kstat) = ivamat
+           pistat(kstat) = imodel
+           if (kstat.eq.nstat) then
+            nstat = nstat + 100
+            segadj modsta
+           endif
+          endif
+          if (cmate.eq.'MODAL') then
+           kmoda = kmoda + 1
+           ivmoda(kmoda) = ivamat
+           pimoda(kmoda) = imodel
+           if (kmoda.eq.nmoda) then
+            nmoda = nmoda + 100
+            segadj modsta
+           endif
+          endif
+         if (cmate.eq.'MODAL'.or.cmate.eq.'STATIQUE') then
+          if (ival(4).eq.0)  goto 519
+         endif
+
+          MPTVAL = IVAMAT
+          NBGMAT = 0
+          NELMAT = 0
+          DO i = 1,NMATT
+            IF (IVAL(i).NE.0) THEN
+              MELVAL = IVAL(i)
+C*            IF (CMATE.EQ.'SECTION') THEN
+              IF (MATE.EQ.11) THEN
+                NBGMAT = MAX(NBGMAT,IELCHE(/1))
+                NELMAT = MAX(NELMAT,IELCHE(/2))
+              ELSE
+                NBGMAT = MAX(NBGMAT,VELCHE(/1))
+                NELMAT = MAX(NELMAT,VELCHE(/2))
+              ENDIF
+            ENDIF
+          ENDDO
+
+          IF (MOCARA.NE.0)  THEN
+            CALL KOMCHA(IPCHE1,ipmail,CONM,MOCARA,MOTYPC,1,
+     &                  INFOS,3,IVACAR)
+            IF (IERR.NE.0) GOTO 597
+            IF (ISUPC.EQ.1) THEN
+              CALL VALCHE(IVACAR,NCARR,IPMINT,IPPORE,MOCARA,MELE)
+              IF (IERR.NE.0) THEN
+                ISUPC = 0
+                GOTO 597
+              ENDIF
+            ENDIF
+* Rendement :
+            mptval = IVACAR
+            IF (ival(/1).GE.ncar1+9) THEN
+              brend = ival(ncar1+7).GT.0 .OR. ival(ncar1+8).GT.0 .OR.
+     &                ival(ncar1+9).GT.0
+            ENDIF
+          ENDIF
+
+      isous = isous + 1
+      imod = imodel
+      if (dcmate.and.mele.eq.2) goto 29
+
+************************************************************************
+*                        P H A S E   3
+*
+*              CALCUL DES RIGIDITES ELEMENTAIRES
+*
+************************************************************************
+*
+*     NUMERO DES ETIQUETTES      :
+*     Les elements sont groupes comme suit :
+*      - massif,liquide 'surface libre' poreux ----------------------> r
+*      - coq3,dkt,coq4,coq8,coq2,dst --------------------------------> r
+*      - poutre,tuyau,linespring,tuyau fissure,barre,homogeneise,jot3> r
+*      - joi4,joi2,poutre de timoschenko,joi3
+*
+*               CABL SEG2 SEG3 TRI3 TRI4 TRI6 TRI7 QUA4 QUA5 QUA8 QUA9
+          GOTO (  99,  99,  99,   4,  99,   4,  99,   4,  99,   4,  99
+*               RAC2 RAC3 CUB8 CU20 PRI6 PR15 LIA3 LIA4 LIA6 LIA8 MULT
+     &         ,  99,  99,   4 ,  4,   4,   4,  99,  99,  99,  99,  99
+*               TET4 TE10 PYR5 PY13 COQ3  DKT POUT LISP FAC3 FAC4 FAC6
+     &         ,   4,   4,   4,   4,  27,  27,  29,  29,  99,  99,  99
+*               FAC8 LTR3 LQU4 LCU8 LPR6 LTE4 LPY5 COQ8 TUYA TUFI COQ2
+     &         ,  99,   4,   4,   4,   4,   4,   4,  27,  29,  29,  27
+*               POI1 BARR RACO LSU2 COQ4 LISM COF3 RES2 LSU3 LSU4 LICO
+     &         ,  29,  29,  99,   4,  27,  99,  99,  99,   4,   4,  99
+*               COQ6 CVS2 CVS3 CVT3 CVT6 CVQ4 CVQ8 THP5 TH13 THP6 TH15
+     &         ,  27,  99,  99,  99,  99,  99,  99,  99,  99,  99,  99
+*               THC8 TH20 ICT3 ICQ4 ICT6 ICQ8 ICC8 ICT4 ICP6 IC20 IC10
+     &         ,  99,  99,   4,   4,   4,   4,  99,  99,  99,  99,  99
+*               IC15 TRIP QUAP CUBP TETP PRIP TIMO JOI2 JOI3 JOT3 JOI4
+     &         ,  99,  99,  99,  99,  99,  99,  29,  29,  29,  29,  29
+*               JOI6 JOI8 LISC TRIH  DST LIC4 CERC TUYO LSE2 LITU HYT3
+     &         ,  99,  99,  99,  29,  27,  99,  29,  29,  29,  29,  99
+*               HYQ4 HYT4 HYP6 HYC8 TRIS QUAS POIS FOR3 JOP3 JOP6 JOP8
+     &         ,  99,  99,  99,  99,  99,  99,  99,  99,  99,  99,  99
+*               POL3 POL4 POL5 POL6 POL7 POL8 POL9 PO10 PO11 PO12 PO13
+     &         ,  99,  99,  99,  99,  99,  99,  99,  99,  99,  99,  99
+*               PO14 BAR3 BAEX LIA2 QUAH CUBH ROT3 SEF2 TRF3 QUF4 CUF8
+     &         ,  99,  29,  29,  29,  99,  99,  99,  99,  99,  99,  99
+*               PRF6 TEF4 PYF5 MSE3 MTR6 MQU9 MC27 MP18 MT10 MP14 SEF3
+     &         ,  99,  99,  99,  99,  99,  99,  99,  99,  99,  99,  99
+*               TRF7 QUF9 CF27 PF21 TF15 PF19 SEG6 TR21 QU36 C216 P126
+     &         ,  99,  99,  99,  99,  99,  99,  99,  99,  99,  99,  99
+*               TE56 PY91 TRH6
+     &         ,  99,  99,  99),MELE
+C
+C     CASE OF THE NEW JOINT ELEMENTS (JCT3 AND JCI4 IN 2D SHEAR)
+C                                    (JGI2 2D GENERALIZED)
+C                                    (JGT3 AND JGI4 GENERALIZED)
+          IF (MELE.GE.168.AND.MELE.LE.172)GOTO 29
+          IF (MELE.GE.173.OR.MELE.LE.184) GO TO 4
+C
+ 99       CONTINUE
+          MOTERR(1:4) = NOMTP(MELE)
+          MOTERR(9:12)= 'AMOR1'
+          CALL ERREUR(86)
+          GOTO 510
+C_______________________________________________________________________
+C
+C     massif
+C_______________________________________________________________________
+C
+ 4        CONTINUE
+          IF (ICAS.EQ.2) GOTO 99
+          CALL AMOR2 (MATE,MELE,ipmail,IPMINT,NBPGAU,LRE,NSTRS,IVAMAT,
+     &                IVACAR,CMATE,MFR,NBGMAT,NELMAT,1,LHOOK,NMATT,
+     &                IPORE,NDDL,IPMATR,IIPDPG,ncar1)
+          GOTO 510
+C_______________________________________________________________________
+C
+C     coq3,dkt,coq4,coq8,coq2,dst
+C_______________________________________________________________________
+C
+ 27       CONTINUE
+          IF (ICAS.EQ.2) GOTO 99
+          CALL RIGI3(MATE,MELE,ipmail,IPMINT,IPMIN1,NBPGAU,LRE,NSTRS,
+     &               IVAMAT,IVACAR,CMATE,MFR,NBGMAT,NELMAT,1,LHOOK,
+     &               NMATT,LW,NPINT,IPMATR,IIPDPG)
+          GOTO 510
+C_______________________________________________________________________
+C
+C poutre,tuyau,linespring,tuyau fissure,barre,joints 2-3D
+C poutre de Timoschenko,point
+C_______________________________________________________________________
+C
+ 29       CONTINUE
+          n_z = ncar1 - 1
+          CALL AMOR4(MATE,MELE,ipmail,IPMINT,NBPGAU,LRE,NSTRS,
+     &               IVAMAT,IVACAR,IVECT,CMATE,MFR,ICAS,NBGMAT,NELMAT,
+     &      LHOOK,NMATT,n_z,ISOUS,LW,IPORE,IPMATR,IIPDPG,IMOD)
+          GOTO 510
+*
+************************************************************************
+*                        P H A S E   4
+*
+*     DESACTIVATION DES SEGMENTS PROPRES A LA ZONE GEOMETRIQUE IA
+*
+***********************************************************************
+ 510      CONTINUE
+ 597      CONTINUE
+      if (cmate.eq.'MODAL'.or.cmate.eq.'STATIQUE') goto 518
+          IF (ISUPM.EQ.1 .OR. nblprt.GT.1) THEN
+            CALL DTMVAL(IVAMAT,3)
+          ELSE
+            CALL DTMVAL(IVAMAT,1)
+          ENDIF
+          IF (ISUPC.EQ.1 .OR. nblprt.GT.1) THEN
+            CALL DTMVAL(IVACAR,3)
+          ELSE
+            CALL DTMVAL(IVACAR,1)
+          ENDIF
+c*          xmatri = ipmatr
+ 518   continue
+          IF (NBLPRT.GT.1) THEN
+            meleme = ipmail
+            SEGDES,meleme
+          ENDIF
+
+C- Sortie prematuree en cas d'erreur
+          IF (IERR.NE.0) GOTO 598
+C Ajout de la matrice d'AMORTISSEMENT a la matrice globale
+C ========================================================
+        NRIGE0 = IRIGEL(/2)
+c        NRIGEL = NRIGE0 + NBLPRT
+        NRIGEL = NRIGE0 + 1
+        SEGADJ,MRIGID
+
+C- Stockage de la matrice
+c          jrige = NRIGE0 + isous
+          jrige = NRIGE0 + 1
+          COERIG(jrige)   = 1.
+          IF (BDPGE) THEN
+            IRIGEL(1,jrige) = ipmadg
+          ELSE
+            IRIGEL(1,jrige)=IPMAIL
+          ENDIF
+          IRIGEL(2,jrige) = 0
+          IRIGEL(3,jrige) = ipdesc
+          IRIGEL(4,jrige) = ipmatr
+          IRIGEL(5,jrige) = NIFOUR
+          IRIGEL(6,jrige) = 0
+          IF (ICAS.EQ.2) THEN
+            IRIGEL(7,jrige) = 2
+            xmatri.symre=2
+          ELSE IF (MFR.EQ.57.OR.MFR.EQ.59) THEN
+            IRIGEL(7,jrige) = 2
+            xmatri.symre=2
+          ELSE IF (brend) THEN
+            IRIGEL(7,jrige) = 2
+            xmatri.symre=2
+          ELSE
+            IRIGEL(7,jrige) = 0
+            xmatri.symre=0
+          ENDIF
+          segdes xmatri
+          IRIGEL(8,jrige) = 0
+
+        ENDDO
+C- Fin de la boucle sur les partitions
+*
+ 519   continue
+ 598    CONTINUE
+        IF (MOMATR.NE.0) THEN
+          nomid = MOMATR
+          SEGSUP,nomid
+          notype = MOTYPM
+          SEGSUP,notype
+        ENDIF
+        IF (MOCARA.NE.0) THEN
+          nomid = MOCARA
+          SEGSUP,nomid
+          notype = MOTYPC
+          SEGSUP,notype
+        ENDIF
+        NOMID = MODEPL
+        SEGDES,NOMID
+        IF (lsupde) SEGSUP,NOMID
+        NOMID = MOFORC
+        SEGDES,NOMID
+        IF (lsupfo) SEGSUP,NOMID
+
+*
+*  Fin de la boucle (5000) de PARTITIONNEMENT du segment XMATRI
+ 5000 CONTINUE
+
+ 5991   CONTINUE
+        IF (IPMINT.NE.0) SEGDES,MINTE
+        SEGDES,IPT1
+ 5990   CONTINUE
+        SEGDES,IMODEL
+
+C EN CAS D'ERREUR
+        IF (IERR.NE.0) GOTO 999
+
+  500 CONTINUE
+C* Fin de la boucle sur les modeles elementaires
+      NRIGEL = jrige
+      segadj mrigid
+
+*termes croises  'STATIQUE'/'MODAL'
+       nstat = kstat
+       nmoda = kmoda
+       segadj modsta
+       ir2 = 0
+      if (nstat.ne.0) then
+       if (nstat.gt.0) call ricroi(modsta, ir2,3)
+       if (nstat.gt.0) then
+        do kstat=1,nstat
+          mptval = ivstat(kstat)
+          segact mptval
+          IF (ISUPM.EQ.1) THEN
+            CALL DTMVAL(mptval,3)
+          ELSE
+            CALL DTMVAL(mptval,1)
+         ENDIF
+        enddo
+       endif
+       if (nmoda.gt.0) then
+        do kmoda=1,nmoda
+          mptval = ivmoda(kmoda)
+          segact mptval
+          IF (ISUPM.EQ.1) THEN
+            CALL DTMVAL(mptval,3)
+          ELSE
+            CALL DTMVAL(mptval,1)
+         ENDIF
+        enddo
+       endif
+      endif
+
+      if (ierr.eq.0.and.ir2.gt.0) then
+        ir1 = mrigid
+        call fusrig(ir1,ir2,ir3)
+        mrigid = ir3
+      endif
+      segsup modsta
+
+ 999  CONTINUE
+      IF (IERR.NE.0) THEN
+        SEGSUP,MRIGID
+        IPRIG = 0
+      ELSE
+        SEGDES,MRIGID
+        IPRIG = MRIGID
+      ENDIF
+
+      SEGDES,MMODEL
+
+      RETURN
+      END
+
+

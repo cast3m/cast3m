@@ -1,0 +1,525 @@
+C KRES2     SOURCE    PV        18/10/17    11:50:37     9965
+      SUBROUTINE KRES2()
+      IMPLICIT REAL*8 (A-H,O-Z)
+      IMPLICIT INTEGER (I-N)
+C*************************************************************************
+C     Operateur KRES
+C
+C     OBJET   : Resoud l'equation AX=B par différentes méthodes
+C               * directe (factorisation Choleski)
+C               * itérative (Gradient conjugué, BiCGSTAB,
+C                 GMRES(m)) avec différents préconditionneurs
+C                 diagonal (Jacobi), D-ILU, ILU(0) (Choleski
+C                 incomplet), MILU(0)
+C     SYNTAXE :   CHPO3 = KRES MA1 'TYPI' TAB1
+C                                  'CLIM' CHPO1
+C                                  'SMBR' CHPO2
+C                                  'IMPR' VAL1   ;
+C     Voir la notice pour plus de précisions.
+C
+C***********************************************************************
+C APPELES          : KRES3, KRES4, KRES5
+C APPELES (E/S)    : LIROBJ, ECROBJ, ERREUR, LIRMOT, LIRENT, LIRTAB,
+C                    ACME, ACMO, ACMM, ACMF, ECMO
+C APPELES (UTIL.)  : QUETYP
+C APPELE PAR       : KOPS
+C***********************************************************************
+C***********************************************************************
+C HISTORIQUE : 26/10/98 : prise en compte du cas particulier
+C              où A est diagonale. C'est en fait assez pénible
+C              car on utilise le CHPOINT comme structure de
+C              données pour la matrice A et les vecteurs X,B,CLIM
+C HISTORIQUE : 09/02/99 : on peut utiliser le préconditionnement d'une
+C                         autre matrice que celle que l'on inverse
+C HISTORIQUE : 01/06/99 : on modifie la partie résolution itérative
+C                         en effet, lors de l'imposition des CL. de
+C                         Dirichlet, on changeait les valeurs de la
+C                         matrice Morse.
+C                         Ceci n'est pas bon lorsqu'on veut utiliser la
+C                         matrice assemblée pour plusieurs pas de temps.
+C                         On travaille maintenant sur une copie.
+C HISTORIQUE : 20/12/99 :  reprogrammation de l'assemblage
+C      Le nouvel assemblage n'est, pour l'instant effectif que
+C      lorsqu'une méthode itérative est sélectionnée (-> fabrication
+C      d'une matrice Morse). Le nouvel assemblage est plus performant
+C      (temps de calcul, utilisation de la mémoire) et plus général (cas
+C      particuliers à peu près supprimés) que le précédent.
+C HISTORIQUE : 05/01/00 : On ne supprime plus les 0.D0 de la matrice
+C      assemblée (cf. clmors appelé par melim). Ceci pour ne plus avoir
+C      perte éventuelle de symétrie de la matrice assemblée. Cela permet
+C      aussi de ne plus dupliquer la matrice assemblée.
+C HISTORIQUE : 13/01/00 : Mise en conformité du solveur direct avec le
+C      nouvel assemblage.
+C HISTORIQUE : 22/03/00 : Rajout des préconditionneurs ILUT
+C HISTORIQUE : 13/04/00 : Séparation Lecture des données
+C                                    Ecriture des résultats (kres2)
+C                         Assemblage            kres3
+C                         Méthode directe       kres4
+C                         Méthodes itératives   kres5
+C HISTORIQUE : 06/04/04 : Renumérotation (double mult.)
+C HISTORIQUE : 06/04/04 : Scaling
+C HISTORIQUE : 08/04/04 : ajout ILUTP
+C HISTORIQUE : 09/02/06 : ajout nb prod matrice vecteur (NMATVEC)
+C                         simplification du code
+C HISTORIQUE : 22/02/06 : Gros nettoyage au niveau de l'entrée des
+C                         arguments (Nouvelle syntaxe)
+C HISTORIQUE : 08/2011  : En vue de la suppression de l'objet MATRIK
+C                         on utilise l'assemblage de RESOU.
+C
+C***********************************************************************
+C Prière de PRENDRE LE TEMPS de compléter les commentaires
+C en cas de modification de ce sous-programme afin de faciliter
+C la maintenance !
+C***********************************************************************
+-INC CCOPTIO
+-INC SMLREEL
+      POINTEUR LRES.MLREEL
+-INC SMLENTI
+      POINTEUR LNMV.MLENTI
+-INC SMCHPOI
+      POINTEUR KCLIM.MCHPOI
+      POINTEUR KSMBR.MCHPOI
+      POINTEUR MCHINI.MCHPOI
+      POINTEUR MCHSOL.MCHPOI
+-INC SMTABLE
+      POINTEUR MTINV.MTABLE
+      POINTEUR KTIME.MTABLE
+      DIMENSION ITTIME(4)
+      CHARACTER*8 CHARI
+*  MATRIK est la matrice à inverser
+*  MAPREC est la matrice dont on utilise le préconditionnement
+*  MATASS est la matrice dont on utilise l'assemblage
+*         pour préconditionner celui de MATRIK
+-INC SMMATRIK
+      POINTEUR MAPREC.MATRIK
+      POINTEUR MATASS.MATRIK
+*STAT -INC SMSTAT
+C
+      CHARACTER*8 TYPE
+*     Paramètre m du GMRES(m)
+      INTEGER RESTRT
+      INTEGER ITER
+      REAL*8 BRTOL,RESID,RXMILU,RXILUP
+*
+      REAL*8 XLFIL,XDTOL
+      INTEGER KPREC
+      INTEGER NMATRI
+      INTEGER IP,KTYPI
+      INTEGER IMPINV,IIMPR
+      CHARACTER*4 MRENU,MMULAG
+      LOGICAL LRIG,LTIME,LDETR,LDEPE,LASRIG,LDMULT,LOGII
+      INTEGER IMPR,IRET
+C
+C  Lecture des arguments et mise à défaut des optionnels ()
+C
+C  MATRIK : La matrice lue en entrée au format MATRIK
+C  MTINV  : L'éventuelle table d'inversion (obsolète)
+C  IMPR   : Niveau d'impression solveur direct
+C  KCLIM  : Chpoint éventuel de conditions aux limites de Dirichlet
+C  KSMBR  : Chpoint second membre
+C  KTYPI  : Type de méthode de résolution
+C  MATASS : Matrice utilisée pour préconditionner l'assemblage
+C  MAPREC : Matrice utilisée pour préconditionner la construction du
+C           préconditionneur
+C  MRENU  : Type de renumérotation
+C  MMULAG : Placement des multiplicateurs de Lagrange
+C  ISCAL  : Scaling de la matrice
+C  IOUBL  : Oubli des matrices élémentaires ?
+C  IMPINV : Niveau d'impression solveur itératif
+C  MCHINI : Chpoint estimation de l'inconnue
+C  ITER   : Nombre maxi d'itérations à effectuer
+C  RESID  : Norme L2 maxi du résidu
+C  BRTOL  : Breakdown tolerance pour les méthodes de type Bi-CG
+C  IRSTRT : Paramètre m de redémarrage pour GMRES
+C  KPREC  : Type du préconditionneur
+C  RXMILU : Paramètre de relaxation pour MILU(0)
+C  RXILUP : Paramètre de filtre pour ILU(0)-PV
+C  XLFIL  : Paramètre de remplissage pour les préconditionneurs ILUT
+C  XDTOL  : Drop tolerance pour les préconditionneurs ILUT
+C  XSPIV  : Sensibilité du pivoting pour les préconditionneurs ILUTP
+C  LBCG   : le l dans BicgStab(l)
+C  ICALRS : façon de calculer le résidu
+C  METASS : Méthode d'assemblage
+C  LTIME  : construit une table avec des statistiques temporelles
+C           si vrai
+C  LDEPE  : élimine les dépendances si VRAI
+C           et matrice d'entrée RIGIDITE
+C  IDDOT  : 0 => utilisation du produit scalaire normal dans les
+C                méthodes itératives
+C           1 => utilisation du produit scalaire compensé
+*      IMPR=4
+
+      IVALI=0
+      XVALI=0.D0
+      LOGII=.FALSE.
+      IRETI=0
+      XVALR=0.D0
+      IOBRE=0
+      IRETR=0
+
+      IMPR=0
+*      WRITE(IOIMP,*) 'coucou kres2'
+*
+*STAT       CALL INMSTA(MSTAT,IMPR)
+*
+      CALL PRKRES(MATRIK,MTINV,IMPR,KCLIM,KSMBR,KTYPI,MATASS,MAPREC,
+     $     MRENU,MMULAG,ISCAL,IOUBL,IMPINV,MCHINI,ITER,RESID,BRTOL,
+     $     IRSTRT,KPREC,RXMILU,RXILUP,XLFIL,XDTOL,XSPIV,LBCG,ICALRS,
+     $     METASS,LTIME,LDEPE,MRIGID,IDDOT,IMVEC,IRET)
+      IF (IRET.NE.0) GOTO 9999
+      IMPR=MAX(IMPR,IMPINV)
+*
+* Préparation de la matrice et du second membre
+* suivant les cas
+*
+* LASRIG=.TRUE. on utilise l'assemblage de RESOU
+* LDMULT=.TRUE. on dédouble les multiplicateurs de Lagrange
+*
+
+      LASRIG=(METASS.EQ.6)
+      LDMULT=LASRIG
+      MRIGI0=MRIGID
+      IF (MRIGID.NE.0) THEN
+         IF (LDEPE) THEN
+            KSMBR0=KSMBR
+*            CALL KRES6(MRIGID,KSMBR,IDEPE,
+*     $           MRIGIC,KSMBRC,KSMBR0,KSMBR1)
+            CALL KRES6(MRIGID,KSMBR,LDMULT,
+     $           MRIGIC,KSMBRC,KSMBR1)
+            IF (IERR.NE.0) RETURN
+            MRIGID=MRIGIC
+            KSMBR=KSMBRC
+         ENDIF
+         IF (LASRIG) THEN
+* Gestion de la normalisation
+            NORICO=NORINC
+            NORIDO=NORIND
+            IF (ISCAL.EQ.0) THEN
+               NORINC=0
+               NORIND=0
+            ELSE
+               NORINC=-1
+               NORIND=0
+            ENDIF
+* Gestion de la renumérotation
+            NUCROO=NUCROU
+            IF (MRENU.EQ.'RIEN') THEN
+               NUCROU=-1
+            ELSEIF (MRENU.EQ.'SLOA') THEN
+               NUCROU=1
+            ELSEIF (MRENU.EQ.'GIPR'.OR.MRENU.EQ.'GIBA') THEN
+               NUCROU=2
+            ELSE
+               WRITE(IOIMP,*) 'MRENU=',MRENU
+               CALL ERREUR(5)
+               RETURN
+            ENDIF
+            CALL KRES8(MRIGID,KSMBR,
+     $           KTYPI,ITER,RESID,ICALRS,IRSTRT,LBCG,BRTOL,IDDOT,IMVEC,
+     $           KPREC,RXMILU,RXILUP,XLFIL,XDTOL,XSPIV,
+     $           KTIME,LTIME,
+     $           MCHSOL,LRES,LNMV,ICVG,IMPR)
+            IF (IERR.NE.0) RETURN
+* Gestion de la normalisation
+            NORINC=NORICO
+            NORIND=NORIDO
+            NUCROU=NUCROO
+            IF (LTIME) CALL ECROBJ('TABLE   ',KTIME)
+            IF (MTINV.NE.0) THEN
+               CALL ECMO(MTINV,'CVGOK','ENTIER',ICVG)
+               IF (LRES.NE.0) CALL ECMO(MTINV,'CONVINV','LISTREEL',LRES)
+               IF (LNMV.NE.0) CALL ECMO(MTINV,'NMATVEC','LISTENTI',LNMV)
+            ENDIF
+* On décondense si nécessaire
+*
+*            write (6,*) ' resou - mchsol '
+*            call ecchpo(mchsol,0)
+*            call mucpri(mchsol,mrigid,iresi)
+*            write (6,*) ' kres - iresi '
+*            call ecchpo(iresi,0)
+*      WRITE(IOIMP,*) 'Avant KRES7'
+            IF (MRIGI0.NE.0.AND.LDEPE) THEN
+               MSOLC=MCHSOL
+               CALL KRES7(MSOLC,MRIGI0,KSMBR0,KSMBR1,1,
+     $              MCHSOL)
+               IF (IERR.NE.0) RETURN
+            ENDIF
+            CALL ECROBJ('CHPOINT ',MCHSOL)
+            RETURN
+         ELSE
+            CALL ECROBJ('RIGIDITE',MRIGID)
+            CALL RIMA
+            IF (IERR.NE.0) GOTO 9999
+            CALL MACHI2(1)
+            IF (IERR.NE.0) GOTO 9999
+            CALL LIROBJ('MATRIK',MATRIK,1,IRET)
+            IF(IRET.EQ.0) GOTO 9999
+
+* Changement des noms d'inconnues du second membre
+            IF (KSMBR.NE.0) THEN
+               CALL ECROBJ('CHPOINT ',KSMBR)
+               CALL MACHI2(1)
+               CALL LIROBJ('CHPOINT ',KSMBR,1,IRET)
+               IF (IRET.EQ.0) GOTO 9999
+            ENDIF
+         ENDIF
+*         write (6,*) ' le vecteur  2'
+*         call ecchpo(ksmbr,0)
+*         write (6,*) ' la matrice  2'
+*         call ecrent(5)
+*         call ecmatk(matrik)
+      ENDIF
+*
+      SEGACT MATRIK
+      NMATRI=IRIGEL(/2)
+      IF(NMATRI.EQ.0)THEN
+C% Résolution impossible : la matrice de RIGIDITE est vide
+         CALL ERREUR(727)
+         RETURN
+      ENDIF
+      SEGDES MATRIK
+      IF (MATASS.EQ.0) MATASS=MATRIK
+      IF (MAPREC.EQ.0) MAPREC=MATRIK
+*      WRITE(IOIMP,*) 'Sortie de prkres'
+*      WRITE(IOIMP,*) 'IOUBL=',IOUBL
+C
+      IF (LTIME) THEN
+         CALL CRTABL(KTIME)
+         CALL TIMESPV(ITTIME)
+         ITI1=(ITTIME(1)+ITTIME(2))/10
+      ELSE
+         KTIME=0
+      ENDIF
+*STAT       CALL PRMSTA('Lectures',MSTAT,IMPR)
+*
+C
+C Assemblage proprement dit
+C
+      IIMPR=0
+      CALL KRES3(MATRIK,MATASS,MRENU,MMULAG,METASS,
+     $     KTIME,LTIME,
+     $     IIMPR,IRET)
+      IF (IRET.NE.0) GOTO 9999
+*!      WRITE(IOIMP,*) 'Aprés assemblage'
+*!      CALL ECRENT(5)
+*!      CALL ECROBJ('MATRIK  ',MATRIK)
+*!      CALL PRLIST
+      IF (LTIME) THEN
+         CALL TIMESPV(ITTIME)
+         ITI2=(ITTIME(1)+ITTIME(2))/10
+      ENDIF
+*STAT       CALL PRMSTA('Assemblage',MSTAT,IMPR)
+*
+* "Oubli" des valeurs des matrice élémentaires
+* On met les tableaux de LIZAFM à 0 => à MENAGE de les supprimmer
+* si besoin est.
+*
+      IOUBD=MOD(IOUBL,10)
+*!      WRITE(IOIMP,*) 'IOUBD=',IOUBD
+      IF (IOUBD.EQ.1) THEN
+         CALL OUBIMA(MATRIK,IMPR,IRET)
+         IF (IRET.NE.0) GOTO 9999
+         IF (IMPR.GT.2) THEN
+            WRITE(IOIMP,*) 'Oubli des mat. elem.'
+         ENDIF
+      ELSEIF (IOUBD.EQ.2) THEN
+         ith=0
+         ith=oothrd
+         call ooohor(0,ith)
+         SEGACT MATRIK*MOD
+         LDETR=.FALSE.
+         NMATE=IRIGEL(/2)
+         DO IMATE=1,NMATE
+            IMATRI=IRIGEL(4,IMATE)
+            SEGACT IMATRI*MOD
+            NSOUM =LIZAFM(/1)
+            NTOTIN=LIZAFM(/2)
+            DO ITOTIN=1,NTOTIN
+               DO ISOUM=1,NSOUM
+                  IZAFM=LIZAFM(ISOUM,ITOTIN)
+                  IF (IZAFM.NE.0) THEN
+                     LDETR=.TRUE.
+                     SEGSUP IZAFM
+                     LIZAFM(ISOUM,ITOTIN)=0
+                  ENDIF
+               ENDDO
+            ENDDO
+            SEGDES IMATRI
+         ENDDO
+         IF (IMPR.GT.2.AND.LDETR) THEN
+            WRITE(IOIMP,*) 'Destruction des mat. elem.'
+         ENDIF
+      ELSEIF (IOUBD.NE.0) THEN
+         WRITE(IOIMP,*) 'IOUBL=',IOUBL, ' non prevu'
+         GOTO 9999
+      ENDIF
+*STAT       CALL PRMSTA('Oubli',MSTAT,IMPR)
+*!      WRITE(IOIMP,*) 'Aprés oubli'
+C
+C Méthode directe
+C
+      IF (KTYPI.EQ.1) THEN
+         CALL KRES4(MATRIK,KCLIM,KSMBR,
+     $        ISCAL,
+     $        MCHSOL,
+     $        IMPR,IRET)
+         IF (IRET.NE.0) GOTO 9999
+*STAT       CALL PRMSTA('Methode directe',MSTAT,IMPR)
+C
+C Méthodes itératives
+C
+      ELSE
+C
+         CALL KRES5(MATRIK,KCLIM,KSMBR,KTYPI,
+     $        MCHINI,ITER,RESID,
+     $        BRTOL,IRSTRT,LBCG,ICALRS,
+     $        MAPREC,KPREC,
+     $        RXMILU,RXILUP,XLFIL,XDTOL,XSPIV,
+     $        ISCAL,
+     $        KTIME,LTIME,IDDOT,IMVEC,
+     $        MCHSOL,LRES,LNMV,ICVG,
+     $        IMPR,IRET)
+         IF (IRET.NE.0) GOTO 9999
+*STAT       CALL PRMSTA('Methode iterative',MSTAT,IMPR)
+         IF (MTINV.NE.0) THEN
+            CALL ECMO(MTINV,'CVGOK','ENTIER',ICVG)
+            CALL ECMO(MTINV,'CONVINV','LISTREEL',LRES)
+            CALL ECMO(MTINV,'NMATVEC','LISTENTI',LNMV)
+         ENDIF
+      ENDIF
+      IF (LTIME) THEN
+         CALL TIMESPV(ITTIME)
+         ITI3=(ITTIME(1)+ITTIME(2))/10
+         CHARI='ASS+RENU'
+         CALL ECCTAB(KTIME,'MOT     ',IVALI,XVALI,CHARI,LOGII,IRETI,
+     $                     'ENTIER  ',ITI2-ITI1,XVALR,CHARR,LOGIR,IRETR)
+         CHARI='PRE+RESO'
+         CALL ECCTAB(KTIME,'MOT     ',IVALI,XVALI,CHARI,LOGII,IRETI,
+     $                     'ENTIER  ',ITI3-ITI2,XVALR,CHARR,LOGIR,IRETR)
+         CHARI='TOTAL   '
+         CALL ECCTAB(KTIME,'MOT     ',IVALI,XVALI,CHARI,LOGII,IRETI,
+     $                     'ENTIER  ',ITI3-ITI1,XVALR,CHARR,LOGIR,IRETR)
+         SEGDES KTIME
+         CALL ECROBJ('TABLE   ',KTIME)
+      ENDIF
+      IOUBE=IOUBL/10
+*!      WRITE(IOIMP,*) 'IOUBE=',IOUBE
+      IF (IOUBE.GE.1) THEN
+         ith=0
+         ith=oothrd
+         call ooohor(0,ith)
+         SEGACT MATRIK*MOD
+         IF (IOUBE.EQ.2) THEN
+            PMORS=KIDMAT(4)
+            IF (PMORS.NE.0) THEN
+               IF (IMPR.GT.2) THEN
+                  WRITE(IOIMP,*) 'Destruction du profil morse'
+               ENDIF
+               SEGSUP PMORS
+               KIDMAT(4)=0
+            ENDIF
+         ENDIF
+         IZA=KIDMAT(5)
+         IF (IZA.NE.0) THEN
+            IF (IMPR.GT.2) THEN
+               WRITE(IOIMP,*) 'Destruction des valeurs morses'
+            ENDIF
+            SEGSUP IZA
+            KIDMAT(5)=0
+         ENDIF
+         PMORS=KIDMAT(6)
+         IF (PMORS.NE.0) THEN
+            IF (IMPR.GT.2) THEN
+               WRITE(IOIMP,*) 'Destruction du profil du precon'
+            ENDIF
+            SEGSUP PMORS
+            KIDMAT(6)=0
+         ENDIF
+         IZA=KIDMAT(7)
+         IF (IZA.NE.0) THEN
+            IF (IMPR.GT.2) THEN
+               WRITE(IOIMP,*) 'Destruction des valeurs du precon'
+            ENDIF
+            SEGSUP IZA
+            KIDMAT(7)=0
+         ENDIF
+         SEGDES MATRIK
+      ELSEIF (IOUBE.NE.0) THEN
+         WRITE(IOIMP,*) 'IOUBL=',IOUBL, ' non prevu'
+         GOTO 9999
+      ENDIF
+*
+* On décondense si nécessaire
+*
+*            write (6,*) ' resou - mchsol '
+*            call ecchpo(mchsol,0)
+*            call mucpri(mchsol,mrigid,iresi)
+*            write (6,*) ' kres - iresi '
+*            call ecchpo(iresi,0)
+*      WRITE(IOIMP,*) 'Avant KRES7'
+      IF (MRIGI0.NE.0.AND.LDEPE) THEN
+         MSOLC=MCHSOL
+*         CALL KRES7(MRIGID,IDEPE,KSMBR0,KSMBR1,
+*     $        MSOLC,
+*     $        MCHSOL)
+         CALL KRES7(MSOLC,MRIGI0,KSMBR0,KSMBR1,1,
+     $        MCHSOL)
+         IF (IERR.NE.0) RETURN
+      ENDIF
+      CALL ECROBJ('CHPOINT ',MCHSOL)
+*STAT       CALL SUMSTA(MSTAT,IMPR)
+*
+* Normal termination
+*
+      RETURN
+*
+* Format handling
+*
+*
+* Error handling
+*
+ 9999 CONTINUE
+      WRITE(IOIMP,*) 'An error was detected in kres2.eso'
+*  153 2
+* Opération illicite dans ce contexte
+      CALL ERREUR(153)
+      RETURN
+*
+* End of KRES2
+*
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

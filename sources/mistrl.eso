@@ -1,0 +1,1038 @@
+C MISTRL    SOURCE    PV        11/03/07    21:17:30     6885
+
+C-----------------------------------------------------------------------
+C Sous-programme d'interface entre CAST3M et module MISTRAL version 2.0
+C-----------------------------------------------------------------------
+      SUBROUTINE MISTRL (TEMP0,T0,FI0, SIG0, VAR0,
+     &                   IFOURB, NSTRS,
+     &                   DT, TF,FIF, DEPST, XMAT,TXR,IDIM,
+     &                   PDILT, NDPI,NDVP,NXX,NPSI,
+     &                   PCOHI,PECOU,PEDIR,PRVCE,PECRX,PDVDI, PCROI,
+     &                   NPINCR,PINCR,
+     &                   SIGF,VARF,EPINF)
+C-----------------------------------------------------------------------
+C     Entrees :
+C     ---------
+C     TEMP0    : instant de debut du pas de temps
+C     T0       : temperature au debut du pas de temps
+C     FI0      : flux de neutrons rapides au debut du pas de temps
+C     SIG0()   : contraintes au debut du pas de temps *
+C     VAR0()   : variables internes materiau au debut du pas de temps **
+C     IFOURB   : type de calcul CAST3M :
+C                =  2 : tridimensionnel (3D)
+C                =  0 : axisymetrie (2D)
+C                = -1 : deformations planes (2D)
+C                = -2 : contraintes planes (2D)
+C                = -3 : deformations planes generalisees (2D)
+C                =  3 a 11 : unidimensionnel plan (massif 1D)
+C                = 12 a 14 : unidimensionnel axisymetrique (massif 1D)
+C     NSTRS    : nombre de composantes de contraintes et de deformations
+C                pour CAST3M
+C     DT       : pas de temps
+C     TF       : temperature a la fin du pas de temps
+C     FIF      : flux de neutrons rapides a la fin du pas de temps
+C     DEPST()  : increment impose de deformation totale *
+C     XMAT()   : caracteristiques materiau selon CAST3M
+C     TXR(l,c) : composante l du vecteur c de la base locale de CAST3M (element
+C                fini) dans la base generale de CAST3M (ensemble du modele)
+C     IDIM     : dimension de l'espace dans CAST3M : 1 a 3 (pour DIMENSION TXR)
+C     PDILT    : tableau des parametres relatifs a la dilatation thermique
+C     NDPI     : nombre de deformations plastiques instantanees (0 ou 1)
+C     NDVP     : nombre de deformations viscoplastiques (0 a 3)
+C     NXX      : nombre de contraintes internes (0 a 3)
+C     NPSI     : existence (1) ou non (0) de variable de durcissement
+C                d'irradiation differente de la fluence neutronique
+C     tableaux des parametres du modele :
+C     PCOHI    : relatif aux coefficients de Hill
+C     PECOU    : relatif a l'ecoulement viscoplastique
+C     PEDIR    : relatif a la contrainte seuil
+C     PRVCE    : relatif aux lois d'evolution des deformations equivalentes
+C     PECRX    : relatif aux lois d'evolution des contraintes internes
+C     PDVDI    : relatif au durcissement d'irradiation
+C     PCROI    : relatif a la croissance d'irradiation
+C     NPINCR   : nombre de parametres de PINCR
+C     PINCR    : tableau des increments maximaux autorises
+C
+C     Sorties :
+C     ---------
+C     SIGF()   : contraintes a la fin du pas de temps *
+C     VARF()   : variables internes materiau a la fin du pas de temps **
+C     EPINF()  : deformation inelastique globale (somme des deformations
+C                plastiques de toutes natures) a la fin du pas de temps *
+C
+C     *  : dans la base generale de CAST3M
+C          (donc composantes 4, 5 et 6 des deformations = glissements)
+C     ** : dans la base generale de CAST3M ou dans base d'orthotropie MISTRAL
+C          pour les composantes de deformations et contraintes internes
+C          selon valeur de ICBASE extrait de XMAT
+C-----------------------------------------------------------------------
+
+      IMPLICIT INTEGER (I-N)
+      IMPLICIT REAL*8 (A-H, O-Z)
+
+C     Nombre total de variables internes :
+C        NIJ*(4+NDVPMA)+2*(1+NDVPMA)+NIJ*NXXMAX+8+2*NIJ+1+NDVPMA = 101
+      PARAMETER ( NIJ = 6 , NDVPMA = 4 , NXXMAX = 3 )
+      PARAMETER ( FEPSIJ = 2. )
+      PARAMETER ( NPCELM = 19 )
+
+      DIMENSION SIG0(1:*),VAR0(1:*),DEPST(1:*),XMAT(1:*),
+     &          TXR(1:IDIM,1:*)
+      DIMENSION PDILT(1:*),PCOHI(1:*),PECOU(1:*),
+     &          PEDIR(1:*),PRVCE(1:*),PECRX(1:*),PDVDI(1:*),
+     &          PCROI(1:*),PINCR(1:*)
+      DIMENSION PCOEL(1:NPCELM)
+      DIMENSION PBLOC(1:3,1:3),VEC(1:3,1:3),
+     &          IP(1:3),SENS(1:3),PVEC(1:3,1:3),
+     &          PBPO(1:3,1:3),PINV(1:3,1:3),IC(6),JC(6),
+     &          VECT(1:3,1:3),VECTP(1:3,1:3),
+     &          PROMAT(1:3,1:3)
+      DIMENSION SIG(1:6),EPS(1:6),EPSTH(1:6),EPSEL(1:6),EPSCR(1:6),
+     &          EPSP(1:6,0:NDVPMA),EPSE(0:NDVPMA),EPSEQ(0:NDVPMA),
+     &          XX(1:6,1:NXXMAX)
+      DIMENSION CSIG(1:6,1:6),CEPS(1:6,1:6),CSIEP0(1:6)
+      DIMENSION SEQ(0:NDVPMA),RR(0:NDVPMA)
+      DIMENSION SIGP(1:6),VEPS(1:6),VEPSTH(1:6),VEPSEL(1:6),VEPSCR(1:6),
+     &          VEPSP(1:6,0:NDVPMA),VEPSE(0:NDVPMA),
+     &          EPSEQP(0:NDVPMA),XXP(1:6,1:NXXMAX)
+      DIMENSION DELSIG(1:6),
+     &          DELEPS(1:6),DELETH(1:6),DELEEL(1:6),DELECR(1:6),
+     &          DELEP(1:6,0:NDVPMA),DELEE(0:NDVPMA),DELEEQ(0:NDVPMA),
+     &          DELXX(1:6,1:NXXMAX)
+      DIMENSION VEPSIN(1:6)
+      REAL*8 NU120,NU230,NU310,MU120,MU130,MU230
+      CHARACTER FICH*1
+      DIMENSION SIGF(1:*),VARF(1:*),EPINF(1:*)
+C     ------------------------------------------------------------------
+      DATA IC / 1 , 2 , 3 , 1 , 1 , 2 /
+      DATA JC / 1 , 2 , 3 , 2 , 3 , 3 /
+      DATA FICH / ' ' /
+C     ------------------------------------------------------------------
+C     Variables diverses
+C
+      T = TEMP0
+      TT = T0
+      FI = FI0
+      IF (DT.EQ.0.D0) THEN
+        DTI = 1.D-20
+      ELSE
+        DTI = DT
+      END IF
+      TTP = (TF-T0)/DTI
+      FIP = (FIF-FI0)/DTI
+C     ------------------------------------------------------------------
+C     Determination de la matrice PBPO de passage de la base generale
+C     CAST3M a la base principale d'orthotropie pour MISTRAL
+C     et de son inverse PINV
+C
+      IF (IFOURB.EQ.2) THEN
+        PBLOC(1,1) = TXR(1,1)
+        PBLOC(1,2) = TXR(2,1)
+        PBLOC(1,3) = TXR(3,1)
+        PBLOC(2,1) = TXR(1,2)
+        PBLOC(2,2) = TXR(2,2)
+        PBLOC(2,3) = TXR(3,2)
+        PBLOC(3,1) = TXR(1,3)
+        PBLOC(3,2) = TXR(2,3)
+        PBLOC(3,3) = TXR(3,3)
+        VEC(1,1) = XMAT(10)
+        VEC(1,2) = XMAT(11)
+        VEC(1,3) = XMAT(12)
+        VEC(2,1) = XMAT(13)
+        VEC(2,2) = XMAT(14)
+        VEC(2,3) = XMAT(15)
+        VEC(3,1) = VEC(1,2)*VEC(2,3)-VEC(1,3)*VEC(2,2)
+        VEC(3,2) = VEC(1,3)*VEC(2,1)-VEC(1,1)*VEC(2,3)
+        VEC(3,3) = VEC(1,1)*VEC(2,2)-VEC(1,2)*VEC(2,1)
+        SENIP1 = XMAT(16)
+        SENIP2 = XMAT(17)
+      ELSE IF ((IFOURB.GE.-3).AND.(IFOURB.LE.0)) THEN
+        PBLOC(1,1) = TXR(1,1)
+        PBLOC(1,2) = TXR(2,1)
+        PBLOC(1,3) = 0.
+        PBLOC(2,1) = TXR(1,2)
+        PBLOC(2,2) = TXR(2,2)
+        PBLOC(2,3) = 0.
+        PBLOC(3,1) = 0.
+        PBLOC(3,2) = 0.
+        PBLOC(3,3) = 1.
+        IF (IFOURB.EQ.-2) THEN
+          VEC(1,1) = XMAT(5)
+          VEC(1,2) = XMAT(6)
+        ELSE
+          VEC(1,1) = XMAT(8)
+          VEC(1,2) = XMAT(9)
+        END IF
+        VEC(1,3) = 0.
+        VEC(3,1) = 0.
+        VEC(3,2) = 0.
+        VEC(3,3) = 1.
+C*      VEC(2,1) = VEC(3,2)*VEC(1,3)-VEC(3,3)*VEC(1,2)
+C*      VEC(2,2) = VEC(3,3)*VEC(1,1)-VEC(3,1)*VEC(1,3)
+C*      VEC(2,3) = VEC(3,1)*VEC(1,2)-VEC(3,2)*VEC(1,1)
+        VEC(2,1) = -VEC(1,2)
+        VEC(2,2) = VEC(1,1)
+        VEC(2,3) = 0.
+        SENIP1 = XMAT(10)
+        SENIP2 = XMAT(11)
+      ELSE IF ((IFOURB.GE.3).AND.(IFOURB.LE.14)) THEN
+        PBLOC(1,1) = 1.
+        PBLOC(1,2) = 0.
+        PBLOC(1,3) = 0.
+        PBLOC(2,1) = 0.
+        PBLOC(2,2) = 1.
+        PBLOC(2,3) = 0.
+        PBLOC(3,1) = 0.
+        PBLOC(3,2) = 0.
+        PBLOC(3,3) = 1.
+        VEC(1,1) = 1.
+        VEC(1,2) = 0.
+        VEC(1,3) = 0.
+        VEC(2,1) = 0.
+        VEC(2,2) = 1.
+        VEC(2,3) = 0.
+        VEC(3,1) = 0.
+        VEC(3,2) = 0.
+        VEC(3,3) = 1.
+        SENIP1 = XMAT(7)
+        SENIP2 = XMAT(8)
+      END IF
+      IP(1) = ABS(nint(SENIP1))
+      IP(2) = ABS(nint(SENIP2))
+      SENS(1) = SENIP1/ABS(SENIP1)
+      SENS(2) = SENIP2/ABS(SENIP2)
+      DO I = 1,2
+        DO J = 1,3
+          IF (J.EQ.IP(I)) THEN
+            PVEC(I,J) = SENS(I)
+          ELSE
+            PVEC(I,J) = 0.
+          END IF
+        END DO
+      END DO
+      PVEC(3,1) = PVEC(1,2)*PVEC(2,3)-PVEC(1,3)*PVEC(2,2)
+      PVEC(3,2) = PVEC(1,3)*PVEC(2,1)-PVEC(1,1)*PVEC(2,3)
+      PVEC(3,3) = PVEC(1,1)*PVEC(2,2)-PVEC(1,2)*PVEC(2,1)
+      CALL PRODMA(PBLOC,VEC,3,3,3, PROMAT)
+      CALL PRODMA(PROMAT,PVEC,3,3,3, PBPO)
+      DO I = 1,3
+        DO J = 1,3
+          PINV(I,J) = PBPO(J,I)
+        END DO
+      END DO
+C     ------------------------------------------------------------------
+C     Changement de base pour contraintes debut de pas de temps
+C
+      IF (IFOURB.EQ.2) THEN
+        VECT(1,1) = SIG0(1)
+        VECT(2,1) = SIG0(4)
+        VECT(3,1) = SIG0(5)
+        VECT(1,2) = SIG0(4)
+        VECT(2,2) = SIG0(2)
+        VECT(3,2) = SIG0(6)
+        VECT(1,3) = SIG0(5)
+        VECT(2,3) = SIG0(6)
+        VECT(3,3) = SIG0(3)
+      ELSE IF ((IFOURB.GE.-3).AND.(IFOURB.LE.0)) THEN
+        VECT(1,1) = SIG0(1)
+        VECT(2,1) = SIG0(4)
+        VECT(3,1) = 0.
+        VECT(1,2) = SIG0(4)
+        VECT(2,2) = SIG0(2)
+        VECT(3,2) = 0.
+        VECT(1,3) = 0.
+        VECT(2,3) = 0.
+        IF (IFOURB.EQ.-2) THEN
+          VECT(3,3) = 0.
+        ELSE
+          VECT(3,3) = SIG0(3)
+        END IF
+      ELSE IF ((IFOURB.GE.3).AND.(IFOURB.LE.14)) THEN
+        VECT(1,1) = SIG0(1)
+        VECT(2,1) = 0.
+        VECT(3,1) = 0.
+        IF ((IFOURB.EQ.5).OR.(IFOURB.EQ.6).OR.(IFOURB.EQ.10).OR.
+     &      (IFOURB.EQ.13)) THEN
+          VECT(2,2) = 0.
+        ELSE
+          VECT(2,2) = SIG0(2)
+        END IF
+        VECT(3,2) = 0.
+        VECT(1,3) = 0.
+        VECT(2,3) = 0.
+        IF ((IFOURB.EQ.4).OR.(IFOURB.EQ.6).OR.(IFOURB.EQ.8)) THEN
+          VECT(3,3) = 0.
+        ELSE
+          VECT(3,3) = SIG0(3)
+        END IF
+      END IF
+      CALL PRODMA(VECT,PBPO,3,3,3, PROMAT)
+      CALL PRODMA(PINV,PROMAT,3,3,3, VECTP)
+      SIG(1) = VECTP(1,1)
+      SIG(2) = VECTP(2,2)
+      SIG(3) = VECTP(3,3)
+      SIG(4) = VECTP(1,2)
+      SIG(5) = VECTP(1,3)
+      SIG(6) = VECTP(2,3)
+C     ------------------------------------------------------------------
+C     Coefficients des equations entre derivees des contraintes
+C     et vitesses de deformations
+C
+      IF (IFOURB.EQ.2) THEN
+        CSIEP0(1) = DEPST(1)/DTI
+        CSIEP0(2) = DEPST(2)/DTI
+        CSIEP0(3) = DEPST(3)/DTI
+        CSIEP0(4) = DEPST(4)/FEPSIJ/DTI
+        CSIEP0(5) = DEPST(5)/FEPSIJ/DTI
+        CSIEP0(6) = DEPST(6)/FEPSIJ/DTI
+        DO IJ = 1,6
+          DO IPJP = 1,3
+            CSIG(IPJP,IJ) = 0.
+            CEPS(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+          END DO
+          DO IPJP = 4,6
+            CSIG(IPJP,IJ) = 0.
+            CEPS(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+     &                    + PINV(IC(IJ),JC(IPJP))*PINV(JC(IJ),IC(IPJP))
+          END DO
+        END DO
+      ELSE IF ((IFOURB.GE.-3).AND.(IFOURB.LE.0)) THEN
+        IF (IFOURB.EQ.-2) THEN
+          CSIEP0(3) = 0.
+          IJ = 3
+          DO IPJP = 1,3
+            CSIG(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+            CEPS(IPJP,IJ) = 0.
+          END DO
+          DO IPJP = 4,6
+            CSIG(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+     &                    + PINV(IC(IJ),JC(IPJP))*PINV(JC(IJ),IC(IPJP))
+            CEPS(IPJP,IJ) = 0.
+          END DO
+        ELSE
+          CSIEP0(3) = DEPST(3)/DTI
+          IJ = 3
+          DO IPJP = 1,3
+            CSIG(IPJP,IJ) = 0.
+            CEPS(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+          END DO
+          DO IPJP = 4,6
+            CSIG(IPJP,IJ) = 0.
+            CEPS(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+     &                    + PINV(IC(IJ),JC(IPJP))*PINV(JC(IJ),IC(IPJP))
+          END DO
+        END IF
+        CSIEP0(1) = DEPST(1)/DTI
+        CSIEP0(2) = DEPST(2)/DTI
+        CSIEP0(4) = DEPST(4)/FEPSIJ/DTI
+        CSIEP0(5) = 0.
+        CSIEP0(6) = 0.
+        DO IJ = 1,2
+          DO IPJP = 1,3
+            CSIG(IPJP,IJ) = 0.
+            CEPS(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+          END DO
+          DO IPJP = 4,6
+            CSIG(IPJP,IJ) = 0.
+            CEPS(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+     &                    + PINV(IC(IJ),JC(IPJP))*PINV(JC(IJ),IC(IPJP))
+          END DO
+        END DO
+        IJ = 4
+        DO IPJP = 1,3
+          CSIG(IPJP,IJ) = 0.
+          CEPS(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+        END DO
+        DO IPJP = 4,6
+          CSIG(IPJP,IJ) = 0.
+          CEPS(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+     &                  + PINV(IC(IJ),JC(IPJP))*PINV(JC(IJ),IC(IPJP))
+        END DO
+        DO IJ = 5,6
+          DO IPJP = 1,3
+            CSIG(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+            CEPS(IPJP,IJ) = 0.
+          END DO
+          DO IPJP = 4,6
+            CSIG(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+     &                    + PINV(IC(IJ),JC(IPJP))*PINV(JC(IJ),IC(IPJP))
+            CEPS(IPJP,IJ) = 0.
+          END DO
+        END DO
+      ELSE IF ((IFOURB.GE.3).AND.(IFOURB.LE.14)) THEN
+        IF ((IFOURB.EQ.5).OR.(IFOURB.EQ.10).OR.(IFOURB.EQ.13)) THEN
+          CSIEP0(2) = 0.
+          CSIEP0(3) = DEPST(3)/DTI
+          IJ = 2
+          DO IPJP = 1,3
+            CSIG(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+            CEPS(IPJP,IJ) = 0.
+          END DO
+          DO IPJP = 4,6
+            CSIG(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+     &                    + PINV(IC(IJ),JC(IPJP))*PINV(JC(IJ),IC(IPJP))
+            CEPS(IPJP,IJ) = 0.
+          END DO
+          IJ = 3
+          DO IPJP = 1,3
+            CSIG(IPJP,IJ) = 0.
+            CEPS(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+          END DO
+          DO IPJP = 4,6
+            CSIG(IPJP,IJ) = 0.
+            CEPS(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+     &                    + PINV(IC(IJ),JC(IPJP))*PINV(JC(IJ),IC(IPJP))
+          END DO
+        ELSE IF ((IFOURB.EQ.4).OR.(IFOURB.EQ.8)) THEN
+          CSIEP0(2) = DEPST(2)/DTI
+          CSIEP0(3) = 0.
+          IJ = 2
+          DO IPJP = 1,3
+            CSIG(IPJP,IJ) = 0.
+            CEPS(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+          END DO
+          DO IPJP = 4,6
+            CSIG(IPJP,IJ) = 0.
+            CEPS(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+     &                    + PINV(IC(IJ),JC(IPJP))*PINV(JC(IJ),IC(IPJP))
+          END DO
+          IJ = 3
+          DO IPJP = 1,3
+            CSIG(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+            CEPS(IPJP,IJ) = 0.
+          END DO
+          DO IPJP = 4,6
+            CSIG(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+     &                    + PINV(IC(IJ),JC(IPJP))*PINV(JC(IJ),IC(IPJP))
+            CEPS(IPJP,IJ) = 0.
+          END DO
+        ELSE IF (IFOURB.EQ.6) THEN
+          CSIEP0(2) = 0.
+          CSIEP0(3) = 0.
+          DO IJ = 2,3
+            DO IPJP = 1,3
+              CSIG(IPJP,IJ)=PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+              CEPS(IPJP,IJ)=0.
+            END DO
+            DO IPJP = 4,6
+              CSIG(IPJP,IJ)= PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+     &                     + PINV(IC(IJ),JC(IPJP))*PINV(JC(IJ),IC(IPJP))
+              CEPS(IPJP,IJ) = 0.
+            END DO
+          END DO
+        ELSE
+          CSIEP0(2) = DEPST(2)/DTI
+          CSIEP0(3) = DEPST(3)/DTI
+          DO IJ = 2,3
+            DO IPJP = 1,3
+              CSIG(IPJP,IJ)= 0.
+              CEPS(IPJP,IJ)= PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+            END DO
+            DO IPJP = 4,6
+              CSIG(IPJP,IJ)= 0.
+              CEPS(IPJP,IJ)= PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+     &                     + PINV(IC(IJ),JC(IPJP))*PINV(JC(IJ),IC(IPJP))
+            END DO
+          END DO
+        END IF
+        CSIEP0(1) = DEPST(1)/DTI
+        CSIEP0(4) = 0.
+        CSIEP0(5) = 0.
+        CSIEP0(6) = 0.
+        IJ = 1
+        DO IPJP = 1,3
+          CSIG(IPJP,IJ) = 0.
+          CEPS(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+        END DO
+        DO IPJP = 4,6
+          CSIG(IPJP,IJ) = 0.
+          CEPS(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+     &                  + PINV(IC(IJ),JC(IPJP))*PINV(JC(IJ),IC(IPJP))
+        END DO
+        DO IJ = 4,6
+          DO IPJP = 1,3
+            CSIG(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+            CEPS(IPJP,IJ) = 0.
+          END DO
+          DO IPJP = 4,6
+            CSIG(IPJP,IJ) = PINV(IC(IJ),IC(IPJP))*PINV(JC(IJ),JC(IPJP))
+     &                    + PINV(IC(IJ),JC(IPJP))*PINV(JC(IJ),IC(IPJP))
+            CEPS(IPJP,IJ) = 0.
+          END DO
+        END DO
+      END IF
+C     ------------------------------------------------------------------
+C     Recuperation des variables internes au debut du pas de temps
+C
+      IVAR = NIJ*(3+NDVPMA)
+      DO IJ = 1,NIJ
+        EPSTH(IJ) = VAR0(IJ)
+        EPSEL(IJ) = VAR0(NIJ+IJ)
+        EPSCR(IJ) = VAR0(IVAR+IJ)
+      END DO
+      IVAR = NIJ*(4+NDVPMA)+1
+      JVAR = IVAR+NDVPMA+1
+      DO IDP = 1-NDPI,NDVP
+        KVAR = NIJ*(2+IDP)
+        DO IJ = 1,NIJ
+          EPSP(IJ,IDP) = VAR0(KVAR+IJ)
+        END DO
+        EPSE(IDP) = VAR0(IVAR+IDP)
+        EPSEQ(IDP) = VAR0(JVAR+IDP)
+      END DO
+      IVAR = NIJ*(3+NDVPMA)+2*(1+NDVPMA)
+      DO IXX = 1,NXX
+        JVAR = IVAR+NIJ*IXX
+        DO IJ = 1,NIJ
+          XX(IJ,IXX) = VAR0(JVAR+IJ)
+        END DO
+      END DO
+      IFVAR = NIJ*(4+NDVPMA)+2*(1+NDVPMA)+NIJ*NXXMAX
+      FIT = VAR0(IFVAR+1)
+      PSI = VAR0(IFVAR+2)
+      DTA = VAR0(IFVAR+3)
+      SEQA0 = VAR0(IFVAR+4)
+      RRA0 = VAR0(IFVAR+5)
+      VEEA0 = VAR0(IFVAR+6)
+      KPLAST = nint(VAR0(IFVAR+7))
+C     ------------------------------------------------------------------
+C     Changement eventuel de base pour deformations de toutes natures
+C     et contraintes internes
+C
+      IF (IFOURB.EQ.2) THEN
+        ICBASE = nint(XMAT(18))
+      ELSE IF ((IFOURB.GE.-3).AND.(IFOURB.LE.0)) THEN
+        ICBASE = nint(XMAT(12))
+      ELSE IF ((IFOURB.GE.3).AND.(IFOURB.LE.14)) THEN
+        ICBASE = nint(XMAT(9))
+      END IF
+      IF (ICBASE.GE.1) THEN
+        VECT(1,1) = EPSTH(1)
+        VECT(2,2) = EPSTH(2)
+        VECT(3,3) = EPSTH(3)
+        VECT(1,2) = EPSTH(4)/FEPSIJ
+        VECT(2,1) = VECT(1,2)
+        VECT(1,3) = EPSTH(5)/FEPSIJ
+        VECT(3,1) = VECT(1,3)
+        VECT(2,3) = EPSTH(6)/FEPSIJ
+        VECT(3,2) = VECT(2,3)
+        CALL PRODMA(VECT,PBPO,3,3,3, PROMAT)
+        CALL PRODMA(PINV,PROMAT,3,3,3, VECTP)
+        EPSTH(1) = VECTP(1,1)
+        EPSTH(2) = VECTP(2,2)
+        EPSTH(3) = VECTP(3,3)
+        EPSTH(4) = VECTP(1,2)
+        EPSTH(5) = VECTP(1,3)
+        EPSTH(6) = VECTP(2,3)
+        VECT(1,1) = EPSEL(1)
+        VECT(2,2) = EPSEL(2)
+        VECT(3,3) = EPSEL(3)
+        VECT(1,2) = EPSEL(4)/FEPSIJ
+        VECT(2,1) = VECT(1,2)
+        VECT(1,3) = EPSEL(5)/FEPSIJ
+        VECT(3,1) = VECT(1,3)
+        VECT(2,3) = EPSEL(6)/FEPSIJ
+        VECT(3,2) = VECT(2,3)
+        CALL PRODMA(VECT,PBPO,3,3,3, PROMAT)
+        CALL PRODMA(PINV,PROMAT,3,3,3, VECTP)
+        EPSEL(1) = VECTP(1,1)
+        EPSEL(2) = VECTP(2,2)
+        EPSEL(3) = VECTP(3,3)
+        EPSEL(4) = VECTP(1,2)
+        EPSEL(5) = VECTP(1,3)
+        EPSEL(6) = VECTP(2,3)
+        VECT(1,1) = EPSCR(1)
+        VECT(2,2) = EPSCR(2)
+        VECT(3,3) = EPSCR(3)
+        VECT(1,2) = EPSCR(4)/FEPSIJ
+        VECT(2,1) = VECT(1,2)
+        VECT(1,3) = EPSCR(5)/FEPSIJ
+        VECT(3,1) = VECT(1,3)
+        VECT(2,3) = EPSCR(6)/FEPSIJ
+        VECT(3,2) = VECT(2,3)
+        CALL PRODMA(VECT,PBPO,3,3,3, PROMAT)
+        CALL PRODMA(PINV,PROMAT,3,3,3, VECTP)
+        EPSCR(1) = VECTP(1,1)
+        EPSCR(2) = VECTP(2,2)
+        EPSCR(3) = VECTP(3,3)
+        EPSCR(4) = VECTP(1,2)
+        EPSCR(5) = VECTP(1,3)
+        EPSCR(6) = VECTP(2,3)
+        DO IDP = 1-NDPI,NDVP
+          VECT(1,1) = EPSP(1,IDP)
+          VECT(2,2) = EPSP(2,IDP)
+          VECT(3,3) = EPSP(3,IDP)
+          VECT(1,2) = EPSP(4,IDP)/FEPSIJ
+          VECT(2,1) = VECT(1,2)
+          VECT(1,3) = EPSP(5,IDP)/FEPSIJ
+          VECT(3,1) = VECT(1,3)
+          VECT(2,3) = EPSP(6,IDP)/FEPSIJ
+          VECT(3,2) = VECT(2,3)
+          CALL PRODMA(VECT,PBPO,3,3,3, PROMAT)
+          CALL PRODMA(PINV,PROMAT,3,3,3, VECTP)
+          EPSP(1,IDP) = VECTP(1,1)
+          EPSP(2,IDP) = VECTP(2,2)
+          EPSP(3,IDP) = VECTP(3,3)
+          EPSP(4,IDP) = VECTP(1,2)
+          EPSP(5,IDP) = VECTP(1,3)
+          EPSP(6,IDP) = VECTP(2,3)
+        END DO
+        IF (ICBASE.EQ.2) THEN
+          DO IXX = 1,NXX
+            VECT(1,1) = XX(1,IXX)
+            VECT(2,2) = XX(2,IXX)
+            VECT(3,3) = XX(3,IXX)
+            VECT(1,2) = XX(4,IXX)
+            VECT(2,1) = XX(4,IXX)
+            VECT(1,3) = XX(5,IXX)
+            VECT(3,1) = XX(5,IXX)
+            VECT(2,3) = XX(6,IXX)
+            VECT(3,2) = XX(6,IXX)
+            CALL PRODMA(VECT,PBPO,3,3,3, PROMAT)
+            CALL PRODMA(PINV,PROMAT,3,3,3, VECTP)
+            XX(1,IXX) = VECTP(1,1)
+            XX(2,IXX) = VECTP(2,2)
+            XX(3,IXX) = VECTP(3,3)
+            XX(4,IXX) = VECTP(1,2)
+            XX(5,IXX) = VECTP(1,3)
+            XX(6,IXX) = VECTP(2,3)
+          END DO
+        END IF
+      END IF
+C     ------------------------------------------------------------------
+C     Variables et parametres divers(es)
+C
+      DO IJ = 1,NIJ
+        EPS(IJ) = EPSTH(IJ)+EPSEL(IJ)+EPSCR(IJ)
+        DO IDP = 1-NDPI,NDVP
+          EPS(IJ) = EPS(IJ)+EPSP(IJ,IDP)
+        END DO
+      END DO
+      DTMI = 0.
+      DTMAX = DTI
+      TMAX = 1.D+4*DTI
+      NPAS = 0
+      NCHPL = 0
+      EPSMAX = 10.
+      IES = 0
+      IUM = 8
+      IUI = IUM-2
+      ISTOP = 0
+C     ------------------------------------------------------------------
+C     Passage de la base locale d'orthotropie CAST3M a celle de MISTRAL
+C     pour les coefficients d'elasticite
+C
+      PYG1 = XMAT(1)
+      PYG2 = XMAT(2)
+      IF (IFOURB.EQ.-2) THEN
+        PYG3 = XMAT(7)
+        PNU12 = XMAT(3)
+        PNU23 = XMAT(8)
+        PNU13 = XMAT(9)
+        PG12 = XMAT(4)
+        PG23 = PG12
+        PG13 = PG12
+      ELSE
+        PYG3 = XMAT(3)
+        PNU12 = XMAT(4)
+        PNU23 = XMAT(5)
+        PNU13 = XMAT(6)
+        IF (IFOURB.EQ.2) THEN
+          PG12 = XMAT(7)
+          PG23 = XMAT(8)
+          PG13 = XMAT(9)
+        ELSE IF ((IFOURB.GE.-3).AND.(IFOURB.LE.0)) THEN
+          PG12 = XMAT(7)
+          PG23 = PG12
+          PG13 = PG12
+        ELSE IF ((IFOURB.GE.3).AND.(IFOURB.LE.14)) THEN
+          PG12 = 0.
+          PG23 = 0.
+          PG13 = 0.
+        END IF
+      END IF
+C
+      IP(3) = 6-IP(1)-IP(2)
+      IF (IP(1).EQ.1) THEN
+C Cas 1.1 : IP(1)=1 , IP(2)=2 , IP(3)=3
+        IF (IP(2).EQ.2) THEN
+          E10 = PYG1
+          E20 = PYG2
+          E30 = PYG3
+          NU120 = PNU12
+          NU230 = PNU23
+          NU310 = PNU13*PYG3/PYG1
+          MU120 = PG12
+          MU130 = PG13
+          MU230 = PG23
+C Cas 1.2 : IP(1)=1 , IP(2)=3 , IP(3)=2
+        ELSE
+          E10 = PYG1
+          E20 = PYG3
+          E30 = PYG2
+          NU120 = PNU13
+          NU230 = PNU23*PYG3/PYG2
+          NU310 = PNU12*PYG2/PYG1
+          MU120 = PG13
+          MU130 = PG12
+          MU230 = PG23
+        END IF
+      ELSE IF (IP(1).EQ.2) THEN
+C Cas 2.1 : IP(1)=2 , IP(2)=1 , IP(3)=3
+        IF (IP(2).EQ.1) THEN
+          E10 = PYG2
+          E20 = PYG1
+          E30 = PYG3
+          NU120 = PNU12*PYG2/PYG1
+          NU230 = PNU13
+          NU310 = PNU23*PYG3/PYG2
+          MU120 = PG12
+          MU130 = PG23
+          MU230 = PG13
+C Cas 2.2 : IP(1)=2 , IP(2)=3 , IP(3)=1
+        ELSE
+          E10 = PYG2
+          E20 = PYG3
+          E30 = PYG1
+          NU120 = PNU23
+          NU230 = PNU13*PYG3/PYG1
+          NU310 = PNU12
+          MU120 = PG23
+          MU130 = PG12
+          MU230 = PG13
+        END IF
+      ELSE IF (IP(1).EQ.3) THEN
+C Cas 3.1 : IP(1)=3 , IP(2)=1 , IP(3)=2
+       IF (IP(2).EQ.1) THEN
+        E10 = PYG3
+        E20 = PYG1
+        E30 = PYG2
+        NU120 = PNU13*PYG3/PYG1
+        NU230 = PNU12
+        NU310 = PNU23
+        MU120 = PG13
+        MU130 = PG23
+        MU230 = PG12
+C Cas 3.2 : IP(1)=3 , IP(2)=2 , IP(3)=1
+       ELSE
+        E10 = PYG3
+        E20 = PYG2
+        E30 = PYG1
+        NU120 = PNU23*PYG3/PYG2
+        NU230 = PNU12*PYG2/PYG1
+        NU310 = PNU13
+        MU120 = PG23
+        MU130 = PG13
+        MU230 = PG12
+       END IF
+      END IF
+      PCOEL( 1) = 0
+      PCOEL( 2) = E10
+      PCOEL( 3) = 0.
+      PCOEL( 4) = E20
+      PCOEL( 5) = 0.
+      PCOEL( 6) = E30
+      PCOEL( 7) = 0.
+      PCOEL( 8) = NU120
+      PCOEL( 9) = 0.
+      PCOEL(10) = NU230
+      PCOEL(11) = 0.
+      PCOEL(12) = NU310
+      PCOEL(13) = 0.
+      PCOEL(14) = MU120
+      PCOEL(15) = 0.
+      PCOEL(16) = MU130
+      PCOEL(17) = 0.
+      PCOEL(18) = MU230
+      PCOEL(19) = 0.
+C     ------------------------------------------------------------------
+C     Appel du module MISTRAL pour calculer l'evolution durant DTI = DT
+C     (ou DTI = 1.E-20 si DT = 0.)
+C
+      CALL MISTR1 (T, TT,FI,FIT, SIG,
+     &             EPS,EPSTH,EPSEL,EPSP,EPSCR,EPSE,EPSEQ,XX,PSI,
+     &             DTA,SEQA0,RRA0,VEEA0, KPLAST,
+     &             DTI, TTP,FIP, CSIG,CEPS,CSIEP0,
+     &             PDILT,PCOEL, NDPI,NDVP,NXX,NPSI,
+     &             PCOHI,PECOU,PEDIR,PRVCE,PECRX,PDVDI, PCROI,
+     &             NPINCR,PINCR, DTMI,DTMAX,TMAX,
+     &             NPAS,NCHPL, EPSMAX, IES,FICH,IUM, ISTOP,
+     &             DELTT,DELFI,DELFIT, DELSIG,DELEPS,DELETH,
+     &             DELEEL,DELEP,DELECR,DELEE,DELEEQ,DELXX,DELPSI)
+      IF (ISTOP.NE.0) THEN
+       STOP
+      END IF
+C
+C     Vitesses de deformations a la fin du pas de temps
+C
+      CALL MISTR0 (TT,TTP,FI,FIT, SIG, XX,EPSE,EPSEQ,PSI,KPLAST,
+     &             CSIG,CEPS,CSIEP0, IUI,
+     &             PDILT,PCOEL, NDPI,NDVP,NXX,
+     &             PCOHI,PECOU,PEDIR,PRVCE,PECRX,PDVDI, PCROI,
+     &             SEQ,RR,
+     &             SIGP, VEPS,VEPSTH,VEPSEL,VEPSP,VEPSCR,
+     &             VEPSE,EPSEQP,XXP,PSIP,
+     &             ISTOP)
+      IF (ISTOP.NE.0) THEN
+       STOP
+      END IF
+      DO IJ = 1,NIJ
+        VEPSIN(IJ) = 0.
+        DO IDP = 1-NDPI,NDVP
+          VEPSIN(IJ) = VEPSIN(IJ)+VEPSP(IJ,IDP)
+        END DO
+      END DO
+C     ------------------------------------------------------------------
+C     Changement de base inverse pour contraintes a fin de pas de temps
+C
+      VECTP(1,1) = SIG(1)
+      VECTP(2,2) = SIG(2)
+      VECTP(3,3) = SIG(3)
+      VECTP(1,2) = SIG(4)
+      VECTP(2,1) = SIG(4)
+      VECTP(1,3) = SIG(5)
+      VECTP(3,1) = SIG(5)
+      VECTP(2,3) = SIG(6)
+      VECTP(3,2) = SIG(6)
+      CALL PRODMA(VECTP,PINV,3,3,3, PROMAT)
+      CALL PRODMA(PBPO,PROMAT,3,3,3, VECT)
+      SIGF(1) = VECT(1,1)
+      SIGF(2) = VECT(2,2)
+      SIGF(3) = VECT(3,3)
+      IF (IFOURB.EQ.2) THEN
+        SIGF(4) = VECT(1,2)
+        SIGF(5) = VECT(1,3)
+        SIGF(6) = VECT(2,3)
+      ELSE IF ((IFOURB.GE.-3).AND.(IFOURB.LE.0)) THEN
+        SIGF(4) = VECT(1,2)
+      END IF
+C     ------------------------------------------------------------------
+C     Changement eventuel de base pour deformations de toutes natures
+C     et contraintes internes a fin de pas de temps
+C
+      IF (ICBASE.GE.1) THEN
+        VECTP(1,1) = EPSTH(1)
+        VECTP(2,2) = EPSTH(2)
+        VECTP(3,3) = EPSTH(3)
+        VECTP(1,2) = EPSTH(4)
+        VECTP(2,1) = EPSTH(4)
+        VECTP(1,3) = EPSTH(5)
+        VECTP(3,1) = EPSTH(5)
+        VECTP(2,3) = EPSTH(6)
+        VECTP(3,2) = EPSTH(6)
+        CALL PRODMA(VECTP,PINV,3,3,3, PROMAT)
+        CALL PRODMA(PBPO,PROMAT,3,3,3, VECT)
+        EPSTH(1) = VECT(1,1)
+        EPSTH(2) = VECT(2,2)
+        EPSTH(3) = VECT(3,3)
+        EPSTH(4) = VECT(1,2)*FEPSIJ
+        EPSTH(5) = VECT(1,3)*FEPSIJ
+        EPSTH(6) = VECT(2,3)*FEPSIJ
+        VECTP(1,1) = EPSEL(1)
+        VECTP(2,2) = EPSEL(2)
+        VECTP(3,3) = EPSEL(3)
+        VECTP(1,2) = EPSEL(4)
+        VECTP(2,1) = EPSEL(4)
+        VECTP(1,3) = EPSEL(5)
+        VECTP(3,1) = EPSEL(5)
+        VECTP(2,3) = EPSEL(6)
+        VECTP(3,2) = EPSEL(6)
+        CALL PRODMA(VECTP,PINV,3,3,3, PROMAT)
+        CALL PRODMA(PBPO,PROMAT,3,3,3, VECT)
+        EPSEL(1) = VECT(1,1)
+        EPSEL(2) = VECT(2,2)
+        EPSEL(3) = VECT(3,3)
+        EPSEL(4) = VECT(1,2)*FEPSIJ
+        EPSEL(5) = VECT(1,3)*FEPSIJ
+        EPSEL(6) = VECT(2,3)*FEPSIJ
+        VECTP(1,1) = EPSCR(1)
+        VECTP(2,2) = EPSCR(2)
+        VECTP(3,3) = EPSCR(3)
+        VECTP(1,2) = EPSCR(4)
+        VECTP(2,1) = EPSCR(4)
+        VECTP(1,3) = EPSCR(5)
+        VECTP(3,1) = EPSCR(5)
+        VECTP(2,3) = EPSCR(6)
+        VECTP(3,2) = EPSCR(6)
+        CALL PRODMA(VECTP,PINV,3,3,3, PROMAT)
+        CALL PRODMA(PBPO,PROMAT,3,3,3, VECT)
+        EPSCR(1) = VECT(1,1)
+        EPSCR(2) = VECT(2,2)
+        EPSCR(3) = VECT(3,3)
+        EPSCR(4) = VECT(1,2)*FEPSIJ
+        EPSCR(5) = VECT(1,3)*FEPSIJ
+        EPSCR(6) = VECT(2,3)*FEPSIJ
+        DO IDP = 1-NDPI,NDVP
+          VECTP(1,1) = EPSP(1,IDP)
+          VECTP(2,2) = EPSP(2,IDP)
+          VECTP(3,3) = EPSP(3,IDP)
+          VECTP(1,2) = EPSP(4,IDP)
+          VECTP(2,1) = EPSP(4,IDP)
+          VECTP(1,3) = EPSP(5,IDP)
+          VECTP(3,1) = EPSP(5,IDP)
+          VECTP(2,3) = EPSP(6,IDP)
+          VECTP(3,2) = EPSP(6,IDP)
+          CALL PRODMA(VECTP,PINV,3,3,3, PROMAT)
+          CALL PRODMA(PBPO,PROMAT,3,3,3, VECT)
+          EPSP(1,IDP) = VECT(1,1)
+          EPSP(2,IDP) = VECT(2,2)
+          EPSP(3,IDP) = VECT(3,3)
+          EPSP(4,IDP) = VECT(1,2)*FEPSIJ
+          EPSP(5,IDP) = VECT(1,3)*FEPSIJ
+          EPSP(6,IDP) = VECT(2,3)*FEPSIJ
+        END DO
+        VECTP(1,1) = VEPS(1)
+        VECTP(2,2) = VEPS(2)
+        VECTP(3,3) = VEPS(3)
+        VECTP(1,2) = VEPS(4)
+        VECTP(2,1) = VEPS(4)
+        VECTP(1,3) = VEPS(5)
+        VECTP(3,1) = VEPS(5)
+        VECTP(2,3) = VEPS(6)
+        VECTP(3,2) = VEPS(6)
+        CALL PRODMA(VECTP,PINV,3,3,3, PROMAT)
+        CALL PRODMA(PBPO,PROMAT,3,3,3, VECT)
+        VEPS(1) = VECT(1,1)
+        VEPS(2) = VECT(2,2)
+        VEPS(3) = VECT(3,3)
+        VEPS(4) = VECT(1,2)*FEPSIJ
+        VEPS(5) = VECT(1,3)*FEPSIJ
+        VEPS(6) = VECT(2,3)*FEPSIJ
+        IF ((NDPI+NDVP).GT.0) THEN
+          VECTP(1,1) = VEPSIN(1)
+          VECTP(2,2) = VEPSIN(2)
+          VECTP(3,3) = VEPSIN(3)
+          VECTP(1,2) = VEPSIN(4)
+          VECTP(2,1) = VEPSIN(4)
+          VECTP(1,3) = VEPSIN(5)
+          VECTP(3,1) = VEPSIN(5)
+          VECTP(2,3) = VEPSIN(6)
+          VECTP(3,2) = VEPSIN(6)
+          CALL PRODMA(VECTP,PINV,3,3,3, PROMAT)
+          CALL PRODMA(PBPO,PROMAT,3,3,3, VECT)
+          VEPSIN(1) = VECT(1,1)
+          VEPSIN(2) = VECT(2,2)
+          VEPSIN(3) = VECT(3,3)
+          VEPSIN(4) = VECT(1,2)*FEPSIJ
+          VEPSIN(5) = VECT(1,3)*FEPSIJ
+          VEPSIN(6) = VECT(2,3)*FEPSIJ
+        END IF
+        IF (ICBASE.EQ.2) THEN
+          DO IXX = 1,NXX
+            VECTP(1,1) = XX(1,IXX)
+            VECTP(2,2) = XX(2,IXX)
+            VECTP(3,3) = XX(3,IXX)
+            VECTP(1,2) = XX(4,IXX)
+            VECTP(2,1) = XX(4,IXX)
+            VECTP(1,3) = XX(5,IXX)
+            VECTP(3,1) = XX(5,IXX)
+            VECTP(2,3) = XX(6,IXX)
+            VECTP(3,2) = XX(6,IXX)
+            CALL PRODMA(VECTP,PINV,3,3,3, PROMAT)
+            CALL PRODMA(PBPO,PROMAT,3,3,3, VECT)
+            XX(1,IXX) = VECT(1,1)
+            XX(2,IXX) = VECT(2,2)
+            XX(3,IXX) = VECT(3,3)
+            XX(4,IXX) = VECT(1,2)
+            XX(5,IXX) = VECT(1,3)
+            XX(6,IXX) = VECT(2,3)
+          END DO
+        END IF
+      END IF
+C     ------------------------------------------------------------------
+C     Stockage des variables internes a la fin du pas de temps
+C
+      IVAR = NIJ*(3+NDVPMA)
+      DO IJ = 1,NIJ
+        VARF(IJ) = EPSTH(IJ)
+        VARF(NIJ+IJ) = EPSEL(IJ)
+        VARF(IVAR+IJ) = EPSCR(IJ)
+      END DO
+      IVAR = NIJ*(4+NDVPMA)+1
+      JVAR = IVAR+NDVPMA+1
+      LVAR = IFVAR+8
+      VARF(LVAR) = 0.
+      DO IDP = 1-NDPI,NDVP
+        KVAR = NIJ*(2+IDP)
+        DO IJ = 1,NIJ
+          VARF(KVAR+IJ) = EPSP(IJ,IDP)
+        END DO
+        VARF(IVAR+IDP) = EPSE(IDP)
+        VARF(JVAR+IDP) = EPSEQ(IDP)
+        VARF(LVAR) = VARF(LVAR) + EPSE(IDP)
+      END DO
+      IVAR = NIJ*(3+NDVPMA)+2*(1+NDVPMA)
+      DO IXX = 1,NXX
+        JVAR = IVAR+NIJ*IXX
+        DO IJ = 1,NIJ
+          VARF(JVAR+IJ) = XX(IJ,IXX)
+        END DO
+      END DO
+      VARF(IFVAR+1) = FIT
+      VARF(IFVAR+2) = PSI
+        IF (DT.NE.0.D0) THEN
+      VARF(IFVAR+3) = DTA
+      VARF(IFVAR+4) = SEQA0
+      VARF(IFVAR+5) = RRA0
+      VARF(IFVAR+6) = VEEA0
+      VARF(IFVAR+7) = KPLAST
+        ENDIF
+      IVAR = LVAR+NIJ
+      DO IJ = 1,NIJ
+        VARF(LVAR+IJ) = VEPS(IJ)
+        VARF(IVAR+IJ) = VEPSIN(IJ)
+      END DO
+      IVAR = IVAR+NIJ+1
+      DO IDP = 1-NDPI,NDVP
+        VARF(IVAR+IDP) = VEPSE(IDP)
+      END DO
+C     ------------------------------------------------------------------
+C     Deformation inelastique = somme des deformations plastiques
+C     a la fin du pas de temps
+C
+      IF (ICBASE.EQ.0) THEN
+        VECTP(1,1) = 0.
+        VECTP(2,2) = 0.
+        VECTP(3,3) = 0.
+        VECTP(1,2) = 0.
+        VECTP(1,3) = 0.
+        VECTP(2,3) = 0.
+        DO IDP = 1-NDPI,NDVP
+          VECTP(1,1) = VECTP(1,1) + EPSP(1,IDP)
+          VECTP(2,2) = VECTP(2,2) + EPSP(2,IDP)
+          VECTP(3,3) = VECTP(3,3) + EPSP(3,IDP)
+          VECTP(1,2) = VECTP(1,2) + EPSP(4,IDP)
+          VECTP(1,3) = VECTP(1,3) + EPSP(5,IDP)
+          VECTP(2,3) = VECTP(2,3) + EPSP(6,IDP)
+        END DO
+        VECTP(2,1) = VECTP(1,2)
+        VECTP(3,1) = VECTP(1,3)
+        VECTP(3,2) = VECTP(2,3)
+        CALL PRODMA(VECTP,PINV,3,3,3, PROMAT)
+        CALL PRODMA(PBPO,PROMAT,3,3,3, VECT)
+        EPINF(1) = VECT(1,1)
+        EPINF(2) = VECT(2,2)
+        EPINF(3) = VECT(3,3)
+        IF (IFOURB.EQ.2) THEN
+          EPINF(4) = VECT(1,2)*FEPSIJ
+          EPINF(5) = VECT(1,3)*FEPSIJ
+          EPINF(6) = VECT(2,3)*FEPSIJ
+        ELSE IF ((IFOURB.GE.-3).AND.(IFOURB.LE.0)) THEN
+          EPINF(4) = VECT(1,2)*FEPSIJ
+        END IF
+      ELSE
+        DO IJ =1,NSTRS
+          EPINF(IJ) = 0.
+          DO IDP = 1-NDPI,NDVP
+            EPINF(IJ) = EPINF(IJ)+EPSP(IJ,IDP)
+          END DO
+        END DO
+      END IF
+C     ------------------------------------------------------------------
+      RETURN
+      END
+
+
+
+
+

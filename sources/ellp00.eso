@@ -1,0 +1,1051 @@
+C ELLP00    SOURCE    PV        11/03/07    21:16:46     6885
+        SUBROUTINE ELLP00
+C
+      IMPLICIT INTEGER(I-N)
+        IMPLICIT REAL*8     (A-H,O-Y)
+        IMPLICIT COMPLEX*16 (Z)
+C
+C CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C   OPERATEUR ELFE LAPLACE POUTRE
+C
+C   CALCUL DES FONCTIONS DE TRANSFERT D'UN MAILLAGE DE POUTRES PAR
+C   LA METHODE DITE "INTEGRALE". LA SYNTAXE EST LA SUIVANTE :
+C
+C   EVOL = ELFE LAPLACE POUTRE GEO1 (GEO2) CHP1 CHAM1 LFR S0 PT
+C                              COMP IMETH (IMP)
+C
+C
+C   ELFE .............. MOT DESIGNANT L'OPERATEUR
+C
+C   LAPLACE, POUTRE ... MOTS CLES POUR L'OPTION DE ELFE
+C
+C   GEO1 .............. OBJET TYPE MAILLAGE DONNANT LE RESEAU DE POUTRES
+C
+C   GEO2 (FACULTATIF).. OBJET TYPE MAILLAGE SI ON VEUT LA DEFORMEE
+C
+C   CHP1 .............. OBJET TYPE CHPOINT  DONNANT LES COND. AUX LIMITE
+C
+C   CHAM1 ............. OBJET TYPE NOUVEAU CHAMELEM POUR LES CARACT.
+C
+C   LFR ............... OBJET TYPE LISTREEL DEFINISSANT LES FREQUENCES
+C
+C   S0  ............... OBJET TYPE REEL POUR LA TRANSFORMEE DE LAPLACE
+C
+C   PT ................ OBJET TYPE POINT OU L'ON DESIRE LE DEPLACEMENT
+C
+C   COMP .............. OBJET TYPE CHAR*2 DESIGNANT 'UX','UY' OU 'UZ'
+C                                                   'RX','RY' OU 'RZ'
+C
+C   IMETH ............. ENTIER : CHOIX DE LA METHODE DE RESOLUTION
+C
+C   IMP (FALCULTATIF).. ENTIER : <>0 POUR IMPRESSION INTERMEDIAIRE
+C
+C
+C   PARAMETRES :
+C                       ('NEANT')
+C
+C   SORTIES :
+C
+C   EVOLUTION --------> SI ON DESIRE LA FONCTION DE TRANSFERT
+C
+C   CHAMPOINT --------> SI ON DESIRE LA DEFORMEE
+C
+C
+C  *****************************************************
+C  *                                                   *
+C  *  Organigramme d'appel des diff{rentes SUBROUTINE  *
+C  *                                                   *
+C  *****************************************************
+C
+C
+C     ELLP00 (interface ESOPE <--> FORTRAN)
+C       |
+C       |
+C       |-----> ELLP09 (conversion de ux , uy ... en 1 , 2 , ...)
+C       |
+C       |-----> ELLP08 (conversion de YOUN , NU ... en 1 , 2 , ...)
+C       |
+C       |
+C       |-----> ELLP11 (programme principal FORTRAN)
+C                 |
+C                 |
+C                 |-----> ELLP12 (remplissage de la 2}me partie de ZA1
+C                 |               qui ne d{pend pas de w)
+C                 |
+C                 |-----> ELLP21 (determination, pour chaque poutre et
+C                           |     chaque frequence, de la matrice ZC1)
+C                           |
+C                           |
+C                           |-----> ELLP31 (valeur des fcts de GREEN)
+C                           |
+C                 |<--------|
+C                 |
+C                 |
+C                 |-----> ELLP51 (resolution du systeme lin{aire)
+C                 |      (ELLP52)
+C                 |      (ELLP53)
+C                 |      (ELLP54)
+C                 |
+C                 |
+C       |<--------|
+C       |
+C       |-----> ELLP23 (d{termination des d{placements aux noeuds du
+C       |               sous-maillage dans le cas du calcul de la
+C       |               d{form{e )
+C       |
+C       |                -------------
+C       |                |           |
+C       |--------------->|    FIN    |
+C                        |           |
+C                        -------------
+C
+C   AUTEUR : SAINT-DIZIER
+C   DATE   : 04 JANVIER 1990 (VERSION DU 22 AOUT 1990)
+C
+C CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+        CHARACTER*4 COMP,CHAR
+C
+C
+-INC CCREEL
+-INC CCOPTIO
+-INC SMCOORD
+-INC SMELEME
+-INC SMCHPOI
+-INC SMCHAML
+-INC SMLREEL
+-INC SMEVOLL
+C
+        POINTEUR MLREE4.MLREEL
+        POINTEUR KEVOL3.KEVOLL
+C
+C ------------------- DIMENSIONNEMENT DES MATRICES CREEES LORS DE
+C                     CETTE INTERFACE FORTRAN <--> ESOPE
+C
+        SEGMENT MATRES
+          COMPLEX*16 ZA1   (NP24,NP24)
+          COMPLEX*16 ZSM   (NP24)
+          COMPLEX*16 ZXX   (NP24)
+          COMPLEX*16 ZSOL  (NNT12,NFRQ)
+          REAL*8     COOR  (3 ,NP2)
+          REAL*8     GAMA  (3 ,NP)
+          REAL*8     CARACT(12,NP)
+          REAL*8     XCL   (12 ,NNT)
+          REAL*8     XCOR  (2 , 3 , NBELEM )
+          REAL*8     VALDE1(2 , NBELEM , 3 )
+          REAL*8     VALDE2(2 , NBELEM , 3 )
+          INTEGER    FLAG  (NNT12)
+          INTEGER    CORRES(NP2)
+          INTEGER    NUMERO(NNT)
+          INTEGER    MASS  (NNT,4)
+          REAL*8     RMAS  (NNT,4)
+          INTEGER    IPIVO(NP24)
+          INTEGER    JPIVO(NP24)
+          INTEGER    IAUX(NP24)
+        ENDSEGMENT
+C
+        SEGMENT MATITE
+          REAL*8     SA(NP48,NP48)
+          REAL*8     SB(NP48)
+          REAL*8     SU(NP48)
+          REAL*8     SR(NP48)
+          REAL*8     SQ(NP48)
+          REAL*8     SDELTA(NP48)
+          REAL*8     SDELT1(NP48)
+          REAL*8     SP(NP48)
+          REAL*8     SP1(NP48)
+          REAL*8     SCH(NP48)
+          REAL*8     SCH1(NP48)
+          INTEGER    IIVO(NP48)
+          INTEGER    JIVO(NP48)
+          INTEGER    IIUX(NP48)
+          INTEGER    ITERA (NFRQ)
+        ENDSEGMENT
+C
+C CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C                 EXPLICATION DE CES VARIABLES
+C                 ----------------------------
+C
+C  NP    :  NOMBRE TOTAL DE POUTRES DU MAILLAGE
+C
+C  NP2   :  NP * 2
+C
+C  NP24  :  NP * 24
+C
+C  NP48  :  NP * 48
+C
+C  NNT   :  NOMBRE TOTAL DE NOEUDS DU MAILLAGE
+C
+C  NNT12 :  NNT * 12
+C
+C  NFRQ  :  NOMBRE DE POINTS DE CALCUL EN FREQUENCE
+C
+C ---------------------------------------------------------------------
+C
+C .................... ZA1    : MATRICE DE RESOLUTION
+C
+C .................... ZSM    : VECTEUR SECOND MEMBRE
+C
+C .................... ZXX    : VECTEUR INCONNU
+C
+C   ZXX CONTIENT, POUR LES 2NP NOEUDS, DANS L'ORDRE SUIVANT :
+C
+C      UX   UY   UZ   RX   RY   RZ   FX   FY   FZ   MX   MY   MZ
+C
+C
+C .................... ZSOL   : TABLEAU SOLUTION POUR TOUTES LES FREQ.
+C
+C
+C .................... COOR   : TABLEAU DES COORDONNEES
+C
+C  UNE POUTRE COMPORTE 2 NOEUDS  (P1 ET P2) -->  2*NP NOEUDS FICTIFS
+C
+C              | COOR(1,2*INP-1)             | COOR(1,2*INP)
+C          P1  | COOR(2,2*INP-1)        P2   | COOR(2,2*INP)
+C              | COOR(3,2*INP-1)             | COOR(3,2*INP)
+C
+C ---------------------------------------------------------------------
+C
+C .................... GAMA   : VECTEUR DEFINISSANT L'AXE OY
+C                               POUR CHAQUE POUTRE
+C
+C
+C .................... CARACT : TABLEAU DES CARACTERISTIQUES
+C
+C  CARACT EST UNE MATRICE (12,NP) QUI, POUR TOUTES LES NP POUTRES,
+C  DONNE LES CARACTERISTIQUES GEOMETRIQUES ET PHYSIQUE DE LA POUTRE :
+C
+C  CARACT( 1,INP) --> MODULE D'YOUNG                     : E
+C  CARACT( 2,INP) --> COEFICIENT DE POISSON              : NU
+C  CARACT( 3,INP) --> MASSE VOLUMIQUE                    : RHO
+C  CARACT( 4,INP) --> SECTION DROITE DE LA POUTRE        : SE
+C  CARACT( 5,INP) --> MOMENT DE TORSION                  : C
+C  CARACT( 6,INP) --> MOMENT D'INERTIE POLAIRE           : IP
+C  CARACT( 7,INP) --> MOMENT D'INERTIE SUIVANT L'AXE OY  : IY
+C  CARACT( 8,INP) --> MOMENT D'INERTIE SUIVANT L'AXE OZ  : IZ
+C  CARACT( 9,INP) --> CONSTANTE DE TIMOSHENKO KCY        : KCY
+C  CARACT(10,INP) --> CONSTANTE DE TIMOSHENKO KCZ        : KCZ
+C  CARACT(11,INP) --> COEFICIENT D'AMORTISSEMENT EXTERNE : CAM
+C  CARACT(12,INP) --> COEFICIENT D'AMORTISSEMENT INTERNE : ETA
+C
+C ---------------------------------------------------------------------
+C
+C .................... XCL + FLAG : TABLEAU DONNANT LES CONDITIONS
+C                                   AUX LIMITES POUR CHAQUE NOEUD.
+C
+C  XCL (K,NN) = VALEUR DE LA CONDITION K AU NOEUD REEL NN
+C  LES CONDITIONS K CORRESPONDENT RESPECTIVEMENT A UX, UY, UZ, RX,
+C  RY, RZ, FX, FY, FZ, MX, MY, MZ.
+C
+C     CHAQUE NOEUD AYANT SOIT LES DEPLACEMENTS, SOIT LES EFFORTS, SOIT
+C  RIEN DU TOUT D'IMPOSES, IL CONVIENT DE DEFINIR UN VECTEUR JOUANT LE
+C  ROLE DE POINTEUR  SUR XCL QUE L'ON APPELLE FLAG DE LONGUEUR 12*NNT.
+C
+C     LES DIFFERENTS BLOCS DE 12 VALEURS POINTENT SUR LE NOEUD CORRES-
+C  PONDANT :
+C
+C  LA VALEUR DE FLAG VAUT LE NUMERO DU NOEUD SI ON IMPOSE LA CONDITION
+C  ELLE VAUT 0 SINON.
+C
+C ---------------------------------------------------------------------
+C
+C .................... CORRES : TABLEAU POUR CONNAITRE LES LIAISONS
+C
+C  CHAQUE NOEUD FICTIF EST ASSOCIE A UN NOEUD REEL ; LE TABLEAU CORRES
+C  DONNE, POUR CHAQUE NOEUD FICTIF (2*NP), LE NUMERO DU NOEUD REEL AS-
+C  SOCIE.
+C
+C ---------------------------------------------------------------------
+C
+C
+C ....................  NUMERO   : TABLEAU DE NUMERO DE NOEUDS
+C
+C      NUMERO (I) = NUMERO GIBI DU IEME NOEUD ( 1 < I < N )
+C
+C  LA NUMEROTATION DE 1 A N EST ARBITRAIREMENT SELON LES NUMEROS
+C  CROISSANTS DANS GIBI.
+C
+C
+C ....................  MASS     : TABLEAU DONNANT POUR CHAQUE MASSE
+C                                  PONCTUELLE :
+C
+C            - MASS(NNT,1) ... NUMERO DU NOEUD OU S'APPLIQUE LA MASSE
+C            - MASS(NNT,2) ... NUMERO DE LA POUTRE ASSOCIEE
+C            - MASS(NNT,3) ... NUMERO DU DEPLACEMENT UX CORRESPONDANT
+C                              DANS LE VECTEUR DES INCONNUS
+C            - MASS(NNT,4) ... NUMERO DE LA LIGNE TRADUISANT
+C                              SOMME FX = FX EXTERIEURES
+C
+C ....................  RMAS     : TABLEAU DONNANT POUR LE NOEUD
+C                                  CORRESPONDANT LA VALEUR DE LA MASSE
+C                                                          DE J0X
+C                                                          DE J0Y
+C                                                          DE J0Z
+C
+C ...........  IPIVO,JPIVO,IAUX  : TABLEAU INTERMEDIAIRE DE MEMORISATION
+C                                  DE LA TRIANGULARISATION DE GAUSS
+C
+C
+C .....................  VALDE1  : TABLEAU DONNANT POUR CHAQUE ELEMENT
+C                                  DU SOUS MAILLAGE LE MODULE DU DEPLA-
+C                                  CEMENT
+C
+C .....................  VALDE2  : TABLEAU DONNANT POUR CHAQUE ELEMENT
+C                                  DU SOUS MAILLAGE LA PHASE DU DEPLA-
+C                                  CEMENT
+C
+C
+C ......S E G M E N T    MATITE  : TABLEAUX NE SERVANT QUE POUR
+C                                  L'EVENTUALITE D'UNE METHODE ITERATIVE
+C
+C
+C CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C ------------------- DIMENSIONNEMENT DES MATRICES AUXILIAIRES
+C                     ----------------------------------------
+C
+        SEGMENT AUXI
+          INTEGER IAUXI(NNNP)
+        ENDSEGMENT
+C
+C -------------------- LECTURE DES OBJETS MAILLAGE CHPOINT ET LISTREEL
+C                      -----------------------------------------------
+C
+C
+        CALL LIROBJ('MAILLAGE',IPT1,1,IRETOU)
+        IF (IERR.NE.0) RETURN
+C
+        CALL LIROBJ('MAILLAGE',IPT4,0,IRETOU)
+        IF (IERR.NE.0) RETURN
+        IF (IRETOU.NE.0) THEN
+          IDEPL = 1
+          SEGACT IPT4
+          NBELEM = IPT4.NUM(/2)
+        ELSE
+          IDEPL = 0
+          NBELEM = 1
+        END IF
+C
+        CALL LIROBJ('CHPOINT',MCHPO1,1,IRETOU)
+        IF (IERR.NE.0) RETURN
+C
+        CALL LIROBJ('MCHAML',MCHEL1,1,IRETOU)
+        IF (IERR.NE.0) RETURN
+C
+        CALL LIROBJ('LISTREEL',MLREE1,1,IRETOU)
+        IF (IERR.NE.0) RETURN
+C
+        CALL LIRREE(S0,1,IRETOU)
+        IF (IERR.NE.0) RETURN
+C
+        CALL LIROBJ('POINT',NPOI,1,IRETOU)
+        IF (IERR.NE.0) RETURN
+C
+        CALL LIRCHA(CHAR,1,LCHAR)
+        IF (IERR.NE.0) RETURN
+C
+        CALL ELLP09(CHAR,ICHAR,IERROR)
+C
+        IF (IERROR.NE.0.OR.ICHAR.GT.12) THEN
+          WRITE(IOIMP,*)'ERREUR DANS LA LECTURE DES DONNEES *********'
+          WRITE(IOIMP,*)'ON NE RECONNAIT PAS UX, UY, UZ, RX, RY OU RZ'
+          WRITE(IOIMP,*)'DANS LA DEMANDE DES RESULTATS.              '
+          RETURN
+        END IF
+C
+        CALL LIRENT(METH,1,IRETOU)
+        IF (IERR.NE.0) RETURN
+C
+        CALL LIRENT(IMP,0,IRETOU)
+        IF (IERR.NE.0) RETURN
+        IF (IRETOU.EQ.0) IMP =  0
+        IF (IMP.NE.0)    IMP = IOIMP
+C
+C
+C -------------------- ACTIVATION DES SEGMENTS
+C                      -----------------------
+        SEGACT IPT1
+        SEGACT MLREE1
+        SEGACT MCHPO1
+        SEGACT MCHEL1
+C
+C
+C **********************************************************************
+C                       LECTURE DU MAILLAGE
+C **********************************************************************
+C
+C ..................NP : NOMBRE DE POUTRES DU MAILLAGE
+C
+        NP = IPT1.NUM(/2)
+C
+C IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII
+C
+        IF (IMP.NE.0) THEN
+          WRITE (IMP,*) 'NOMBRE DE POUTRES DU MAILLAGE :',NP
+        END IF
+C
+C IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII
+C
+        NN = IPT1.NUM(/1)
+C
+C --------------------- NFRQ : NOMBRE DE POINTS DE CALCUL EN FREQUENCE
+C
+        NFRQ = MLREE1.PROG(/1)
+C
+        IF (IDEPL.EQ.1.AND.NFRQ.NE.1) THEN
+          WRITE(6,*)'ERREUR*********************************'
+          WRITE(6,*)'                                       '
+          WRITE(6,*)'ON NE PEUT DONNER LA DEFORMEE  QUE POUR'
+          WRITE(6,*)'UNE SEULE FREQENCE (LISTREEL DE LONG 1)'
+          RETURN
+        END IF
+C
+C
+C --------------------- DETERMINATION DU NOMBRE DE NOEUDS DU MAILLAGE
+C                       ---------------------------------------------
+        NNNP = NN*NP
+        SEGINI AUXI
+        ICOMP = 0
+        DO 10 I = 1 , NP
+            DO 11 J = 1 , NN
+                AUXI.IAUXI(ICOMP+1) = IPT1.NUM(J,I)
+C
+                IF (ICOMP.LT.1) THEN
+                    ITEST = 0
+                    GOTO 13
+                END IF
+C
+            ITEST = 0
+            DO 12 K = 1 , ICOMP
+                IF (AUXI.IAUXI(K).EQ.IPT1.NUM(J,I)) ITEST = 1
+12          CONTINUE
+C
+13          IF (ITEST.EQ.0) ICOMP = ICOMP + 1
+C
+11          CONTINUE
+C
+10      CONTINUE
+C
+        SEGSUP AUXI
+C
+        NNT = ICOMP
+C
+C IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII
+C
+        IF (IMP.NE.0) THEN
+          WRITE (IMP,*) 'NOMBRE TOTAL DE NOEUD DU MAILLAGE :',NNT
+        END IF
+C
+C IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII
+C
+C --------------------- INITIALISATION DES TABLEAUX DE TRAVAIL
+C                       --------------------------------------
+        NP2   = NP  * 2
+        NP12  = NP  * 12
+        NP24  = NP  * 24
+        NP48  = NP  * 48
+        NNT12 = NNT * 12
+C
+        SEGINI MATRES
+C
+C ------------------- SI NON METHODE ITERATIVE, SEGMENT MATITE INUTILE
+C                     ------------------------------------------------
+        IF (METH.LT.3) THEN
+          NP48 = 48
+        END IF
+C
+        SEGINI MATITE
+C
+        NUMP = 0
+C
+        DO 20 INP = 1 , NP
+C
+            IP1 = IPT1.NUM(1,INP)
+C
+C ----------------------  TRADUCTION NUMERO GLOBAL NUMERO LOCAL
+C                         -------------------------------------
+            IF (NUMP.EQ.0) THEN
+              NUMP = NUMP + 1
+              MATRES.NUMERO ( NUMP ) = IP1
+                           ELSE
+              NON = 0
+              DO 21 I = 1 , NUMP
+                  IF (MATRES.NUMERO(I).EQ.IP1) THEN
+                    NON = 1
+                  END IF
+21            CONTINUE
+C
+              IF (NON.EQ.0) THEN
+                NUMP = NUMP + 1
+                MATRES.NUMERO ( NUMP ) = IP1
+              END IF
+            END IF
+C
+            IP2 = IPT1.NUM(2,INP)
+C
+C ----------------------  TRADUCTION NUMERO GLOBAL NUMERO LOCAL
+C                         -------------------------------------
+            NON = 0
+            DO 22 I = 1 , NUMP
+                IF (MATRES.NUMERO(I).EQ.IP2) THEN
+                  NON = 1
+                END IF
+22          CONTINUE
+C
+            IF (NON.EQ.0) THEN
+              NUMP = NUMP + 1
+              MATRES.NUMERO ( NUMP ) = IP2
+            END IF
+C
+C
+C -------------------- COOR   : TABLEAU DES COORDONNEES
+C                      --------------------------------
+            MATRES.COOR(1,2*INP-1) = MCOORD.XCOOR((IP1-1)*(IDIM+1)+1)
+            MATRES.COOR(2,2*INP-1) = MCOORD.XCOOR((IP1-1)*(IDIM+1)+2)
+            MATRES.COOR(3,2*INP-1) = MCOORD.XCOOR((IP1-1)*(IDIM+1)+3)
+            MATRES.COOR(1,2*INP  ) = MCOORD.XCOOR((IP2-1)*(IDIM+1)+1)
+            MATRES.COOR(2,2*INP  ) = MCOORD.XCOOR((IP2-1)*(IDIM+1)+2)
+            MATRES.COOR(3,2*INP  ) = MCOORD.XCOOR((IP2-1)*(IDIM+1)+3)
+C
+C -------------------- CORRES : TABLEAU POUR CONNAITRE LES LIAISONS
+C                      --------------------------------------------
+C
+            MATRES.CORRES(2*INP-1) = IP1
+            MATRES.CORRES(2*INP  ) = IP2
+C
+20      CONTINUE
+C
+C
+C **********************************************************************
+C               LECTURE DU CHPOINT (CONDITIONS AUX LIMITES)
+C **********************************************************************
+C
+C -------------------- XCL + FLAG : TABLEAU DONNANT LES CONDITIONS
+C                      ----------   AUX LIMITES POUR CHAQUE NOEUD.
+C
+        NSOUPO = MCHPO1.IPCHP(/1)
+C
+        IMAS = 0
+C
+        DO 25 I = 1 , NNT
+          DO 25 J = 1 , 12
+          MATRES.XCL(J,I) = 0.E0
+          MATRES.FLAG((I-1)*NNT+J) = 0
+25      CONTINUE
+C
+        DO 30 I = 1 , NSOUPO
+C
+            MSOUP1 = MCHPO1.IPCHP(I)
+            SEGACT MSOUP1
+C
+            IPT2 = MSOUP1.IGEOC
+            SEGACT IPT2
+C
+            MPOVA2 = MSOUP1.IPOVAL
+            SEGACT MPOVA2
+C
+            NC = MSOUP1.NOCOMP(/2)
+            N  = MPOVA2.VPOCHA(/1)
+C
+            DO 31 J = 1 , N
+C
+C -- ON CHERCHE NUM(1,J) CAR DANS UN CHAMP PAR POINTS, LES
+C -- ELEMENTS DES SOUS-MAILLAGES ELEMENTAIRES SONT LES POINTS
+C -- DE CES SOUS-MAILLAGES, ET CHAQUE ELEMENT CONTIENT DONC UN
+C -- SEUL NOEUD
+C
+              NOEUD = IPT2.NUM(1,J)
+              ISTOP = 0
+C
+              DO 33 K = 1 , NNT
+                IF (MATRES.NUMERO(K).EQ.NOEUD) THEN
+                  NNOEUD = K
+                END IF
+33            CONTINUE
+C
+              DO 32 K = 1 , NC
+                COMP = MSOUP1.NOCOMP(K)
+                CALL ELLP09(COMP,ICOMP,IERROR)
+                IF (IERROR.NE.0) THEN
+                  RETURN
+                END IF
+C
+                IF (ICOMP.GE.13.AND.ISTOP.EQ.0) THEN
+                  IMAS = IMAS + 1
+                  ISTOP = 1
+                END IF
+                IF (ICOMP.EQ.13) THEN
+                  DO 35 II = 2*NP , 1 , -1
+                    IF (CORRES(II).EQ.NOEUD) THEN
+                      MATRES.MASS(IMAS,1) = II
+                    END IF
+35                CONTINUE
+C
+                  MATRES.MASS(IMAS,2) = INT((MATRES.MASS(IMAS,1)+1)/2)
+                  II = MATRES.MASS(IMAS,1)
+                  JJ = INT(II/2)*2
+                  IF (II.EQ.JJ) THEN
+                    MATRES.MASS(IMAS,3) = 24*(MATRES.MASS(IMAS,2)-1)+13
+                  ELSE
+                    MATRES.MASS(IMAS,3) = 24*(MATRES.MASS(IMAS,2)-1)+1
+                  END IF
+C
+                  MATRES.RMAS(IMAS,1) = MPOVA2.VPOCHA(J,K)
+C
+                ELSE IF (ICOMP.GT.13) THEN
+                  JMAS = ICOMP - 12
+                  MATRES.RMAS(IMAS,JMAS) = MPOVA2.VPOCHA(J,K)
+C
+                ELSE
+C
+                  MATRES.XCL(ICOMP,NNOEUD)=MPOVA2.VPOCHA(J,K)
+                  MATRES.FLAG((NNOEUD-1)*12+ICOMP)=NNOEUD
+                END IF
+C
+32            CONTINUE
+31          CONTINUE
+C
+            WRITE(6,*)'FIN D IMPRESSION'
+            DO 34 IN = 1 , NNT12 , 3
+                IF (MATRES.FLAG(IN  ).NE.0.OR.
+     *              MATRES.FLAG(IN+1).NE.0.OR.
+     *              MATRES.FLAG(IN+2).NE.0) THEN
+                      MATRES.FLAG(IN  ) = INT((IN-1)/12) + 1
+                      MATRES.FLAG(IN+1) = INT((IN-1)/12) + 1
+                      MATRES.FLAG(IN+2) = INT((IN-1)/12) + 1
+                END IF
+34          CONTINUE
+C
+            SEGDES IPT2
+            SEGDES MPOVA2
+            SEGDES MSOUP1
+C
+30      CONTINUE
+C
+        NMAS = IMAS
+C
+C
+C **********************************************************************
+C             LECTURE DU NOUVEAU CHAMLEM (CARACTERISTIQUES DU MATERIAU)
+C **********************************************************************
+C
+C
+C .................... CARACT : TABLEAU DES CARACTERISTIQUES
+C
+        NN1 = MCHEL1.IMACHE(/1)
+C
+        DO 700 I = 1 , NN1
+C
+          IPT3   = MCHEL1.IMACHE(I)
+          MCHAM1 = MCHEL1.ICHAML(I)
+C
+          SEGACT IPT3
+          NBE = IPT3.NUM(/2)
+C
+          SEGACT MCHAM1
+          NN2 = MCHAM1.IELVAL(/1)
+C
+          DO 713 II = 1 , NN2
+C
+            CALL ELLP08(MCHAM1.NOMCHE(II),ICARAC,IERROR)
+            IF (IERROR.NE.0) THEN
+              RETURN
+            END IF
+C
+            IF (ICARAC.NE.6) THEN
+              MELVA1 = MCHAM1.IELVAL(II)
+              SEGACT MELVA1
+               XCARAC = MELVA1.VELCHE(1,1)
+              SEGDES MELVA1
+            ELSE
+              MELVA1 = MCHAM1.IELVAL(II)
+              SEGACT MELVA1
+               IPP = MELVA1.IELCHE(1,1)
+               X1 = MCOORD.XCOOR((IPP-1)*(IDIM+1)+1)
+               X2 = MCOORD.XCOOR((IPP-1)*(IDIM+1)+2)
+               X3 = MCOORD.XCOOR((IPP-1)*(IDIM+1)+3)
+              SEGDES MELVA1
+            END IF
+C
+            DO 716 IE = 1 , NBE
+                INU1 = IPT3.NUM(1,IE)
+                INU2 = IPT3.NUM(2,IE)
+C
+                NCARAC = 0
+C
+                DO 717 III = 1 , NP2 , 2
+                    IN1 = MATRES.CORRES(III  )
+                    IN2 = MATRES.CORRES(III+1)
+                    IF (INU1.EQ.IN1.AND.INU2.EQ.IN2) THEN
+                      NCARAC = INT(III/2) + 1
+                    END IF
+C
+                    IF (INU1.EQ.IN2.AND.INU2.EQ.IN1) THEN
+                      NCARAC = INT(III/2) + 1
+                    END IF
+C
+717             CONTINUE
+C
+                IF (ICARAC.NE.6) THEN
+                  MATRES.CARACT(ICARAC,NCARAC) = XCARAC
+                ELSE
+                  MATRES.GAMA(1,NCARAC) = X1
+                  MATRES.GAMA(2,NCARAC) = X2
+                  MATRES.GAMA(3,NCARAC) = X3
+                END IF
+C
+716         CONTINUE
+C
+713       CONTINUE
+C
+          SEGDES MCHAM1
+          SEGDES IPT3
+C
+700     CONTINUE
+C
+C --------------------------  ENTREE DU MOMENT POLAIRE IP = IY + IZ
+C                             -------------------------------------
+        DO 40 I = 1 , NP
+            MATRES.CARACT ( 6, I ) = MATRES.CARACT ( 7, I)
+     *                             + MATRES.CARACT ( 8, I )
+40        CONTINUE
+C
+C --------------------------  CALCUL DE LA VALEUR REEL DE NPOI
+C                             --------------------------------
+        DO 50 I = 1 , NNT
+            IF (MATRES.NUMERO(I).EQ.NPOI) THEN
+              NNPOI = I
+            END IF
+50      CONTINUE
+C
+        SEGDES IPT1
+        SEGDES MCHPO1
+        SEGDES MCHEL1
+C
+C IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII
+C
+        IF (IMP.NE.0) THEN
+C
+C ----------------------------------------------------------------------
+C
+C           IMPRESSION DES TABLEAUX CREES A L'INTERFACE
+C
+C     - COOR   ( 3 , 2*NP )
+C     - CORRES ( 2*NP )
+C     - GAMA   ( 3 , NP )
+C     - CARACT (12 , NP )
+C     - XCL    (12 , NNT )
+C     - FLAG   ( 12*NNT )
+C     - NUMERO ( NNT )
+C     - MASS   ( NMAS , 3 )
+C     - RMAS   ( NMAS , 4)
+C
+C ----------------------------------------------------------------------
+C
+          WRITE (IMP,*) 'TABLEAU COOR :'
+          WRITE (IMP,*) '************'
+C
+          DO 980 I = 1 , 2*NP
+              WRITE (IMP,*) 'NOEUD ',I,':',
+     *        MATRES.COOR(1,I),MATRES.COOR(2,I),MATRES.COOR(3,I)
+980       CONTINUE
+C
+          WRITE (IMP,*) 'TABLEAU CORRES :'
+          WRITE (IMP,*) '**************'
+C
+          DO 981 I = 1 , 2*NP
+              WRITE (IMP,*) 'NOEUD ',I,':',MATRES.CORRES(I)
+981       CONTINUE
+C
+C
+          WRITE (IMP,*) 'TABLEAU NUMERO :'
+          WRITE (IMP,*) '**************'
+C
+          DO 987 I = 1 , NNT
+              WRITE (IMP,*) 'NOEUD ',I,':',MATRES.NUMERO(I)
+987       CONTINUE
+C
+          WRITE (IMP,*) 'TABLEAU GAMA :'
+          WRITE (IMP,*) '************'
+C
+          DO 982 I = 1 , NP
+              WRITE (IMP,*) 'POUTRE ',I,':',
+     *        MATRES.GAMA(1,I),MATRES.GAMA(2,I),MATRES.GAMA(3,I)
+982       CONTINUE
+C
+          WRITE (IMP,*) 'TABLEAU CARACT :'
+          WRITE (IMP,*) '**************'
+C
+          DO 983 I = 1 , NP
+              WRITE (IMP,*) 'E   : ',MATRES.CARACT ( 1 , I)
+              WRITE (IMP,*) 'NU  : ',MATRES.CARACT ( 2 , I)
+              WRITE (IMP,*) 'RHO : ',MATRES.CARACT ( 3 , I)
+              WRITE (IMP,*) 'SEC : ',MATRES.CARACT ( 4 , I)
+              WRITE (IMP,*) 'C   : ',MATRES.CARACT ( 5 , I)
+              WRITE (IMP,*) 'IP  : ',MATRES.CARACT ( 6 , I)
+              WRITE (IMP,*) 'IY  : ',MATRES.CARACT ( 7 , I)
+              WRITE (IMP,*) 'IZ  : ',MATRES.CARACT ( 8 , I)
+              WRITE (IMP,*) 'KCY : ',MATRES.CARACT ( 9 , I)
+              WRITE (IMP,*) 'KCZ : ',MATRES.CARACT (10 , I)
+              WRITE (IMP,*) 'CAM : ',MATRES.CARACT (11 , I)
+              WRITE (IMP,*) 'ETA : ',MATRES.CARACT (12 , I)
+983       CONTINUE
+C
+          WRITE (IMP,*) 'TABLEAU XCL :'
+          WRITE (IMP,*) '***********'
+C
+          DO 984 I = 1 , 12
+            DO 985 J = 1 , NNT
+              WRITE (IMP,*) I , J,':',MATRES.XCL (I,J)
+985         CONTINUE
+984       CONTINUE
+C
+          WRITE (IMP,*) 'TABLEAU FLAG :'
+          WRITE (IMP,*) '************'
+C
+          DO 986 I = 1 , 12*NNT
+              WRITE (IMP,*) 'VAL ',I,':',MATRES.FLAG ( I )
+986       CONTINUE
+C
+          WRITE(IMP,*)'NMAS',NMAS
+C
+          IF (NMAS.GT.0) THEN
+            DO 988 I = 1 , NMAS
+                WRITE (IMP,*) 'MASS (',I,',1) :',MATRES.MASS(I,1)
+                WRITE (IMP,*) 'MASS (',I,',2) :',MATRES.MASS(I,2)
+                WRITE (IMP,*) 'MASS (',I,',3) :',MATRES.MASS(I,3)
+                WRITE (IMP,*) 'MASS (',I,',4) :',MATRES.MASS(I,4)
+988         CONTINUE
+C
+            DO 989 I = 1 , NMAS
+                WRITE (IMP,*) 'RMAS (',I,',1) :',MATRES.RMAS(I,1)
+                WRITE (IMP,*) 'RMAS (',I,',2) :',MATRES.RMAS(I,2)
+                WRITE (IMP,*) 'RMAS (',I,',3) :',MATRES.RMAS(I,3)
+                WRITE (IMP,*) 'RMAS (',I,',4) :',MATRES.RMAS(I,4)
+989         CONTINUE
+          END IF
+C
+        END IF
+C
+C IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII
+C
+C ----------------------------------------------------------------------
+C
+C      APPEL DU PROGRAMME FORTRAN POUR LA RESOLUTION DU PROBLEME
+C
+C     TABLEAUX D'ENTREE :
+C
+C      COOR(3,2*NP), CORRES(2*NP), GAMA(3,NP), CARACT(12,NP),
+C      XCL(12,NNT) , FLAG (12*NNT), NUMERO (NNT) (NP NOMBRE DE POUTRES
+C                                    NNT NOMBRE REEL DE NOEUDS)
+C
+C     TABLEAUX DE SORTIE :
+C
+C     ZA1(24*NP,24*NP) , ZSM (24*NP) , ZXX (24*NP)
+C
+C ----------------------------------------------------------------------
+C
+      CALL ELLP11(MATRES.COOR   , MATRES.CORRES  , MATRES.GAMA  ,
+     *            MATRES.CARACT , MATRES.XCL     , MATRES.FLAG  ,
+     *            MATRES.NUMERO , MATRES.ZA1     , MATRES.ZSM   ,
+     *            MATRES.ZXX    , MATRES.ZSOL    , MATITE.ITERA ,
+     *            MATRES.MASS   , MATRES.RMAS    , NMAS         ,
+     *            MATITE.SA     , MATITE.SB      , MATITE.SU    ,
+     *            MATITE.SR     , MATITE.SQ      , MATITE.SDELTA,
+     *            MATITE.SDELT1 , MATITE.SP      , MATITE.SP1   ,
+     *            MATITE.SCH    , MATITE.SCH1    , MATRES.IPIVO ,
+     *            MATRES.JPIVO  , MATRES.IAUX    , MLREE1.PROG  ,
+     *  NNPOI,ICHAR,NP,NP24,NP48,NNT,NNT12,NFRQ,S0,XPI,METH,IMP)
+C
+         ZS = S0 + (0.D0 , 1.D0 ) * 2. * XPI * MLREE1.PROG(1)
+C
+C
+C IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII
+        IF (IMP.NE.0) THEN
+          WRITE (IMP,*)'VECTEUR SOLUTION ZSOL (PREMIERE FREQUENCE) :'
+          DO 42 J = 1 , NNT12
+             WRITE (IMP,*) J,MATRES.ZSOL(J,1)
+42        CONTINUE
+C
+        END IF
+C IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII
+C
+        IF (IDEPL.EQ.0) THEN
+C
+         JG = NFRQ
+         SEGINI MLREE2
+         SEGINI MLREE3
+         SEGINI MLREE4
+C
+         DO 100 I = 1 , NFRQ
+C
+             MLREE2.PROG(I) = ABS(MATRES.ZSOL((NNPOI-1)*12+ICHAR,I))
+C
+             ZT = MATRES.ZSOL((NNPOI-1)*12+ICHAR,I)
+             PRZT = ZT
+             PIZT = ZT*(0.D0,-1.D0)
+C
+             IF (ABS(PRZT).LT.XPETIT.AND.ABS(PIZT).LT.XPETIT) THEN
+               MLREE3.PROG(I) = 0.D0
+             ELSE
+               MLREE3.PROG(I) = ATAN2(PIZT,PRZT)*180.D0/XPI
+             END IF
+C
+             MLREE4.PROG(I) = MATITE.ITERA(I)
+100      CONTINUE
+C
+C ------------------- OUVERTURE DU SEGMENT RESULTAT TYPE EVOLUTION
+C                     --------------------------------------------
+C
+         N = 3
+         SEGINI MEVOL1
+         SEGINI KEVOL1
+         SEGINI KEVOL2
+         SEGINI KEVOL3
+C
+         MEVOL1.ITYEVO = 'REEL'
+C        MEVOL1.IEVTEX = 'OPERATEUR ELFE LAPLACE POUTRE'
+         MEVOL1.IEVOLL(1) = KEVOL1
+         MEVOL1.IEVOLL(2) = KEVOL2
+         MEVOL1.IEVOLL(3) = KEVOL3
+C
+C
+         KEVOL1.IPROGX = MLREE1
+         KEVOL1.IPROGY = MLREE2
+C        KEVOL1.NUMEVY = 'MODU'
+         KEVOL1.TYPX   = 'LISTREEL'
+         KEVOL1.TYPY   = 'LISTREEL'
+         KEVOL1.NOMEVX = 'FREQ (HZ)'
+         KEVOL1.NOMEVY = CHAR
+C        KEVOL1.KEVTEX = '********'
+C
+C
+         KEVOL2.IPROGX = MLREE1
+         KEVOL2.IPROGY = MLREE3
+C        KEVOL2.NUMEVY = 'PHAS'
+         KEVOL2.TYPX   = 'LISTREEL'
+         KEVOL2.TYPY   = 'LISTREEL'
+         KEVOL2.NOMEVX = 'FREQ (HZ)'
+         KEVOL2.NOMEVY = CHAR
+C        KEVOL2.KEVTEX = '********'
+C
+         KEVOL3.IPROGX = MLREE1
+         KEVOL3.IPROGY = MLREE4
+         KEVOL3.NUMEVY = 'ITER'
+         KEVOL3.TYPX   = 'LISTREEL'
+         KEVOL3.TYPY   = 'LISTREEL'
+         KEVOL3.NOMEVX = 'FREQ (HZ)'
+         KEVOL3.NOMEVY = CHAR
+C        KEVOL3.KEVTEX = 'ITERATION'
+C
+         CALL ECROBJ('EVOLUTION',MEVOL1)
+C
+         SEGDES KEVOL1
+         SEGDES KEVOL2
+         SEGDES KEVOL3
+         SEGDES MEVOL1
+         SEGDES MLREE2
+         SEGDES MLREE3
+         SEGDES MLREE4
+C
+        ELSE
+C
+         DO 230 I = 1 , 2
+           DO 240 J = 1 , NBELEM
+             IP1 = IPT4.NUM(I,J)
+             MATRES.XCOR(I,1,J) = MCOORD.XCOOR((IP1-1)*(IDIM+1)+1)
+             MATRES.XCOR(I,2,J) = MCOORD.XCOOR((IP1-1)*(IDIM+1)+2)
+             MATRES.XCOR(I,3,J) = MCOORD.XCOOR((IP1-1)*(IDIM+1)+3)
+240        CONTINUE
+230      CONTINUE
+C
+         CALL ELLP23(MATRES.CARACT , MATRES.COOR    , MATRES.GAMA  ,
+     *               MATRES.ZXX    , MATRES.XCOR    , MATRES.VALDE1,
+     *               MATRES.VALDE2 , ZS , NP , NBELEM ,XPI )
+C
+         N1 = 1
+         N2 = 6
+         L1=0
+         N3=0
+         SEGINI MCHEL1
+         SEGINI MCHAM1
+         MCHEL1.IMACHE(1) = IPT4
+         MCHEL1.CONCHE(1) = ' '
+         MCHEL1.ICHAML(1) = MCHAM1
+C
+         MCHAM1.NOMCHE(1) = 'UXM'
+         MCHAM1.NOMCHE(2) = 'UYM'
+         MCHAM1.NOMCHE(3) = 'UZM'
+         MCHAM1.NOMCHE(4) = 'UXP'
+         MCHAM1.NOMCHE(5) = 'UYP'
+         MCHAM1.NOMCHE(6) = 'UZP'
+         MCHAM1.TYPCHE(1) = 'REAL*8'
+         MCHAM1.TYPCHE(2) = 'REAL*8'
+         MCHAM1.TYPCHE(3) = 'REAL*8'
+         MCHAM1.TYPCHE(4) = 'REAL*8'
+         MCHAM1.TYPCHE(5) = 'REAL*8'
+         MCHAM1.TYPCHE(6) = 'REAL*8'
+C
+         N1PTEL = 2
+         N1EL = NBELEM
+         N2PTEL = 0
+         N2EL = 0
+C
+         SEGINI MELVA1
+         SEGINI MELVA2
+         SEGINI MELVA3
+         SEGINI MELVA4
+         SEGINI MELVA5
+         SEGINI MELVA6
+C
+         MCHAM1.IELVAL(1) = MELVA1
+         MCHAM1.IELVAL(2) = MELVA2
+         MCHAM1.IELVAL(3) = MELVA3
+         MCHAM1.IELVAL(4) = MELVA4
+         MCHAM1.IELVAL(5) = MELVA5
+         MCHAM1.IELVAL(6) = MELVA6
+C
+         DO  200 I = 1 , 2
+           DO 210 J = 1 , NBELEM
+             MELVA1.VELCHE(I,J) = VALDE1 ( I , J , 1 )
+             MELVA2.VELCHE(I,J) = VALDE1 ( I , J , 2 )
+             MELVA3.VELCHE(I,J) = VALDE1 ( I , J , 3 )
+             MELVA4.VELCHE(I,J) = VALDE2 ( I , J , 1 )
+             MELVA5.VELCHE(I,J) = VALDE2 ( I , J , 2 )
+             MELVA6.VELCHE(I,J) = VALDE2 ( I , J , 3 )
+210        CONTINUE
+200      CONTINUE
+C
+*         NSOUPO = 1
+*         NAT=1
+*         SEGINI MCHPO1
+         CALL CHAMPO(MCHEL1,1,MCHPO1,IRET)
+         CALL ECROBJ('CHPOINT',MCHPO1)
+C
+         SEGDES MELVA1
+         SEGDES MELVA2
+         SEGDES MELVA3
+         SEGDES MELVA4
+         SEGDES MELVA5
+         SEGDES MELVA6
+         SEGDES MCHAM1
+         SEGDES MCHEL1
+         SEGDES MCHPO1
+C
+        END IF
+C
+        SEGDES MLREE1
+        SEGSUP MATRES
+        SEGSUP MATITE
+C
+        END
+
+
+
+
+
+
+
+

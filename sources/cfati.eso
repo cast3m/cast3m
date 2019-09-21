@@ -1,0 +1,435 @@
+C CFATI     SOURCE    PV        17/12/08    21:15:35     9660
+C CFATI
+      SUBROUTINE CFATI (WRK52,WRK53,WRK54,WRKK2,NSTRS1,NVARI,
+     1                   ICARA,JDIM,IFOUR2)
+C CMAZAR    SOURCE    KICH      01/03/26    21:24:09     4117
+C      SUBROUTINE CMAZAR (WRK52,WRK53,WRK54,WRKK2,NSTRS1,NVARI,
+C     1                   ICARA,JDIM,IFOUR2)
+C MAZARS    SOURCE    AM        98/12/23    21:38:30     3409
+*======================================================================
+* DB
+*     FOR THE LOCAL CASE CALLED by COML8 --> CFATTT --> CFATI
+*     New source: one nonlocal damage material model added:
+*     Fatigue damage
+*     This routine is inspired based on mazars.eso
+*
+C Goal: allowing cyclic cumulative damage calculation under simple fatigue loading
+C
+C           Description:
+C           1. The threshold is maintiened allowing an endurance limit but not tested
+C           2. The equivalent strain is changed replaced by the geometric average of the positive stresses
+C              induced strain ( no damage growth due to compression induced tension - Poisson effect)
+C           3. The damage rate given in [1] is integrated over a cycle with
+C              dD/dN = f(D) eps_a^(beta+1)/(beta+1)
+C           4. Two expression of the f(D) funcion are implemented
+C              a) LOI = 2. power law as chosen in [2]
+C              b) LOI = 3. power law including a damage rate acceleration as describe in [1]
+C
+C           References:
+C           [1] D. Bodin, G. Pijaudier-Cabot, C. de La Roche, J.-M Piau and A. Chabot, (2004)
+C               A Continuum Damage Approach to Asphalt Concrete Fatigue Modelling, Journal of
+C                Engineering Mechanics, ASCE, vol. 130 (6), pp. 700-708.
+C
+C           [2] Paas, R. H. J. W., Scheurs, P. J. G., and Brekelmans, W. A. M. (1993). ‘A
+C               continuum approach to brittle and fatigue damage: Theory and numerical
+C               procedures.’ Int. J. Solids Struct., 30~4!, 579–599.
+C
+* DB
+*
+*======================================================================
+C
+C
+C
+C
+C
+C     variables en entree
+C
+C
+C     WRK0     pointeur sur un segment deformation au pas precedent
+C
+C     WRK1     pointeur sur un segment increment de deformation
+C
+C     WRKK2     pointeur sur un segment variables internes au pas precedent
+C
+C     WRK5      pointeur sur un segment de deformations inelastiques
+C
+C     XMATER     constantes du materiau
+C
+C     NSTRS1      nombre de composantes dans les vecteurs des contraintes
+C                                        et les vecteurs des deformations
+C
+C     NVARI      nombre de variables internes (doit etre egal a 2)
+C
+C     NMATT      nombre de constantes du materiau
+C
+C     ISTEP      flag utilise pour separer les etapes dans un calcul non local
+C                ISTEP=0 -----> calcul local
+C                ISTEP=1 -----> calcul non local etape 1 on calcule les seuils
+C                ISTEP=2 -----> calcul non local etape 2 on continue le calcul
+C                               a partir des seuils moyennes
+C
+C Modif L.Bode - 14/10/92
+C Nouveaux parametres en entree
+C     JDIM       Dimension de travail
+C                ( Coques JDIM =2 , Massifs JDIM = IDIM )
+C     IFOUR2     Type de formulation
+C                ( Coques IFOUR2 = -2 => contraintes planes ,
+C                  Massifs IFOUR2 = IFOUR)
+C
+C     variables en sortie
+C
+C     VARINF      variables internes finales
+C
+C     SIGMAF      contraintes finales
+C
+C     C. LA BORDERIE MARS 1992
+C     declaration des variables
+C
+C
+      IMPLICIT REAL*8(A-H,O-Z)
+-INC CCOPTIO
+-INC DECHE
+*
+      SEGMENT WRKK2
+         REAL*8 EPSILI(NSTRS1)
+      ENDSEGMENT
+C Modif L.Bode - 14/10/92
+      SEGMENT WRK3
+        REAL*8 EPSILO(NSTRS1)
+      ENDSEGMENT
+C Definition dynamique de EPSILO
+C Fin modif L.Bode
+      INTEGER NSTRS1,NVARI
+      REAL*8 EPS33(3,3),EPSIPP(3),EPSILT(3),VALP33(3,3)
+      REAL*8 SIGP(3),SIGPT(3),SIGPC(3),TRSIGT,TRSIGC
+      REAL*8 YOUN,XNU,EPSD0
+C ajout bodin 14 02 2006
+      REAL*8 BETA,LOI
+C pour la loi L2R
+      REAL*8 C,ALFA
+C pour la loi L3R
+      REAL*8 ALFA1,ALFA2,ALFA3
+C fin ajout bodin 14 02 2006
+      INTEGER ISTRS,JSTRS,KCAS,IRTD
+      REAL*8 XZERO,UN,DEUX,TROIS
+      REAL*8 EPSTL0,EPSTM0
+      REAL*8 DINI,D,EPSTIL,EPSTIM,ALFAT,ALFAC,GAMMA
+      REAL*8 dt1
+C Fin modif Bodin - 26-09-2005
+      PARAMETER (XZERO=0.D0,UN=1.D0,DEUX=2.D0,TROIS=3.D0)
+
+C
+C
+C     recuperation des variables initiales dans les tableaux
+C
+C
+      N=NSTRS1
+      CMATE = 'ISOTROPE'
+      YOUN = XMAT(1)
+      XNU  = XMAT(2)
+      EPSD0= XMAT(5)
+      BETA = XMAT(6)
+      LOI  = XMAT(7)
+      C = XMAT(8)
+      ALFA = XMAT(9)
+      ALFA1 = XMAT(10)
+      ALFA2 = XMAT(11)
+      ALFA3 = XMAT(12)
+C     ajout bodin 17-11-2000
+C     introduction de la variable EPSTIMI déformation équivalent initiale
+      EPSTL0 = VAR0(1)
+C     fin ajout bodin
+      DINI = VAR0(2)
+
+C ajout bodin 26 09 2005
+C récupération des temps temp0 et tempf qui sont dans le segment WRK52
+C et calcul du pas de temps dt1
+C        print*,'temps temp0 ',temp0
+C       print*,'temps tempf ',tempf
+         dt1=tempf-temp0
+C fin ajout bodin 26 09 2005
+
+
+C
+C     calcul des seuils
+C
+C
+C        calcul de la deformation totale
+C
+      SEGINI WRK3
+      DO 100 ISTRS=1,NSTRS1
+         EPSILO(ISTRS)=EPSILI(ISTRS)+DEPST(ISTRS)
+100   CONTINUE
+C
+C        calcul des deformations principales
+C
+C
+C        on reecrit les deformations sous forme matricielle
+C
+C Modif L.Bode - 14/10/92
+C Rajout de IFOUR2 en argument de ENDOCA
+*      print*,'on appelle ENDOCB'
+      CALL ENDOCB (EPSILO,EPS33,2,IFOUR2)
+*      print*,'apres endocb'
+C Fin modif L.Bode
+C
+C        et on diagonalise
+C
+C Modif L.Bode - 14/10/92
+C Pour les elts Coques, on travaille en contraintes planes => JDIM =2
+C Pour les elts Massifs JDIM =IDIM
+*      print*,'avant JACOB3'
+      CALL JACOB3 (EPS33,JDIM,EPSIPP,VALP33)
+*      print*,'apres JACOB3'
+C Fin modif L.Bode
+      IF (ISTEP .EQ. 0 .OR. ISTEP.EQ.2) THEN
+C
+C       on calcule la matrice de hooke et les contraintes ppales
+C
+C         CMATE = 'ISOTROPE'
+C        KCAS=1
+C Modif L.Bode - 14/10/92
+C IFOUR --> IFOUR2 dans appel DOHMAS
+C*         print*,'avant dohmas'
+C         CALL DOHMAS(XMAT,CMATE,IFOUR2,NSTRS,KCAS,DDHOOK,IRTD)
+C*         print*,'apres dohmas'
+C Fin modif L.Bode
+C         DO 200 ISTRS=1,3
+C            SIGP(ISTRS)= XZERO
+C            DO 210 JSTRS=1,3
+C               SIGP(ISTRS)=SIGP(ISTRS)+DDHOOK(ISTRS,JSTRS)*EPSIPP(JSTRS)
+C210         CONTINUE
+C200      CONTINUE
+      END IF
+C
+C        on complete la deformation dans le cas des contraintes planes
+C
+C Modif L.Bode - 14/10/92
+C IFOUR remplace par IFOUR2
+      IF (IFOUR2.EQ. -2) THEN
+         EPSIPP(3)= -(EPSIPP(1) + EPSIPP(2))*XNU / (UN-XNU)
+      END IF
+C Fin modif L.Bode
+C
+C        on calcule le epsilontild
+Cmodif bodin 6 juillet 2001 pour le calcul de epsilon equivalente
+C       on calcule la matrice de hooke et les contraintes ppales
+C
+         CMATE = 'ISOTROPE'
+         KCAS=1
+C Modif L.Bode - 14/10/92
+C IFOUR --> IFOUR2 dans appel DOHMAS
+*         print*,'avant dohmas'
+         CALL DOHMAS(XMAT,CMATE,IFOUR2,LHOOK,KCAS,DDHOOK,IRTD)
+*         print*,'apres dohmas'
+C Fin modif L.Bode
+
+         DO 200 ISTRS=1,3
+            SIGP(ISTRS)= XZERO
+            DO 210 JSTRS=1,3
+               SIGP(ISTRS)=SIGP(ISTRS)+DDHOOK(ISTRS,JSTRS)*EPSIPP(JSTRS)
+210         CONTINUE
+200      CONTINUE
+C
+C        on calcule le signe des contraintes elastiques
+C
+            DO 300 ISTRS=1,3
+               IF (SIGP(ISTRS).LT. XZERO) THEN
+                  SIGPC(ISTRS)=SIGP(ISTRS)
+                  SIGPT(ISTRS)=XZERO
+               ELSE
+                  SIGPT(ISTRS)=SIGP(ISTRS)
+                  SIGPC(ISTRS)=XZERO
+               END IF
+300         CONTINUE
+            TRSIGT=SIGPT(1)+SIGPT(2)+SIGPT(3)
+            TRSIGC=SIGPC(1)+SIGPC(2)+SIGPC(3)
+C
+C        on calcule les deformations dues aux contraintes positives
+C
+            DO 400 ISTRS=1,3
+               EPSILT(ISTRS)=(SIGPT(ISTRS)*(UN+XNU)-TRSIGT*XNU)/YOUN
+400         CONTINUE
+C
+       EPSTIL=MAX( XZERO , EPSILT(1) )**2 +
+     1       MAX( XZERO , EPSILT(2) )**2 +
+     2       MAX( XZERO , EPSILT(3) )**2
+      EPSTIL=SQRT (EPSTIL)
+C
+C       EPSTIL=MAX( XZERO , EPSIPP(1) )**2 +
+C     1       MAX( XZERO , EPSIPP(2) )**2 +
+C     2       MAX( XZERO , EPSIPP(3) )**2
+C      EPSTIL=SQRT (EPSTIL)
+C fin modif bodin 6 juillet 2001 pour le calcul de epsilon equivalente
+      IF (ISTEP .EQ. 0) THEN
+         EPSTIM=EPSTIL
+         EPSTM0=EPSTL0
+         VARF(1)=EPSTIL
+      ELSE IF (ISTEP .EQ. 1) THEN
+         VARF(2)=DINI
+         VARF(1)=EPSTIL
+C ajout bodin 13-03-2001 pour une nouvelle variable interne
+C VARx(3) introduite pour garder la mémoire de la déf eq initiale
+C marche en non local si le champ de EPSTL0 est non local par exemple identiquement nul
+         VARF(3)=EPSTL0
+C fin ajout bodin 13-03-2001
+      ELSE IF (ISTEP .EQ. 2) THEN
+C ajout bodin 13-03-2001 pour une nouvelle variable interne
+C VARx(3) introduite pour garder la mémoire de la déf eq initiale
+         EPSTM0=VAR0(3)
+C fin ajout bodin 13-03-2001
+         EPSTIM=VAR0(1)
+         VARF(1)=EPSTIM
+      ELSE
+         PRINT*,'DANS MAZARS ISTEP = 0,1,2 ET PAS ',ISTEP
+      END IF
+      IF ( (ISTEP .EQ. 0) .OR. (ISTEP .EQ. 2)) THEN
+C
+C      on calcule l'endommagement et les contraintes
+C
+C
+C        on calcule ALFAT ALFAC DT et DC puis D
+C        dans le cas ou le seuil initial est depasse
+C
+         IF ( EPSTIM .GT. EPSD0) THEN
+C
+C      calcul de l'endommagement
+C
+C
+C        on calcule le signe des contraintes elastiques
+C
+C            DO 300 ISTRS=1,3
+C               IF (SIGP(ISTRS).LT. XZERO) THEN
+C                  SIGPC(ISTRS)=SIGP(ISTRS)
+C                  SIGPT(ISTRS)=XZERO
+C               ELSE
+C                  SIGPT(ISTRS)=SIGP(ISTRS)
+C                  SIGPC(ISTRS)=XZERO
+C               END IF
+C300         CONTINUE
+C            TRSIGT=SIGPT(1)+SIGPT(2)+SIGPT(3)
+C            TRSIGC=SIGPC(1)+SIGPC(2)+SIGPC(3)
+C
+C        on calcule les deformations dues aux contraintes positives
+C
+C           DO 400 ISTRS=1,3
+C               EPSILT(ISTRS)=(SIGPT(ISTRS)*(UN+XNU)-TRSIGT*XNU)/YOUN
+C400         CONTINUE
+C
+C        on en deduit ALFAT et ALFAC
+C
+C            ALFAT = MAX(XZERO,EPSIPP(1))*EPSILT(1) +
+C     1              MAX(XZERO,EPSIPP(2))*EPSILT(2) +
+C     2              MAX(XZERO,EPSIPP(3))*EPSILT(3)
+C            ALFAT = ALFAT/(EPSTIL*EPSTIL)
+C            ALFAC = UN - ALFAT
+C            PRINT*,'alfat = ',ALFAT,' et alfac = ',ALFAC
+C            PRINT*,'alfa1=',A99,'beta1 =',B99,'C1 = ',C99
+C
+C       modification pour la bi ou tricompression
+C
+C            IF (TRSIGC.LT. -XPETIT .AND. TRSIGT.LT.XPETIT) THEN
+C               GAMMA=SIGPC(1)*SIGPC(1)+SIGPC(2)*SIGPC(2)+
+C     1                                 SIGPC(3)*SIGPC(3)
+C               GAMMA=-SQRT(GAMMA)/TRSIGC
+C               EPSTIM=EPSTIM*GAMMA
+C            END IF
+C
+C        amelioration de la reponse en cisaillement pour beta > 1.
+C
+C            IF (BETA .GT. UN) THEN
+C               IF ( ALFAT .GT. XPETIT ) THEN
+C                  ALFAT=ALFAT**BETA
+C               END IF
+C               IF ( ALFAC .GT. XPETIT ) THEN
+C                  ALFAC=ALFAC**BETA
+C               END IF
+C           END IF
+
+C
+C        on calcule DT et DC puis D
+C        dans le cas ou le seuil initial est depasse
+C
+C        on est oblige de verifier car on a pu multiplier par gamma
+C
+C        modif bodin 26-02-2001
+C        calcul incrémental pour le pas EPSTIM-EPSTIMI de déformation
+C        équivalente
+C
+C         PRINT*,'La def initiale est',EPSTM0
+C         PRINT*,'La def finale est',EPSTIM
+C
+          IF (LOI.EQ.DEUX) THEN
+                   D=((DINI**(1-ALFA))+
+     1                 ((C*(1-ALFA)/(BETA+1))*
+     2                  ((EPSTIM**(BETA+1))-(EPSD0**(BETA+1)))*(dt1*2)
+     3                 ))**(1/(1-ALFA))
+C
+          ELSE  IF (LOI.EQ.TROIS) THEN
+C on traite la loi L3R
+C calcul d'un term intermediaire
+           TERM_A= (((ALFA1*(UN -EXP(-1*((DINI/ALFA2)**ALFA3))))+
+     1               ((((EPSTIM**(BETA+1))-(EPSD0**(BETA+1)))
+     2                 /(BETA+UN))*(dt1*2))
+     3                )/ALFA1)
+C
+                        IF (TERM_A  .LT. UN)   THEN
+              D= ALFA2 *((-1*(LOG(UN - TERM_A)))**(UN/ALFA3))
+                         ELSE
+                          D=UN
+                         END IF
+C sinon roblème de définition de LOI
+                ELSE
+                WRITE(*,*) 'LOI doit etre egal à 2. ou 3.'
+                STOP
+          END IF
+C
+C           on borne la valeur de D a 0.99999
+C
+            D=MIN ( D , UN-1.D-05 )
+         ELSE
+C on n'a pas dépassé le seuil
+            D=XZERO
+         END IF
+C
+C           on teste la croissance de D
+C
+         D=MAX ( D , DINI )
+C
+C           on le stocke dans les variables internes finales
+C
+         VARF(2)= D
+C
+C           on calcule les contraintes finales
+C
+*         CALL MATVE1 (DDHOOK,EPSILO,NSTRS,NSTRS,SIGF,2)
+         DO istrs=1,NSTRS
+            SIGF(istrs)=0.d0
+         ENDDO
+         DO jstrs=1,NSTRS
+         DO istrs=1,nstrs
+          SIGF(jstrs)=SIGF(jstrs)+DDHOOK(jstrs,istrs)*epsilo(istrs)
+         ENDDO
+         ENDDO
+
+
+         DO 500 ISTRS=1,NSTRS
+            SIGF(ISTRS)=SIGF(ISTRS)*(UN-D)
+500      CONTINUE
+C
+C         et les deformations inelastiques finales
+C
+         DO 600 ISTRS=1,NSTRS
+            EPINF(ISTRS)=EPSILO(ISTRS)*D
+600      CONTINUE
+
+      END IF
+      SEGSUP WRK3
+      RETURN
+      END
+
+
+
+
+
+

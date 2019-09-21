@@ -1,0 +1,263 @@
+C CHABAT    SOURCE    FANDEUR   16/11/30    21:15:03     9222
+
+C=======================================================================
+C=                            C H A B A T                              =
+C=                            -----------                              =
+C=                                                                     =
+C=  Fonction :                                                         =
+C=  ----------                                                         =
+C=   Calcul des flux equivalents a des sources volumiques dans le cas  =
+C=   des elements BARRE (THERMIQUE) et TUYAU (ADVECTION)               =
+C=                                                                     =
+C=  Parametres :  (E)=Entree  (S)=Sortie                               =
+C=  ------------                                                       =
+C=   IPMODL  (E)   Pointeur du MMODEL a traiter                        =
+C=   IFORMU  (E)   Entier indiquant la formulation du modele a traiter =
+C=   IPCHSO  (E)   Pointeur du MCHAML de sources                       =
+C=   IPCHEB  (E)   Pointeur du MCHAML de CARACTERISTIQUES              =
+C=                 (necessaire pour les elements BARRes et TUYAux)     =
+C=   ISUPCH  (E)   Support des champs en entree                        =
+C=   NOMDUA  (E)   Nom de la composante du champ de flux equivalents   =
+C=   IPCHAL  (S)   Pointeur du champ aux noeuds des flux equivalents   =
+C=======================================================================
+
+      SUBROUTINE CHABAT (IPMODL,IFORMU, IPCHSO,IPCHEB,ISUPCH, NOMDUA,
+     &                   IPCHAL)
+
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+
+-INC CCOPTIO
+-INC CCREEL
+
+-INC SMCOORD
+-INC SMCHAML
+-INC SMELEME
+-INC SMINTE
+-INC SMMODEL
+
+      SEGMENT INFO
+        INTEGER INFELL(JG)
+      ENDSEGMENT
+
+      SEGMENT MMAT1
+        REAL*8 XEL(3,NBPTEL),AEL(NBPTEL,NBPTEL)
+      ENDSEGMENT
+
+      CHARACTER*(*) NOMDUA
+
+      MMODEL = IPMODL
+**      SEGACT,MMODEL   <- Modele actif en E/S
+      NSOU = KMODEL(/1)
+
+      MCHELM = IPCHAL
+c*      SEGACT,MCHELM   <- Champ par element actif et modifiable en E/S
+c*      NSZC = MCHELM.IMACHE(/1)   <- On a ici : NSZC = NSOU
+
+      MCHEL1 = IPCHSO
+c*      SEGACT,MCHEL1   <- Champ par element actif en E/S
+      NSZ1 = MCHEL1.IMACHE(/1)
+
+      MCHEL2 = IPCHEB
+c*      SEGACT,MCHEL2   <- Champ par element actif en E/S
+      NSZ2 = MCHEL2.IMACHE(/1)
+
+C  BOUCLE SUR LES ZONES ELEMENTAIRES DU MODELE (ISOU)
+C ====================================================
+      DO 100 ISOU = 1, NSOU
+
+C  Modele elementaire ISOU
+C =====
+        IMODEL = mmodel.KMODEL(ISOU)
+c*        SEGACT,IMODEL
+C =====
+C  Recherche dans le MCHAML des sources (IPCHSO) de la sous-zone
+C  associee au modele elementaire ISOU (IMAMOD et CONMOD), puis
+C  recuperation des valeurs du champ elementaire de sources (MELVA1)
+C =====
+        MELVA1 = 0
+        DO is = 1, NSZ1
+          IF (MCHEL1.IMACHE(is).EQ.imodel.IMAMOD .AND.
+     &        MCHEL1.CONCHE(is).EQ.imodel.CONMOD) THEN
+            mchaml = MCHEL1.ICHAML(is)
+            SEGACT,mchaml
+c il faudrait chercher la composante si le champ en a plus d'une.
+            MELVA1 = mchaml.IELVAL(1)
+            SEGDES,mchaml
+            GOTO 10
+          ENDIF
+        ENDDO
+ 10     CONTINUE
+        IF (MELVA1.EQ.0) GOTO 100
+C =====
+C  Recherche dans le MCHMAL des caracteristiques (IPCHEB) du
+C  maillage (IMAMOD) associe au modele elementaire ISOU, puis
+C  recuperation du MCHAML elementaire associe (MELVA2)
+C =====
+        MELVA2 = 0
+        DO is = 1, NSZ2
+          IF (MCHEL2.IMACHE(is).EQ.imodel.IMAMOD .AND.
+     &        MCHEL2.CONCHE(is).EQ.imodel.CONMOD) THEN
+            mchaml = MCHEL2.ICHAML(is)
+            SEGACT,mchaml
+            NCOELE = mchaml.NOMCHE(/2)
+            IPOSI = 0
+            CALL PLACE(mchaml.NOMCHE,NCOELE,IPOSI,'SECT')
+            IF (IPOSI.NE.0) THEN
+              MELVA2 = mchaml.IELVAL(IPOSI)
+            ENDIF
+            SEGDES,mchaml
+            GOTO 20
+          ENDIF
+        ENDDO
+ 20     CONTINUE
+        IF (MELVA2.EQ.0) THEN
+          MOTERR(1:4) = 'SECT'
+          MOTERR(5:8) = 'CARA'
+          CALL ERREUR(77)
+          GOTO 100
+        ENDIF
+C =====
+C  Informations sur l'element fini du modele ISOU
+C =====
+        NEF    = imodel.NEFMOD
+        MELEME = imodel.IMAMOD
+        IF (IFORMU.EQ.1 .OR. IFORMU.EQ.2) THEN
+c*???          CALL TSHAPE(NEF,'NOEUDS',IPINTE)
+          CALL TSHAPE(NEF,'GAUSS',IPINTE)
+        ELSE
+          IF (imodel.INFMOD(/1).LT.2+ISUPCH) THEN
+            CALL ELQUOI(NEF,0,ISUPCH,ipinf,imodel)
+            IF (IERR.NE.0) GOTO 100
+            info   = ipinf
+            IPINTE = info.INFELL(11)
+            SEGSUP,info
+          ELSE
+            IPINTE = imodel.INFMOD(2+ISUPCH)
+          ENDIF
+        ENDIF
+C =====
+C  3.6 - Calcul des flux nodaux equivalents (segment MELVAL)
+C =====
+C  3.6.1 - Recuperation d'informations sur le maillage elementaire
+        MELEME = imodel.IMAMOD
+        SEGACT,MELEME
+        NBPTEL = meleme.NUM(/1)
+        NBELT  = meleme.NUM(/2)
+C  3.6.2 - Recuperation d'informations sur l'element fini du maillage
+        MINTE = IPINTE
+        SEGACT,MINTE
+        NBPGAU = minte.POIGAU(/1)
+c*        NBNO   = minte.SHPTOT(/2)
+C  3.6.3 - Activation du MCHAML contenant les valeurs des sources
+        SEGACT,MELVA1
+        NBPTE1 = MELVA1.VELCHE(/1)
+        NEL1   = MELVA1.VELCHE(/2)
+C  3.6.4 - Element fini BARRe : recuperation de la section
+        SEGACT,MELVA2
+        IF (IFOMOD.NE.0 .AND. IFOMOD.NE.1) THEN
+          iBarre = 1
+          iVA1 = MELVA2.VELCHE(/1)
+          iMin1 = MIN(1,iVA1)
+          iMin2 = MIN(2,iVA1)
+          iVA2 = MELVA2.VELCHE(/2)
+        ELSE
+          iBarre = 0
+          SMoy = 1.D0
+        ENDIF
+C  3.6.5 - Initialisation du segment de travail MMAT1
+        SEGINI,MMAT1
+C  3.6.6 - Initialisation du segment resultat MELVAL des valeurs
+C          des flux nodaux pour chaque element du maillage (IMAMOD)
+        N1PTEL = NBPTEL
+        N1EL   = NBELT
+        N2PTEL = 0
+        N2EL   = 0
+        SEGINI,MELVAL
+C  3.6.7 - Boucle sur les elements du maillage elementaire IMAMOD
+        DO iELT = 1, NBELT
+          CALL ZERO(AEL,NBPTEL,NBPTEL)
+          CALL DOXE(XCOOR,IDIM,NBPTEL,meleme.NUM,iELT,XEL)
+          IF (iBarre.EQ.1) THEN
+            i = MIN(iELT,iVA2)
+            SMoy = (MELVA2.VELCHE(iMin1,i)+MELVA2.VELCHE(iMin2,i))*0.5D0
+          ENDIF
+          IF (IDIM.EQ.3) THEN
+            DO iGau = 1, NBPGAU
+              DLX = XZERO
+              DLY = XZERO
+              DLZ = XZERO
+              DO i = 1, NBPTEL
+                r_z = minte.SHPTOT(2,i,iGau)
+                DLX = DLX + r_z * XEL(1,i)
+                DLY = DLY + r_z * XEL(2,i)
+                DLZ = DLZ + r_z * XEL(3,i)
+              ENDDO
+              Volu = SMoy * SQRT(DLX*DLX+DLY*DLY+DLZ*DLZ)
+     &                    * minte.POIGAU(iGau)
+              DO i = 1, NBPTEL
+                r_z = minte.SHPTOT(1,i,iGau) * Volu
+                DO j = 1, NBPTEL
+                  AEL(i,j) = AEL(i,j) + minte.SHPTOT(1,j,iGau) * r_z
+                ENDDO
+              ENDDO
+            ENDDO
+          ELSE IF (IDIM.EQ.2) THEN
+            DO iGau = 1, NBPGAU
+              DLX = XZERO
+              DLY = XZERO
+              DO i = 1, NBPTEL
+                r_z = minte.SHPTOT(2,i,iGau)
+                DLX = DLX + r_z * XEL(1,i)
+                DLY = DLY + r_z * XEL(2,i)
+              ENDDO
+              Volu = SMoy*SQRT(DLX*DLX+DLY*DLY)*POIGAU(iGau)
+              DO i = 1, NBPTEL
+                r_z = minte.SHPTOT(1,i,iGau) * Volu
+                DO j = 1,NBPTEL
+                  AEL(i,j) = AEL(i,j) + minte.SHPTOT(1,j,iGau) * r_z
+                ENDDO
+              ENDDO
+            ENDDO
+          ENDIF
+          IEMIN = MIN(NEL1,iELT)
+          DO i = 1, NBPTEL
+            r_z = XZERO
+            DO j = 1, NBPTEL
+              k = MIN(NBPTE1,j)
+              r_z = r_z + MELVA1.VELCHE(k,IEMIN) * AEL(j,i)
+            ENDDO
+            melval.VELCHE(i,iElt) = r_z
+          ENDDO
+        ENDDO
+C  3.6.8 - Fin du traitement
+        SEGSUP,MMAT1
+        SEGDES,MELEME,MINTE
+        SEGDES,MELVAL,MELVA1,MELVA2
+C =====
+C  Initialisation du MCHAML des flux de chaleur nodaux equivalents
+C  (MCHAML) associe au modele elementaire ISOU (maillage IMAMOD)
+C  Remplissage des donnees associees a MCHAML dans MCHELM (global)
+C =====
+        N2 = 1
+        SEGINI,MCHAML
+        mchaml.NOMCHE(1) = NOMDUA
+        mchaml.TYPCHE(1) = 'REAL*8'
+        mchaml.IELVAL(1) = MELVAL
+        SEGDES,MCHAML
+
+        mchelm.CONCHE(ISOU) = imodel.CONMOD
+        mchelm.IMACHE(ISOU) = MELEME
+        mchelm.ICHAML(ISOU) = MCHAML
+        mchelm.INFCHE(ISOU,3) = NIFOUR
+        mchelm.INFCHE(ISOU,6) = 1
+
+C===
+ 100  CONTINUE
+C===
+C Fin de la boucle sur les sous-modeles elementaires
+
+      RETURN
+      END
+
+

@@ -1,0 +1,1087 @@
+C KGFM12    SOURCE    BECC      11/05/26    21:15:48     6981
+      SUBROUTINE KGFM12(
+     &        LOGCON, NESP,
+     &        INDMET,
+     &        MLRMGA, MLRMPI, MLRPGA, MLRPPI,
+     &        PMIN,
+     &        ICHPHI, ICHALP,
+     &        IPHI1,IROF1,IVITF1,IPF1,
+     &        IFRMAF, IFRALF,
+     &        ICHPSU,ICHPDI,ICHPVO,
+     &        MELEMC,MELEMF,MELEFE,MELLIM,
+     &        ICHRES,
+     &        DT,
+     &        LOGNC,LOGAN,MESERR)
+C************************************************************************
+C
+C PROJET            :  CASTEM 2000
+C
+C NOM               :  KGFM12
+C
+C DESCRIPTION       :  Voir KONV15
+C
+C                      Cas deux dimensions, GFMP
+C
+C LANGAGE           :  FORTRAN 77 + ESOPE 2000 (avec estensions CISI)
+C
+C AUTEUR            :  A. BECCANTINI, DEN/DM2S/SFME/LTMF
+C
+C************************************************************************
+C
+C ENTREES
+C
+C 1) Parameters concerning some gas properties
+C
+C    GAM1, PINF1, GAM2, PINF2 : gamma and pinf for the "stiffened gases".
+C
+C 2) Numerical scheme
+C
+C INDMET  :     1     GODUNOV (exact Riemann solver)
+C
+C 3) Pointers for the CHPOINTs/MCHAML des variables
+C
+C ICHPHI   : chpoint CENTRE contenant (phi)
+C
+C IPHI1   : MCHAML sur "FACEL"  contenant phi
+C           ("gauche" et "droite");
+C
+C IROF1   : MCHAML sur "FACEL"  contenant la masse volumique 1
+C           ("gauche" et "droite");
+C
+C IVITF1  : MCHAML sur "FACEL"  contenant la vitesse 1 dans le repaire
+C           local (n,t) et les cosinus directeurs des repaire local;
+C
+C IPF1    : MCHAML sur "FACEL"  contenant la pression 1;
+C
+C
+C 4) Others
+C
+C ICHPSU  : CHPOINT "FACE" contenant la surface des faces
+C
+C ICHPDI  : CHPOINT "CENTRE" contenant le diametre minimum
+C           de chaque element
+C
+C ICHPVO  : CHPOINT "CENTRE" contenant le volume
+C           de chaque element
+C
+C 5) Pointeurs de MELEME de la table DOMAINE
+C
+C MELEMC  : MELEME 'CENTRE' du SPG des CENTRES
+C
+C MELEMF  : MELEME 'FACE' du SPG des FACES
+C
+C MELEFE  : MELEME 'FACEL' du connectivité FACES -> ELEM
+C
+C MELLIM  : MAILLAGE where the flux (or residu) will not be found
+C
+C SORTIES (il faudrait dire E/S)
+C
+C ICHRES  : pointeurs de CHPOINTs "FACE" des flux aux interfaces:
+C
+C DT      : pas de temps pour le respect de la CFL-like condition
+C           DT < DIAMEL /2 /max(Lambda_i)
+C           En maillage regulier cette condition garantie la
+C           non-interaction des ondes
+C
+C LOGNC   : (LOGICAL): si .TRUE. la methode de Newton-Rapson, utilisée
+C           dans pour la solution du probleme Riemann n'a pas bien
+C           marchéee
+C
+C LOGAN   : (LOGICAL): si .TRUE. une anomalie à été detectée
+C
+C MESERR  : pour l'ecriture des messages d'erreurs
+C
+C************************************************************************
+C
+C HISTORIQUE (Anomalies et modifications éventuelles)
+C
+C  04/12/2010 - Created
+*  25/05/2011 - Evolution in CAST3M
+C
+C************************************************************************
+C
+C
+C N.B.: On suppose qu'on a déjà controllé RO, P > 0
+C                                         Y \in (0,1)
+C       Si non il faut le faire!!!
+C
+C************************************************************************
+C
+C
+      IMPLICIT INTEGER(I-N)
+      INTEGER NESP, NESP1, IESP, INDMET, NPAR
+     &     , ICHPHI, ICHALP
+     &     , IPHI1, IROF1, IVITF1, IPF1
+     &     , ICHPSU, ICHPDI, ICHPVO, MELEMC, MELEMF, MELEFE, MELLIM
+     &     , IGEOMC, IGEOMF
+     &     , ICHRES
+     &     , NFAC
+     &     , NLCF, NGCEG,  NGCED, NLCEG, NLCED
+     &     , NGCF, NLCF1, SPG1, SPG2, NLFL
+     &     , NFRA
+      REAL*8 GAMMA, PINF, ALP, ALPI, RNUM, DEN, PMIN
+      REAL*8 DT, UNSDT, CELLT, CELLTM
+     &     , PHIG1C, PHIG1F, ROG1, UNG1, UTG1, PG1
+     &     , PHID1C, PHID1F, ROD1, UND1, UTD1, PD1
+     &     , SURF,CNX, CNY, CTX , CTY
+     &     , CELL, DIAMG, DIAMD, DIAM, VOLG, VOLD
+     &     , FLUCEL, FLUCED
+     &     , PHIPRO, PINFG, GAMG, PINFD, GAMD
+      REAL*8 RHO_B, P_B, U_B, D_B
+     &     ,RHO_A, P_A, U_A, D_A
+     &     ,RHO_B1, P_B1, U_B1, D_B1
+     &     ,RHO_A1, P_A1, U_A1, D_A1
+     &     ,ROG1G, PG1G, UNG1G
+     &     ,ROD1G, PD1G, UND1G
+     &     ,UINT
+C
+      LOGICAL LOGNC, LOGAN, LOGVAC, LOGDEB, LOGCON
+      CHARACTER*(40) MESERR
+      CHARACTER*(8) TYPE
+      PARAMETER (LOGDEB = .FALSE.)
+C
+C**** LES INCLUDES
+C
+-INC CCOPTIO
+-INC SMCOORD
+-INC SMELEME
+-INC SMCHAML
+C     Normal and tangent
+      POINTEUR MELVNX.MELVAL, MELVNY.MELVAL,
+     &         MELT1X.MELVAL, MELT1Y.MELVAL
+      POINTEUR MELUN1.MELVAL, MELUT1.MELVAL
+      POINTEUR MELPH1.MELVAL, MELRO1.MELVAL, MELP1.MELVAL
+      POINTEUR MCHAMY.MCHAML, MCHAMA.MCHAML
+-INC SMCHPOI
+      POINTEUR MPOVSU.MPOVAL, MPOVDI.MPOVAL, MPOVVO.MPOVAL
+     &        , MPORES.MPOVAL
+     &        , MPPHI1.MPOVAL, MPALPH.MPOVAL
+-INC SMLMOTS
+-INC SMLENTI
+      POINTEUR MLELIM.MLENTI
+      INTEGER JG
+-INC SMLREEL
+      POINTEUR MLRMGA.MLREEL, MLRPGA.MLREEL,
+     &     MLRMPI.MLREEL, MLRPPI.MLREEL
+C
+C**** Segment for the subroutine for the flux
+C
+      POINTEUR IFLU.MLREEL, WPARG.MLREEL, WPARD.MLREEL
+C
+C**** Pointer for Y
+      SEGMENT FRAMAS
+         REAL*8 YET(NFRA)
+      ENDSEGMENT
+      POINTEUR FRAMAG.FRAMAS, FRAMAD.FRAMAS
+     &     , ALPHAG.FRAMAS, ALPHAD.FRAMAS
+     &     , ALPHCG.FRAMAS, ALPHCD.FRAMAS
+C
+      LOGAN = .FALSE.
+C
+C**** Parameter (phi + fractions massiques)
+C
+      NPAR = 1 + NESP
+      JG = NPAR
+      SEGINI WPARG
+      SEGINI WPARD
+C
+      SEGACT MLRMGA
+      SEGACT MLRPGA
+      SEGACT MLRMPI
+      SEGACT MLRPPI
+C
+C**** KRIPAD pour la correspondance global/local des conditions limits
+C
+      CALL KRIPAD(MELLIM,MLELIM)
+C      SEGINI MLELIM
+C
+C**** Initialisation des MCHAMLs
+C
+C     PHI
+C
+      MCHEL1 = IPHI1
+      SEGACT MCHEL1
+      MCHAM1 = MCHEL1.ICHAML(1)
+      SEGACT MCHAM1
+      MELPH1 = MCHAM1.IELVAL(1)
+      SEGDES MCHEL1
+      SEGDES MCHAM1
+C
+C     Masse volumique
+C
+      MCHEL1 = IROF1
+      SEGACT MCHEL1
+      MCHAM1 = MCHEL1.ICHAML(1)
+      SEGACT MCHAM1
+      MELRO1 = MCHAM1.IELVAL(1)
+      SEGDES MCHEL1
+      SEGDES MCHAM1
+C
+C     Pression
+C
+      MCHEL1 = IPF1
+      SEGACT MCHEL1
+      MCHAM1 = MCHEL1.ICHAML(1)
+      SEGACT MCHAM1
+      MELP1 = MCHAM1.IELVAL(1)
+      SEGDES MCHEL1
+      SEGDES MCHAM1
+C
+C     Vitesse et cosinus directeurs du repere (n,t)
+C
+      MCHEL1 = IVITF1
+      SEGACT MCHEL1
+C
+C     La vitesse a comme SPG MELEFE
+C     Le cosinus directeurs ont comme SPG MELEMF
+C
+C     MCHAM1 -> Cosinus directeurs
+C     MCHAM2 -> Vitesse
+C
+      SPG1 = MCHEL1.IMACHE(1)
+      SPG2 = MCHEL1.IMACHE(2)
+      IF((SPG1 .EQ. MELEMF)  .AND. (SPG2 .EQ. MELEFE))THEN
+         MCHAM1 = MCHEL1.ICHAML(1)
+         MCHAM2 = MCHEL1.ICHAML(2)
+      ELSEIF((SPG1 .EQ. MELEFE)  .AND. (SPG2 .EQ. MELEMF))THEN
+         MCHAM1 = MCHEL1.ICHAML(2)
+         MCHAM2 = MCHEL1.ICHAML(1)
+      ELSE
+         LOGAN = .TRUE.
+         CALL ERREUR(251)
+         GOTO 9999
+      ENDIF
+      SEGACT MCHAM1
+      MELVNX = MCHAM1.IELVAL(1)
+      MELVNY = MCHAM1.IELVAL(2)
+      MELT1X = MCHAM1.IELVAL(3)
+      MELT1Y = MCHAM1.IELVAL(4)
+      SEGDES MCHAM1
+      SEGACT MCHAM2
+      MELUN1 = MCHAM2.IELVAL(1)
+      MELUT1 = MCHAM2.IELVAL(2)
+      SEGDES MCHAM2
+      SEGDES MCHEL1
+C
+      IF (NESP .GE. 1) THEN
+C
+C        Fractions massiques au centre (non-conservative approach)
+C
+         CALL LICHT(ICHALP, MPALPH, TYPE, IGEOMC)
+C        SEGACT MPALPH
+
+         NFRA = NESP
+         SEGINI FRAMAG
+         SEGINI FRAMAD
+         SEGINI ALPHAG
+         SEGINI ALPHAD
+         SEGINI ALPHCG
+         SEGINI ALPHCD
+C
+         MCHEL1 = IFRMAF
+         SEGACT MCHEL1
+         MCHAMY = MCHEL1.ICHAML(1)
+         SEGACT MCHAMY
+         SEGDES MCHEL1
+         NESP1 =  MCHAMY.IELVAL(/1)
+         IF (NESP1 .NE. NESP) THEN
+            WRITE(IOIMP,*) 'Mass fractions, dimension = ???'
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+C
+         DO IESP = 1, NESP, 1
+            MELVA1 = MCHAMY.IELVAL(IESP)
+            SEGACT MELVA1
+         ENDDO
+C
+         MCHEL1 = IFRALF
+         SEGACT MCHEL1
+         MCHAMA = MCHEL1.ICHAML(1)
+         SEGACT MCHAMA
+         SEGDES MCHEL1
+         NESP1 =  MCHAMA.IELVAL(/1)
+         IF (NESP1 .NE. NESP) THEN
+            WRITE(IOIMP,*) 'Volume fractions dimension = ???'
+            CALL ERREUR(21)
+            GOTO 9999
+         ENDIF
+C
+         DO IESP = 1, NESP, 1
+            MELVA1 = MCHAMA.IELVAL(IESP)
+            SEGACT MELVA1
+*            write(*,*) melva1
+         ENDDO
+      ENDIF
+C
+C      write(*,*) 'Son in kgdm12'
+C      write(*,*) 'Ho letto gli MCHAM'
+C     Fluxes
+C
+      JG = IDIM + 3 + NESP
+      SEGINI IFLU
+C
+C**** Initialisation des MELEMEs
+C
+C     'CENTRE', 'FACEL'
+C
+      IPT2 = MELEFE
+      SEGACT IPT2
+      NFAC = IPT2.NUM(/2)
+C
+C**** KRIPAD pour la correspondance global/local de centre
+C
+      CALL KRIPAD(MELEMC,MLENT1)
+C
+C**** MLENTI1 a MCORD.XCOORD(/1)/(IDIM+1) elements
+C
+C     Si i est le numero global d'un noeud de ICEN,
+C     MLENT1.LECT(i) contient sa position, i.e.
+C
+C     I              = numero global du noeud centre
+C     MLENT1.LECT(i) = numero local du noeud centre
+C
+C     MLENT1 déjà activé, i.e.
+C
+C     SEGINI MLENT1
+C
+C
+C**** KRIPAD pour la correspondance global/local de 'FACE'
+C
+      CALL KRIPAD(MELEMF,MLENT2)
+C      SEGINI MLENT2
+C
+C**** CHPOINTs de la table DOMAINE
+C
+      CALL LICHT(ICHPSU,MPOVSU,TYPE,IGEOMF)
+      CALL LICHT(ICHPDI,MPOVDI,TYPE,IGEOMC)
+      CALL LICHT(ICHPVO,MPOVVO,TYPE,IGEOMC)
+C
+C**** LICHT active les MPOVALs en *MOD
+C
+C     i.e.
+C
+C     SEGACT MPOVSU*MOD
+C     SEGACT MPOVDI*MOD
+C     SEGACT MPOVVO*MOD
+C
+C
+C**** Les FLUX aux face
+C
+      CALL LICHT(ICHRES,MPORES,TYPE,IGEOMC)
+C     SEGACT MPORES*MOD
+C
+C**** Activation des MCHAMLs
+C
+      SEGACT MELPH1
+      SEGACT MELRO1
+      SEGACT MELP1
+      SEGACT MELUN1
+      SEGACT MELUT1
+      SEGACT MELVNX
+      SEGACT MELVNY
+      SEGACT MELT1X
+      SEGACT MELT1Y
+C
+C**** Lecture des MPOVALs ICHPHI, ICHPA2
+C
+      CALL LICHT(ICHPHI, MPPHI1, TYPE, IGEOMC)
+C     SEGACT MPPHI1
+C
+C**** Initialisation de 1/DT
+C
+      UNSDT = 0.0D0
+C
+C**** BOUCLE SUR FACEL pour le calcul du FLUX/RESIDU
+C
+      DO NLCF = 1, NFAC
+C
+C******* NLCF  = numero local du centre de facel
+C        NGCF  = numero global du centre de facel
+C        NLCF1 = numero local du centre de face
+C        NGCEG = numero global du centre ELT "gauche"
+C        NLCEG = numero local du centre ELT "gauche"
+C        NGCED = numero global du centre ELT "droite"
+C        NLCED = numero local du centre ELT "droite"
+C
+         NGCEG = IPT2.NUM(1,NLCF)
+         NGCED = IPT2.NUM(3,NLCF)
+         NGCF  = IPT2.NUM(2,NLCF)
+         NLCF1 = MLENT2.LECT(NGCF)
+         NLCEG = MLENT1.LECT(NGCEG)
+         NLCED = MLENT1.LECT(NGCED)
+         NLFL  = MLELIM.LECT(NGCF)
+C
+         VOLG = MPOVVO.VPOCHA(NLCEG,1)
+         VOLD = MPOVVO.VPOCHA(NLCED,1)
+C
+C******* NLCF != NLCF1 -> l'auteur (MOI) n'a rien compris.
+C
+         IF(NLCF .NE. NLCF1)THEN
+            MESERR = 'Il ne faut pas jouer avec la console.   '
+            LOGAN = .TRUE.
+            CALL ERREUR(5)
+            GOTO 9999
+         ENDIF
+         IF(NLFL .EQ. 0)THEN
+            CELLTM = 0.0D0
+C
+C********** Recuperation des Etats "gauche" et "droite"
+C
+            PHIG1C = MPPHI1.VPOCHA(NLCEG,1)
+            PHIG1F = MELPH1.VELCHE(1,NLCF)
+            ROG1 = MELRO1.VELCHE(1,NLCF)
+            UNG1 = MELUN1.VELCHE(1,NLCF)
+            UTG1 = MELUT1.VELCHE(1,NLCF)
+            PG1 = MELP1.VELCHE(1,NLCF)
+            DO IESP = 1, NESP, 1
+               MELVA1 = MCHAMY.IELVAL(IESP)
+               FRAMAG.YET(IESP) = MELVA1.VELCHE(1,NLCF)
+            ENDDO
+            DO IESP = 1, NESP, 1
+               MELVA1 = MCHAMA.IELVAL(IESP)
+               ALPHAG.YET(IESP) = MELVA1.VELCHE(1,NLCF)
+C               IF (NGCF .EQ. 685) THEN
+C                  write(*,*) 'IFRALF =', IFRALF
+C                  write(*,*) 'MELVA1 =', MELVA1
+C                  write(*,*) 'NLCF =', NLCF
+C                  write(*,*) 'IESP =', IESP
+C                  write(*,*) 'ALPHAG.YET(IESP) =', MELVA1.VELCHE(1,NLCF)
+C               ENDIF
+            ENDDO
+            DO IESP = 1, NESP, 1
+               ALPHCG . YET(IESP) = MPALPH.VPOCHA(NLCEG,IESP)
+            ENDDO
+C
+            WPARG.PROG(1) = PHIG1F
+C           Fractions massiques traité en forme conservative...
+            DO IESP = 1, NESP, 1
+               WPARG.PROG (IESP + 1) = FRAMAG.YET(IESP)
+            ENDDO
+C
+            PHID1C = MPPHI1.VPOCHA(NLCED,1)
+            PHID1F = MELPH1.VELCHE(3,NLCF)
+            ROD1 = MELRO1.VELCHE(3,NLCF)
+            UND1 = MELUN1.VELCHE(3,NLCF)
+            UTD1 = MELUT1.VELCHE(3,NLCF)
+            PD1 = MELP1.VELCHE(3,NLCF)
+            DO IESP = 1, NESP, 1
+               MELVA1 = MCHAMY.IELVAL(IESP)
+               FRAMAD.YET(IESP) = MELVA1.VELCHE(3,NLCF)
+            ENDDO
+            DO IESP = 1, NESP, 1
+               MELVA1 = MCHAMA.IELVAL(IESP)
+               ALPHAD.YET(IESP) = MELVA1.VELCHE(3,NLCF)
+            ENDDO
+            DO IESP = 1, NESP, 1
+               ALPHCD . YET(IESP) = MPALPH.VPOCHA(NLCED,IESP)
+            ENDDO
+            WPARD.PROG(1) = PHID1F
+            DO IESP = 1, NESP, 1
+               WPARD.PROG (IESP + 1) = FRAMAD.YET(IESP)
+            ENDDO
+C
+            CNX = MELVNX.VELCHE(1,NLCF)
+            CNY = MELVNY.VELCHE(1,NLCF)
+            CTX = MELT1X.VELCHE(1,NLCF)
+            CTY = MELT1Y.VELCHE(1,NLCF)
+C
+            SURF   = MPOVSU.VPOCHA(NLCF,1)
+C
+            PHIPRO = PHIG1C * PHID1C
+C
+C            IF (NGCF .EQ. 685) THEN
+            IF (LOGDEB) THEN
+               WRITE(*,*)
+               WRITE(*,*) 'NGCF =', NGCF
+               WRITE(*,*) 'Left '
+               WRITE(*,*) 'Phic, phi'
+               WRITE(*,*) PHIG1C, PHIG1F
+               WRITE(*,*) 'rho, un, ut, pg'
+               WRITE(*,*) ROG1, UNG1, UTG1, PG1
+               WRITE(*,*) 'Right'
+               WRITE(*,*) 'Phic, phi'
+               WRITE(*,*) PHID1C, PHID1F
+               WRITE(*,*) 'rho, un, ut, pg'
+               WRITE(*,*) ROD1, UND1, UTD1, PD1
+            ENDIF
+C
+C********** According to PHIG1C we compute GAMG, PINFG
+C
+            IF (PHIG1C .LT. 0.0D0) THEN
+               MLREE1 = MLRMGA
+               MLREE2 = MLRMPI
+            ELSE
+               MLREE1 = MLRPGA
+               MLREE2 = MLRPPI
+            ENDIF
+C           Left
+            ALP = 1.0D0
+            DEN = 0.0D0
+            RNUM = 0.0D0
+            DO IESP = 1, NESP, 1
+               GAMMA = MLREE1.PROG(IESP)
+               PINF =  MLREE2.PROG(IESP)
+               ALPI = ALPHAG.YET(IESP)
+C               IF (NGCF .EQ. 685) THEN
+C                  write(*,*) 'IESP =', IESP
+C                  write(*,*) 'ALPI =', ALPI
+C               ENDIF
+C
+               ALP = ALP - ALPI
+               DEN = DEN + (ALPI / (GAMMA - 1.0D0))
+               RNUM = RNUM  +
+     &              ((ALPI * GAMMA * PINF) / (GAMMA - 1.0D0))
+C               IF (NGCF .EQ. 685) THEN
+C                  write(*,*) 'IESP =', IESP
+C                  write(*,*) 'GAMMA, PINF, ALPI, ALP, DEN, RNUM'
+C                  write(*,*) GAMMA, PINF, ALPI, ALP, DEN, RNUM
+C               ENDIF
+            ENDDO
+            GAMMA = MLREE1.PROG(NESP + 1)
+            PINF =  MLREE2.PROG(NESP + 1)
+            DEN = DEN + (ALP / (GAMMA - 1.0D0))
+            RNUM = RNUM  + ((ALP * GAMMA * PINF) / (GAMMA - 1.0D0))
+C            IF (NGCF .EQ. 685) THEN
+C               write(*,*) 'IESP =', (NESP + 1)
+C               write(*,*) 'GAMMA, PINF, ALPI, ALP, DEN, RNUM'
+C               write(*,*) GAMMA, PINF, ALPI, ALP, DEN, RNUM
+C            ENDIF
+C
+            PINF = RNUM / DEN
+            GAMMA = 1.0D0 / DEN
+            GAMMA = GAMMA + 1.0D0
+            PINF = PINF / GAMMA
+C
+            PINFG = PINF
+            GAMG = GAMMA
+C
+C********** According to PHID1C we compute GAMD, PINFD
+C
+            IF (PHID1C .LT. 0.0D0) THEN
+               MLREE1 = MLRMGA
+               MLREE2 = MLRMPI
+            ELSE
+               MLREE1 = MLRPGA
+               MLREE2 = MLRPPI
+            ENDIF
+            ALP = 1.0D0
+            DEN = 0.0D0
+            RNUM = 0.0D0
+            DO IESP = 1, NESP, 1
+               GAMMA = MLREE1.PROG(IESP)
+               PINF =  MLREE2.PROG(IESP)
+               ALPI = ALPHAD.YET(IESP)
+               ALP = ALP - ALPI
+               DEN = DEN + (ALPI / (GAMMA - 1.0D0))
+               RNUM = RNUM  +
+     &              ((ALPI * GAMMA * PINF) / (GAMMA - 1.0D0))
+            ENDDO
+            GAMMA = MLREE1.PROG(NESP + 1)
+            PINF =  MLREE2.PROG(NESP + 1)
+            DEN = DEN + (ALP / (GAMMA - 1.0D0))
+            RNUM = RNUM  + ((ALP * GAMMA * PINF) / (GAMMA - 1.0D0))
+C
+            PINF = RNUM / DEN
+            GAMMA = 1.0D0 / DEN
+            GAMMA = GAMMA + 1.0D0
+            PINF = PINF / GAMMA
+C
+            PINFD = PINF
+            GAMD = GAMMA
+C
+C           A priori, there is no vacuum...
+C
+            LOGVAC = .FALSE.
+C
+C            IF (NGCF .EQ. 685) THEN
+C               WRITE(*,*)
+C     &              PINFG, GAMG,
+C     &              PINFD, GAMD
+C            ENDIF
+C
+            IF (INDMET .EQ. 1) THEN
+C
+C                 Exact Riemann solver
+C                 Computation of the states on the left and on the
+C                 right of the contact discontinuity
+C
+               CALL FSTIFF(IDIM, NPAR,
+     &              PINFG, GAMG,
+     &              PINFD, GAMD,
+     &              PMIN,
+     &              ROG1, PG1, UNG1, UTG1, 0.0D0, WPARG.PROG,
+     &              ROD1, PD1, UND1, UTD1, 0.0D0, WPARD.PROG,
+     &              RHO_B, P_B, U_B, D_B,
+     &              RHO_A, P_A, U_A, D_A,
+     &              0.0D0,
+     &              UINT,
+     &              IFLU.PROG, CELLT,
+     &              LOGAN, LOGNC, LOGVAC)
+               IF (LOGAN) THEN
+                  WRITE(IOIMP,*) 'SUBROUTINE KGFM12'
+                  WRITE(IOIMP,*) 'ANOMALY DETECTED'
+C
+                  WRITE(*,*)
+                  WRITE(*,*) 'NGCF =', NGCF
+                  WRITE(*,*) 'NLCF =', NLCF
+                  WRITE(*,*) 'Left '
+                  WRITE(*,*) 'Phic, phi'
+                  WRITE(*,*) PHIG1C, PHIG1F
+                  WRITE(*,*) 'Pinf, gamma'
+                  WRITE(*,*) PINFG, GAMG
+                  WRITE(*,*) 'rho, un, ut, pg'
+                  WRITE(*,*) ROG1, UNG1, UTG1, PG1
+                  WRITE(*,*) 'Right'
+                  WRITE(*,*) 'Phic, phi'
+                  WRITE(*,*) PHID1C, PHID1F
+                  WRITE(*,*) 'Pinf, gamma'
+                  WRITE(*,*) PINFD, GAMD
+                  WRITE(*,*) 'rho, un, ut, pg'
+                  WRITE(*,*) ROD1, UND1, UTD1, PD1
+C
+                  CALL ERREUR(5)
+                  GOTO 9999
+               ENDIF
+            ENDIF
+            CELLTM = MAX(CELLT, CELLTM)
+C
+            IF ((.NOT. LOGVAC) .AND. (PHIPRO .GT. 0.0D0)) THEN
+C
+C************* Ecriture du residu
+C
+C              FLUX(2) = RO Un              RO Un
+C              FLUX(3) = RO Un Un + P   ->  RO Un Ux + P CNX
+C              FLUX(4) = RO Un Ut       ->  RO Un Uy + P CNY
+C              FLUX(5) = RO Un Et           RO Un Et
+C              Mass fractions... (5 + IESP)...
+C              Volume fractions in non conservative form...
+C
+               FLUCEL = IFLU.PROG(1) * SURF
+C               write(*,*) 'flux', iflu.prog(1)
+C               write(*,*) 'nlceg, nlced', nlceg, nlced
+C               write(*,*) 'surf', surf
+               MPORES.VPOCHA(NLCEG,2) = MPORES.VPOCHA(NLCEG,2) -
+     &              (FLUCEL / VOLG)
+               IF (NLCED .NE. NLCEG)
+     &              MPORES.VPOCHA(NLCED,2) = MPORES.VPOCHA(NLCED,2) +
+     &              (FLUCEL / VOLD)
+               FLUCEL = (IFLU.PROG(2)*CNX+IFLU.PROG(3)*CTX) * SURF
+               MPORES.VPOCHA(NLCEG,3) = MPORES.VPOCHA(NLCEG,3) -
+     &              (FLUCEL / VOLG)
+               IF (NLCED .NE. NLCEG)
+     &              MPORES.VPOCHA(NLCED,3) = MPORES.VPOCHA(NLCED,3) +
+     &              (FLUCEL / VOLD)
+               FLUCEL = (IFLU.PROG(2)*CNY+IFLU.PROG(3)*CTY) * SURF
+               MPORES.VPOCHA(NLCEG,4) = MPORES.VPOCHA(NLCEG,4) -
+     &              (FLUCEL / VOLG)
+               IF (NLCED .NE. NLCEG)
+     &              MPORES.VPOCHA(NLCED,4) = MPORES.VPOCHA(NLCED,4) +
+     &              (FLUCEL / VOLD)
+               FLUCEL = IFLU.PROG(4) * SURF
+               MPORES.VPOCHA(NLCEG,5) = MPORES.VPOCHA(NLCEG,5) -
+     &              (FLUCEL / VOLG)
+               IF (NLCED .NE. NLCEG)
+     &              MPORES.VPOCHA(NLCED,5) = MPORES.VPOCHA(NLCED,5) +
+     &              (FLUCEL / VOLD)
+C
+C************* rho Y in conservative form
+C              Components 5 + 1 -> 5 + NESP
+C
+               DO IESP = 1, NESP, 1
+
+                  FLUCEL = IFLU.PROG(5 + IESP) * SURF
+                  MPORES.VPOCHA(NLCEG,5 + IESP) =
+     &                 MPORES.VPOCHA(NLCEG,5 + IESP) -
+     &                 (FLUCEL / VOLG)
+                  IF (NLCED .NE. NLCEG)
+     &                 MPORES.VPOCHA(NLCED,5 + IESP) =
+     &                 MPORES.VPOCHA(NLCED,5 + IESP) +
+     &                 (FLUCEL / VOLD)
+               ENDDO
+C************* Alpha in non conservative form
+C              Components 5 + NESP -> 5 + (2 * NESP)
+               IF (NESP .GE. 1) THEN
+                  IF (UINT .GT. 0.0D0) THEN
+                     FRAMAS = ALPHAG
+                  ELSE
+                     FRAMAS = ALPHAD
+                  ENDIF
+                  DO IESP = 1, NESP, 1
+C                     UINT > 0
+C                     FLUCEL = UINT * (PHIG1F - PHIG1C) * SURF
+C                     UINT < 0
+C                     FLUCEL = UINT * (PHID1F - PHIG1C) * SURF
+                     FLUCEL = UINT * (FRAMAS.YET(IESP) -
+     &                    ALPHCG.YET(IESP)) * SURF
+C                     UINT > 0
+C                     FLUCED = UINT * (PHIG1F - PHID1C) * SURF
+C                     UINT < 0
+C                     FLUCED = UINT * (PHID1F - PHID1C) * SURF
+                     FLUCED = UINT * (FRAMAS.YET(IESP) -
+     &                    ALPHCD.YET(IESP)) * SURF
+C
+                     MPORES.VPOCHA(NLCEG,5 + NESP + IESP) =
+     &                    MPORES.VPOCHA(NLCEG,5 + NESP + IESP) -
+     &                    (FLUCEL / VOLG)
+                     IF (NLCED .NE. NLCEG)
+     &                    MPORES.VPOCHA(NLCED,5 + NESP + IESP) =
+     &                    MPORES.VPOCHA(NLCED,5 + NESP + IESP) +
+     &                    (FLUCED / VOLD)
+                  ENDDO
+               ENDIF
+            ENDIF
+C
+C           Level set
+C
+            IF (LOGCON) THEN
+C
+C************* Conservative, variable rho phi...
+C
+               FLUCEL = IFLU.PROG(5) * SURF
+C            write(*,*) 'flux', iflu.prog(1)
+C            write(*,*) 'nlceg, nlced', nlceg, nlced
+C            write(*,*) 'surf', surf
+               MPORES.VPOCHA(NLCEG,1) = MPORES.VPOCHA(NLCEG,1) -
+     &              (FLUCEL / VOLG)
+               IF (NLCED .NE. NLCEG)
+     &              MPORES.VPOCHA(NLCED,1) = MPORES.VPOCHA(NLCED,1) +
+     &              (FLUCEL / VOLD)
+            ELSE
+C
+C************ Non conservative, variable phi
+C
+               IF (UINT .GT. 0.0D0) THEN
+                  FLUCEL = UINT * (PHIG1F - PHIG1C) * SURF
+                  FLUCED = UINT * (PHIG1F - PHID1C) * SURF
+               ELSE
+                  FLUCEL = UINT * (PHID1F - PHIG1C) * SURF
+                  FLUCED = UINT * (PHID1F - PHID1C) * SURF
+               ENDIF
+C
+               MPORES.VPOCHA(NLCEG,1) = MPORES.VPOCHA(NLCEG,1) -
+     &              (FLUCEL / VOLG)
+               IF (NLCED .NE. NLCEG)
+     &              MPORES.VPOCHA(NLCED,1) = MPORES.VPOCHA(NLCED,1) +
+     &              (FLUCED / VOLD)
+            ENDIF
+C
+            IF ((PHIPRO .LE. 0.0D0) .OR. LOGVAC) THEN
+*               write(*,*) 'Son qui !!!'
+*               stop
+C
+C           Left flux for everything but not for the level-set
+C
+               ROD1G = RHO_B
+               PD1G  = P_B
+               UND1G = U_B
+               IF (INDMET .EQ. 1) THEN
+C
+C              Exact Riemann solver
+C
+                  CALL FSTIFF(IDIM, NPAR,
+     &                 PINFG, GAMG,
+     &                 PINFG, GAMG,
+     &                 PMIN,
+     &                 ROG1, PG1, UNG1, UTG1, 0.0D0, WPARG.PROG,
+     &                 ROD1G, PD1G, UND1G, UTG1, 0.0D0, WPARG.PROG,
+     &                 RHO_B1, P_B1, U_B1, D_B1,
+     &                 RHO_A1, P_A1, U_A1, D_A1,
+     &                 0.0D0,
+     &                 UINT,
+     &                 IFLU.PROG, CELLT,
+     &                 LOGAN, LOGNC, LOGVAC)
+C                 IF (LOGVAC) THEN
+C                    WRITE(IOIMP,*) 'Vacuum of vacuum ???'
+C                    WRITE(IOIMP,*) 'SUBROUTINE KGFM12'
+C                    WRITE(IOIMP,*) 'ANOMALY DETECTED'
+C                    CALL ERREUR(251)
+C                    GOTO 9999
+C                 ENDIF
+                  IF (LOGAN) THEN
+                     WRITE(IOIMP,*) 'SUBROUTINE KGFM12'
+                     WRITE(IOIMP,*) 'ANOMALY DETECTED'
+C
+                     WRITE(*,*)
+                     WRITE(*,*) 'NGCF =', NGCF
+                     WRITE(*,*) 'Left '
+                     WRITE(*,*) 'Phic, phi'
+                     WRITE(*,*) PHIG1C, PHIG1F
+                     WRITE(*,*) 'rho, un, ut, pg'
+                     WRITE(*,*) ROG1, UNG1, UTG1, PG1
+                     WRITE(*,*) 'Right'
+                     WRITE(*,*) 'Phic, phi'
+                     WRITE(*,*) PHID1C, PHID1F
+                     WRITE(*,*) 'rho, un, ut, pg'
+                     WRITE(*,*) ROD1, UND1, UTD1, PD1
+C
+                     CALL ERREUR(5)
+                     GOTO 9999
+                  ENDIF
+               ENDIF
+               CELLTM = MAX(CELLT, CELLTM)
+C
+C********** Ecriture du residu... gauche only...
+C
+C           FLUX(2) = RO Un              RO Un
+C           FLUX(3) = RO Un Un + P   ->  RO Un Ux + P CNX
+C           FLUX(4) = RO Un Ut       ->  RO Un Uy + P CNY
+C           FLUX(5) = RO Un Et           RO Un Et
+C
+               FLUCEL = IFLU.PROG(1) * SURF
+C               write(*,*) 'flux', iflu.prog(1)
+C               write(*,*) 'nlceg, nlced', nlceg, nlced
+C               write(*,*) 'surf', surf
+               MPORES.VPOCHA(NLCEG,2) = MPORES.VPOCHA(NLCEG,2) -
+     &              (FLUCEL / VOLG)
+               FLUCEL = (IFLU.PROG(2)*CNX+IFLU.PROG(3)*CTX) * SURF
+               MPORES.VPOCHA(NLCEG,3) = MPORES.VPOCHA(NLCEG,3) -
+     &              (FLUCEL / VOLG)
+               FLUCEL = (IFLU.PROG(2)*CNY+IFLU.PROG(3)*CTY) * SURF
+               MPORES.VPOCHA(NLCEG,4) = MPORES.VPOCHA(NLCEG,4) -
+     &              (FLUCEL / VOLG)
+               FLUCEL = IFLU.PROG(4) * SURF
+               MPORES.VPOCHA(NLCEG,5) = MPORES.VPOCHA(NLCEG,5) -
+     &              (FLUCEL / VOLG)
+C
+C              Level set already done...
+C              Level set treated as the other variables (like in the
+C              following comment... does not work)
+C
+C               FLUCEL = IFLU.PROG(5) * SURF
+C               MPORES.VPOCHA(NLCEG,1) = MPORES.VPOCHA(NLCEG,1) -
+C     &              (FLUCEL / VOLG)
+C
+C
+C************* rho Y in conservative form
+C              Components 5 + 1 -> 5 + NESP
+C
+               DO IESP = 1, NESP, 1
+                  FLUCEL = IFLU.PROG(5 + IESP) * SURF
+                  MPORES.VPOCHA(NLCEG,5 + IESP) =
+     &                 MPORES.VPOCHA(NLCEG,5 + IESP) -
+     &                 (FLUCEL / VOLG)
+               ENDDO
+C************* Alpha in non conservative form
+C              Components 5 + NESP -> 5 + (2 * NESP)
+               IF (NESP .GE. 1) THEN
+                  IF (UINT .GT. 0.0D0) THEN
+                     FRAMAS = ALPHAG
+                  ELSE
+                     FRAMAS = ALPHAD
+                  ENDIF
+                  DO IESP = 1, NESP, 1
+C                     UINT > 0
+C                     FLUCEL = UINT * (PHIG1F - PHIG1C) * SURF
+C                     UINT < 0
+C                     FLUCEL = UINT * (PHID1F - PHIG1C) * SURF
+                     FLUCEL = UINT * (FRAMAS.YET(IESP) -
+     &                    ALPHCG.YET(IESP)) * SURF
+C
+                     MPORES.VPOCHA(NLCEG,5 + NESP + IESP) =
+     &                    MPORES.VPOCHA(NLCEG,5 + NESP + IESP) -
+     &                    (FLUCEL / VOLG)
+                  ENDDO
+               ENDIF
+C
+C********** Calcul du pas du temps (CFL)
+C
+C*********  a) etat a l'interface
+C
+               DIAMG = MPOVDI.VPOCHA(NLCEG,1)
+               DIAMD = MPOVDI.VPOCHA(NLCED,1)
+               DIAM = MIN(DIAMG,DIAMD)
+               CELL  = CELLTM/DIAM
+               IF(CELL .GT. UNSDT)THEN
+                  UNSDT  =  CELL
+               ENDIF
+C
+C           Right flux for everything but not for the level-set
+C
+               ROG1G = RHO_A
+               PG1G  = P_A
+               UNG1G = U_A
+C
+               IF (NLCED .NE. NLCEG) THEN
+                  IF (INDMET .EQ. 1) THEN
+C
+C                 Exact Riemann solver
+C
+                     CALL FSTIFF(IDIM, NPAR,
+     &                    PINFD, GAMD,
+     &                    PINFD, GAMD,
+     &                    PMIN,
+     &                    ROG1G, PG1G, UNG1G, UTD1, 0.0D0, WPARD.PROG,
+     &                    ROD1, PD1, UND1, UTD1, 0.0D0, WPARD.PROG,
+     &                    RHO_B1, P_B1, U_B1, D_B1,
+     &                    RHO_A1, P_A1, U_A1, D_A1,
+     &                    0.0D0,
+     &                    UINT,
+     &                    IFLU.PROG, CELLT,
+     &                    LOGAN, LOGNC, LOGVAC)
+C
+C                  IF (LOGVAC) THEN
+C                     WRITE(IOIMP,*) 'Vacuum of vacuum ???'
+C                     WRITE(IOIMP,*) 'SUBROUTINE KGFM12'
+C                     WRITE(IOIMP,*) 'ANOMALY DETECTED'
+C                     CALL ERREUR(251)
+C                     GOTO 9999
+C                  ENDIF
+C
+                     IF (LOGAN) THEN
+                        WRITE(IOIMP,*) 'SUBROUTINE KGFM12'
+                        WRITE(IOIMP,*) 'ANOMALY DETECTED'
+                        CALL ERREUR(5)
+                        GOTO 9999
+                     ENDIF
+C
+                  ENDIF
+                  CELLTM = MAX(CELLT, CELLTM)
+
+C
+C************* Ecriture du flux a droite...
+C
+C              FLUX(2) = RO Un              RO Un
+C              FLUX(3) = RO Un Un + P   ->  RO Un Ux + P CNX
+C              FLUX(4) = RO Un Ut       ->  RO Un Uy + P CNY
+C              FLUX(5) = RO Un Et           RO Un Et
+C
+                  FLUCEL = IFLU.PROG(1) * SURF
+C               write(*,*) 'flux', iflu.prog(1)
+C               write(*,*) 'nlceg, nlced', nlceg, nlced
+C               write(*,*) 'surf', surf
+                  MPORES.VPOCHA(NLCED,2) = MPORES.VPOCHA(NLCED,2) +
+     &                 (FLUCEL / VOLD)
+                  FLUCEL = (IFLU.PROG(2)*CNX+IFLU.PROG(3)*CTX) * SURF
+
+                  MPORES.VPOCHA(NLCED,3) = MPORES.VPOCHA(NLCED,3) +
+     &                 (FLUCEL / VOLD)
+                  FLUCEL = (IFLU.PROG(2)*CNY+IFLU.PROG(3)*CTY) * SURF
+                  MPORES.VPOCHA(NLCED,4) = MPORES.VPOCHA(NLCED,4) +
+     &              (FLUCEL / VOLD)
+                  FLUCEL = IFLU.PROG(4) * SURF
+                  MPORES.VPOCHA(NLCED,5) = MPORES.VPOCHA(NLCED,5) +
+     &                 (FLUCEL / VOLD)
+C
+C              Level set already done...
+C              Level set treated as the other variables (like in the
+C              following comment... does not work)
+C
+C               FLUCEL = IFLU.PROG(5) * SURF
+C               MPORES.VPOCHA(NLCED,1) = MPORES.VPOCHA(NLCED,1) +
+C     &              (FLUCEL / VOLD)
+C
+C
+C**************** rho Y in conservative form
+C                 Components 5 + 1 -> 5 + NESP
+C
+                  DO IESP = 1, NESP, 1
+
+                     FLUCEL = IFLU.PROG(5 + IESP) * SURF
+                     MPORES.VPOCHA(NLCED,5 + IESP) =
+     &                    MPORES.VPOCHA(NLCED,5 + IESP) +
+     &                    (FLUCEL / VOLD)
+                  ENDDO
+C************* Alpha in non conservative form
+C              Components 5 + NESP -> 5 + (2 * NESP)
+                  IF (NESP .GE. 1) THEN
+                     IF (UINT .GT. 0.0D0) THEN
+                        FRAMAS = ALPHAG
+                     ELSE
+                        FRAMAS = ALPHAD
+                     ENDIF
+                     DO IESP = 1, NESP, 1
+                        FLUCED = UINT * (FRAMAS.YET(IESP) -
+     &                       ALPHCD.YET(IESP)) * SURF
+C
+                        MPORES.VPOCHA(NLCED,5 + NESP + IESP) =
+     &                       MPORES.VPOCHA(NLCED,5 + NESP + IESP) +
+     &                       (FLUCED / VOLD)
+                     ENDDO
+                  ENDIF
+               ENDIF
+            ENDIF
+            DIAMG = MPOVDI.VPOCHA(NLCEG,1)
+            DIAMD = MPOVDI.VPOCHA(NLCED,1)
+            DIAM = MIN(DIAMG,DIAMD)
+            CELL  = CELLTM/DIAM
+            IF(CELL .GT. UNSDT)THEN
+               UNSDT  =  CELL
+            ENDIF
+         ENDIF
+C
+C**** Fin boucle sur FACEL
+C
+      ENDDO
+C
+C**** Pas du temps (condition de non interaction en 1D)
+C
+      DT = 0.5D0 / UNSDT
+C
+C**** Desactivation des segments
+C
+      SEGSUP MLELIM
+      SEGSUP MLENT1
+      SEGSUP MLENT2
+C
+      SEGDES MPOVSU
+      SEGDES MPOVDI
+      SEGDES MPOVVO
+      SEGDES MPORES
+      SEGDES IPT2
+C
+C     Warning. MLRMFR = PGAS . 'MASSFRA'
+C              MLRCHE = PGAS . 'CHEMCOEF'
+C
+      SEGSUP WPARG
+      SEGSUP WPARD
+C
+      SEGSUP IFLU
+C
+      SEGDES MPPHI1
+      SEGDES MELPH1
+      SEGDES MELRO1
+      SEGDES MELP1
+      SEGDES MELUN1
+      SEGDES MELUT1
+      SEGDES MELVNX
+      SEGDES MELVNY
+      SEGDES MELT1X
+      SEGDES MELT1Y
+C
+      SEGDES MLRMGA
+      SEGDES MLRPGA
+      SEGDES MLRMPI
+      SEGDES MLRPPI
+C
+      IF (NESP .GE. 1)THEN
+C
+         SEGDES MPALPH
+C
+         SEGSUP FRAMAG
+         SEGSUP FRAMAD
+         SEGSUP ALPHAG
+         SEGSUP ALPHAD
+         SEGSUP ALPHCG
+         SEGSUP ALPHCD
+C
+         DO IESP = 1, NESP
+            MELVA1 = MCHAMY.IELVAL(IESP)
+            SEGDES MELVA1
+         ENDDO
+         SEGDES MCHAMY
+C
+         DO IESP = 1, NESP
+            MELVA1 = MCHAMA.IELVAL(IESP)
+            SEGDES MELVA1
+         ENDDO
+         SEGDES MCHAMA
+      ENDIF
+C
+ 9999 CONTINUE
+      RETURN
+      END
+CC
+
+
+

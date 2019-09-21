@@ -1,0 +1,410 @@
+C DYNE26    SOURCE    BP208322  15/07/22    21:15:34     8586
+      SUBROUTINE DYNE26(IBAS,KTKAM,KTLIAB,KTPHI,IA1,IB,ICOMP,
+     &                  RIGIDE,ITCARA,LMODYN,ITKM)
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+*--------------------------------------------------------------------*
+*                                                                    *
+*     Operateur DYNE : algorithme de Fu - de Vogelaere               *
+*     ________________________________________________               *
+*                                                                    *
+*     Transpose l'information des objets de Castem2000 dans des      *
+*     tableaux de travail.                                           *
+*                                                                    *
+*     Parametres:                                                    *
+*                                                                    *
+* e   IBAS    Table representant une base modale                     *
+* es  KTKAM   Segment contenant les matrices XK, XASM et XM          *
+* es  KTPHI   Segment des deformees modales                          *
+* e   KTLIAB  Segment des liaisons sur base B                        *
+* es  IA1     Compteur                                               *
+* e   IB      Compteur de la sous base                               *
+* es  RIGIDE  Vrai si l'on a un corps rigide, faux sinon             *
+* e   LMODYN  Logique = vrai si table PASAPAS                        *
+* e   ITKM    >0 si table RAIDEUR_ET_MASSE fournie                   *
+*                                                                    *
+*     Auteur, date de creation:                                      *
+*                                                                    *
+*     Lionel VIVAN, le 24 octobre 1989.                              *
+*                                                                    *
+*--------------------------------------------------------------------*
+-INC CCOPTIO
+-INC CCREEL
+-INC SMCHAML
+-INC SMELEME
+-INC SMMODEL
+*
+      SEGMENT,MTKAM
+         REAL*8 XK(NA1,NB1K),XASM(NA1,NB1C),XM(NA1,NB1M)
+         REAL*8 XOPER(NB1,NB1,NOPER)
+      ENDSEGMENT
+*
+      SEGMENT,MTPHI
+         INTEGER IBASB(NPLB),IPLSB(NPLB),INMSB(NSB),IORSB(NSB)
+         INTEGER IAROTA(NSB)
+         REAL*8 XPHILB(NSB,NPLSB,NA2,IDIMB)
+      ENDSEGMENT
+*
+      SEGMENT,MTLIAB
+         INTEGER IPALB(NLIAB,NIPALB),IPLIB(NLIAB,NPLBB),JPLIB(NPLB)
+         REAL*8 XPALB(NLIAB,NXPALB)
+         REAL*8 XABSCI(NLIAB,NIP),XORDON(NLIAB,NIP)
+      ENDSEGMENT
+*
+      segment mtbas
+        integer itbmod,lsstru(np1),nsstru
+      endsegment
+*
+      LOGICAL L0,L1,RIGIDE,LMODYN
+      CHARACTER*4 NOMTRI(6),NOMAXI(6),NOMPLA(3)
+      CHARACTER*8 CMOT,TYPRET,MORIGI,CHARRE
+      REAL*8      XAXROT(3),XROTA(2,3)
+*
+*     si IFOMOD = -1  :  modele PLAN
+*     si IFOMOD =  0  :  modele AXIS
+*     si IFOMOD =  1  :  modele FOUR
+*     si IFOMOD =  2  :  modele TRID
+*
+*     Les noms de composante sont
+*       - en modele PLAN   :  UX, UY, RT
+*       - en modele AXIS   :  UX, UY, RZ
+*       - en modele FOUR 1 :  UR, UZ, UT, RT
+*       - en modele TRID   :  UX, UY, UZ, RX, RY, RZ
+*
+      DATA NOMTRI/'UX  ','UY  ','UZ  ','RX  ','RY  ','RZ  '/
+      DATA NOMAXI/'UR  ','UT  ','UZ  ','RR  ','RT  ','RZ  '/
+      DATA NOMPLA/'UX  ','UY  ','RZ  '/
+*
+      MTKAM  = KTKAM
+      MTPHI  = KTPHI
+      MTLIAB = KTLIAB
+*
+      NLIAB  = IPALB(/1)
+      NPLB   = JPLIB(/1)
+      NSB    = XPHILB(/1)
+      NPLSB  = XPHILB(/2)
+      NA2    = XPHILB(/3)
+      IDIMB  = XPHILB(/4)
+      DEUXPI = 2.D0 * XPI
+*
+      IORSB(IB) = IA1 + 1
+      IAROTA(IB) = 0
+      IROT = 0
+      IN = 0
+
+
+************************************************************************
+*      Aiguillage pour le cas
+************************************************************************
+
+      if (lmodyn) goto 40
+
+
+************************************************************************
+*     table BASE_MODALE
+************************************************************************
+
+ 10   CONTINUE
+      IN = IN + 1
+      TYPRET = ' '
+      CALL ACCTAB(IBAS,'ENTIER',IN,X0,' ',L0,IP0,
+     &                   TYPRET,I1,X1,CHARRE,L1,IBAMOD)
+      IF (IERR.NE.0) RETURN
+*    -on a bien un objet de type table
+      IF (IBAMOD.NE.0) THEN
+       IF (TYPRET.EQ.'TABLE   ') THEN
+
+         IA1 = IA1 + 1
+
+*        remplissage de XM et XK diagonale depuis la table BASE_MODALE
+*        sauf si deja fait car on a une table RAIDEUR_ET_MASSE !
+         IF(ITKM.LE.0) THEN
+           CALL ACCTAB(IBAMOD,'MOT',I0,X0,'MASSE_GENERALISEE',L0,IP0,
+     &                        'FLOTTANT',I1,XMASSE,' ',L1,IP1)
+           IF (IERR.NE.0) RETURN
+           XM(IA1,1) = XMASSE
+           CALL ACCTAB(IBAMOD,'MOT',I0,X0,'FREQUENCE',L0,IP0,
+     &                        'FLOTTANT',I1,XFREQ,' ',L1,IP1)
+           IF (IERR.NE.0) RETURN
+           OMEGA = XFREQ * DEUXPI
+           XK(IA1,1) = XMASSE * OMEGA * OMEGA
+           IF (IIMPI.EQ.333) THEN
+              WRITE(IOIMP,*)'DYNE26 :   XM(',IA1,') =',XMASSE
+              WRITE(IOIMP,*)'DYNE26 :   XK(',IA1,') =',XK(IA1,1)
+           ENDIF
+         ENDIF
+
+*        si liaison_B existe, remplissage de IPLSB, XPHILB, IAROTA, INMSB...
+         IF (NLIAB.NE.0) THEN
+            CALL ACCTAB(IBAMOD,'MOT',I0,X0,'DEFORMEE_MODALE',L0,IP0,
+     &                         'CHPOINT',I1,X1,' ',L1,ICDM)
+            IF (IERR.NE.0) RETURN
+            DO 12 ID = 1,IDIMB
+               IF (IFOUR.EQ.0 .OR. IFOUR.EQ.1) THEN
+                  CMOT = NOMAXI(ID)
+               ELSE
+                  IF (IFOMOD.EQ.-1) THEN
+                      CMOT = NOMPLA(ID)
+                  ELSE
+                      CMOT = NOMTRI(ID)
+                  ENDIF
+               ENDIF
+               IF (IIMPI.EQ.333)
+     &         WRITE(IOIMP,*)'DYNE26 :  composante a extraire :',CMOT
+               ICOMP  = 0
+               DO 14 IP = 1,NPLB
+                  IPOINT = JPLIB(IP)
+*      On extrait du chpoint ICDM au point IPOINT de composante CMOT
+                  CALL EXTRA9(ICDM,IPOINT,CMOT,KERRE,XVAL)
+                  ICOMP = ICOMP + 1
+*          on ajuste la taille si necessaire
+                  IF(ICOMP.GT.NPLSB) THEN
+                      NPLSB=ICOMP
+                      SEGADJ MTPHI
+                  ENDIF
+                  IPLSB(IP) = ICOMP
+* suite a la modif dans extra9, car on attribue une valeur meme
+* si le point n'existe pas dans le chpoint
+                  IF (XVAL.NE.0.) THEN
+                    IF ((IBASB(IP).NE.0).AND.(IBASB(IP).NE.IB)) THEN
+                      call erreur (783)
+                      RETURN
+                    ENDIF
+                    IBASB(IP) = IB
+                  ELSEIF ((IB.EQ.NSB).AND.(IBASB(IP).EQ.0)) THEN
+                    IBASB(IP) = IB
+                  ENDIF
+                  XPHILB(IB,ICOMP,IN,ID) = XVAL
+      IF (IIMPI.EQ.333) THEN
+        WRITE(IOIMP,*)'DYNE26 :   IPLSB(',IP,') =',IPLSB(IP)
+        WRITE(IOIMP,*)'DYNE26 :   IBASB(',IP,') =',IBASB(IP)
+        XVA2 = XPHILB(IB,ICOMP,IN,ID)
+        WRITE(IOIMP,*)'DYNE26 :   XPHILB(',IB,ICOMP,IN,ID,') =',XVA2
+      ENDIF
+ 14            CONTINUE
+ 12         CONTINUE
+         ENDIF
+
+*        Prise en compte d'un mode de rotation de corps rigide
+         MORIGI = ' '
+         CALL ACCTAB(IBAMOD,'MOT',I0,X0,'CORPS_RIGIDE',L0,IP0,
+     &                      MORIGI,I1,X1,CMOT,L1,IP1)
+         IF (IERR.NE.0) RETURN
+         IF (MORIGI.EQ.'MOT') THEN
+            IF (CMOT(1:4).EQ.'VRAI') THEN
+                CALL ACCTAB(IBAMOD,'MOT',I0,X0,'CENTRE_DE_GRAVITE',
+     &          L0,IP0,'POINT',I1,X1,'  ',L1,ICDG)
+                IF (IERR.NE.0) RETURN
+                IAROTA(IB)=IA1
+                IROT = IN
+            ENDIF
+         ENDIF
+         GOTO 10
+       ELSE
+         CALL ERREUR(491)
+         RETURN
+       ENDIF
+      ENDIF
+*    -fin du cas ou on a bien un objet de type table
+      INMSB(IB) = IN - 1
+
+
+************************************************************************
+*     table PASAPAS
+************************************************************************
+
+ 40   if (lmodyn) then
+*
+       mtbas = ibas
+       mmodel = itbmod
+       segact mmodel
+       mchelm = itcara
+       segact mchelm
+       n1 = imache(/1)
+       IN = 0
+
+       do 41 ik =1,kmodel(/1)
+        imodel = kmodel(ik)
+        if (lsstru(ik).ne.ib) goto 41
+         IN =  IN + 1
+        segact imodel
+        jdefo = 0
+        jmass = 0
+        jfreq = 0
+        jgrav = 0
+        do 46 inc = 1,n1
+          meleme = imache(inc)
+          if (meleme.ne.imamod) goto 46
+          if (conche(inc).ne.conmod) goto 46
+          segact meleme
+          mchaml = ichaml(inc)
+          segact mchaml
+          n2 = ielval(/1)
+
+          do io = 1,n2
+            if (nomche(io)(1:4).eq.'DEFO') then
+              jdefo = io
+              melval = ielval(io)
+              segact melval
+            else if  (nomche(io)(1:4).eq.'MASS') then
+              jmass =io
+              melval = ielval(io)
+              segact melval
+            else if (nomche(io)(1:4).eq.'FREQ') then
+              jfreq = io
+              melval = ielval(io)
+              segact melval
+            else if (nomche(io)(1:4).eq.'CGRA') then
+              jgrav = io
+              melval = ielval(io)
+              segact melval
+            else
+            endif
+           if (jdefo.gt.0.and.jmass.gt.0.and.jfreq.gt.0.and.
+     &jgrav.gt.0) goto 47
+          enddo
+           if (jdefo.gt.0.and.jmass.gt.0.and.jfreq.gt.0) goto 47
+ 46     continue
+        if (jdefo.eq.0.and.jmass.eq.0.and.jfreq.eq.0) then
+         write(6,*) 'pas de caracteristiques modele ',ik, conmod
+         return
+        endif
+ 47     continue
+        do ip =1,num(/2)
+         IA1 = IA1 + 1
+           melval = ielval(jmass)
+           xmasse = velche(1,ip)
+         XM(IA1,1) = XMASSE
+
+           melval = ielval(jfreq)
+           xfreq = velche(1,ip)
+         OMEGA = XFREQ * DEUXPI
+         XK(IA1,1) = XMASSE * OMEGA * OMEGA
+
+           melval = ielval(jdefo)
+           icdm = ielche(1,ip)
+
+**
+*   Prise en compte d'un mode de rotation de corps rigide
+           if (jgrav.gt.0) then
+             melval = ielval(jgrav)
+             ICDG = ielche(1,ip)
+                IAROTA(IB)=IA1
+                IROT = IN
+           endif
+        enddo
+*
+*
+         IF (IIMPI.EQ.333) THEN
+            WRITE(IOIMP,*)'DYNE26 :   XM(',IA1,') =',XMASSE
+            WRITE(IOIMP,*)'DYNE26 :   XK(',IA1,') =',XK(IA1,1)
+         ENDIF
+         IF (NLIAB.NE.0) THEN
+            DO 42 ID = 1,IDIMB
+               IF (IFOUR.EQ.0 .OR. IFOUR.EQ.1) THEN
+                  CMOT = NOMAXI(ID)
+               ELSE
+                  IF (IFOMOD.EQ.-1) THEN
+                      CMOT = NOMPLA(ID)
+                  ELSE
+                      CMOT = NOMTRI(ID)
+                  ENDIF
+               ENDIF
+               IF (IIMPI.EQ.333) THEN
+                  WRITE(IOIMP,*)'DYNE26 :  composante a extraire :',CMOT
+               ENDIF
+               ICOMP  = 0
+               DO 44 IP = 1,NPLB
+                  IPOINT = JPLIB(IP)
+*
+*     On extrait du chpoint ICDM au point IPOINT de composante CMOT
+*
+                  CALL EXTRA9(ICDM,IPOINT,CMOT,KERRE,XVAL)
+                     ICOMP = ICOMP + 1
+*
+*          on ajuste la taille si necessaire
+*                      MP
+                         IF(ICOMP.GT.NPLSB) THEN
+                             NPLSB=ICOMP
+                             SEGADJ MTPHI
+                         ENDIF
+                     IPLSB(IP) = ICOMP
+* suite e la modif dans extra9, car on attribue une valeur meme
+* si le point n'existe pas dans le chpoint
+                     IF (XVAL.NE.0.) THEN
+                      IF ((IBASB(IP).NE.0).AND.(IBASB(IP).NE.IB)) THEN
+                       call erreur (783)
+                        RETURN
+                      ENDIF
+                        IBASB(IP) = IB
+                     ELSE
+            IF ((IB.EQ.NSB).AND.(IBASB(IP).EQ.0)) IBASB(IP) = IB
+                     ENDIF
+*
+                     XPHILB(IB,ICOMP,IN,ID) = XVAL
+      IF (IIMPI.EQ.333) THEN
+        WRITE(IOIMP,*)'DYNE26 :   IPLSB(',IP,') =',IPLSB(IP)
+        WRITE(IOIMP,*)'DYNE26 :   IBASB(',IP,') =',IBASB(IP)
+        XVA2 = XPHILB(IB,ICOMP,IN,ID)
+        WRITE(IOIMP,*)'DYNE26 :   XPHILB(',IB,ICOMP,IN,ID,') =',XVA2
+      ENDIF
+
+ 44               CONTINUE
+ 42            CONTINUE
+          ENDIF
+*
+
+ 41    continue
+       INMSB(IB) = IN
+       IN = IN + 1
+
+       endif
+****** fin du cas table PASAPAS ****************************************
+
+
+************************************************************************
+*     Remplissage des fausses deformees modales de rotations
+************************************************************************
+
+ 50   continue
+      IF (IAROTA(IB).NE.0) THEN
+         RIGIDE = .TRUE.
+         MERR = 0
+         NPLUS = IN + 1
+         IF (NPLUS.GT.NA2) THEN
+* On reajuste le dimension NA2 de XPHILB
+                 NA2 = NPLUS
+                 SEGADJ MTPHI
+         ENDIF
+         DO 18 IP=1,NPLB
+             IPOINT=JPLIB(IP)
+             IPOS=IPLSB(IP)
+             IBBAS= IBASB(IP)
+             IF (IBBAS.EQ.IB) THEN
+                DO 20 ID=(IDIM+1),IDIMB
+                  XAXROT(ID-IDIM) = XPHILB(IB,IPOS,IROT,ID)
+ 20             CONTINUE
+* En tridimensionnel l'axe de rotation est le vecteur propre de rotation
+* On norme l axe du plan de rotation
+                CALL DYNE41(XAXROT,MERR,IDIM)
+* En bidimensionnel l'axe de rotation est fixe
+* Calcul des fausses deformees modales de rotation
+                CALL DYNE42(XROTA,XAXROT,IPOINT,ICDG,IDIMB,MERR)
+             DO 22 ID =1,IDIMB
+                 XPHILB(IB,IPOS,IN,ID)  = XROTA(1,ID)
+                 XPHILB(IB,IPOS,IN+1,ID)= XROTA(2,ID)
+ 22          CONTINUE
+             ENDIF
+ 18       CONTINUE
+      ENDIF
+
+      IF (IIMPI.EQ.333) THEN
+        WRITE(IOIMP,*)'DYNE26 :   INMSB(',IB,') =',INMSB(IB)
+        WRITE(IOIMP,*)'DYNE26 :   IORSB(',IB,') =',IORSB(IB)
+        WRITE(IOIMP,*)'DYNE26 :   IAROTA(',IB,') =',IAROTA(IB)
+      ENDIF
+*
+      END
+
+
+

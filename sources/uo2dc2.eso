@@ -1,0 +1,408 @@
+C UO2DC2    SOURCE    STRU      07/05/31    21:15:37     5744
+      SUBROUTINE UO2DC2(IFLAG,T0,TPOINT,FI0,FPOINT,PRECIS,PRECIZ,
+     1                  XMAT,NCOMAT,NSIMP,AAD,GS,LEBIL,XINVL,PENTE,
+     2                  EPSPT,SIG0,EPSV0,VAR0,W0,WMAX0,DX0,
+     3                  NGAT,NC1,NCA,NDIM,NN,TAU,TAUNEX,SIGF,EPSVF,
+     4                  VARF,WF,DXF,WMAXF,TF,FIF,KERRE)
+C----------------------------------------------------------------------
+C       ECOULEMENT MODELE UO2 (OTTOSEN ET GATT_MONERIE) SIMPLIFIE
+C   SCHEMA EULER-CAUCHY AVEC DECOUPAGE DU SOUS PAS D INTEGRATION EN 2
+C                    CONTROLE AVEC METHODE DE SIMPSON
+C          RECHERCHE D UN ETAT CONVERGE POUR TAU <= DT SI IFLAG=1
+C----------------------------------------------------------------------
+C
+C  ENTREES
+C  -------
+C IFLAG        = 1 RECHERCHE D UN ETAT CONVERGE POUR TAU <= DT
+C                0 PAS DE RECHERCHE D UN ETAT CONVERGE (1 ITERATION)
+C T0           = TEMPERATURE AU DEBUT DU SOUS PAS D INTEGRATION
+C TPOINT       = VITESSE DE TEMPERATURE SUR LE PAS D INTEGRATION
+C FI0          = DENSITE DE FISSION AU DEBUT DU SOUS PAS D INTEGRATION
+C FPOINT       = VITESSE DE DENSITE DE FISSION SUR LE PAS D INTEGRATION
+C PRECIS       = PRECISION POUR LA CONVERGENCE DU SCHEMA NUMERIQUE
+C PRECIZ       = PRECISION POUR L INVERSION DE LA MATRICE
+C XMAT(NCOMAT) = CARACTERISTIQUES THERMOMECANIQUES DU MATERIAU
+C NSIMP        = POINTE SUR LA CARACTERISTIQUE FACULTATIVE 'SIMP' DE XMAT
+C AAD          = COEFFICIENT INTERVENANT DS LE CALCUL DE LA VITESSE
+C                DE LA DEFORMATION DE DENSIFICATION
+C GS(3)        = RESISTANCES AU CISAILLEMENT
+C LEBIL(NC)    = COMPRESSION/TRACTION
+C EPSPT(6)     = VITESSE DES DEFORM. TOTALES SUR LE PAS D INTEGRATION
+C SIG0(6)      = CONTRAINTES         AU DEBUT DU SOUS PAS D INTEGRATION
+C EPSV0(6)     = DEFORM. VISCOPLAST. AU DEBUT DU SOUS PAS D'INTEGRATION
+C VAR0(NGAT)   = VAR. INT. SCAL. DE GATT_MONERIE AU DEB. DU SS PAS
+C W0(3)        = OUVERTURES DE FISS. AU DEB. DU SS PAS D'INTEGRATION
+C WMAX0(3)     = OUVERTURES MAXIMALES DES FISSURES AU DEB. DU SOUS PAS
+C XINVL(3)     = PARAMETRES DE TAILLE
+C PENTE(NC)    = PENTES DES CRITERES
+C DX0(NC)      = DEF. DE FISSURATION (OUV.) AU DEB. DU SS PAS
+C NC1          = NC+1 AVEC NC(=3) NBR. TOTAL DE DIRECTIONS DE FISS.
+C NCA          = NBR. DE DIRECTIONS DE FISS. OU UN CRITERE EST ATTEINT
+C NDIM         = NCA+1 SI CP, NCA SINON
+C NN(NCA)      = NUMEROS DES DIRECTIONS DE FISS. OU UN CRIT. EST ATTEINT
+C
+C  SORTIES
+C  -------
+C TAU          = CONVERGENCE POUR t0+TAU
+C TAUNEX       = ESTIMATION DE LA VALEUR SUIVANTE DE TAU
+C SIGF(6)      = CONTRAINTES                     A t0+TAU
+C EPSVF(6)     = DEFORM. VISCOPLAST.             A t0+TAU
+C VARF(NGAT)   = VAR. INT. SCAL. DE GATT_MONERIE A t0+TAU
+C WF(3)        = OUVERTURES DE FISS.             A t0+TAU
+C DXF(NC)      = DEF. DE FISSURATION (OUV.)      A t0+TAU
+C WMAXF(3)     = OUVERTURES MAX. DES FISSURES    A t0+TAU
+C                (OUVERTURES + GLISSEMENTS)      A t0+TAU
+C TF           = TEMPERATURE                     A t0+TAU
+C FIF          = DENSITE DE FISSION              A t0+TAU
+C KERRE        = GESTION DES ERREURS
+C----------------------------------------------------------------------
+C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+-INC CCOPTIO
+C
+      PARAMETER (XZER=0.D0,UNDEMI=.5D0,UN=1.D0,NC=3,NGATT=4)
+C
+      DIMENSION EPSPT(*),SIG0(*),EPSV0(*),VAR0(*),W0(*),XINVL(*),DX0(*)
+      DIMENSION WMAX0(*)
+      DIMENSION SIGF(*),EPSVF(*),VARF(*),DXF(*),WF(*),WMAXF(*)
+      DIMENSION PENTE(*),XMAT(*),NN(*),GS(*),LEBIL(*)
+      DIMENSION DDE(18),DFDS(6,NC),DGDS(6,NC),HDFDQ(NC)
+      DIMENSION EPSVP1(6),VARP1(NGATT),EPSDP1(3),EPSGP1(3),
+     &          DDX1(4),SIGP1(6)
+      DIMENSION EPSVP2(6),VARP2(NGATT),EPSDP2(3),EPSGP2(3),
+     &          DDX2(4),SIGP2(6)
+      DIMENSION EPSVP3(6),VARP3(NGATT),EPSDP3(3),EPSGP3(3),
+     &          DDX3(4),SIGP3(6)
+      DIMENSION EPSVP4(6),VARP4(NGATT),EPSDP4(3),EPSGP4(3),
+     &          DDX4(4),SIGP4(6)
+      DIMENSION SIG1(6),EPSV1(6),VAR1(NGATT),DX1(3),W1(3)
+      DIMENSION SIG12(6),EPSV12(6),VAR12(NGATT),DX12(3),W12(3)
+      DIMENSION SIG13(6),EPSV13(6),VAR13(NGATT),DX13(3),W13(3),XX(6)
+C
+C-------------------------------------
+C PARAMETRES POUR TESTS DE CONVERGENCE
+C-------------------------------------
+      BORNE = 2.0
+      RMAX  = 1.3
+      RMIN  = 0.7
+      DIV   = 7.0
+      FAC   = 3.0
+      DIV2  = 3.*DIV
+C
+C -------------------------
+C COEFFICIENTS D ELASTICITE
+C -------------------------
+      YOUN=XMAT(1)
+      XNU =XMAT(2)
+      G   = UNDEMI*YOUN/(UN+XNU)
+C
+C ---------------------------------------------------------------
+C COEF. POUR CALCULER LE BURNUP A PARTIR DE LA DENSITE DE FISSION
+C ---------------------------------------------------------------
+      RHO=XMAT(3)
+      RHO0=1.D0-XMAT(25)
+      EFIS=XMAT(27)
+      AMU238= 238.D0
+      AMUO2 = 238.D0 + 16.D0 + 16.D0
+      AKBU  = (AMUO2/AMU238)*EFIS/(RHO*RHO0)
+C
+C---------------------------------
+C UTILE POUR CALCULER LA PRECISION
+C---------------------------------
+      XMAX=YOUN*1.D-3
+C
+C ----------------
+C  INITIALISATION
+C ----------------
+C
+      KERRE=0
+C
+C --- Taux de combustion
+      BU0=VAR0(2)
+C
+      ASIG = SQRT(PROCON(SIG0,SIG0,6))
+      ERRABS = PRECIS*ASIG
+      IF (XMAX.GT.ASIG) ERRABS = PRECIS*XMAX
+C
+C
+C -- derivees 1
+      BUPT=AKBU*FI0
+      CALL UO2VI1(SIG0,EPSV0,VAR0,EPSVP1,VARP1,EPSDP1,EPSGP1,
+     &                    XMAT,AAD,NGAT,NCOMAT,NSIMP,FI0,T0,BU0,BUPT)
+      CALL OTTODD(DDE,YOUN,XNU,G,GS,XINVL,W0)
+      CALL UO2FL(NCA,NN,XINVL,PENTE,SIG0,GS,DFDS,DGDS,HDFDQ,KERRE)
+      IF (KERRE.NE.0) THEN
+        GOTO 1100
+      ENDIF
+      CALL UO2VI2(NC1,NCA,NDIM,NN,PRECIZ,EPSPT,EPSVP1,EPSDP1,
+     &                EPSGP1,DDE,DFDS,DGDS,HDFDQ,DDX1,SIGP1,KERRE)
+      IF (KERRE.NE.0) THEN
+        GOTO 1100
+      ENDIF
+C
+C
+      NITERA  = 0
+C -----------------------------------------------------------
+C      DEBUT DES ITERATIONS SUR TAU OPTIMAL / FIN SI RA PETIT
+C -----------------------------------------------------------
+1300  CONTINUE
+      NITERA  = NITERA + 1
+         TAU2=TAU*UNDEMI
+C -- maj 1
+         CALL UO2MAJ(IFOUR,NC,NCA,NDIM,NN,NGAT,XINVL,TAU2,SIG0,EPSV0,
+     &               VAR0,DX0,SIG1,EPSV1,VAR1,DX1,W1,SIGP1,EPSVP1,
+     &               VARP1,DDX1)
+C
+C -- derivees 2
+         FI12=FI0+(TAU2*FPOINT)
+         TI12=T0+(TAU2*TPOINT)
+         BUPT=0.5D0*AKBU*(FI0+FI12)
+         BU12=BU0+(TAU2*BUPT)
+         CALL UO2VI1(SIG1,EPSV1,VAR1,EPSVP2,VARP2,EPSDP2,EPSGP2,
+     &                   XMAT,AAD,NGAT,NCOMAT,NSIMP,FI12,TI12,BU12,BUPT)
+         CALL OTTODD(DDE,YOUN,XNU,G,GS,XINVL,W1)
+         CALL UO2FL(NCA,NN,XINVL,PENTE,SIG1,GS,DFDS,DGDS,HDFDQ,KERRE)
+         IF (KERRE.NE.0) THEN
+           GOTO 1100
+         ENDIF
+         CALL UO2VI2(NC1,NCA,NDIM,NN,PRECIZ,EPSPT,EPSVP2,EPSDP2,
+     &                   EPSGP2,DDE,DFDS,DGDS,HDFDQ,DDX2,SIGP2,KERRE)
+         IF (KERRE.NE.0) THEN
+           GOTO 1100
+         ENDIF
+C
+         DO I=1,6
+           SIGP2(I) =UNDEMI*(SIGP1(I)+SIGP2(I))
+           EPSVP2(I)=UNDEMI*(EPSVP1(I)+EPSVP2(I))
+         ENDDO
+         VARP2(1)=UNDEMI*(VARP1(1)+VARP2(1))
+         VARP2(2)=UNDEMI*(VARP1(2)+VARP2(2))
+         DO I=1,NDIM
+           DDX2(I)=UNDEMI*(DDX1(I)+DDX2(I))
+         ENDDO
+C
+C -- maj 2
+         CALL UO2MAJ(IFOUR,NC,NCA,NDIM,NN,NGAT,XINVL,TAU2,SIG0,EPSV0,
+     &               VAR0,DX0,SIG12,EPSV12,VAR12,DX12,W12,SIGP2,EPSVP2,
+     &               VARP2,DDX2)
+C    ---------------------------------------------------------------------
+C      Calcul du rapport : erreur calculee / erreur admise a mi-pas (TAU2)
+C      pour eviter les demarrages trop brutaux avec une contrainte
+C      elastique a t=0 tres grande si bien que la vitesse de deformation
+C      viscoplastique diverge a la fin du pas defini par TAU
+C    ---------------------------------------------------------------------
+      IF(IIMPI.EQ.42) THEN
+         WRITE(IOIMP,77002) NITERA
+*
+         WRITE(IOIMP,18010) TAU,ERRABS
+18010   FORMAT('0  UO2DC2 - TAU ERRABS '/2(1X,1PE12.5)/)
+*
+         WRITE(IOIMP,74432) (SIG12(I),I=1,6)
+74432    FORMAT('0  UO2DC2 - SIG12 ',6(1X,1PE12.5)/)
+         WRITE(IOIMP,74434) (SIG1(I),I=1,6)
+*
+         WRITE(IOIMP,74431) (DX12(I),I=1,3)
+74431    FORMAT('0  UO2DC2 - DX12 ',3(1X,1PE12.5)/)
+         WRITE(IOIMP,74436) (DX1(I),I=1,3)
+*
+         WRITE(IOIMP,74430) (VAR12(I),I=1,NGAT)
+74430    FORMAT('0  UO2DC2 - VAR12 ',3(1X,1PE12.5)/)
+         WRITE(IOIMP,74438) (VAR1(I),I=1,NGAT)
+*
+         WRITE(IOIMP,74429) (EPSV12(I),I=1,6)
+74429    FORMAT('0  UO2DC2 - EPSV12 ',6(1X,1PE12.5)/)
+         WRITE(IOIMP,74440) (EPSV1(I),I=1,6)
+      ENDIF
+*
+      DO 150 I=1,6
+        XX(I) = SIG12(I)-SIG1(I)
+ 150  CONTINUE
+      RA = SQRT(PROCON(XX,XX,6))/ERRABS
+      IF (RA.GT.DIV2*DIV2) THEN
+        TAU = TAU/DIV2
+        GOTO 1300
+      ENDIF
+C
+C -- derivees 3
+         CALL UO2VI1(SIG12,EPSV12,VAR12,EPSVP3,VARP3,EPSDP3,EPSGP3,
+     &                   XMAT,AAD,NGAT,NCOMAT,NSIMP,FI12,TI12,BU12,BUPT)
+         CALL OTTODD(DDE,YOUN,XNU,G,GS,XINVL,W12)
+         CALL UO2FL(NCA,NN,XINVL,PENTE,SIG12,GS,DFDS,DGDS,HDFDQ,KERRE)
+         IF (KERRE.NE.0) THEN
+           GOTO 1100
+         ENDIF
+         CALL UO2VI2(NC1,NCA,NDIM,NN,PRECIZ,EPSPT,EPSVP3,EPSDP3,
+     &                   EPSGP3,DDE,DFDS,DGDS,HDFDQ,DDX3,SIGP3,KERRE)
+         IF (KERRE.NE.0) THEN
+           GOTO 1100
+         ENDIF
+C
+C -- maj 3
+         CALL UO2MAJ(IFOUR,NC,NCA,NDIM,NN,NGAT,XINVL,TAU2,SIG12,
+     &               EPSV12,VAR12,DX12,SIG13,EPSV13,VAR13,DX13,W13,
+     &               SIGP3,EPSVP3,VARP3,DDX3)
+C
+C -- derivees 4
+         FIF=FI0+(TAU*FPOINT)
+         TF=T0+(TAU*TPOINT)
+         BUPT=0.5D0*AKBU*(FI0+FIF)
+         BUF=BU0+(TAU*BUPT)
+         CALL UO2VI1(SIG13,EPSV13,VAR13,EPSVP4,VARP4,EPSDP4,EPSGP4,
+     &                     XMAT,AAD,NGAT,NCOMAT,NSIMP,FIF,TF,BUF,BUPT)
+         CALL OTTODD(DDE,YOUN,XNU,G,GS,XINVL,W13)
+         CALL UO2FL(NCA,NN,XINVL,PENTE,SIG13,GS,DFDS,DGDS,HDFDQ,KERRE)
+         IF (KERRE.NE.0) THEN
+           GOTO 1100
+         ENDIF
+         CALL UO2VI2(NC1,NCA,NDIM,NN,PRECIZ,EPSPT,EPSVP4,EPSDP4,
+     &                   EPSGP4,DDE,DFDS,DGDS,HDFDQ,DDX4,SIGP4,KERRE)
+         IF (KERRE.NE.0) THEN
+           GOTO 1100
+         ENDIF
+C
+         DO I=1,6
+           SIGP4(I) =UNDEMI*(SIGP3(I)+SIGP4(I))
+           EPSVP4(I)=UNDEMI*(EPSVP3(I)+EPSVP4(I))
+         ENDDO
+         VARP4(1)=UNDEMI*(VARP3(1)+VARP4(1))
+         VARP4(2)=UNDEMI*(VARP3(2)+VARP4(2))
+         DO I=1,NDIM
+           DDX4(I)=UNDEMI*(DDX3(I)+DDX4(I))
+         ENDDO
+C
+C -- maj 4
+         CALL UO2MAJ(IFOUR,NC,NCA,NDIM,NN,NGAT,XINVL,TAU2,SIG12,
+     &        EPSV12,VAR12,DX12,SIGF,EPSVF,VARF,DXF,WF,SIGP4,EPSVP4,
+     &        VARP4,DDX4)
+         IF (IFLAG.EQ.0) THEN
+           GOTO 200
+         ENDIF
+C
+C -- derivees 5
+         CALL UO2VI1(SIGF,EPSVF,VARF,EPSVP4,VARP4,EPSDP4,EPSGP4,
+     &                    XMAT,AAD,NGAT,NCOMAT,NSIMP,FIF,TF,BUF,BUPT)
+         CALL OTTODD(DDE,YOUN,XNU,G,GS,XINVL,WF)
+         CALL UO2FL(NCA,NN,XINVL,PENTE,SIGF,GS,DFDS,DGDS,HDFDQ,KERRE)
+         IF (KERRE.NE.0) THEN
+           GOTO 1100
+         ENDIF
+         CALL UO2VI2(NC1,NCA,NDIM,NN,PRECIZ,EPSPT,EPSVP4,EPSDP4,
+     &                   EPSGP4,DDE,DFDS,DGDS,HDFDQ,DDX4,SIGP4,KERRE)
+         IF (KERRE.NE.0) THEN
+           GOTO 1100
+         ENDIF
+C
+         DO I=1,6
+           SIGP2(I) =(SIGP1(I)+SIGP4(I))/6.d0+SIGP3(I)*2.d0/3.d0
+           EPSVP2(I)=(EPSVP1(I)+EPSVP4(I))/6.d0+EPSVP3(I)*2.d0/3.d0
+         ENDDO
+         VARP2(1)=(VARP1(1)+VARP4(1))/6.d0+VARP3(1)*2.d0/3.d0
+         VARP2(2)=(VARP1(2)+VARP4(2))/6.d0+VARP3(2)*2.d0/3.d0
+         DO I=1,NDIM
+           DDX2(I)=(DDX1(I)+DDX4(I))/6.d0+DDX3(I)*2.d0/3.d0
+         ENDDO
+C
+C -- maj 5
+         CALL UO2MAJ(IFOUR,NC,NCA,NDIM,NN,NGAT,XINVL,TAU,SIG0,EPSV0,
+     &               VAR0,DX0,SIG1,EPSV1,VAR1,DX1,W1,SIGP2,EPSVP2,
+     &               VARP2,DDX2)
+C ---------------------------------------------------------------------
+C CALCUL DU RAPPORT ERREUR CALCULEE/ERREUR ADMISE A LA FIN DU PAS (TAU)
+C ---------------------------------------------------------------------
+      DO 170 I=1,6
+        XX(I) = SIGF(I)-SIG1(I)
+ 170  CONTINUE
+      RA = SQRT(PROCON(XX,XX,6))/ERRABS
+      SQRA = SQRT(RA)
+*
+      IF(IIMPI.EQ.42) THEN
+        WRITE(IOIMP,77002) NITERA
+77002   FORMAT('0  UO2DC2 - NITERA ',I3/)
+*
+        WRITE(IOIMP,18011) TAU,ERRABS,RA
+18011   FORMAT('0  UO2DC2 - TAU ERRABS RA '/3(1X,1PE12.5)/)
+*
+         WRITE(IOIMP,74433) (SIGF(I),I=1,6)
+74433    FORMAT('0  UO2DC2 - SIGF ',6(1X,1PE12.5)/)
+         WRITE(IOIMP,74434) (SIG1(I),I=1,6)
+74434    FORMAT('0  UO2DC2 - SIG1 ',6(1X,1PE12.5)/)
+*
+         WRITE(IOIMP,74435) (DXF(I),I=1,3)
+74435    FORMAT('0  UO2DC2 - DXF ',3(1X,1PE12.5)/)
+         WRITE(IOIMP,74436) (DX1(I),I=1,3)
+74436    FORMAT('0  UO2DC2 - DX1 ',3(1X,1PE12.5)/)
+*
+         WRITE(IOIMP,74437) (VARF(I),I=1,NGAT)
+74437    FORMAT('0  UO2DC2 - VARF ',3(1X,1PE12.5)/)
+         WRITE(IOIMP,74438) (VAR1(I),I=1,NGAT)
+74438    FORMAT('0  UO2DC2 - VAR1 ',3(1X,1PE12.5)/)
+*
+         WRITE(IOIMP,74439) (EPSVF(I),I=1,6)
+74439    FORMAT('0  UO2DC2 - EPSVF ',6(1X,1PE12.5)/)
+         WRITE(IOIMP,74440) (EPSV1(I),I=1,6)
+74440    FORMAT('0  UO2DC2 - EPSV1 ',6(1X,1PE12.5)/)
+      ENDIF
+C -----------------------------------------------
+C  TEST DE FIN D'ITERATIONS /  MISE A JOUR DE TAU
+C  DIV =7   BORNE = 2
+C  SI   SQRA>7   TAU = TAU/7     ET NOUVEL ESSAI
+C  SI 2<RA<7*7   ON VISE RA = 1  ET NOUVEL ESSAI
+C -----------------------------------------------
+        IF (RA.GT.DIV*DIV) THEN
+          TAU = TAU/DIV
+          GOTO 1300
+        ELSEIF (RA.GT.BORNE) THEN
+          TAU = TAU/SQRA
+          GOTO 1300
+        ENDIF
+C ---------------------
+C       ici  RA < BORNE
+C ---------------------
+C
+C ------------------------------------------------------
+C  FIN D'ITERATIONS  / RECUPERATION DE TAU (CONVERGENCE)
+C ------------------------------------------------------
+C
+C-------------------------------------
+C  ESTIMATION DU TAU SUIVANT
+C  si   SQRA<1/3        TAU = TAU*3
+C  si   1/3<SQRA<RMIN   on vise RA = 1
+C  si   RMIN<SQRA<RMAX  TAU inchange
+C  si   SQRA>RMAX       on vise RA = 1
+C-------------------------------------
+      TAUNEX=TAU
+      IF (FAC*SQRA.LT.1.D0) THEN
+        TAUNEX=TAU*FAC
+      ELSEIF ( (SQRA.LT.RMIN).OR.(SQRA.GT.RMAX) ) THEN
+        TAUNEX=TAU/SQRA
+      ENDIF
+C
+ 200  CONTINUE
+C
+C---------------------------------------------------------------
+C Maj du burnup - des ouvertures max. - des limites de fermeture
+C---------------------------------------------------------------
+        VARF(2)=BUF
+C
+        DO 400 I=1,3
+          WMAXF(I)=WMAX0(I)
+          IF (WF(I).GT.WMAX0(I)) THEN
+C            IF(LEBIL(I).NE.1.OR.WMAX0(I).GE.WRUPT(I)) THEN
+                 WMAXF(I)=WF(I)
+C            ENDIF
+          ENDIF
+ 400    CONTINUE
+C
+C
+1100  CONTINUE
+C
+      RETURN
+      END
+
+
+
+
+
+
+

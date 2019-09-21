@@ -1,0 +1,578 @@
+C AMELI2    SOURCE    PV        07/11/23    21:15:18     5978
+      SUBROUTINE AMELI2 (NUM,NSA,NBNN,NUMELG,NUMNP,NBVOIS,MAXVOI,KON)
+************************************************************************
+*
+*                             A M E L I 2
+*                             -----------
+*
+* FONCTION:
+* ---------
+*
+*     AMELIORATION D'UN MAILLAGE DE "QUA4" ET/OU "TRI3" SANS
+*     DEPLACEMENT DES NOEUDS.
+*
+* MODULES UTILISES:
+* -----------------
+*
+      IMPLICIT INTEGER(I-N)
+      implicit real*8 (a-h,o-z)
+-INC CCREEL
+-INC CCOPTIO
+*
+* PARAMETRES:   (E)=ENTREE   (S)=SORTIE   (+ = CONTENU DANS UN COMMUN)
+* -----------
+*
+*     NUM(I,J)  E/S  NUMERO DU I-EME NOEUD DU J-EME ELEMENT.
+*                    - MELANGE "QUA4" ET "TRI3" DANS LE MEME TABLEAU,
+*                    - TABLEAU SURDIMENSIONNE.
+*                    - NUMEROTATION DES NOEUDS LOCALE A L'OPERATEUR.
+*     NSA       (E)  TABLEAU DE CORRESPONDANCE ENTRE NUMEROS LOCAUX ET
+*                    GLOBAUX.
+*     NBNN      (E)  NOMBRE MAXI DE NOEUDS PAR ELEMENT.
+*     NUMELG    E/S  NOMBRE D'ELEMENTS DU MAILLAGE.
+*     NUMNP     (E)  NOMBRE DE NOEUDS DU MAILLAGE.
+*     NBVOIS    (E)  NOMBRE D'ELEMENTS APPUYES SUR UN NOEUD DONNE.
+*     KON       (E)  TABLEAU DE CONNEXIONS DES NOEUDS.
+*                    KON(I, N.NOEUD - CSTE) = N.ELEMENT
+*
+      INTEGER NUM(NBNN,*),NSA(*),NBVOIS(*),KON(MAXVOI,*)
+*
+* CONSTANTES:
+* -----------
+*
+      PARAMETER (PI = XPI)
+      PARAMETER (ANGMIN =  30.D0 * XPI/180.D0)
+      PARAMETER (ANGMAX = XPI - ANGMIN)
+      PARAMETER (QUAL0 = 0.3)
+*
+* VARIABLES:
+* ----------
+*
+*     QUADRA = .TRUE.  SI ON CHERCHE A MAILLER EN QUADRANGLES.
+*
+      LOGICAL QUADRA
+*
+* FONCTIONS:
+* ----------
+*
+      LOGICAL QUAD
+      QUAD(I) = (NBNN.EQ.4).AND.(NUM(NBNN,I).NE.0)
+*
+* REMARQUES:
+* ----------
+*
+*     CRITERES DE QUALITE:
+*     - PLUS GRAND ANGLE DE QUADRANGLE (ANALOGUE AU S.P. "AMELIO"),
+*     - PLUS PETIT ANGLE DE QUADRANGLE,
+*     - SURFACE TRIANGLE PAR RAPPORT A EQUILATERAL (ANALOGUE AU S.P.
+*       "AMELIO", LIMITE A 0.3 AU LIEU DE 0.4)
+*     MAIS CALCUL DANS L'ESPACE GEOMETRIQUE REEL ET IMPOSSIBILITE DE
+*     DEPLACER LES NOEUDS.
+*
+* AUTEUR, DATE DE CREATION:
+* -------------------------
+*
+*     PASCAL MANIGOT     19 NOVEMBRE 1990
+*
+* LANGAGE:
+* --------
+*
+*     FORTRAN77
+*
+************************************************************************
+*
+      IF (NUMELG.LE.1) RETURN
+*
+      QUADRA = NBNN.EQ.4
+*
+*
+*     1) CONVERSION DES QUADRANGLES APLATIS EN COUPLES DE TRIANGLES
+*
+      IF (QUADRA) THEN
+*
+         NUMEL0 = NUMELG
+         DO 100 L1=1,NUMEL0
+            IF (.NOT. QUAD(L1)) GOTO 100
+*
+            I1=NUM(1,L1)
+            I2=NUM(2,L1)
+            I3=NUM(3,L1)
+            I4=NUM(4,L1)
+            N1 = NSA(I1)
+            N2 = NSA(I2)
+            N3 = NSA(I3)
+            N4 = NSA(I4)
+            CALL ANGQUA (N1,N2,N3,N4,  ANG1,ANG2,ANG3,ANG4)
+            IF  (ANG1.GT.ANGMAX .OR. ANG2.LT.ANGMIN
+     &           .OR. ANG3.GT.ANGMAX .OR. ANG4.LT.ANGMIN) THEN
+               NUM(4,L1)=0
+               NUMELG=NUMELG+1
+               NUM(1,NUMELG)=I1
+               NUM(2,NUMELG)=I3
+               NUM(3,NUMELG)=I4
+               NUM(4,NUMELG)=0
+            ELSE IF  (ANG1.LT.ANGMIN .OR. ANG2.GT.ANGMAX
+     &              .OR. ANG3.LT.ANGMIN .OR. ANG4.GT.ANGMAX) THEN
+               NUM(4,L1)=0
+               NUM(3,L1)=I4
+               NUMELG=NUMELG+1
+               NUM(1,NUMELG)=I2
+               NUM(2,NUMELG)=I3
+               NUM(3,NUMELG)=I4
+               NUM(4,NUMELG)=0
+            END IF
+ 100     CONTINUE
+*        END DO
+*
+         IF (IIMPI .EQ. 1808) THEN
+            WRITE (IOIMP,2100) (NUMELG - NUMEL0)
+ 2100       FORMAT (1X,I5,' DECOUPAGES DE 1 QUADRANGLE EN 2 TRIANGLES.')
+         END IF
+*
+      END IF
+*
+*
+      MODIF2 = 0
+      MODIF4 = 0
+      MODIF6 = 0
+*     DO
+ 400  CONTINUE
+      MODIF1 = MODIF2
+      MODIF3 = MODIF4
+      MODIF5 = MODIF6
+*
+*
+*        2) RECHERCHE DE TRIANGLES ADJACENTS POUR:
+*           - CREATION DE QUADRANGLE, OU
+*           - INVERSION EVENTUELLE DE DIAGONALE.
+*
+*
+*        DEFINITION DE LA TABLE DES CONNEXIONS:
+      DO 200 I=1,NUMNP
+         NBVOIS(I)=0
+ 200  CONTINUE
+*        END DO
+      DO 202 L2=1,NUMELG
+         DO 2021 I=1,NBNN
+            IA = NUM(I,L2)
+            IF (IA .NE. 0) THEN
+               NBVOIS(IA)=NBVOIS(IA)+1
+               KON(NBVOIS(IA),IA)=L2
+            END IF
+ 2021    CONTINUE
+ 202  CONTINUE
+*        END DO
+*
+      L1 = 0
+ 500  IF (L1.LT.NUMELG) THEN
+         L1 = L1 + 1
+         IF (QUAD(L1)) GOTO 500
+*
+         I1=NUM(1,L1)
+         I2=NUM(2,L1)
+         I3=NUM(3,L1)
+         N1 = NSA(I1)
+         N2 = NSA(I2)
+         N3 = NSA(I3)
+         CALL VALTRI (N1,N2,N3,  CAL1)
+*
+         DO 540 IPOI=1,3
+*
+            NODL1 = NUM(IPOI,L1)
+            NM=NBVOIS(NODL1)
+*
+            DO 520 IVOIS=1,NM
+*
+               L2=KON(IVOIS,NODL1)
+               IF (L2 .EQ. L1) GOTO 520
+               IF (QUAD(L2)) GOTO 520
+*
+               IF    ((I1.EQ.NUM(1,L2)).AND.(I2.EQ.NUM(3,L2))) THEN
+                  I9=NUM(2,L2)
+               ELSEIF((I1.EQ.NUM(2,L2)).AND.(I2.EQ.NUM(1,L2))) THEN
+                  I9=NUM(3,L2)
+               ELSEIF((I1.EQ.NUM(3,L2)).AND.(I2.EQ.NUM(2,L2))) THEN
+                  I9=NUM(1,L2)
+*
+               ELSEIF((I1.EQ.NUM(1,L2)).AND.(I3.EQ.NUM(2,L2))) THEN
+                  IAA=I1
+                  I1=I3
+                  I3=I2
+                  I2=IAA
+                  I9=NUM(3,L2)
+               ELSEIF((I1.EQ.NUM(2,L2)).AND.(I3.EQ.NUM(3,L2))) THEN
+                  IAA=I1
+                  I1=I3
+                  I3=I2
+                  I2=IAA
+                  I9=NUM(1,L2)
+               ELSEIF((I1.EQ.NUM(3,L2)).AND.(I3.EQ.NUM(1,L2))) THEN
+                  IAA=I1
+                  I1=I3
+                  I3=I2
+                  I2=IAA
+                  I9=NUM(2,L2)
+*
+               ELSEIF((I2.EQ.NUM(1,L2)).AND.(I3.EQ.NUM(3,L2))) THEN
+                  IAA=I1
+                  I1=I2
+                  I2=I3
+                  I3=IAA
+                  I9=NUM(2,L2)
+               ELSEIF((I2.EQ.NUM(2,L2)).AND.(I3.EQ.NUM(1,L2))) THEN
+                  IAA=I1
+                  I1=I2
+                  I2=I3
+                  I3=IAA
+                  I9=NUM(3,L2)
+               ELSEIF((I2.EQ.NUM(3,L2)).AND.(I3.EQ.NUM(2,L2))) THEN
+                  IAA=I1
+                  I1=I2
+                  I2=I3
+                  I3=IAA
+                  I9=NUM(1,L2)
+               ELSE
+*                    ITERATE
+                  GOTO 520
+               END IF
+*
+               N1 = NSA(I1)
+               N9 = NSA(I9)
+               N2 = NSA(I2)
+               N3 = NSA(I3)
+               CALL ANGQUA (N1,N9,N2,N3,  ANG1,ANG2,ANG3,ANG4)
+*
+               IF (QUADRA) THEN
+                  IF   (MIN(ANG1,ANG2,ANG3,ANG4).GT.ANGMIN
+     &                 .AND. MAX(ANG1,ANG2,ANG3,ANG4).LT.ANGMAX) THEN
+*                       ON PEUT ASSEMBLER UN QUADRANGLE:
+                     NUM(1,L1)=I1
+                     NUM(2,L1)=I9
+                     NUM(3,L1)=I2
+                     NUM(4,L1)=I3
+*
+*                       ON ENLEVE L'ELEMENT "L2":
+                     NUMELG=NUMELG-1
+                     DO 102 K=L2,NUMELG
+                        NUM(1,K)=NUM(1,K+1)
+                        NUM(2,K)=NUM(2,K+1)
+                        NUM(3,K)=NUM(3,K+1)
+                        NUM(4,K)=NUM(4,K+1)
+ 102                 CONTINUE
+*                       END DO
+                     IF (L1.GT.L2) L1 = L1 - 1
+                     DO 103 K1=1,MAXVOI
+                        DO 1031 K2=1,NUMNP
+                           IF (KON(K1,K2).GT.L2) THEN
+                              KON(K1,K2)=KON(K1,K2)-1
+                           ELSE IF (KON(K1,K2).EQ.L2) THEN
+                              NBVOIS(K2) = NBVOIS(K2) - 1
+                              DO 120 K1B = K1,NBVOIS(K2)
+                                 KON(K1B,K2) = KON(K1B+1,K2)
+ 120                          CONTINUE
+*                             END DO
+                           END IF
+ 1031                   CONTINUE
+ 103                 CONTINUE
+*                       END DO
+*                       FIN DE LA SUPPRESSION DE L'ELEMENT "L2"
+*
+                     MODIF2 = MODIF2 + 1
+                     GOTO 500
+                  END IF
+               END IF
+*
+               IF (MAX(ANG1,ANG2,ANG3,ANG4) .LT. PI) THEN
+*                    INVERSION EVENTUELLE DE DIAGONALE POUR LES 2
+*                    TRIANGLES ADJACENTS:
+                  CALL VALTRI (N1,N9,N3,  CAL2)
+                  IF (CAL2.GT.CAL1) THEN
+                     CALL VALTRI (N9,N2,N3,  CAL2)
+                     IF (CAL2.GT.CAL1) THEN
+*                          ON PEUT COUPER SUIVANT LA DEUXIEME DIAGONALE
+                        NUM(1,L1)=I1
+                        NUM(2,L1)=I9
+                        NUM(3,L1)=I3
+                        NUM(1,L2)=I9
+                        NUM(2,L2)=I2
+                        NUM(3,L2)=I3
+                        MODIF4 = MODIF4 + 1
+                        GOTO 500
+                     END IF
+                  END IF
+               END IF
+*
+ 520        CONTINUE
+*              END DO
+*
+ 540     CONTINUE
+*           END DO
+*
+         GOTO 500
+      END IF
+*
+      IF (IIMPI .EQ. 1808) THEN
+         WRITE (IOIMP,2000) (MODIF2 - MODIF1)
+ 2000    FORMAT (1X,I5,
+     &        ' TRANSFORMATIONS DE 2 TRIANGLES EN 1 QUADRANGLE.')
+         WRITE (IOIMP,2110) (MODIF4 - MODIF3)
+ 2110    FORMAT (1X,I5,' INVERSIONS DE DIAGONALES.')
+      END IF
+*
+      IF (.NOT. QUADRA) THEN
+         IF (MODIF4 .GT. MODIF3) GOTO 400
+         RETURN
+      END IF
+*
+*
+*        3) AMELIORATION DES QUADRANGLES PAR GLISSEMENT DES TRIANGLES
+*
+*
+      IF ((MODIF2+MODIF4) .GT. (MODIF1+MODIF3)) THEN
+*           REDEFINITION DE LA TABLE DES CONNEXIONS:
+         DO 610 I=1,NUMNP
+            NBVOIS(I)=0
+ 610     CONTINUE
+*           END DO
+         DO 620 L2=1,NUMELG
+            DO 6201 I=1,NBNN
+               IA = NUM(I,L2)
+               IF (IA .NE. 0) THEN
+                  NBVOIS(IA)=NBVOIS(IA)+1
+                  KON(NBVOIS(IA),IA)=L2
+               END IF
+ 6201       CONTINUE
+ 620     CONTINUE
+*           END DO
+      END IF
+*
+      L1 = 0
+ 700  IF (L1.LT.NUMELG) THEN
+         L1 = L1 + 1
+         IF (QUAD(L1)) GOTO 700
+*
+         I1=NUM(1,L1)
+         I2=NUM(2,L1)
+         I3=NUM(3,L1)
+         PABO1 = ANGMAX * 1.01
+*
+         DO 740 IPOI=1,3
+*
+            NODL1 = NUM(IPOI,L1)
+            NM=NBVOIS(NODL1)
+*
+            DO 720 IVOIS=1,NM
+*
+               L2=KON(IVOIS,NODL1)
+               IF (.NOT.QUAD(L2)) GOTO 720
+*
+               IF ((I1.EQ.NUM(1,L2)).AND.(I2.EQ.NUM(4,L2))) THEN
+                  II1 = I2
+                  II2 = I3
+                  II3 = I1
+                  II4 = NUM(2,L2)
+                  II5 = NUM(3,L2)
+               ELSEIF((I1.EQ.NUM(2,L2)).AND.(I2.EQ.NUM(1,L2))) THEN
+                  II1 = I2
+                  II2 = I3
+                  II3 = I1
+                  II4 = NUM(3,L2)
+                  II5 = NUM(4,L2)
+               ELSEIF((I1.EQ.NUM(3,L2)).AND.(I2.EQ.NUM(2,L2))) THEN
+                  II1 = I2
+                  II2 = I3
+                  II3 = I1
+                  II4 = NUM(4,L2)
+                  II5 = NUM(1,L2)
+               ELSEIF((I1.EQ.NUM(4,L2)).AND.(I2.EQ.NUM(3,L2))) THEN
+                  II1 = I2
+                  II2 = I3
+                  II3 = I1
+                  II4 = NUM(1,L2)
+                  II5 = NUM(2,L2)
+*
+               ELSEIF((I1.EQ.NUM(1,L2)).AND.(I3.EQ.NUM(2,L2))) THEN
+                  II1 = I1
+                  II2 = I2
+                  II3 = I3
+                  II4 = NUM(3,L2)
+                  II5 = NUM(4,L2)
+               ELSEIF((I1.EQ.NUM(2,L2)).AND.(I3.EQ.NUM(3,L2))) THEN
+                  II1 = I1
+                  II2 = I2
+                  II3 = I3
+                  II4 = NUM(4,L2)
+                  II5 = NUM(1,L2)
+               ELSEIF((I1.EQ.NUM(3,L2)).AND.(I3.EQ.NUM(4,L2))) THEN
+                  II1 = I1
+                  II2 = I2
+                  II3 = I3
+                  II4 = NUM(1,L2)
+                  II5 = NUM(2,L2)
+               ELSEIF((I1.EQ.NUM(4,L2)).AND.(I3.EQ.NUM(1,L2))) THEN
+                  II1 = I1
+                  II2 = I2
+                  II3 = I3
+                  II4 = NUM(2,L2)
+                  II5 = NUM(3,L2)
+*
+               ELSEIF((I2.EQ.NUM(1,L2)).AND.(I3.EQ.NUM(4,L2))) THEN
+                  II1 = I3
+                  II2 = I1
+                  II3 = I2
+                  II4 = NUM(2,L2)
+                  II5 = NUM(3,L2)
+               ELSEIF((I2.EQ.NUM(2,L2)).AND.(I3.EQ.NUM(1,L2))) THEN
+                  II1 = I3
+                  II2 = I1
+                  II3 = I2
+                  II4 = NUM(3,L2)
+                  II5 = NUM(4,L2)
+               ELSEIF((I2.EQ.NUM(3,L2)).AND.(I3.EQ.NUM(2,L2))) THEN
+                  II1 = I3
+                  II2 = I1
+                  II3 = I2
+                  II4 = NUM(4,L2)
+                  II5 = NUM(1,L2)
+               ELSEIF((I2.EQ.NUM(4,L2)).AND.(I3.EQ.NUM(3,L2))) THEN
+                  II1 = I3
+                  II2 = I1
+                  II3 = I2
+                  II4 = NUM(1,L2)
+                  II5 = NUM(2,L2)
+               ELSE
+*                    ITERATE
+                  GOTO 720
+               END IF
+*
+               N1 = NSA(II1)
+               N2 = NSA(II2)
+               N3 = NSA(II3)
+               N4 = NSA(II4)
+               N5 = NSA(II5)
+*                 TRIANGLE=1,2,3    QUADRANGLE=1,3,4,5
+*
+*                 QUALITE DU QUADRANGLE ACTUEL:
+               CALL ANGQUA (N1,N3,N4,N5,  ANG1,ANG2,ANG3,ANG4)
+               AN1345 = MAX(ANG1,ANG2,ANG3,ANG4,
+     &              PI-ANG1,PI-ANG2,PI-ANG3,PI-ANG4)
+*                 2 AUTRES QUADRANGLES POSSIBLES:
+               CALL ANGQUA (N1,N2,N3,N4,  ANG1,ANG2,ANG3,ANG4)
+               AN1234 = MAX(ANG1,ANG2,ANG3,ANG4,
+     &              PI-ANG1,PI-ANG2,PI-ANG3,PI-ANG4)
+               CALL ANGQUA (N1,N2,N3,N5,  ANG1,ANG2,ANG3,ANG4)
+               AN1235 = MAX(ANG1,ANG2,ANG3,ANG4,
+     &              PI-ANG1,PI-ANG2,PI-ANG3,PI-ANG4)
+*
+               IF (AN1234 .LT. AN1345) THEN
+                  IF (AN1234 .LT. PABO1) THEN
+*                       1ER NOUVEAU TRIANGLE POSSIBLE:
+                     CALL VALTRI (N1,N4,N5,  CAL1)
+                     IF (CAL1 .GT. QUAL0) THEN
+                        PABO1 = AN1234
+                        L2BEST = L2
+                        III1 = II4
+                        III2 = II5
+                        III3 = II1
+                        III4 = II2
+                        III5 = II3
+                     END IF
+                  END IF
+               END IF
+               IF (AN1235 .LT. PI) THEN
+*                    2EME NOUVEAU TRIANGLE POSSIBLE:
+                  CALL VALTRI (N1,N2,N5,  CAL1)
+                  IF (CAL1 .GT. QUAL0) THEN
+                     CALL ANGQUA (N2,N3,N4,N5,  ANG1,ANG2,ANG3,ANG4)
+                     PABO3 = MAX(ANG1,ANG2,ANG3,ANG4,
+     &                    PI-ANG1,PI-ANG2,PI-ANG3,PI-ANG4)
+                     IF (PABO3 .LT. AN1345) THEN
+                        IF (PABO3 .LT. PABO1) THEN
+                           PABO1 = PABO3
+                           L2BEST = L2
+                           III1 = II5
+                           III2 = II1
+                           III3 = II2
+                           III4 = II3
+                           III5 = II4
+                        END IF
+                     END IF
+                  END IF
+               END IF
+               IF (AN1234 .LT. PI) THEN
+*                    3EME NOUVEAU TRIANGLE POSSIBLE:
+                  CALL VALTRI (N2,N3,N4,  CAL1)
+                  IF (CAL1 .GT. QUAL0) THEN
+                     CALL ANGQUA (N4,N5,N1,N2,  ANG1,ANG2,ANG3,ANG4)
+                     PABO3 = MAX(ANG1,ANG2,ANG3,ANG4,
+     &                    PI-ANG1,PI-ANG2,PI-ANG3,PI-ANG4)
+                     IF (PABO3 .LT. AN1345) THEN
+                        IF (PABO3 .LT. PABO1) THEN
+                           PABO1 = PABO3
+                           L2BEST = L2
+                           III1 = II2
+                           III2 = II3
+                           III3 = II4
+                           III4 = II5
+                           III5 = II1
+                        END IF
+                     END IF
+                  END IF
+               END IF
+               IF (AN1235 .LT. AN1345) THEN
+                  IF (AN1235 .LT. PABO1) THEN
+*                       4EME NOUVEAU TRIANGLE POSSIBLE:
+                     CALL VALTRI (N3,N4,N5,  CAL1)
+                     IF (CAL1 .GT. QUAL0) THEN
+                        PABO1 = AN1235
+                        L2BEST = L2
+                        III1 = II3
+                        III2 = II4
+                        III3 = II5
+                        III4 = II1
+                        III5 = II2
+                     END IF
+                  END IF
+               END IF
+*
+ 720        CONTINUE
+*              END DO
+*
+ 740     CONTINUE
+*           END DO
+*
+         IF (PABO1 .LT. ANGMAX) THEN
+*              ON A TROUVE LE MOYEN DE MIEUX REPRESENTER UN ENSEMBLE
+*              QUADRANGLE+TRIANGLE DANS UN POLYGONE DE 5 POINTS.
+            MODIF6 = MODIF6 + 1
+            L2 = MAX(L1,L2BEST)
+            L1 = MIN(L1,L2BEST)
+            NUM(1,L1) = III1
+            NUM(2,L1) = III2
+            NUM(3,L1) = III3
+            NUM(4,L1) = 0
+            NUM(1,L2) = III1
+            NUM(2,L2) = III3
+            NUM(3,L2) = III4
+            NUM(4,L2) = III5
+            L1 = L1 - 1
+         END IF
+*
+         GOTO 700
+      END IF
+*
+      IF (IIMPI .EQ. 1808) THEN
+         WRITE (IOIMP,2010) (MODIF6 - MODIF5)
+ 2010    FORMAT (1X,I5,' DEPLACEMENTS DE TRIANGLES.')
+      END IF
+*
+      IF ((MODIF4+MODIF6) .GT. (MODIF3+MODIF5)) GOTO 400
+*     END DO
+*
+      END
+
+
+
+
+
+

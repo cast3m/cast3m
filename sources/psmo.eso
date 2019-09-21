@@ -1,0 +1,874 @@
+C PSMO      SOURCE    BP208322  14/09/15    21:16:54     8150
+      SUBROUTINE PSMO
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+************************************************************************
+*
+*                               P S M O
+*                               -------
+*
+*            Sous-programme associ{ @ l'op{rateur  "PSMO"
+*
+* FONCTION:
+* ---------
+*
+*     L'op{rateur "PSMO" calcule les pseudo-modes en d{placement.
+*
+* PHRASE D'APPEL (EN GIBIANE):
+* ----------------------------
+*
+*     SOLS  =  'PSMO'  RIG  (MAS)  MOD1  (TPODI)  (CHP1  OU  LCHP1)
+*                      (SEISME  (UX) (UY) (UZ))  (FREQ  XFREQ)  ;
+*
+* OPERANDES ET RESULTATS:
+* -----------------------
+*
+*     RIG     'RIGIDITE'  matrice de rigidit{ de la structure.
+*     MAS     'RIGIDITE'  matrice de masse de la structure.
+*     MOD1    'TABLE   '  modes de la structure.
+*     TPODI   'TABLE   '  table de sous-type POINTS_DE_LIAISON, donnant
+*                         les point et normale de chaque choc.
+*     CHP1    'CHPOINT '  description spatiale des chargements ou des
+*                         supports.
+*     LCHP1   'LISTCHPO'  description spatiale des chargements ou des
+*                         supports.
+*     SEISME  'MOT     '  mot cl{, indique que  :
+*                                 - soit la structure est soumise @
+*                         une acc{l{ration sismique d'ensemble.
+*                                 - soit la structure est multisupport{e
+*                         avec un d{placement impos{ des supoorts.
+*     UX      'MOT     '  mot cl{, direction de l'excitation sismique
+*                         suivant X.
+*     UY      'MOT     '  mot cl{, direction de l'excitation sismique
+*                         suivant Y.
+*     UZ      'MOT     '  mot cl{, direction de l'excitation sismique
+*                         suivant Z.
+*     FREQ    'MOT     '  mot cl{, indique dans le cas ou la structure a
+*                         des modes de corps solide que l'utilisateur
+*                         veut imposer la fr{quence @ laquelle on
+*                         {tudiera la r{ponse de la structure.
+*     XFREQ   'FLOTTANT'  valeur de cette fr{quence.
+*     SOLS    'TABLE   '  objet TABLE de sous-type 'PSEUDO_MODE'
+*                         contenant les pseudo-modes.
+*
+* MODULES UTILISES:
+* -----------------
+*
+-INC CCOPTIO
+-INC CCREEL
+*-
+-INC SMRIGID
+-INC SMATTAC
+-INC SMCHPOI
+-INC SMELEME
+-INC SMLCHPO
+-INC SMSOLUT
+-INC SMSTRUC
+*
+* VARIABLES:
+* ----------
+*
+*     DIR       : direction de l'excitation sismique.
+*     DIRECT(3) : tableau contenant les directions sismiques donn{es.
+*     CORSOL = .TRUE.  : la structure a des modes de corps solide.
+*     SISMIQ = .TRUE.  : excitation sismique.
+*     FORCON = .TRUE.  : force concentr{e.
+*     STRUCM = .TRUE.  : structure multisupport{e.
+*
+      PARAMETER (LSEIS=3,LOPT1=1,LOPT2=1)
+      CHARACTER*2 NSEISM(LSEIS),DIRECT(3),DIR
+      CHARACTER*4 NOPTI1(LOPT1),COMP
+      CHARACTER*6 NOPTI2(LOPT2)
+      CHARACTER*8 TYPRET,CTYP,CHARRE
+      CHARACTER*40 CMOT,MONMOT
+      LOGICAL CORSOL,SISMIQ,FORCON,STRUCM,L0,L1
+*
+*
+* AUTEUR, DATE DE CREATION:
+* -------------------------
+*
+*     Lionel VIVAN       Juillet 1988
+*
+************************************************************************
+*
+      SEGMENT MTRAV
+        REAL*8 FREQ(NBMODE),MN(NBMODE),MW2(NBMODE),
+     &         QX(NBMODE),QY(NBMODE),QZ(NBMODE)
+        INTEGER DEPL(NBMODE)
+      ENDSEGMENT
+*
+      DATA NOPTI1/'FREQ'/
+      DATA NOPTI2/'SEISME'/
+      DATA NSEISM/'UX','UY','UZ'/
+      CORSOL = .FALSE.
+      SISMIQ = .FALSE.
+      FORCON = .FALSE.
+      STRUCM = .FALSE.
+      DEUXPI = 2.D0 * XPI
+      EPSI = 0.00001
+      XFREQ = 0.D0
+      NBCHP = 0
+      LCH1 = 0
+      ICH1 = 0
+      IAT1 = 0
+      DO 8 I =1,3
+         DIRECT(I) = '  '
+8     CONTINUE
+*
+*     lecture des donn{es
+*
+      CALL LIRMOT(NOPTI1,LOPT1,IMOT,0)
+      IF (IMOT .EQ. 1) THEN
+         CALL LIRREE(XFREQ,1,IRETOU)
+         IF (XFREQ .LE. 0.D0) THEN
+            CALL ERREUR(21)
+            RETURN
+         ENDIF
+         CORSOL = .TRUE.
+      ENDIF
+*
+      CALL LIRMOT(NOPTI2,LOPT2,IMOT,0)
+      IF (IMOT .EQ. 1) THEN
+         SISMIQ = .TRUE.
+         I = 0
+10       CONTINUE
+         CALL LIRMOT(NSEISM,LSEIS,IMOT,0)
+         IF (IMOT .NE. 0) THEN
+            IF (I .LE. 3) THEN
+               I = I + 1
+               DIRECT(I) = NSEISM(IMOT)
+               GOTO 10
+            ELSE
+               CALL ERREUR(21)
+               RETURN
+            ENDIF
+         ENDIF
+      ENDIF
+*
+      CALL QUETYP(CTYP,1,IRETOU)
+      IF (CTYP(1:8).EQ.'RIGIDITE') GOTO 2000
+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+**+*+*+*+*+*+*+*+*+*+*+*+*
+*                    version appel{e @ disparaitre
+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+**+*+*+*+*+*+*+*+*+*+*+*+*
+      CALL LIROBJ('STRUCTUR',ISTR,1,IRETOU)
+      IF (IERR .NE. 0) RETURN
+*
+      CALL LIROBJ('SOLUTION',IMOD,1,IRETOU)
+      IF (IERR .NE. 0) RETURN
+*
+      CALL LIROBJ('ATTACHE ',IATT,0,IRETOU)
+      IF (IRETOU .EQ. 1) THEN
+         IAT1 = 1
+      ENDIF
+*
+      CALL LIROBJ('CHPOINT ',ICHPT,0,IRETOU)
+      IF (IRETOU .EQ. 0) THEN
+         CALL LIROBJ('LISTCHPO',LCHPT,0,IRETOU)
+         IF (IRETOU .EQ. 1) THEN
+            LCH1 = 1
+         ENDIF
+      ELSE
+         ICH1 = 1
+      ENDIF
+      IF (ICH1 .EQ. 1) THEN
+         CALL ECROBJ('CHPOINT ',ICHPT)
+         CALL SUITE1
+         IF(IERR.NE.0) RETURN
+         CALL LIROBJ('LISTCHPO',LCHPT,1,IRETOU)
+         IF(IERR.NE.0) RETURN
+         LCH1 = 1
+      ENDIF
+*
+      IF (LCH1 .EQ. 1) THEN
+         IF ( SISMIQ ) THEN
+            STRUCM = .TRUE.
+            SISMIQ = .FALSE.
+         ELSE
+            FORCON = .TRUE.
+         ENDIF
+         CALL DIMEN2(LCHPT,NBCHP)
+         IF (IERR.NE.0) RETURN
+      ENDIF
+*
+*     RECUPERATION DE LA MATRICE K ET DE LA MATRICE M
+*
+      CALL EXTR10(ISTR,'RIGI',IRAI1)
+      IF (IERR.NE.0) RETURN
+      CALL EXTR10(ISTR,'MASS',IMAS1)
+      IF (IERR.NE.0) RETURN
+*
+*     REMPLISSAGE DE MTRAV
+*
+      MSOLUT = IMOD
+      SEGACT MSOLUT
+      MSOLEN = MSOLIS(4)
+      SEGACT MSOLEN
+      NBMODE = ISOLEN(/1)
+*
+      SEGINI MTRAV
+*
+      DO 1940 I = 1,NBMODE
+         FREQ(I) = XZERO
+         MN(I) = XZERO
+         MW2(I) = XZERO
+         QX(I) = XZERO
+         QY(I) = XZERO
+         QZ(I) = XZERO
+         DEPL(I) = 0
+1940  CONTINUE
+*
+      DO 1950 IM = 1,NBMODE
+         MMODE = ISOLEN(IM)
+         SEGACT MMODE
+         XF = FMMODD(1)
+         XMN = FMMODD(2)
+         W2 = ( DEUXPI * XF ) ** 2
+         FREQ(IM) = XF
+         MN(IM) = XMN
+         MW2(IM) = XMN * W2
+         QX(IM) = FMMODD(3)
+         QY(IM) = FMMODD(4)
+         QZ(IM) = FMMODD(5)
+         SEGDES MMODE
+1950  CONTINUE
+      SEGDES MSOLEN
+*
+      MSOLEN = MSOLIS(5)
+      SEGACT MSOLEN
+      DO 1960 ID = 1,NBMODE
+         DEPL(ID) = ISOLEN(ID)
+1960  CONTINUE
+      SEGDES MSOLEN
+*
+      SEGDES MSOLUT
+*
+*     CAS DES MODES DE CORPS SOLIDE
+*     RECHERCHE DE FREQUENCE(S) NULLE(S) DANS L'OBJET SOLUTION
+*
+      XF1 = 0.D0
+      DO 1972 I = 1,NBMODE
+         XFI = FREQ(I)
+         IF (XFI .LT. EPSI) THEN
+            CORSOL = .TRUE.
+         ELSE
+            IF (XF1 .EQ. 0.D0) XF1 =XFI
+         ENDIF
+1972  CONTINUE
+*
+      IF ( CORSOL ) THEN
+         IF (XFREQ .EQ. 0.D0) THEN
+*           RECHERCHE DE LA 1-ERE FREQUENCE NON NULLE
+            DO 1974 I = 1,NBMODE
+               XFI = FREQ(I)
+               IF ((XFI .LT. XF1) .AND.(XFI .GE. EPSI))THEN
+                  XF1 = XFI
+               ENDIF
+1974        CONTINUE
+            XFREQ = XF1 / 2.D0
+         ENDIF
+*
+         IF ( IIMPI .GT. 0 ) THEN
+         WRITE (IOIMP,998) ( FREQ(I),I=1,NBMODE)
+998      FORMAT (/1X,'SBR PSMO LISTE DES FREQ ',/1X,10(E12.5,1X))
+         WRITE ( IOIMP, 1002 )  XFREQ
+1002     FORMAT ( /1X, 'SBR PSMO CORPS SOLIDES 1ERE FREQ*0.5 N.NUL'
+     C   ,' OU FREQ IMPO  ',E12.5 )
+         ENDIF
+         W2 = (DEUXPI * XFREQ) ** 2
+         CALL DECALE(IRAI1,IMAS1,W2,IRAID)
+         IF (IERR.NE.0) RETURN
+*
+         DO 19100 IM = 1,NBMODE
+            W2I = ( DEUXPI * FREQ(IM) ) ** 2
+            MW2(IM) = MN(IM) * ( W2I - W2 )
+19100    CONTINUE
+*
+      ELSE
+         IRAID = IRAI1
+      ENDIF
+*
+      SEGDES MTRAV
+*
+      NUME = NBMODE
+      NBMOD1 = NBMODE + 1
+      XFRST = 0.D0
+      XMNST = 0.D0
+      XQ1 = 0.D0
+      XQ2 = 0.D0
+      XQ3 = 0.D0
+      ICHE1 = 0
+*
+*     CAS DE L'ACCELERATION SISMIQUE D'ENSEMBLE
+*
+      IF ( SISMIQ ) THEN
+         CALL ECRCHA('MAIL')
+         CALL ECROBJ('RIGIDITE',IRAID)
+         CALL EXTRAI
+         IF (IERR.NE.0) RETURN
+         CALL LIROBJ('MAILLAGE',IMAIL,1,IRETOU)
+         IF (IERR.NE.0) RETURN
+         DO 1980 ID = 1,3
+            DIR = DIRECT(ID)
+            IF (DIR .NE. '  ') THEN
+               CALL PSACCE(IRAID,IMAS1,IMAIL,MTRAV,DIR,ICHP1)
+               N = 0
+               SEGINI MJONCT
+               IJONCT = MJONCT
+               MJODDL = DIR
+               MJOTYP = 'SEIS'
+               MJOPOI = 0
+               SEGDES MJONCT
+               MCHPOI = ICHP1
+               SEGACT MCHPOI
+               IF (DIR .EQ. 'UX') THEN
+                  MOCHDE = 'EMSISEISMEX'
+               ELSE IF (DIR .EQ. 'UY') THEN
+                  MOCHDE = 'EMSISEISMEY'
+               ELSE
+                  MOCHDE = 'EMSISEISMEZ'
+               ENDIF
+               SEGDES MCHPOI
+               NUME = NUME + 1
+               IF (NUME .EQ. NBMOD1) THEN
+                  CALL MANUSO('PSEUMODE',NUME,XFRST,XMNST,XQ1,XQ2,XQ3,
+     &                        ICHP1,ICHE1,IJONCT,ISOLS)
+               ELSE
+                  CALL MANUSO('PSEUMODE',NUME,XFRST,XMNST,XQ1,XQ2,XQ3,
+     &                        ICHP1,ICHE1,IJONCT,ISOL1)
+                  CALL FUSOLU(ISOLS,ISOL1,ISOL2)
+                  IF (IERR.NE.0) RETURN
+                  CALL DESOLU(ISOLS)
+                  IF (IERR.NE.0) RETURN
+                  CALL DESOLU(ISOL1)
+                  IF (IERR.NE.0) RETURN
+                  ISOLS = ISOL2
+               ENDIF
+            ENDIF
+1980     CONTINUE
+      ENDIF
+*
+*     CAS DES FORCES CONCENTREES OU DE CHOCS
+*
+      IF ( FORCON ) THEN
+         DO 1920 IC = 1,NBCHP
+            CALL EXTRA4(LCHPT,IC,ICHPT)
+            IF (IERR.NE.0) RETURN
+            CALL PSCHPT(IRAID,IMAS1,MTRAV,ICHPT,'FORC',ICHP1)
+            N = 1
+            SEGINI MJONCT
+            IJONCT = MJONCT
+            MJODDL = '    '
+            MJOTYP = 'FORC'
+            MJOPOI = 0
+            IPCHJO(1) = ICHPT
+            ISTRJO(1) = 0
+            IPOSJO(1) = 0
+            SEGDES MJONCT
+            MCHPOI = ICHP1
+            SEGACT MCHPOI
+            MOCHDE = 'EMSIFORCECONCENTREE'
+            SEGDES MCHPOI
+            NUME = NUME + 1
+            IF (NUME .EQ. NBMOD1) THEN
+               CALL MANUSO('PSEUMODE',NUME,XFRST,XMNST,XQ1,XQ2,XQ3,
+     &                     ICHP1,ICHE1,IJONCT,ISOLS)
+            ELSE
+               CALL MANUSO('PSEUMODE',NUME,XFRST,XMNST,XQ1,XQ2,XQ3,
+     &                     ICHP1,ICHE1,IJONCT,ISOL1)
+               CALL FUSOLU(ISOLS,ISOL1,ISOL2)
+               IF (IERR.NE.0) RETURN
+               CALL DESOLU(ISOLS)
+               IF (IERR.NE.0) RETURN
+               CALL DESOLU(ISOL1)
+               IF (IERR.NE.0) RETURN
+               ISOLS = ISOL2
+            ENDIF
+1920     CONTINUE
+      ENDIF
+*
+*     CAS DES FORCES DE CHOC
+*
+      IF (IAT1 .EQ. 1) THEN
+         MATTAC = IATT
+         SEGACT MATTAC
+         NSOUMA = LISATT(/1)
+         DO 1932 IS =1,NSOUMA
+            MSOUMA = LISATT(IS)
+            SEGACT MSOUMA
+            IF (ITYATT .NE. 'CHOC') THEN
+               SEGDES MSOUMA
+               GOTO 1932
+            ENDIF
+            MGEOCH = IGEOCH
+            SEGACT MGEOCH
+            MELEME = INORCH(1)
+            SEGDES MGEOCH
+            SEGACT MELEME
+            NORM = NUM(1,1)
+            SEGDES MELEME
+            NJONCT = IATREL(/1)
+            DO 1934 IJ =1,NJONCT
+               MJONCT = IATREL(IJ)
+               SEGACT MJONCT
+               DO 1936 IJ2 = 1,2
+                  ISTR = ISTRJO(IJ2)
+                  IF (ISTR.NE.0) THEN
+                     MCHPOI = IPCHJO(IJ2)
+                     SEGACT MCHPOI
+                     MSOUPO = IPCHP(1)
+                     SEGDES MCHPOI
+                     SEGACT MSOUPO
+                     MELEME = IGEOC
+                     SEGDES MSOUPO
+                     SEGACT MELEME
+                     IPT = NUM(1,IJ2)
+                     SEGDES MELEME
+*
+                     CALL PSCHOC(IRAID,MTRAV,IPT,NORM,IJ2, ICHP1)
+                     N = 1
+                     SEGINI MJONC1
+                     IJONCT = MJONC1
+                     MJONC1.MJODDL = '    '
+                     MJONC1.MJOTYP = 'CHOC'
+                     MJONC1.MJOPOI = IPT
+                     MJONC1.IPCHJO(1) = 0
+                     MJONC1.ISTRJO(1) = ISTR
+                     MJONC1.IPOSJO(1) = 0
+                     SEGDES MJONC1
+*
+                     MCHPOI = ICHP1
+                     SEGACT MCHPOI
+                     MOCHDE = 'EMSIFORCEDECHOC'
+                     SEGDES MCHPOI
+*
+                     NUME = NUME + 1
+                     IF (NUME .EQ. NBMOD1) THEN
+                        CALL MANUSO('PSEUMODE',NUME,XFRST,XMNST,XQ1,
+     &                              XQ2,XQ3,ICHP1,ICHE1,IJONCT,ISOLS)
+                     ELSE
+                        CALL MANUSO('PSEUMODE',NUME,XFRST,XMNST,XQ1,
+     &                              XQ2,XQ3,ICHP1,ICHE1,IJONCT,ISOL1)
+                        CALL FUSOLU(ISOLS,ISOL1,ISOL2)
+                        IF (IERR.NE.0) RETURN
+                        CALL DESOLU(ISOLS)
+                        IF (IERR.NE.0) RETURN
+                        CALL DESOLU(ISOL1)
+                        IF (IERR.NE.0) RETURN
+                        ISOLS = ISOL2
+                     ENDIF
+                  ENDIF
+1936           CONTINUE
+               SEGDES MJONCT
+1934        CONTINUE
+            SEGDES MSOUMA
+1932     CONTINUE
+         SEGDES MATTAC
+      ENDIF
+*
+*     CAS DES STRUCTURES MULTISUPPORTEES
+*
+      IF ( STRUCM ) THEN
+         DO 1942 IC = 1,NBCHP
+            CALL EXTRA4(LCHPT,IC,ICHPT)
+            IF (IERR.NE.0) RETURN
+            CALL PSCHPT(IRAID,IMAS1,MTRAV,ICHPT,'DEPL',ICHP1)
+            N = 1
+            SEGINI MJONCT
+            IJONCT = MJONCT
+            MJODDL = '    '
+            MJOTYP = 'DEPL'
+            MJOPOI = 0
+            IPCHJO(1) = ICHPT
+            ISTRJO(1) = 0
+            IPOSJO(1) = 0
+            SEGDES MJONCT
+            MCHPOI = ICHP1
+            SEGACT MCHPOI
+            MOCHDE = 'EMSISTRUCTUREMULTISUPPORTEE'
+            SEGDES MCHPOI
+            NUME = NUME + 1
+            IF (NUME .EQ. NBMOD1) THEN
+               CALL MANUSO('PSEUMODE',NUME,XFRST,XMNST,XQ1,XQ2,XQ3,
+     &                     ICHP1,ICHE1,IJONCT,ISOLS)
+            ELSE
+               CALL MANUSO('PSEUMODE',NUME,XFRST,XMNST,XQ1,XQ2,XQ3,
+     &                     ICHP1,ICHE1,IJONCT,ISOL1)
+               CALL FUSOLU(ISOLS,ISOL1,ISOL2)
+               IF (IERR.NE.0) RETURN
+               CALL DESOLU(ISOLS)
+               IF (IERR.NE.0) RETURN
+               CALL DESOLU(ISOL1)
+               IF (IERR.NE.0) RETURN
+               ISOLS = ISOL2
+            ENDIF
+1942     CONTINUE
+      ENDIF
+*
+      SEGSUP MTRAV
+*
+      CALL ECROBJ('SOLUTION',ISOLS)
+*
+      RETURN
+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+**+*++*+*+*
+*                        nouvelle version
+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+*+**+*++*+*+*
+ 2000 CONTINUE
+      IRAI1 = 0
+      IMAS1 = 0
+ 1    CALL LIROBJ('RIGIDITE',IRET,0,IRETOU)
+      IF (IRETOU.NE.0) THEN
+         MRIGID = IRET
+         SEGACT,MRIGID
+         IF (MTYMAT.EQ.'RIGIDITE') THEN
+            IF (IRAI1.NE.0) THEN
+               MOTERR(1:8)='RIGIDITE'
+               MOTERR(9:16)='RIGIDITE'
+               CALL ERREUR(130)
+*              la matrice de rigidite a d{ja {t{ donn{e
+               SEGDES,MRIGID
+               RETURN
+            ENDIF
+            IRAI1 = MRIGID
+            SEGDES,MRIGID
+            IF (IMAS1.EQ.0) GOTO 1
+         ELSE IF (MTYMAT.EQ.'MASSE') THEN
+            IF (IMAS1.NE.0) THEN
+               MOTERR(1:8)='RIGIDITE'
+               MOTERR(9:16)='MASSE'
+               CALL ERREUR(130)
+*              la matrice de masse a d{ja {t{ donn{e
+               SEGDES,MRIGID
+               RETURN
+            ENDIF
+            IMAS1 = MRIGID
+            SEGDES,MRIGID
+            IF (IRAI1.EQ.0) GOTO 1
+         ELSE
+            MOTERR(1:8) = 'RIGIDITE'
+            MOTERR(9:16) = MTYMAT
+            CALL ERREUR(131)
+*           on n'attend pas ce sous type de rigidit{
+            SEGDES,MRIGID
+            RETURN
+         ENDIF
+      ENDIF
+*
+      CALL LIRTAB('BASE_DE_MODES',ITMOD,1,IRET)
+      IF (IERR .NE. 0) RETURN
+*
+      CALL LIRTAB('POINT_DE_LIAISON',ITLIA,0,IRETOU)
+      IF (IRETOU .EQ. 1) THEN
+         IAT1 = 1
+      ENDIF
+*
+      CALL LIROBJ('CHPOINT ',ICHPT,0,IRETOU)
+      IF (IRETOU .EQ. 0) THEN
+         CALL LIROBJ('LISTCHPO',LCHPT,0,IRETOU)
+         IF (IRETOU .EQ. 1) THEN
+            LCH1 = 1
+         ENDIF
+      ELSE
+         ICH1 = 1
+      ENDIF
+      IF (ICH1 .EQ. 1) THEN
+         CALL ECROBJ('CHPOINT ',ICHPT)
+         CALL SUITE1
+         IF(IERR.NE.0) RETURN
+         CALL LIROBJ('LISTCHPO',LCHPT,1,IRETOU)
+         IF(IERR.NE.0) RETURN
+         LCH1 = 1
+      ENDIF
+*
+      IF (LCH1 .EQ. 1) THEN
+         IF ( SISMIQ ) THEN
+            STRUCM = .TRUE.
+            SISMIQ = .FALSE.
+         ELSE
+            FORCON = .TRUE.
+         ENDIF
+         CALL DIMEN2(LCHPT,NBCHP)
+         IF (IERR.NE.0) RETURN
+      ENDIF
+*
+*     remplissage de MTRAV
+*
+      CALL DIMEN7(ITMOD,NBMODE)
+      NBMODE = NBMODE - 2
+*
+      SEGINI MTRAV
+      DO 50 IM = 1,NBMODE
+         CALL ACCTAB(ITMOD,'ENTIER',IM,X0,' ',L0,IP0,
+     &                      'TABLE',I1,X1,' ',L1,ITMK)
+         CALL ACCTAB(ITMK,'MOT',I0,X0,'FREQUENCE',L0,IP0,
+     &               'FLOTTANT',I1,XF,' ',L1,IP1)
+         CALL ACCTAB(ITMK,'MOT',I0,X0,'MASSE_GENERALISEE',L0,IP0,
+     &               'FLOTTANT',I1,XMN,' ',L1,IP1)
+         CALL ACCTAB(ITMK,'MOT',I0,X0,'DEPLACEMENTS_GENERALISES',L0,IP0,
+     &                  'TABLE',I1,X1,' ',L1,ITDG)
+         CALL ACCTAB(ITDG,'ENTIER',1,X0,' ',L0,IP0,
+     &                  'FLOTTANT',I1,XQX,' ',L1,IP1)
+         CALL ACCTAB(ITDG,'ENTIER',2,X0,' ',L0,IP0,
+     &                  'FLOTTANT',I1,XQY,' ',L1,IP1)
+         CALL ACCTAB(ITDG,'ENTIER',3,X0,' ',L0,IP0,
+     &                  'FLOTTANT',I1,XQZ,' ',L1,IP1)
+         CALL ACCTAB(ITMK,'MOT',I0,X0,'DEFORMEE_MODALE',L0,IP0,
+     &                'CHPOINT',I1,X1,' ',L1,ICHDM)
+         W2 = ( DEUXPI * XF ) ** 2
+         FREQ(IM) = XF
+         MN(IM) = XMN
+         MW2(IM) = XMN * W2
+         QX(IM) = XQX
+         QY(IM) = XQY
+         QZ(IM) = XQZ
+         DEPL(IM) = ICHDM
+50    CONTINUE
+*
+*     cas des modes de corps solide
+*     recherche de fr{quence(s) nulle(s)
+*
+      XF1 = 0.D0
+      DO 72 I = 1,NBMODE
+         XFI = FREQ(I)
+         IF (XFI .LT. EPSI) THEN
+            CORSOL = .TRUE.
+         ELSE
+            IF (XF1 .EQ. 0.D0) XF1 =XFI
+         ENDIF
+72    CONTINUE
+*
+      IF ( CORSOL ) THEN
+         IF (XFREQ .EQ. 0.D0) THEN
+*           recherche de la 1-}re fr{quence non nulle
+            DO 74 I = 1,NBMODE
+               XFI = FREQ(I)
+               IF ((XFI .LT. XF1) .AND.(XFI .GE. EPSI))THEN
+                  XF1 = XFI
+               ENDIF
+74          CONTINUE
+            XFREQ = XF1 / 2.D0
+         ENDIF
+*
+         IF ( IIMPI .GT. 0 ) THEN
+         WRITE (IOIMP,999) ( FREQ(I),I=1,NBMODE)
+999      FORMAT (/1X,'SBR PSMO liste des freq ',/1X,10(E12.5,1X))
+         WRITE ( IOIMP, 1000 )  XFREQ
+1000     FORMAT ( /1X, 'SBR PSMO corps solides 1}re freq*0.5 n.nil'
+     &   ,' OU FREQ IMPO  ',E12.5 )
+         ENDIF
+         W2 = (DEUXPI * XFREQ) ** 2
+         IF (IMAS1.EQ.0) THEN
+            MOTERR(1:8) = 'RIGIDITE'
+            MOTERR(9:16) = 'MASSE   '
+            CALL ERREUR(131)
+            SEGSUP,MTRAV
+            RETURN
+         ENDIF
+         CALL DECALE(IRAI1,IMAS1,W2,IRAID)
+         IF (IERR.NE.0) RETURN
+*
+         DO 100 IM = 1,NBMODE
+            W2I = ( DEUXPI * FREQ(IM) ) ** 2
+            MW2(IM) = MN(IM) * ( W2I - W2 )
+ 100     CONTINUE
+*
+      ELSE
+         IRAID = IRAI1
+      ENDIF
+*
+      SEGDES MTRAV
+*
+*     cr{ation de la table de sortie
+*
+      CALL CRTABL(ITPSMO)
+      CALL ECCTAB(ITPSMO,'MOT',I0,X0,'SOUSTYPE',L0,IP0,
+     &                   'MOT',I1,X1,'PSEUDO_MODE',L1,IP1)
+      IPSMO = 0
+*
+*     cas de l'acceleration sismique d'ensemble
+*
+      IF ( SISMIQ ) THEN
+         IF (IRAID.EQ.0) THEN
+            MOTERR(1:8)='RIGIDITE'
+            MOTERR(9:16)='RAIDEUR'
+            CALL ERREUR(79)
+            SEGSUP,MTRAV
+            RETURN
+         ENDIF
+         IF (IMAS1.EQ.0) THEN
+            MOTERR(1:8)='RIGIDITE'
+            MOTERR(9:16)='MASSE'
+            CALL ERREUR(79)
+            SEGSUP,MTRAV
+            RETURN
+         ENDIF
+         CALL ECRCHA('MAIL')
+         CALL ECROBJ('RIGIDITE',IRAID)
+         CALL EXTRAI
+         IF (IERR.NE.0) RETURN
+         CALL LIROBJ('MAILLAGE',IMAIL,1,IRETOU)
+         IF (IERR.NE.0) RETURN
+         DO 80 ID = 1,3
+            DIR = DIRECT(ID)
+            IF (DIR .NE. '  ') THEN
+               CALL PSACCE(IRAID,IMAS1,IMAIL,MTRAV,DIR,ICHP1)
+               MCHPOI = ICHP1
+               SEGACT MCHPOI*MOD
+               IF (DIR .EQ. 'UX') THEN
+                  MOCHDE = 'EMSISEISMEX'
+                  IENT = 1
+               ELSE IF (DIR .EQ. 'UY') THEN
+                  MOCHDE = 'EMSISEISMEY'
+                  IENT = 2
+               ELSE
+                  MOCHDE = 'EMSISEISMEZ'
+                  IENT = 3
+               ENDIF
+               SEGDES MCHPOI
+               CALL CRTABL(ITSEIS)
+               CALL ECCTAB(ITSEIS,'MOT',I0,X0,'SOUSTYPE',L0,IP0,
+     &                            'MOT',I1,X1,'PSMO_SEIS',L1,IP1)
+               CALL ECCTAB(ITSEIS,'MOT',I0,X0,'DEPLACEMENT',L0,IP0,
+     &                        'CHPOINT',I1,X1,' ',L1,ICHP1)
+               CALL ECCTAB(ITSEIS,'MOT',I0,X0,'DIRECTION',L0,IP0,
+     &                         'ENTIER',IENT,X1,' ',L1,IP1)
+               IPSMO = IPSMO + 1
+               CALL ECCTAB(ITPSMO,'ENTIER',IPSMO,X0,' ',L0,IP0,
+     &                             'TABLE',I1,X1,' ',L1,ITSEIS)
+            ENDIF
+80       CONTINUE
+      ENDIF
+*
+*     cas des forces concentr{es
+*
+      IF ( FORCON ) THEN
+         IF (IRAID.EQ.0) THEN
+            MOTERR(1:8)='RIGIDITE'
+            MOTERR(9:16)='RAIDEUR'
+            CALL ERREUR(79)
+            SEGSUP,MTRAV
+            RETURN
+         ENDIF
+         DO 20 IC = 1,NBCHP
+            CALL EXTRA4(LCHPT,IC,ICHPT)
+            IF (IERR.NE.0) RETURN
+            CALL PSCHPT(IRAID,IMAS1,MTRAV,ICHPT,'FORC',ICHP1)
+            MCHPOI = ICHP1
+            SEGACT MCHPOI*MOD
+            MOCHDE = 'EMSIFORCECONCENTREE'
+            SEGDES MCHPOI
+            CALL CRTABL(ITFORC)
+            CALL ECCTAB(ITFORC,'MOT',I0,X0,'SOUSTYPE',L0,IP0,
+     &                         'MOT',I1,X1,'PSMO_FORC',L1,IP1)
+            CALL ECCTAB(ITFORC,'MOT',I0,X0,'DEPLACEMENT',L0,IP0,
+     &                         'CHPOINT',I1,X1,' ',L1,ICHP1)
+            CALL ECCTAB(ITFORC,'MOT',I0,X0,'CHAMP_BASE_B',L0,IP0,
+     &                     'CHPOINT',I1,X1,' ',L1,ICHPT)
+            CALL PROJTA(ICHPT,ITMOD,0,ICHPR)
+            CALL ECCTAB(ITFORC,'MOT',I0,X0,'CHAMP_BASE_A',L0,IP0,
+     &                     'CHPOINT',I1,X1,' ',L1,ICHPR)
+            IPSMO = IPSMO + 1
+            CALL ECCTAB(ITPSMO,'ENTIER',IPSMO,X0,' ',L0,IP0,
+     &                          'TABLE',I1,X1,' ',L1,ITFORC)
+20       CONTINUE
+      ENDIF
+*
+*     cas des forces de choc
+*
+      IF (IAT1 .EQ. 1) THEN
+         IF (IRAID.EQ.0) THEN
+            MOTERR(1:8)='RIGIDITE'
+            MOTERR(9:16)='RAIDEUR'
+            CALL ERREUR(79)
+            SEGSUP,MTRAV
+            RETURN
+         ENDIF
+         IL = 0
+ 32      CONTINUE
+         IL = IL + 1
+         TYPRET = ' '
+         CALL ACCTAB(ITLIA,'ENTIER',IL,X0,' ',L0,IP0,
+     &                       TYPRET,I1,X1,CHARRE,L1,ITLLL)
+         IF (ITLLL.NE.0 .AND. TYPRET.EQ.'TABLE   ') THEN
+            CALL ACCTAB(ITLLL,'MOT',I1,X0,'POINT',L0,IP0,
+     &                      'POINT',I1,X1,' ',L1,IPS)
+            CALL ACCTAB(ITLLL,'MOT',I1,X0,'NORMALE',L0,IP0,
+     &                      'POINT',I1,X1,' ',L1,IPN)
+            CALL PSCHOC(IRAID,MTRAV,IPS,IPN,1,ICHP1)
+            MCHPOI = ICHP1
+            SEGACT MCHPOI*MOD
+            MOCHDE = 'EMSIFORCEDECHOC'
+            SEGDES MCHPOI
+            CALL CRTABL(ILIAI)
+            CALL ECCTAB(ILIAI,'MOT',I0,X0,'SOUSTYPE',L0,IP0,
+     &                        'MOT',I1,X1,'PSMO_LIAI',L1,IP1)
+            CALL ECCTAB(ILIAI,'MOT',I0,X0,'DEPLACEMENT',L0,IP0,
+     &                    'CHPOINT',I1,X1,' ',L1,ICHP1)
+            CALL ECCTAB(ILIAI,'MOT',I0,X0,'POINT',L0,IP0,
+     &                      'POINT',I1,X1,' ',L1,IPS)
+            CALL ECCTAB(ILIAI,'MOT',I0,X0,'NORMALE',L0,IP0,
+     &                      'POINT',I1,X1,' ',L1,IPN)
+            IPSMO = IPSMO + 1
+            CALL ECCTAB(ITPSMO,'ENTIER',IPSMO,X0,' ',L0,IP0,
+     &                          'TABLE',I1,X1,' ',L1,ILIAI)
+            GOTO 32
+         ENDIF
+      ENDIF
+*
+*     cas des structures multisupport{es
+*
+      IF ( STRUCM ) THEN
+         IF (IRAID.EQ.0) THEN
+            MOTERR(1:8)='RIGIDITE'
+            MOTERR(9:16)='RAIDEUR'
+            CALL ERREUR(79)
+            SEGSUP,MTRAV
+            RETURN
+         ENDIF
+         IF (IMAS1.EQ.0) THEN
+            MOTERR(1:8)='RIGIDITE'
+            MOTERR(9:16)='RAIDEUR'
+            CALL ERREUR(79)
+            SEGSUP,MTRAV
+            RETURN
+         ENDIF
+         DO 42 IC = 1,NBCHP
+            CALL EXTRA4(LCHPT,IC,ICHPT)
+            IF (IERR.NE.0) RETURN
+            CALL PSCHPT(IRAID,IMAS1,MTRAV,ICHPT,'DEPL',ICHP1)
+            MCHPOI = ICHP1
+            SEGACT MCHPOI*MOD
+            MOCHDE = 'EMSISTRUCTUREMULTISUPPORTEE'
+            SEGDES MCHPOI
+            CALL CRTABL(ITMULT)
+            CALL ECCTAB(ITMULT,'MOT',I0,X0,'SOUSTYPE',L0,IP0,
+     &                         'MOT',I1,X1,'PSMO_DEPL',L1,IP1)
+            CALL ECCTAB(ITMULT,'MOT',I0,X0,'DEPLACEMENT',L0,IP0,
+     &                     'CHPOINT',I1,X1,' ',L1,ICHP1)
+            CALL ECCTAB(ITMULT,'MOT',I0,X0,'CHAMP_BASE_B',L0,IP0,
+     &                     'CHPOINT',I1,X1,' ',L1,ICHPT)
+            CALL PROJTA(ICHPT,ITMOD,0,ICHPR)
+            CALL ECCTAB(ITMULT,'MOT',I0,X0,'CHAMP_BASE_A',L0,IP0,
+     &                     'CHPOINT',I1,X1,' ',L1,ICHPR)
+            IPSMO = IPSMO + 1
+            CALL ECCTAB(ITPSMO,'ENTIER',IPSMO,X0,' ',L0,IP0,
+     &                          'TABLE',I1,X1,' ',L1,ITMULT)
+42       CONTINUE
+      ENDIF
+*
+      SEGSUP MTRAV
+*
+      CALL ECROBJ('TABLE',ITPSMO)
+*
+      END
+
+
+
+
+
+
+
+
+
+
+
+

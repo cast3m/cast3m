@@ -1,0 +1,900 @@
+C HOOKIS    SOURCE    AM        15/08/21    21:15:21     8599
+      SUBROUTINE HOOKIS(VALMAT,VALCAR,VAR,MFR,IB,IGAU,EXCEN,EPAIST,
+     +     INAT,MELE,NPINT,IFOU,KCAS,NBGMAT,NELMAT,
+     +     S,SECT,LHOOK,DDHOMU,DDHOOK,COBMA,XMOB,IRET)
+C
+C----------------------------------------------------------------------
+C
+C   Calcul de la matrice de HOOKE dans le cas d'un
+C   matériau isotrope
+C
+C   Entrees:
+C   --------
+C   VALMAT   tableau de materiau
+C   VALCAR   tableau de caracteristiques
+C   VAR      tableau de variables internes
+C   MFR      numero de formulation
+C   IB       numero de l'element
+C   IGAU     numero du point de Gauss
+C   EXCEN    excentrement (coques minces avec ou sans cisail. transv)
+C   EPAIST   epaisseur (coques minces avec ou sans cisail. transv)
+C   INAT     numero de la plasticite
+C   MELE     numero de l'element fini
+C   NPINT    coque integree ou non
+C   IFOU     numero d'harmonique de Fourier
+C   KCAS     = 1 si on veut la matrice pour elle-meme
+C            = 2 si on veut la matrice pour l'inverser ensuite
+C   NBGMAT, NELMAT tailles des tableaux
+C   S
+C   SECT     SECTION DE L'ELEMENT IB (<> 0 SI MFR.EQ.27)
+C   LHOOK    taille de la matrice de HOOKE
+C
+C   Sorties:
+C   --------
+C   DDHOOK   matrice de HOOKE
+C   IRET     = 1 si option existante, 0 sinon
+C
+C---------------------------------------------------------------------
+C
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8(A-H,O-Z)
+      PARAMETER(UN=1.D0,DEUX=2.D0,UNDEMI=.5D0)
+      PARAMETER(SIX=6.D0,DOUZE=12.D0,TRSIX=36.D0)
+      PARAMETER(PENA=1.D6,PENB=1.D6)
+      PARAMETER(X774=.774596669241483D0)
+      PARAMETER(XK=1.2D0)
+      PARAMETER(D6=1.D06)
+C
+-INC CCREEL
+-INC CCOPTIO
+C
+      DIMENSION DDHOOK(LHOOK,*),DDHOMU(LHOOK,*),COBMA(*)
+      DIMENSION VALCAR(*),VALMAT(*),VAR(*),S(*)
+      DIMENSION COBB(3),CPBB(3),XKBB(3,3)
+C
+C     INITIALISATION
+C
+      CALL ZERO(DDHOOK,LHOOK,LHOOK)
+      CALL ZERO(COBMA,LHOOK,1)
+C
+C    CAS DES MATERIAUX ENDOMMAGEABLES
+C        DU MATERIAU CERAMIQUE
+C
+*      write(6,*) ' inat',inat
+      IF(INAT.EQ.26.OR.INAT.EQ.29.OR.INAT.EQ.65) THEN
+         IF(INAT.EQ.26) THEN
+            CALL ELAST1(KCAS,IFOU,VAR,0,VALMAT,0,0.D0,0.D0,
+     1           VALCAR,0,MFR,LHOOK,DDHOOK,DDHOMU,KERRE,-1,0)
+            if(npint.le.1.and.mfr.eq.3) kerre=99
+*        write(6,*) ' kerre',kerre
+         ELSEIF(INAT.EQ.29) THEN
+            CALL ELAST1(KCAS,IFOU,VAR,0,VALMAT,0,0.D0,0.D0,
+     1           VALCAR,0,MFR,LHOOK,DDHOOK,DDHOMU,KERRE,-2,0)
+            if(npint.le.1.and.mfr.eq.3) kerre=99
+*        write(6,*) ' kerre',kerre
+         ELSEIF(INAT.EQ.65) THEN
+CCC            IF(IFOUR.EQ.-1.OR.IFOUR.EQ.0) THEN
+CCC               IBID2 = 26
+CCC            ELSE IF(IFOUR.EQ.2.AND.MFR.EQ.1) THEN
+CCC               IBID2 = 35
+CCC            ELSE IF(IFOUR.EQ.-3) THEN
+CCC               IBID2 = 30
+CCC            ELSE IF(IFOUR.EQ.-2) THEN
+CCC               IBID2 = 23
+CCC            ELSE IF(IFOUR.EQ.2.AND.MFR.EQ.0) THEN
+CCC               IF(NPINT.EQ.0) THEN
+CCC                  IBID2 = 31
+CCC               ELSE
+CCC                  IBID2 =23
+CCC               ENDIF
+CCC            ENDIF
+CCC Eloi : correction de IBID2
+            IF(IFOUR.EQ.-1.OR.IFOUR.EQ.0) THEN
+               IBID2 = 27
+            ELSE IF(IFOUR.EQ.2.AND.(MFR.EQ.1.OR.MFR.EQ.31)) THEN
+               IBID2 = 36
+            ELSE IF(IFOUR.EQ.-3) THEN
+               IBID2 = 27
+            ELSE IF(IFOUR.EQ.-2) THEN
+               IBID2 = 24
+            ELSE IF(IFOUR.EQ.2.AND.MFR.EQ.0) THEN
+               IF(NPINT.EQ.0) THEN
+                  IBID2 = 32
+               ELSE
+                  IBID2 =24
+               ENDIF
+            ENDIF
+C modifications cas céramique lorsque on a endommagement généralisé
+            IF (VAR(IBID2).EQ.1.D0) THEN
+               CALL ELAST3(KCAS,IFOU,VALMAT,MFR,LHOOK,DDHOOK,KERRE,1)
+            ELSE
+               CALL ELAST3(KCAS,IFOU,VALMAT,MFR,LHOOK,DDHOOK,KERRE,0)
+            ENDIF
+         ENDIF
+         IF (KERRE.NE.0) THEN
+            IRET=0
+            GOTO 1020
+         ENDIF
+C
+      ELSEIF (IGAU.LE.NBGMAT.AND.
+     1        (IB.LE.NELMAT.OR.NBGMAT.GT.1)) THEN
+C
+C  Formulation massive et milieu poreux, joints poreux et incompressibles
+C         IF(MFR.EQ.1.OR.MFR.EQ.31.OR.MFR.EQ.33.OR.
+c     1      MFR.EQ.57.OR.MFR.EQ.59) THEN
+c as :
+         IF(MFR.EQ.1.OR.MFR.EQ.31.OR.MFR.EQ.33.OR.
+     1      MFR.EQ.57.OR.MFR.EQ.59.OR.MFR.EQ.63) THEN
+*
+            NSTMU=3
+*
+            IF(MFR.EQ.57) THEN
+              IDECAP=2
+              COBB(1)  = VALMAT(3)
+              COBB(2)  = VALMAT(4)
+              CPBB(1)  = VALMAT(5)
+              CPBB(2)  = VALMAT(6)
+              XKBB(1,1)= VALMAT(7)
+              XKBB(1,2)= VALMAT(8)
+              XKBB(2,1)= VALMAT(9)
+              XKBB(2,2)= VALMAT(10)
+*
+            ELSE IF(MFR.EQ.59) THEN
+              IDECAP=3
+              COBB(1)  = VALMAT(3)
+              COBB(2)  = VALMAT(4)
+              COBB(3)  = VALMAT(5)
+              CPBB(1)  = VALMAT(6)
+              CPBB(2)  = VALMAT(7)
+              CPBB(3)  = VALMAT(8)
+              XKBB(1,1)= VALMAT(9)
+              XKBB(1,2)= VALMAT(10)
+              XKBB(1,3)= VALMAT(11)
+              XKBB(2,1)= VALMAT(12)
+              XKBB(2,2)= VALMAT(13)
+              XKBB(2,3)= VALMAT(14)
+              XKBB(3,1)= VALMAT(15)
+              XKBB(3,2)= VALMAT(16)
+              XKBB(3,3)= VALMAT(17)
+            ENDIF
+C
+C           cas des joints poreux
+C
+            IF(MELE.GE.108.AND.MELE.LE.110.OR.
+     &         MELE.GE.185.AND.MELE.LE.190) THEN
+
+               NSTMU=2
+C
+               IF(IFOU.EQ.2) THEN
+                  NSTMU=3
+
+C
+C      CAS TRIDIMENSIONNEL
+C
+                  ZK1 =VALMAT(1)
+                  ZK2 =VALMAT(1)
+                  ZK3 =VALMAT(2)
+C
+                  DDHOOK(1,1)=ZK1
+                  DDHOOK(2,2)=ZK2
+                  DDHOOK(3,3)=ZK3
+C
+               ELSE IF(IFOU.EQ.-3.OR.IFOU.EQ.-2.OR.
+     &                 IFOU.EQ.-1.OR.IFOU.EQ.0) THEN
+C
+C     CAS CONTRAINTES PLANES DEFORMATIONS PLANES AXISYMETRIE
+C
+                  ZK1 =VALMAT(1)
+                  ZK2 =VALMAT(2)
+C
+                  DDHOOK(1,1)=ZK1
+                  DDHOOK(2,2)=ZK2
+C
+               ELSE
+                  IRET=0
+               ENDIF
+*
+               IF(MELE.GE.108.AND.MELE.LE.110) THEN
+                 COBMA(NSTMU)=VALMAT(3)
+                 XMOB=VALMAT(4)
+               ELSE IF(MELE.GE.185.AND.MELE.LE.190) THEN
+                   DO 2185 I=1,IDECAP
+                     IN = I + NSTMU
+                     DDHOOK(NSTMU,IN)=-COBB(I)
+                     DDHOOK(IN,NSTMU)= CPBB(I)
+                     DO 2185 J=1,IDECAP
+                       JN = J + NSTMU
+                       DDHOOK(IN,JN)=XKBB(I,J)
+2185               CONTINUE
+               ENDIF
+*
+            ELSE
+C
+               YOU =VALMAT(1)
+               XNU =VALMAT(2)
+               IF(IFOU.EQ.-2.AND.KCAS.EQ.1) THEN
+C
+C     CONTRAINTES PLANES
+C
+                  AUX =YOU/(UN-XNU*XNU)
+                  AUX1=AUX*XNU
+                  DDHOOK(1,1)=AUX
+                  DDHOOK(1,2)=AUX1
+                  DDHOOK(2,1)=AUX1
+                  DDHOOK(2,2)=AUX
+                  DDHOOK(4,4)=(UN-XNU)*AUX*UNDEMI
+C
+C     AXISYMETRIQUE, DEFORMATIONS PLANES ET DEFO PLANE GENE
+C     FOURIER ET TRIDIMENSIONNEL
+C
+               ELSE IF(IFOU.EQ.-1.OR.IFOU.EQ.0.OR.IFOU.EQ.-3.OR.IFOU.EQ
+     $                 .1.OR.IFOU.EQ.2.OR.(IFOU.EQ.-2.AND.KCAS.EQ.2))
+     $                 THEN
+                  AUX0=UN/((UN+XNU)*(UN-DEUX*XNU))
+                  AUX =YOU*AUX0*(UN-XNU)
+                  AUX1=YOU*AUX0*XNU
+                  GEGE=YOU*UNDEMI/(UN+XNU)
+C
+                  DDHOOK(1,1)=AUX
+                  DDHOOK(1,2)=AUX1
+                  DDHOOK(1,3)=AUX1
+C
+                  DDHOOK(2,1)=AUX1
+                  DDHOOK(2,2)=AUX
+                  DDHOOK(2,3)=AUX1
+C
+                  DDHOOK(3,1)=AUX1
+                  DDHOOK(3,2)=AUX1
+                  DDHOOK(3,3)=AUX
+                  DDHOOK(4,4)=GEGE
+C
+C     FOURIER ET TRIDIMENSIONNEL
+C
+                  IF(IFOU.EQ.1.OR.IFOU.EQ.2) THEN
+                     DDHOOK(5,5)=GEGE
+                     DDHOOK(6,6)=GEGE
+                  ENDIF
+C
+C  CAS UNIDIMENSIONNELS (1D)
+            ELSE IF (IFOU.GE.3.AND.IFOU.LE.15) THEN
+              IF (IFOU.EQ.6.AND.KCAS.EQ.1) THEN
+                DDHOOK(1,1)=YOU
+              ELSE IF ((IFOU.EQ.4.OR.IFOU.EQ.8).AND.KCAS.EQ.1) THEN
+                AUX=YOU/(UN-XNU*XNU)
+                AUX1=AUX*XNU
+                DDHOOK(1,1)=AUX
+                DDHOOK(1,2)=AUX1
+                DDHOOK(2,1)=AUX1
+                DDHOOK(2,2)=AUX
+              ELSE IF ((IFOU.EQ.5.OR.IFOU.EQ.10.OR.IFOU.EQ.13).AND.
+     .                 KCAS.EQ.1) THEN
+                AUX=YOU/(UN-XNU*XNU)
+                AUX1=AUX*XNU
+                DDHOOK(1,1)=AUX
+                DDHOOK(1,3)=AUX1
+                DDHOOK(3,1)=AUX1
+                DDHOOK(3,3)=AUX
+              ELSE
+                AUX0=YOU/((UN+XNU)*(UN-XNU-XNU))
+                AUX=AUX0*(UN-XNU)
+                AUX1=AUX0*XNU
+                DDHOOK(1,1)=AUX
+                DDHOOK(1,2)=AUX1
+                DDHOOK(1,3)=AUX1
+                DDHOOK(2,1)=AUX1
+                DDHOOK(2,2)=AUX
+                DDHOOK(2,3)=AUX1
+                DDHOOK(3,1)=AUX1
+                DDHOOK(3,2)=AUX1
+                DDHOOK(3,3)=AUX
+              ENDIF
+               ELSE
+                  IRET=0
+               ENDIF
+*
+*              addition pour massifs poreux
+*
+               IF(MELE.GE.79.AND.MELE.LE.83) THEN
+                 DO 4501 II=1,NSTMU
+                    COBMA(II)=VALMAT(3)
+ 4501            CONTINUE
+                 XMOB=VALMAT(4)
+*
+               ELSE IF(MELE.GE.173.AND.MELE.LE.182) THEN
+*
+                 LHAUX=4
+                 IF(IFOUR.EQ.1.OR.IFOUR.EQ.-3) LHAUX=6
+                 DO 4502 II=1,NSTMU
+                    COBMA(II)=1.D0
+ 4502            CONTINUE
+                 XMOB=1.D0
+*
+*
+                DO 5602 I=1,IDECAP
+                  IDI=LHOOK-IDECAP+I
+                  DO 5603 J=1,IDECAP
+                    IDJ=LHOOK-IDECAP+J
+                    DDHOOK(IDI,IDJ)=XKBB(I,J)
+ 5603             CONTINUE
+                  DO 5604 J=1,LHAUX
+                    DDHOOK(IDI,J)=CPBB(I)*COBMA(J)
+                    DDHOOK(J,IDI)=-COBB(I)*COBMA(J)
+ 5604             CONTINUE
+5602            CONTINUE
+*
+               ENDIF
+
+            ENDIF
+C
+C  Coques minces
+C
+         ELSE IF(MFR.EQ.3) THEN
+C
+C     CAS DKT INTEGRE
+C
+            IF (NPINT.NE.0) THEN
+               YOU =VALMAT(1)
+               XNU =VALMAT(2)
+               AUX =YOU/(UN-XNU*XNU)
+               AUX1=AUX*XNU
+               DDHOOK(1,1)=AUX
+               DDHOOK(1,2)=AUX1
+               DDHOOK(2,1)=AUX1
+               DDHOOK(2,2)=AUX
+               DDHOOK(4,4)=(UN-XNU)*AUX*UNDEMI
+*  PETITE RUSE POUR EVITER LES DIVISIONS PAR 0.D0   A.M. LE 14/6/89
+               DDHOOK(3,3)=AUX*1.D-6
+            ELSE
+C
+C     CAS TRIDIMENSIONNEL  ET FOURIER
+C
+               IF(IFOU.EQ.2.OR.IFOU.EQ.1) THEN
+                  YOU =VALMAT(1)
+                  XNU =VALMAT(2)
+                  AUX=YOU/(UN-XNU*XNU)
+                  AUX1=AUX*XNU
+                  GEGE=YOU*UNDEMI/(UN+XNU)
+C
+                  DDHOOK(1,1)=AUX
+                  DDHOOK(2,1)=AUX1
+                  DDHOOK(1,2)=AUX1
+                  DDHOOK(2,2)=AUX
+                  DDHOOK(3,3)=GEGE
+C
+                  DDHOOK(4,4)=AUX
+                  DDHOOK(5,4)=AUX1
+                  DDHOOK(4,5)=AUX1
+                  DDHOOK(5,5)=AUX
+                  DDHOOK(6,6)=GEGE
+C
+C     CAS AXISYMETRIQUE ET DEFORMATIONS PLANES
+C
+               ELSE IF(IFOU.EQ.0.OR.IFOU.EQ.-1.OR.IFOU.EQ.-3) THEN
+                  YOU = VALMAT(1)
+                  XNU = VALMAT(2)
+                  AUX=YOU/(UN-XNU*XNU)
+                  AUX1=AUX*XNU
+C
+                  DDHOOK(1,1)=AUX
+                  DDHOOK(2,1)=AUX1
+                  DDHOOK(1,2)=AUX1
+                  DDHOOK(2,2)=AUX
+C
+                  DDHOOK(3,3)=AUX
+                  DDHOOK(4,3)=AUX1
+                  DDHOOK(3,4)=AUX1
+                  DDHOOK(4,4)=AUX
+C
+C     CAS CONTRAINTES PLANES
+C
+               ELSE IF(IFOU.EQ.-2.AND.KCAS.EQ.1) THEN
+                  YOU=VALMAT(1)
+                  DDHOOK(1,1)=YOU
+                  DDHOOK(3,3)=YOU
+C
+               ELSE IF(IFOU.EQ.-2.AND.KCAS.EQ.2) THEN
+                  YOU = VALMAT(1)
+                  XNU = VALMAT(2)
+                  AUX=YOU/(UN-XNU*XNU)
+                  AUX1=AUX*XNU
+C
+                  DDHOOK(1,1)=AUX
+                  DDHOOK(2,1)=AUX1
+                  DDHOOK(1,2)=AUX1
+                  DDHOOK(2,2)=AUX
+C
+                  DDHOOK(3,3)=AUX
+                  DDHOOK(4,3)=AUX1
+                  DDHOOK(3,4)=AUX1
+                  DDHOOK(4,4)=AUX
+C
+               ELSE
+                  IRET=0
+               ENDIF
+            ENDIF
+C
+C  Coques epaisses
+C
+         ELSE IF(MFR.EQ.5) THEN
+C
+C     CAS TRIDIMENSIONNEL
+C
+            IF(IFOU.EQ.2) THEN
+               YOU=VALMAT(1)
+               XNU=VALMAT(2)
+               AUX=YOU/(UN-XNU*XNU)
+               AUX1=AUX*XNU
+               GEGE=YOU*UNDEMI/(UN+XNU)
+C
+               DDHOOK(1,1)=AUX
+               DDHOOK(2,1)=AUX1
+               DDHOOK(1,2)=AUX1
+               DDHOOK(2,2)=AUX
+C
+               DDHOOK(3,3)=GEGE
+               DDHOOK(4,4)=GEGE/XK
+               DDHOOK(5,5)=DDHOOK(4,4)
+            ELSE
+               IRET=0
+            ENDIF
+C
+         ELSE IF(MFR.EQ.61) THEN
+C
+C    ELEMENTS  CIFL   MACRO ELEMENT CISAILLEMENT FLEXION
+C
+          YOU=VALMAT(1)
+          XNU=VALMAT(2)
+          GEGE=YOU*UNDEMI/(UN+XNU)
+C
+          SECT=VALCAR(1)
+          XINZ=VALCAR(2)
+C
+          DDHOOK(1,1)=YOU *SECT
+          DDHOOK(2,2)=YOU *XINZ
+          DDHOOK(3,3)=GEGE*SECT
+          DDHOOK(4,4)=YOU *SECT
+          DDHOOK(5,5)=YOU *XINZ
+C
+C  Poutres et tuyaux
+C
+         ELSEIF(MFR.EQ.7.OR.MFR.EQ.13) THEN
+C
+            IF(MFR.EQ.13) THEN
+               YOUNG=VALMAT(1)
+C  CAS DES TUYAUX - ON CALCULE LES CARACTERISTIQUES DE LA POUTRE
+C                   EQUIVALENTE
+               PRES=VALCAR(4)
+               CISA=VALCAR(5)
+               VALCAR(4)=1.D0
+               VALCAR(5)=0.D0
+               VALCAR(6)=0.D0
+               VALCAR(7)=PRES
+               VALCAR(8)=CISA
+               CALL TUYKAR(VALCAR,KERRE,2,YOUNG)
+               IF(KERRE.EQ.1) THEN
+                  IRET=0
+                  GOTO 1020
+               ENDIF
+            ENDIF
+C
+C
+            IF (IFOU.EQ.-2.OR.IFOU.EQ.-1.OR.IFOU.EQ.-3) THEN
+             SD=VALCAR(1)
+             XINZ=VALCAR(2)
+             SREDY=VALCAR(3)
+             IF(MELE.EQ.84) THEN
+C  SECTION "REDUITE"
+               IF (SREDY.EQ.0.D0) SREDY=SD
+             ENDIF
+            ELSE
+             XINX=VALCAR(1)
+             XINY=VALCAR(2)
+             XINZ=VALCAR(3)
+             SD=VALCAR(4)
+             SREDY=VALCAR(5)
+             SREDZ=VALCAR(6)
+C
+             IF(MELE.EQ.84) THEN
+C  SECTION "REDUITE"
+               IF (SREDZ.EQ.0.D0) SREDZ=SD
+               IF (SREDY.EQ.0.D0) SREDY=SD
+             ENDIF
+C
+            ENDIF
+C
+            IF(IFOU.EQ.2) THEN
+               YOU=VALMAT(1)
+               XNU=VALMAT(2)
+               CISA=YOU*0.5D0/(1.D0+XNU)
+C
+               DDHOOK(1,1)=YOU*SD
+               DDHOOK(2,2)=CISA*SREDY
+               DDHOOK(3,3)=CISA*SREDZ
+               DDHOOK(4,4)=CISA*XINX
+               DDHOOK(5,5)=YOU*XINY
+               DDHOOK(6,6)=YOU*XINZ
+C
+            ELSEIF (IFOU.EQ.-2.OR.IFOU.EQ.-1.OR.IFOU.EQ.-3) THEN
+               YOU=VALMAT(1)
+               XNU=VALMAT(2)
+               CISA=YOU*0.5D0/(1.D0+XNU)
+C
+               DDHOOK(1,1)=YOU*SD
+               DDHOOK(2,2)=CISA*SREDY
+               DDHOOK(3,3)=YOU*XINZ
+C
+            ELSE
+               IRET=0
+            ENDIF
+C
+C  Coques minces avec cisaillement transverse
+C
+         ELSE IF(MFR.EQ.9) THEN
+C
+C     CAS TRIDIMENSIONNEL
+C
+            IF(IFOU.EQ.2) THEN
+               YOU = VALMAT(1)
+               XNU = VALMAT(2)
+               AUX=YOU/(UN-XNU*XNU)
+               AUX1=AUX*XNU
+               GEGE=YOU*UNDEMI/(UN+XNU)
+C
+               DDHOOK(1,1)=AUX
+               DDHOOK(2,1)=AUX1
+               DDHOOK(1,2)=AUX1
+               DDHOOK(2,2)=AUX
+               DDHOOK(3,3)=GEGE
+C
+               DDHOOK(4,4)=AUX
+               DDHOOK(5,4)=AUX1
+               DDHOOK(4,5)=AUX1
+               DDHOOK(5,5)=AUX
+               DDHOOK(6,6)=GEGE
+C
+               DDHOOK(7,7)=GEGE/XK
+               DDHOOK(8,8)=GEGE/XK
+            ELSE
+               IRET=0
+            ENDIF
+C
+C  Linespring
+C
+         ELSE IF(MFR.EQ.15) THEN
+C
+C        TRIDIMENSIONNEL
+C
+            IF(IFOU.EQ.2) THEN
+               YOU=VALMAT(1)
+               XNU=VALMAT(2)
+               EE=YOU*UNDEMI/(UN-XNU*XNU)
+               EPA1=VALCAR(1)
+               FISS1=VALCAR(2)
+               EPA2=VALCAR(6)
+               FISS2=VALCAR(7)
+C
+
+C    ON RECUPERE LES FISS AUX POINTS DE GAUSS IL FAUT LES CALCULER
+C          AUX EXTREMITES
+               FISS1 = (FISS1*(UNDEMI +UNDEMI/X774))+
+     +              (FISS2*(UNDEMI-UNDEMI/X774))
+               FISS2 = (FISS1*(UNDEMI -UNDEMI/X774))+
+     +              (FISS2*(UNDEMI+UNDEMI/X774))
+C     ASURW  = A  /  W   NOTATION CHEISSOUX
+               W=(EPA1+EPA2)*UNDEMI
+               ASURW=(FISS1+FISS2)/W
+C
+               D1=EE*W
+               D2=EE*W*W*W/DOUZE
+               PEWMB=D1*PENB
+               PEWFB=D2*PENA
+               H1=UNDEMI-UNDEMI*S(IGAU)
+               H2=UNDEMI+UNDEMI*S(IGAU)
+               ASURW=(H1*FISS1+H2*FISS2)/W
+C     ON RECUPERE LES COEFFICIENTS ALPHAS ET F I
+               CALL LISPAL(ASURW,ALMM,ALMF,ALFF,DELTA)
+               DELTA=D1/DELTA
+C     CALCUL DES COEFFICIENTS R1 R2 R3 R4
+               R1= DELTA*ALFF/W
+               R2=-DELTA*ALMF/SIX
+               R3=-DELTA*ALMF/SIX
+               R4= DELTA*ALMM*W/TRSIX
+C
+               DDHOOK(1,1)=R1
+               DDHOOK(1,4)=R2
+               DDHOOK(2,2)=PEWMB
+               DDHOOK(3,3)=PEWMB
+               DDHOOK(4,1)=R3
+               DDHOOK(4,4)=R4
+               DDHOOK(5,5)=PEWFB
+            ELSE
+               IRET=0
+            ENDIF
+C
+
+C  Tuyau fissure
+C
+         ELSE IF(MFR.EQ.17) THEN
+C
+C       TRIDIMENSIONNEL
+C
+            IF(IFOU.EQ.2) THEN
+               YOU=VALMAT(1)
+               XNU=VALMAT(2)
+               CISA  = YOU /(DEUX *(UN + XNU))
+               RAYO=VALCAR(1)
+               EPAI=VALCAR(2)
+               TETA1=VALCAR(9)*UNDEMI
+
+C     CONVERSION DE TETA1 EN RADIAN
+               TETA = (TETA1 * XPI)/180.D0
+               TESPI = TETA/XPI
+C     ON MET DANS 'RAYMO' LE RAYON MOYEN DU TUYAU.
+               RAYMO =RAYO  - (EPAI/DEUX)
+C     CALCUL DE A   COEFIICIENT ZAHOR
+               RSURT=RAYMO / EPAI
+               IF(RSURT.LE.10.D0.AND.RSURT.GE.4.9D0) THEN
+                  AXX = ( .125D0*RSURT - .25D0 ) **.25D0
+               ELSE IF(RSURT.GT.10.D0.AND.RSURT.LE.35.D0) THEN
+                  AXX = ( .4D0*RSURT - 3.D0 ) **.25D0
+               ELSE
+                  KERRE=3
+               ENDIF
+C
+C     INITIALISATION DES TERMES DE PENALISATION
+C
+               PPFX = DEUX * XPI * EPAI * YOU  * RAYMO * D6
+               PPFY = DEUX * XPI * EPAI * CISA * RAYMO * D6
+               PPFZ = PPFY
+               PPMX = DEUX * XPI * EPAI * CISA * (RAYMO**2) * D6
+               PPMY = YOU * XPI * EPAI * (RAYMO**2) * D6
+               PPMZ = PPMY
+               IF (TETA1.LE.(0.5D0)) THEN
+                  RR11 = PPFX
+                  RR16 = XZERO
+                  RR66 = PPMZ
+               ELSE
+                  CALL TUFIFP(TESPI,AXX,FP,FM,FMP,FOP,FOM)
+                  DENOM = FP*FM - FMP*FMP
+                  COEF = (YOU * XPI * EPAI)/(DENOM * (TETA**2))
+                  RR11 =  COEF * DEUX * FM
+                  RR16 =  COEF * RAYMO * FMP
+                  RR66 =  COEF * (RAYMO**2) * FP *UNDEMI
+               ENDIF
+C
+               DDHOOK(1,1)=RR11
+               DDHOOK(1,6)=RR16
+               DDHOOK(2,2)=PPFY
+               DDHOOK(3,3)=PPFZ
+               DDHOOK(4,4)=PPMX
+               DDHOOK(5,5)=PPMY
+               DDHOOK(6,1)=DDHOOK(1,6)
+               DDHOOK(6,6)=RR66
+            ELSE
+               IRET=0
+            ENDIF
+C
+C  Cas des barres
+C
+         ELSE IF(MFR.EQ.27.OR.MFR.EQ.49) THEN
+C
+            YOU=VALMAT(1)
+            DDHOOK(1,1)=YOU*SECT
+C cccccc
+C  Elements joints JOT3, JOI4 et JOI2 et COA2 et COS2
+C
+         ELSE IF(MFR.EQ.35) THEN
+C
+C     CAS TRIDIMENSIONNEL
+C
+            IF(IFOU.EQ.2) THEN
+               ZK1 =VALMAT(1)
+               ZK2 =VALMAT(1)
+               ZK3 =VALMAT(2)
+C
+               DDHOOK(1,1)=ZK1
+               DDHOOK(2,2)=ZK2
+               DDHOOK(3,3)=ZK3
+C
+C     CAS CONTRAINTES PLANES DANS LE PLAN (S1,N)
+C         DEFORMATIONS PLANES DANS LE PLAN (S1,N)
+C         AXISYMETRIE DANS LE PLAN (S1,N)
+C
+            ELSE IF(IFOU.EQ.-3.OR.IFOU.EQ.-2.OR.IFOU.EQ.-1
+     &                        .OR.IFOU.EQ.0) THEN
+               ZK1 =VALMAT(1)
+               ZK2 =VALMAT(2)
+C
+               DDHOOK(1,1)=ZK1
+               DDHOOK(2,2)=ZK2
+C
+            ELSE
+               IRET=0
+            ENDIF
+         ELSE IF(MFR.EQ.78) THEN
+C
+C     CAS TRIDIMENSIONNEL
+C
+            IF(IFOU.EQ.2) THEN
+               ZK1 =VALMAT(1)
+               ZK2 =VALMAT(2)
+               ZK3 =VALMAT(2)
+C
+               DDHOOK(1,1)=ZK1
+               DDHOOK(2,2)=ZK2
+               DDHOOK(3,3)=ZK3
+C
+C     CAS CONTRAINTES PLANES DANS LE PLAN (S1,N)
+C         DEFORMATIONS PLANES DANS LE PLAN (S1,N)
+C         AXISYMETRIE DANS LE PLAN (S1,N)
+C
+            ELSE IF(IFOU.EQ.-3.OR.IFOU.EQ.-2.OR.IFOU.EQ.-1
+     &                        .OR.IFOU.EQ.0) THEN
+               ZK1 =VALMAT(1)
+               ZK2 =VALMAT(2)
+C
+               DDHOOK(1,1)=ZK1
+               DDHOOK(2,2)=ZK2
+            ELSE
+               IRET=0
+            ENDIF
+c ccccccc
+C
+C
+C  Elements joints JCT3, JCI4 en 2D cisaillement
+C
+         ELSE IF(MFR.EQ.53) THEN
+C
+C     CAS CONTRAINTES PLANES DANS LE PLAN (S1,N)
+C         DEFORMATIONS PLANES DANS LE PLAN (S1,N)
+C
+            IF(IFOU.EQ.-3.OR.IFOU.EQ.-2.OR.IFOU.EQ.-1
+     &                   .OR.IFOU.EQ.-3) THEN
+               ZK1 =VALMAT(1)
+C
+               DDHOOK(1,1)=ZK1
+               DDHOOK(2,2)=ZK1
+C
+            ELSE
+               IRET=0
+            ENDIF
+C
+C  Elements joints generalises JGI2, JGT3, JGI4
+C
+         ELSE IF(MFR.EQ.55) THEN
+C
+           YOU  =VALMAT(1)
+           XNU  =VALMAT(2)
+C
+C     CAS CONTRAINTES PLANES DANS LE PLAN (S1,N)
+C
+           IF(IFOU.EQ.-2) THEN
+             AUX =YOU/(UN-XNU*XNU)
+             AUX1=AUX*XNU
+*
+             DDHOOK(1,1)=(UN-XNU)*AUX*UNDEMI/EPAIST
+*
+             DDHOOK(2,2)=   AUX  / EPAIST
+             DDHOOK(2,3)=   AUX1
+*
+             DDHOOK(3,2)=   AUX1
+             DDHOOK(3,3)=   AUX  * EPAIST
+C
+C      CAS DEFORMATIONS PLANES DANS LE PLAN (S1,N)
+C
+           ELSE IF(IFOU.EQ.-3.OR.IFOU.EQ.-1) THEN
+             AUX0=UN/((UN+XNU)*(UN-DEUX*XNU))
+             AUX =YOU*AUX0*(UN-XNU)
+             AUX1=YOU*AUX0*XNU
+*
+             DDHOOK(1,1)=YOU*UNDEMI/(UN+XNU)/EPAIST
+*
+             DDHOOK(2,2)=   AUX  / EPAIST
+             DDHOOK(2,3)=   AUX1
+             DDHOOK(2,4)=   AUX1
+*
+             DDHOOK(3,2)=   AUX1
+             DDHOOK(3,3)=   AUX  * EPAIST
+             DDHOOK(3,4)=   AUX1 * EPAIST
+*
+             DDHOOK(4,2)=   AUX1
+             DDHOOK(4,3)=   AUX1 * EPAIST
+             DDHOOK(4,4)=   AUX  * EPAIST
+C
+C     CAS TRIDIMENSIONNEL
+C
+           ELSE IF(IFOU.EQ.2) THEN
+             AUX0=UN/((UN+XNU)*(UN-DEUX*XNU))
+             AUX =YOU*AUX0*(UN-XNU)
+             AUX1=YOU*AUX0*XNU
+*
+             DDHOOK(1,1)=YOU*UNDEMI/(UN+XNU)/EPAIST
+*
+             DDHOOK(2,2)=DDHOOK(1,1)
+*
+             DDHOOK(3,3)=   AUX  / EPAIST
+             DDHOOK(3,4)=   AUX1
+             DDHOOK(3,5)=   AUX1
+*
+             DDHOOK(4,3)=   AUX1
+             DDHOOK(4,4)=   AUX  * EPAIST
+             DDHOOK(4,5)=   AUX1 * EPAIST
+*
+             DDHOOK(5,3)=   AUX1
+             DDHOOK(5,4)=   AUX1 * EPAIST
+             DDHOOK(5,5)=   AUX  * EPAIST
+*
+             DDHOOK(6,6)=YOU*UNDEMI/(UN+XNU)*EPAIST
+C
+C     OPTION NON DEFINIE
+C
+           ELSE
+             IRET=0
+           ENDIF
+C
+C  Elements de zones cohesives
+C
+         ELSE IF(MFR.EQ.77) THEN
+
+*  POUR LE MOMENT, ON NE TIENT PAS COMPTE DE L'ENDOMMAGEMENT
+
+C
+C     CAS TRIDIMENSIONNEL
+C
+            IF(IFOU.EQ.2) THEN
+               ZK1 =VALMAT(1)
+               ZK2 =VALMAT(1)
+               ZK3 =VALMAT(2)
+C
+               DDHOOK(1,1)=ZK1
+               DDHOOK(2,2)=ZK2
+               DDHOOK(3,3)=ZK3
+C
+C     CAS CONTRAINTES PLANES DANS LE PLAN (S1,N)
+C         DEFORMATIONS PLANES DANS LE PLAN (S1,N)
+C
+            ELSE IF(IFOU.EQ.-3.OR.IFOU.EQ.-2.OR.IFOU.EQ.-1) THEN
+               ZK1 =VALMAT(1)
+               ZK2 =VALMAT(2)
+C
+               DDHOOK(1,1)=ZK1
+               DDHOOK(2,2)=ZK2
+C
+            ELSE
+               IRET=0
+            ENDIF
+C
+         ELSE
+            IRET=0
+            GOTO 1020
+         ENDIF
+      ENDIF
+C
+C  Prise en compte de l'epaisseur et de l'excentrement
+C  dans le cas des coques minces avec ou sans cisaillement
+C  transverse
+C
+      IF ((MFR.EQ.3.AND.NPINT.EQ.0).OR.MFR.EQ.9) THEN
+         CALL HOOKMU(EPAIST,EXCEN,LHOOK,DDHOOK,DDHOMU)
+         DO 1005 IO=1,LHOOK
+            DO 10051 JO=1,LHOOK
+               DDHOOK(IO,JO)=DDHOMU(IO,JO)
+10051       CONTINUE
+ 1005    CONTINUE
+      ENDIF
+C
+C  Cas particulier de certains materiaux endommageables
+C
+      IF (INAT.EQ.62.OR.INAT.EQ.64.OR.INAT.EQ.30.OR.INAT.EQ.118) THEN
+         CALL ELAST2(DDHOOK,LHOOK,VALMAT,VAR,INAT,IB,IGAU)
+      ENDIF
+C
+ 1020 RETURN
+      END
+
+
+
+
+
+
+

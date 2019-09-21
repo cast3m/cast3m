@@ -1,0 +1,549 @@
+C KRES5     SOURCE    PV        16/11/17    22:00:24     9180
+      SUBROUTINE KRES5(MATRIK,KCLIM,KSMBR,KTYPI,
+     $     MCHINI,ITER,RESID,
+     $     BRTOL,RESTRT,LBCG,ICALRS,
+     $     MAPREC,KPREC,
+     $     RXMILU,RXILUP,XLFIL,XDTOL,XSPIV,
+     $     ISCAL,
+     $     KTIME,LTIME,IDDOT,IMVEC,
+     $     MCHSOL,LRES,LNMV,ICVG,
+     $     IMPR,IRET)
+      IMPLICIT REAL*8 (A-H,O-Z)
+      IMPLICIT INTEGER (I-N)
+C***********************************************************************
+C NOM         : KRES5
+C DESCRIPTION : Résolution d'un système par une méthode itérative
+C               (type gradient conjugué).
+C
+C
+C LANGAGE     : ESOPE
+C AUTEUR      : Stéphane GOUNAND (CEA/DRN/DMT/SEMT/LTMF)
+C               mél : gounand@semt2.smts.cea.fr
+C***********************************************************************
+C APPELES          : VERMAT, MEXINI, MESMBR, MELIM, INFMAT,
+C                    MEIDIA, PRDILU, PRILU, PRMILU, PRILUT,
+C                    PRCG, PRBCGS, PRBCS2, PRGMR,
+C                    XDISP
+C APPELE PAR       : KRES2
+C***********************************************************************
+C ENTREES            : MATRIK, KCLIM, KSMBR, KTYPI, MCHINI, ITER, RESID,
+C                      BRTOL, RESTRT, MAPREC, KPREC, RXMILU, XLFIL,
+C                      XDTOL
+C ENTREES/SORTIES    : -
+C SORTIES            : MCHSOL, LRES
+C CODE RETOUR (IRET) : = 0 si tout s'est bien passé
+C***********************************************************************
+C VERSION    : v1, 14/04/2000, version initiale
+C HISTORIQUE : v1, 14/04/2000, création
+C HISTORIQUE : 06/04/04 : Scaling
+C HISTORIQUE : 08/04/04 : ajout ILUTP
+C HISTORIQUE :
+C***********************************************************************
+C Prière de PRENDRE LE TEMPS de compléter les commentaires
+C en cas de modification de ce sous-programme afin de faciliter
+C la maintenance !
+C***********************************************************************
+-INC CCOPTIO
+-INC SMLENTI
+      POINTEUR LNMV.MLENTI
+      POINTEUR ATYP.MLENTI
+-INC SMLREEL
+      POINTEUR LRES.MLREEL
+-INC SMCHPOI
+      POINTEUR KCLIM.MCHPOI
+      POINTEUR KSMBR.MCHPOI
+      POINTEUR MCHINI.MCHPOI
+      POINTEUR MCHSOL.MCHPOI
+-INC SMMATRIK
+      POINTEUR MAPREC.MATRIK
+      POINTEUR INCX.IZA
+      POINTEUR KS2B.IZA
+      POINTEUR KMORS.PMORS
+      POINTEUR KISA.IZA
+      POINTEUR AMORS.PMORS
+      POINTEUR AISA.IZA
+      POINTEUR NORMP.IZA
+      POINTEUR NORMD.IZA
+*
+*     .. Parameters
+      REAL*8     ZERO      ,ONE
+      PARAMETER (ZERO=0.0D0,ONE=1.0D0)
+*     Paramètre m du GMRES(m)
+      INTEGER RESTRT
+      INTEGER ITER,IVARI
+      REAL*8 BRTOL,RESID,RXMILU,RXILUP
+*
+      REAL*8 XLFIL,XDTOL
+      INTEGER KPREC
+      INTEGER KTYPI
+C      LOGICAL LCLZER
+      LOGICAL LRACOU
+      LOGICAL LFIRST
+C
+      INTEGER IMPR,IRET
+C     Tableau de correspondance : entier <-> mot
+C     pour le type d'inversion
+      INTEGER NBTYPI,LNTYPI
+      PARAMETER (NBTYPI=9)
+      PARAMETER (LNTYPI=18)
+      CHARACTER*(LNTYPI) LTYPI(NBTYPI)
+C     Tableau de correspondance : entier <-> mot
+C     pour le type de préconditionnement (cas d'une méthode itérative)
+      INTEGER NBPREC,LNPREC
+      PARAMETER (NBPREC=11)
+      PARAMETER (LNPREC=8)
+      CHARACTER*(LNPREC) LPREC(NBPREC)
+-INC SMTABLE
+      POINTEUR KTIME.MTABLE
+      DIMENSION ITTIME(4)
+      CHARACTER*8 CHARI
+      CHARACTER*1 CCOMP
+      LOGICAL LTIME,LOGII
+C
+C Initialisation des tableaux
+C
+      DATA LTYPI/'Choleski          ',
+     $     'Conjugate Gradient',
+     $     'BiCGSTAB G        ',
+     $     'BiCGSTAB(l) G     ',
+     $     'GMRES(m)          ',
+     $     'CGS-Neumaier      ',
+     $     'Multigrid FCG     ',
+     $     'Multigrid GCR(m)  ',
+     $     'Bi-CG             '/
+      DATA LPREC/'None    ',
+     $     'Jacobi  ',
+     $     'D-ILU   ',
+     $     'ILU(0)  ',
+     $     'MILU(0) ',
+     $     'ILUT    ',
+     $     'ILUT2   ',
+     $     'ILUTP   ',
+     $     'ILUTP+0 ',
+     $     'ILU0-PV ',
+     $     'ILU0-PVf'/
+
+      IVALI=0
+      XVALI=0.D0
+      LOGII=.FALSE.
+      IRETI=0
+      XVALR=0.D0
+      IOBRE=0
+      IRETR=0
+*
+* Executable statements
+*
+      ICVG=0
+      IF (IMPR.GT.5) WRITE(IOIMP,*) 'Entrée dans kres5.eso'
+C Batterie de tests
+C
+C      KTYPI : Méthode d'inversion du système (cf. LTYPI)
+C                   1 : résolution directe (Choleski)
+C                   2 : Gradient Conjugué
+C                   3 : Bi-Gradient Conjugué Stabilisé (BiCGSTAB)
+C                   4 : BiCGSTAB(2)
+C                   5 : GMRES(m)
+C                   6 : CGS
+C                   7 : Multigrille symétrique
+C                   8 : Multigrille non symétrique
+C                   9 : BiCG
+      IF (KTYPI.LT.2.OR.KTYPI.GT.NBTYPI) THEN
+         WRITE(IOIMP,*) 'KTYPI incorrect (2..',NBTYPI,') :',KTYPI
+         GOTO 9999
+      ENDIF
+* Pas de préconditionnement en cas de multigrille
+C        - Type de préconditionnement : (cf. LPREC)
+C                   0 : pas de préconditionnement
+C                   1 : préconditionnement par la diagonale
+C                   2 : préconditionnement D-ILU
+C                   3 : préconditionnement ILU(0) (Choleski)
+C                   4 : préconditionnement MILU(0) (Choleski modifié)
+C                   5 : préconditionnement ILUT (dual truncation)
+C                   6 : préconditionnement ILUT2 (une variante du
+C                       précédent qui remplit mieux la mémoire et
+C                       fonctionne mieux quelquefois)
+C                   7 : préconditionnement ILUTP
+C                   8 : préconditionnement ILUTP version Goon
+C                   9 : préconditionnement ILU-PV
+C                   10 : préconditionnement ILU-PVf
+      IF (KPREC.LT.0.OR.KPREC.GT.NBPREC-1) THEN
+         WRITE(IOIMP,*) 'PRECOND ',
+     $           'incorrect (0..',NBPREC-1,') :',KPREC
+         GOTO 9999
+      ENDIF
+C
+C On vérifie que la matrice est correctement assemblée
+C
+      CALL VERMAT(MATRIK,IMPR,IRET)
+      IF (IRET.NE.0) GOTO 9999
+C
+C On transforme le chpoint estimation initiale de l'inconnue en vecteur
+C estimation initiale de l'inconnue
+C In MEXINI : SEGINI INCX
+      CALL MEXINI(MATRIK,MCHINI,
+     $     INCX,
+     $     IMPR,IRET)
+      IF (IRET.NE.0) GOTO 9999
+C
+C On transforme le chpoint second membre en vecteur second membre
+C In MESMBR : SEGINI KS2B
+      CALL MESMBR(MATRIK,KSMBR,
+     $     KS2B,
+     $     IMPR,IRET)
+      IF (IRET.NE.0) GOTO 9999
+C
+C On applique les conditions aux limites
+C
+      LRACOU=(KCLIM.EQ.0)
+*      LRACOU=.FALSE.
+*      WRITE(IOIMP,*) 'LRACOU=',LRACOU
+      IF (LRACOU) THEN
+         SEGACT MATRIK
+         AMORS=MATRIK.KIDMAT(4)
+         AISA=MATRIK.KIDMAT(5)
+         SEGDES MATRIK
+      ELSE
+C
+C In MELIM : SEGINI AMORS
+C            SEGINI AISA
+         CALL MELIM(MATRIK,KCLIM,
+     $        INCX,KS2B,
+     $        AMORS,AISA,
+     $        IMPR,IRET)
+         IF (IRET.NE.0) GOTO 9999
+      ENDIF
+C
+      LFIRST=.FALSE.
+      IF (ISCAL.GT.0) THEN
+         IF (LRACOU) THEN
+            SEGACT MATRIK
+            NORMP=MATRIK.KKMMT(4)
+            NORMD=MATRIK.KKMMT(5)
+            SEGDES MATRIK
+            IF (NORMP.EQ.0.AND.NORMD.EQ.0) THEN
+               LFIRST=.TRUE.
+            ENDIF
+         ELSE
+            NORMP=0
+            NORMD=0
+         ENDIF
+         IF (NORMP.EQ.0.OR.NORMD.EQ.0) THEN
+C Calcul des normes primales (colonnes) et duales (lignes)
+C de la matrice. Norme = norme L2, soit :
+C {\sum_{i ou j} a_{ij}^2}^{1/2}
+C
+            CALL NORMAT(AMORS,AISA,ISCAL,NORMP,NORMD,IMPR,IRET)
+            IF (IRET.NE.0) GOTO 9999
+C
+C On norme la matrice : attention modification...
+C
+            CALL NORMAM(AMORS,AISA,NORMP,NORMD,IMPR,IRET)
+            IF (IRET.NE.0) GOTO 9999
+         ENDIF
+C
+C On norme le second membre : attention modification...
+C
+         CALL NORMV2(KS2B,NORMD,IMPR,IRET)
+         IF (IRET.NE.0) GOTO 9999
+C
+C On dénorme l'inconnue X : attention modification...
+C
+         CALL NORMV1(INCX,NORMP,IMPR,IRET)
+         IF (IRET.NE.0) GOTO 9999
+      ELSE
+         NORMP=0
+         NORMD=0
+      ENDIF
+C
+C On donne des infos sur la matrice
+C
+      CALL INFMAT(AMORS,AISA,IMPR,IRET)
+      IF (IRET.NE.0) GOTO 9999
+C
+C     ON CHOISIT LE TYPE D'INVERSION
+C
+C  Méthodes de gradient conjugué
+C
+C  KTYPI = 2 : Gradient conjugué (CG)
+C  KTYPI = 3 : Bi-Gradient conjugué stabilisé (BiCGSTAB)
+C  KTYPI = 4 : BiCGSTAB(2)
+C  KTYPI = 5 : GMRES(m)
+C  KTYPI = 6 : CGS
+C  KTYPI = 7 : Algebraic Multigrid FCG
+C  KTYPI = 8 : Algebraic Multigrid GCR(m)
+C  KTYPI = 9 : BiCG
+C
+C  KPREC = 0 : pas de préconditionnement
+C  KPREC = 1 : préconditionnement par la diagonale
+C  KPREC = 2 : préconditionnement par factorisation incomplete
+C              D-ILU
+C  KPREC = 3 : préconditionnement par factorisation incomplete
+C              ILU(0) (i.e. Crout)
+C  KPREC = 4 : préconditionnement par factorisation incomplete
+C              modifiée MILU(0) (i.e. Crout)
+C  KPREC = 5 : préconditionnement par factorisation incomplete
+C              ILUT (dual truncation strategy)
+C  KPREC = 6 : préconditionnement ILUT2 (une variante du
+C              précédent qui remplit mieux la mémoire et
+C              fonctionne mieux quelquefois)
+C  KPREC = 7 : préconditionnement ILUTP
+C  KPREC = 8 : préconditionnement ILUTPGOO
+C  KPREC = 9 : préconditionnement ILU-PV
+C  KPREC = 10 : préconditionnement ILU-PV filtré
+      IF(KTYPI.GE.2.AND.KTYPI.LE.NBTYPI)THEN
+         IF (IMPR.GT.1) THEN
+            IF (IDDOT.EQ.0) CCOMP=' '
+            IF (IDDOT.EQ.1) CCOMP='c'
+            IF (KTYPI.EQ.5.OR.KTYPI.EQ.8) THEN
+               WRITE(IOIMP,*) CCOMP,LTYPI(KTYPI),' (m=',RESTRT,')'
+            ELSEIF (KTYPI.EQ.11.OR.KTYPI.EQ.12) THEN
+               WRITE(IOIMP,*) CCOMP,LTYPI(KTYPI),' (l=',LBCG,')'
+            ELSE
+               WRITE(IOIMP,*) CCOMP,LTYPI(KTYPI)
+            ENDIF
+            IF (KPREC.EQ.4) THEN
+               WRITE(IOIMP,110) ' ',LPREC(KPREC+1),' (r=',RXMILU,')'
+ 110           FORMAT (3A,D9.2,A)
+            ELSEIF (KPREC.GE.5.AND.KPREC.LE.6) THEN
+               WRITE(IOIMP,111) ' ',LPREC(KPREC+1),' (lfil=',XLFIL,
+     $                 ' droptol=',XDTOL,')'
+ 111           FORMAT (3A,D9.2,A,D9.2,A)
+            ELSEIF (KPREC.GE.7.AND.KPREC.LE.8) THEN
+               WRITE(IOIMP,112) ' ',LPREC(KPREC+1),' (lfil=',XLFIL,
+     $              ' droptol=',XDTOL,' pivtol=',XSPIV,
+     $              ')'
+ 112           FORMAT (3A,D9.2,A,D9.2,A,D9.2,A,I4,A)
+            ELSEIF (KPREC.EQ.10) THEN
+               WRITE(IOIMP,110) ' ',LPREC(KPREC+1),' (r=',RXILUP,')'
+            ELSE
+               WRITE(IOIMP,*) LPREC(KPREC+1)
+            ENDIF
+         ENDIF
+         IF (LTIME) THEN
+            CALL TIMESPV(ITTIME)
+            ITI1=(ITTIME(1)+ITTIME(2))/10
+         ENDIF
+C
+C     Construction (éventuelle) du préconditionneur
+C
+         IF (KPREC.EQ.1) THEN
+            CALL MEIDIA(AMORS,AISA,MAPREC,IMPR,IRET)
+            IF (IRET.NE.0) GOTO 9999
+         ELSEIF (KPREC.EQ.2) THEN
+            CALL PRDILU(AMORS,AISA,MAPREC,IMPR,IRET)
+            IF (IRET.NE.0) GOTO 9999
+         ELSEIF (KPREC.EQ.3) THEN
+            CALL PRILU0(AMORS,AISA,MAPREC,IMPR,IRET)
+            IF (IRET.NE.0) GOTO 9999
+         ELSEIF (KPREC.EQ.4) THEN
+            CALL PRMILU(AMORS,AISA,MAPREC,RXMILU,IMPR,IRET)
+            IF (IRET.NE.0) GOTO 9999
+         ELSEIF (KPREC.GE.5.AND.KPREC.LE.6) THEN
+            IVARI=KPREC-5
+            CALL PRILUT(AMORS,AISA,MAPREC,XLFIL,XDTOL,IVARI,
+     $           IMPR,IRET)
+            IF (IRET.NE.0) GOTO 9999
+*            WRITE(IOIMP,*) 'PRILUT !'
+*        ELSEIF (KPREC.GE.7.AND.KPREC.LE.9) THEN
+         ELSEIF (KPREC.GE.7.AND.KPREC.LE.8) THEN
+* Ici, on pivote les colonnes lors de la construction du
+* préconditionneur...
+* On modifiera donc IDMATP et INCX et NORMP
+            IF (KPREC.EQ.7) THEN
+               IVARI=0
+            ELSEIF (KPREC.EQ.8) THEN
+               IVARI=2
+            ENDIF
+            CALL PRILTP(AMORS,AISA,MAPREC,XLFIL,XDTOL,XSPIV,
+     $           IVARI,
+     $           INCX,NORMP,LRACOU,
+     $           IMPR,IRET)
+            IF (IRET.NE.0) GOTO 9999
+         ELSEIF (KPREC.EQ.9.OR.KPREC.EQ.10) THEN
+            CALL PRILUP(AMORS,AISA,MAPREC,RXILUP,KPREC-9,IMPR,IRET)
+            IF (IRET.NE.0) GOTO 9999
+         ELSEIF (KPREC.NE.0) THEN
+            WRITE(IOIMP,*) 'Erreur de programmation'
+            GOTO 9999
+         ENDIF
+         IF (LTIME) THEN
+            CALL TIMESPV(ITTIME)
+            ITI2=(ITTIME(1)+ITTIME(2))/10
+         ENDIF
+C
+C Nettoyage des zéros stockés (utilité ?)
+C
+         IF (LFIRST) THEN
+*            IIMPR=IMPR
+*            IMPR=6
+            CALL CLMORS(AMORS,AISA,IMPR,IRET)
+            IF (IRET.NE.0) GOTO 9999
+*            IMPR=IIMPR
+         ENDIF
+*         SEGPRT, AMORS
+*         SEGPRT, AISA
+C
+C     Résolution itérative proprement dite
+C
+         IF (LTIME) THEN
+            CALL TIMESPV(ITTIME)
+            ITI3=(ITTIME(1)+ITTIME(2))/10
+         ENDIF
+         INMV=0
+         IF (KTYPI.EQ.2) THEN
+            CALL PRCG2(AMORS,AISA,KS2B,MATRIK,MAPREC,LRES,LNMV,INCX,
+     $           ITER,INMV,RESID,KPREC,BRTOL,ICALRS,IDDOT,IMVEC,
+     $           IMPR,IRET)
+         ELSEIF (KTYPI.EQ.3) THEN
+            LBCG=1
+            CALL PRBCGG(AMORS,AISA,KS2B,MATRIK,MAPREC,LRES,LNMV,INCX,
+     $           ITER,INMV,RESID,KPREC,BRTOL,LBCG,ICALRS,IDDOT,IMVEC,
+     $           IMPR,IRET)
+         ELSEIF (KTYPI.EQ.4) THEN
+            CALL PRBCGG(AMORS,AISA,KS2B,MATRIK,MAPREC,LRES,LNMV,INCX,
+     $           ITER,INMV,RESID,KPREC,BRTOL,LBCG,ICALRS,IDDOT,IMVEC,
+     $           IMPR,IRET)
+         ELSEIF (KTYPI.EQ.5) THEN
+            CALL PRGMR2(AMORS,AISA,KS2B,MATRIK,MAPREC,LRES,LNMV,INCX,
+     $           ITER,INMV,RESID,KPREC,RESTRT,ICALRS,IDDOT,IMVEC,
+     $           IMPR,IRET)
+         ELSEIF (KTYPI.EQ.6) THEN
+            CALL PRCGSN(AMORS,AISA,KS2B,MATRIK,MAPREC,LRES,LNMV,INCX,
+     $           ITER,INMV,RESID,KPREC,BRTOL,ICALRS,IDDOT,IMVEC,
+     $           IMPR,IRET)
+         ELSEIF (KTYPI.EQ.7) THEN
+            CALL INCTYP(MATRIK,
+     $           ATYP,
+     $           IMPR,IRET)
+            IF (IRET.NE.0) GOTO 9999
+*            WRITE(IOIMP,*) 'Appel de pragmg'
+            CALL PRAGMG(AMORS,ATYP,AISA,KS2B,MATRIK,MAPREC,LRES,LNMV,
+     $           INCX,
+     $           ITER,INMV,RESID,KPREC,1,ICALRS,IDDOT,IMVEC,KTIME,LTIME,
+     $           IMPR,IRET)
+            SEGSUP ATYP
+         ELSEIF (KTYPI.EQ.8) THEN
+            CALL INCTYP(MATRIK,
+     $           ATYP,
+     $           IMPR,IRET)
+            IF (IRET.NE.0) GOTO 9999
+            CALL PRAGMG(AMORS,ATYP,AISA,KS2B,MATRIK,MAPREC,LRES,LNMV,
+     $           INCX,
+     $           ITER,INMV,RESID,KPREC,RESTRT,ICALRS,IDDOT,IMVEC,
+     $           KTIME,LTIME,
+     $           IMPR,IRET)
+            SEGSUP ATYP
+         ELSEIF (KTYPI.EQ.9) THEN
+            CALL PRBCG(AMORS,AISA,KS2B,MATRIK,MAPREC,LRES,LNMV,INCX,
+     $           ITER,INMV,RESID,KPREC,BRTOL,ICALRS,IDDOT,IMVEC,
+     $           IMPR,IRET)
+         ELSE
+            WRITE(IOIMP,*) 'KTYPI=',KTYPI,' incorrect'
+            GOTO 9999
+         ENDIF
+C  IRET<0 : 'vrai erreur' ou breakdown (dans le cas de BiCGSTAB)
+C  IRET>0 : l'itération n'a pas convergé mais on veut
+C           quand meme la solution calculée
+         ICVG=IRET
+         IF (IRET.GT.0) THEN
+            WRITE(IOIMP,*) 'Convergence to tolerance not achieved : ',
+     $           'ITER=',ITER,' INMV=',INMV,' RESID=',RESID
+         ELSEIF (IRET.EQ.0) THEN
+            IF (IMPR.GT.0) THEN
+               WRITE(IOIMP,*) 'ITER=',ITER,' INMV=',INMV,' RESID=',RESID
+            ENDIF
+         ELSEIF (IRET.LT.0) THEN
+            WRITE(IOIMP,*) 'Error or breakdown in iterative method'
+            GOTO 9999
+         ENDIF
+         IF (LTIME) THEN
+            CALL TIMESPV(ITTIME)
+            ITI4=(ITTIME(1)+ITTIME(2))/10
+            ITP=ITI2-ITI1
+            ITR=ITI4-ITI3
+            CHARI='PRECONDI'
+            CALL ECCTAB(KTIME,'MOT     ',IVALI,XVALI,CHARI,LOGII,IRETI,
+     $                        'ENTIER  ',ITP,XVALR,CHARR,LOGIR,IRETR)
+            CHARI='RESOLUTI'
+            CALL ECCTAB(KTIME,'MOT     ',IVALI,XVALI,CHARI,LOGII,IRETI,
+     $                     'ENTIER  ',ITR,XVALR,CHARR,LOGIR,IRETR)
+         ENDIF
+      ELSE
+         WRITE(IOIMP,*) 'KTYPI=',KTYPI,' invalide (1..',NBTYPI,')'
+         GOTO 9999
+      ENDIF
+      IF (ISCAL.GT.0) THEN
+C
+C On dénorme le vecteur solution : attention modification...
+C
+         CALL NORMV2(INCX,NORMP,IMPR,IRET)
+         IF (IRET.NE.0) GOTO 9999
+         IF (LRACOU) THEN
+            SEGACT MATRIK*MOD
+            MATRIK.KKMMT(4)=NORMP
+            MATRIK.KKMMT(5)=NORMD
+            SEGDES MATRIK
+         ENDIF
+      ENDIF
+C
+C Transformation du vecteur-solution en chpoint
+C
+      CALL XDISP(MATRIK,INCX,MCHSOL,IMPR,IRET)
+      IF (IRET.NE.0) GOTO 9999
+C
+C Suppression des objets temporaires
+C
+      IF (LRACOU) THEN
+            SEGACT MATRIK*MOD
+            MATRIK.KIDMAT(4)=AMORS
+            MATRIK.KIDMAT(5)=AISA
+            SEGDES MATRIK
+      ELSE
+         SEGSUP,AMORS
+         SEGSUP,AISA
+      ENDIF
+      SEGSUP INCX
+      SEGSUP KS2B
+*
+* Normal termination
+*
+      IRET=0
+      RETURN
+*
+* Format handling
+*
+*
+* Error handling
+*
+ 9999 CONTINUE
+      IRET=1
+      WRITE(IOIMP,*) 'An error was detected in kres5.eso'
+      RETURN
+*
+* End of KRES5
+*
+      END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

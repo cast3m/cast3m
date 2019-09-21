@@ -1,0 +1,712 @@
+C KRESS     SOURCE    PV        16/11/17    22:00:27     9180
+      SUBROUTINE KRESS(MTABP,MCHB,MCHR,IMPR,BETA,KDPDQ,KPIMP,PIMP,NIMP)
+C ***********************************************************************
+C
+C     RESOLUTION DE LA PRESSION DANS LE CAS D'UNE METHODE ITERATIVE
+C     AVEC MATRICE STOCKEE. ON ENCHAINE, SI BESOIN EST : PROGCS,
+C     CGPR ET RESCGS.
+C
+C     DANS LE CAS D'UNE METHODE ITERATIVE AVEC STOCKAGE DE LA MATRICE
+C     DE PRESSION ....
+C
+C     CE SOUS PROGRAMME EFFECTUE LES OPERATIONS SUIVANTES :
+C
+C     1. STOCKAGE DANS LA TABLE METHODE DES POINTEURS ET DONNEES NECESSAIRES
+C
+C     2. CALCUL ET STOCKAGE DE LA MATRICE C D  C   CONNAISSANT C
+C        EN FONCTION DU MODE DE STOCKAGE DEMANDE
+C
+C        DEUX MODES DE STOCKAGE SONT DISPONIBLES
+C           - MORSE CLASSIQUE  (KSTOCK.EQ.0)
+C           - MODE COMPRESSE   (KSTOCK.EQ.1)
+C
+C     3. CALCUL D'UN PRECONDITIONNEMENT SI NECESSAIRE, I.E. LORSQUE
+C        KTYPI=3 OU 4
+C
+C
+C
+C
+C     POINTEURS :
+C
+C     MTABP    CONTIENT ENTRE AUTRES LES TABLEAUX D'INDIRECTION
+C              (CF PROFIM)
+C     MELEME   OBJET MAILLAGE SUR LEQUEL EST FAIT LE CALCUL
+C     MATRAK   MATRICES ELEMENTAIRES DE LA DIVERGENCE (ALIAS"C")
+C
+C     IZIPAD   CORRESPONDANCE NUMER. GLOBALE --> NUMER. LOCALE
+C              (DOMAINE SUR LEQUEL PORTE AP ET NON LA PRESSION)
+C     IZTAB    POROSITE  (VECT DOMA) OU (VECT NOEU) PAR DEFAUT 1.,1.,1.
+C
+C     EN SORTIE :
+C
+C     LA MATRICE EST RANGEE DANS UN SEUL SEGMENT DE MEMOIRE
+C
+C     MORSE     : PAR LIGNES, LE PREMIER DE LA LIGNE EST L'ELEMENT LUI-MEME
+C     COMPRESSE : COMME UN TABLEAU A(NEL,NNZ) AVEC NNZ = NOMBRE MAXI
+C                 DE TERMES NON NULS PAR LIGNE. LA DIAGONALE EST STOCKEE
+C                 EN PREMIER.
+C
+C     LE CALCUL DE LA MATRICE EST FAIT SOUS-OBJET PAR SOUS-OBJET CE QUI
+C     LIMITE A DEUX LE NOMBRE DE MELEMEs ET DE MATRICES DE LA DIVERGENCE
+C     ACTIVES AU MEME INSTANT (EN PLUS DE LA MATRICE ET DE SON TABLEAU
+C     D'INDEXAGE)
+C
+C ***********************************************************************
+      IMPLICIT INTEGER(I-N)
+      IMPLICIT REAL*8 (A-H,O-Z)
+C
+C***
+
+-INC CCOPTIO
+-INC SMELEME
+      POINTEUR IPTJ.MELEME,IPTK.MELEME,MELEM1.MELEME
+      POINTEUR IGEOM.MELEME,IGEOMI.MELEME
+      POINTEUR MELEMK.MELEME,MELEMC.MELEME,IGEOMC.MELEME
+      POINTEUR MELSTB.MELEME
+-INC SMLENTI
+      POINTEUR IZIPAD.MLENTI,MLENTP.MLENTI,IZIPAK.MLENTI
+      POINTEUR IA.MLENTI,JA.MLENTI,KA.MLENTI
+-INC SMCOORD
+-INC SMCHPOI
+      POINTEUR IZDV.MCHPOI
+      POINTEUR IZDP.MCHPOI,IZDDP.MPOVAL
+      POINTEUR MCHB.MCHPOI,MCHR.MCHPOI
+      POINTEUR            IZR.MPOVAL,IZPOC.MPOVAL
+      POINTEUR IZP.MPOVAL,IZF.MPOVAL
+      POINTEUR IPRESU.MCHPOI
+      POINTEUR IPRESV.MPOVAL
+C-INC SMMATRAK
+-INC SMMATRK1
+C*************************************************************************
+C
+C    REPERAGE ET STOKAGE DES MATRICES ELEMENTAIRES  puis assemblees
+C
+
+* LGEOC SPG de la pression et/ou des multiplicateurs de Lagrange
+* (points CENTRE ) pour chaque operateur de contrainte
+* KGEOC SPG pour la totalite des points CENTRE.
+* KGEOS SPG pour la totalite des points SOMMET (Diagonale vitesse)
+* KLEMC Connectivites de l'ensemble des contraintes
+* LIZAFM(NBSOUS) contient les pointeurs IZAFM des sous-zones
+
+      SEGMENT MATRAK
+      INTEGER LGEOC(NBOP),IDEBS(NBOP),IFINS(NBOP)
+      INTEGER LIZAFM(NBSOUS)
+      INTEGER IKAM0 (NBSOUS)
+      INTEGER IMEM  (NBELC)
+      INTEGER KLEMC,KGEOS,KGEOC,KDIAG,KCAC,KIZCL,KIZGC
+      ENDSEGMENT
+
+      SEGMENT IZAFM
+      REAL*8  AM(NNELP,NP,IESP),RPGI(NELAX)
+      ENDSEGMENT
+
+      POINTEUR IPMJ.IZAFM,IPMK.IZAFM
+
+C*******************************************************************
+-INC SMLREEL
+      POINTEUR IZB.MLREEL
+      POINTEUR IZDPR.MLREEL,IZPIM.MLREEL
+      POINTEUR IZICCG.MLREEL,IZA.MLREEL
+      POINTEUR IZD.MLREEL
+C
+      CHARACTER*8 TYPE,TYPC
+C
+C Pour verifier ou non les numeros des elements sur
+C une condition de sortie fluide.
+C
+      LOGICAL SOMTER
+      DATA SOMTER/.FALSE./
+
+C***
+      IZL=0
+      KDPDQ=0
+C     write(6,*)' Entree dans kress KDPDQ=',kdpdq
+
+C
+C*** LECTURE OU CALCUL DES TABLEAUX D'INDIRECTION ***
+C
+C***  On essaie de lire les tableaux d'indirection crees par PROGCS
+C     Si la table MATRIS n'existe pas, alors LEKTAB fera appel
+C     a PROGCS.
+
+      CALL LEKTAB(MTABP,'MATRIS',MTAB2)
+      IF(MTAB2.EQ.0)GO TO 90
+      TYPE=' '
+      CALL ACMO(MTABP,'METHODE',TYPE,MTAB3)
+      IF(MTAB3.EQ.0)GO TO 90
+      CALL ACME(MTAB3,'KTYPI',KTYPI)
+      CALL ACME(MTAB3,'KSTOCK',KSTO)
+
+C
+C*** CALCUL DES COEFFICIENTS DE LA MATRICE ***
+C
+
+      TYPE=' '
+      CALL ACMO(MTABP,'MATC',TYPE,MATRAK)
+      IF(TYPE.NE.'MATRAK')THEN
+      WRITE(6,*)' Il n''y a pas d''entree MATC dans la table '
+      GO TO 90
+      ENDIF
+
+      TYPE=' '
+      CALL ACMO(MTABP,'DIAGV',TYPE,IZDV)
+      IF(TYPE.NE.'CHPOINT ')THEN
+      WRITE(6,*)' Il n''y a pas d''entree DIAGV dans la table '
+      GO TO 90
+      ENDIF
+
+      SEGACT MATRAK*MOD
+
+      IF(KDIAG.EQ.IZDV.AND.KCAC.EQ.1)THEN
+      GO TO 500
+      ENDIF
+
+      IF(KDPDQ.NE.0)THEN
+C DPDQ
+      TYPE=' '
+      CALL ACMO(MTABP,'DOMAINE',TYPE,MTABD)
+      IF(TYPE.NE.'TABLE')GO TO 90
+      TYPE=' '
+      CALL ACMO(MTABD,'MELSTB',TYPE,MELSTB)
+      IF(TYPE.NE.'MAILLAGE') GO TO 90
+      CALL LEKTAB(MTABD,'CENTRE',MELEMC)
+
+      TYPE=' '
+      CALL ACMO(MTABD,'MCHPOC',TYPE,MCHPOC)
+      IF(TYPE.NE.'CHPOINT') GO TO 90
+      CALL LICHT(MCHPOC,IZPOC,TYPC,IGEOMC)
+      NBK=IZPOC.VPOCHA(/2)
+      SEGACT MELEMC,IGEOMC
+C DPDQ
+      ENDIF
+
+      KDIAG=IZDV
+      CALL LICHT(IZDV,MPOVAL,TYPC,IGEOM)
+
+
+
+      WRITE(6,*)'   *------------------------------------------------*'
+      WRITE(6,*)'   *  KTYPI=2,3,4 RESOLUTION DE L''EQUATION DE       *'
+      WRITE(6,*)'   *    PRESSION PAR UNE METHODE ITERATIVE.         *'
+      WRITE(6,*)'   *    LA MATRICE EST CALCULEE ET STOCKEE UNE FOIS *'
+      WRITE(6,*)'   *    POUR TOUTES. L''INVERSION UTILISE UNE        *'
+      WRITE(6,*)'   *    METHODE DE GRADIENT CONJUGUE PRECONDITIONNE *'
+      WRITE(6,*)'   *    PAR LA DIAGONALE OU UNE FACTORISATION       *'
+      WRITE(6,*)'   *    INCOMPLETE.                                 *'
+C
+C*********************************************************************
+C---  Initialisation des segments IZDPR IZPIM
+C     et stockage de leurs pointeurs dans la table METHODE.
+C*********************************************************************
+C
+C---  NL nombre total d'elements
+C
+      CALL ACME(MTAB3,'NL',NL)
+      JG=NL
+      SEGINI IZDPR
+      CALL ECMO(MTAB3,'DPR','LISTREEL',IZDPR)
+      SEGDES IZDPR
+      IF(KTYPI.EQ.4) THEN
+      IF(KSTO.EQ.0) CALL ACME(MTAB2,'LA',NICCG)
+      IF(KSTO.EQ.1) CALL ACME(MTAB2,'NNZ',NNZ)
+      IF(KSTO.EQ.1) NICCG=NL*NNZ
+      JG=NICCG
+      SEGINI IZICCG
+      CALL ECMO(MTAB3,'ICCG','LISTREEL',IZICCG)
+      SEGDES IZICCG
+      ENDIF
+C
+      SEGINI IZPIM
+      CALL INITD (IZPIM.PROG,NL,0.D0)
+      CALL ECMO(MTAB3,'PIM','LISTREEL',IZPIM)
+      SEGDES IZPIM
+C
+C*********************************************************************
+C----  P A R A M E T R E S   D E   C O N V E R G E N C E
+C*********************************************************************
+C
+      CALL ACME(MTAB3,'NITMAX',NITMAX)
+      CALL ACMF(MTAB3,'EPSI',EPI)
+      CALL ACME(MTAB3,'NPITE',NPITE)
+      CALL ACME(MTAB3,'NFIMPR',NFIMPR)
+      WRITE(6,*)'   *                                                *'
+      WRITE(6,*)'   * PARAMETRES DE CONTROLE CHOISIS :               *'
+      WRITE(6,*)'   *                                                *'
+      WRITE(6,*)'   * KTYPI   : ',KTYPI
+      WRITE(6,*)'   * KSTOCK  : ',KSTO
+      WRITE(6,*)'   * NITMAX  : ',NITMAX
+      WRITE(6,666) EPI
+      WRITE(6,*)'   * JTPA    : ',NPITE
+      WRITE(6,*)'   * FIMPR   : ',NFIMPR
+      WRITE(6,*)'   *                                                *'
+ 666  FORMAT(1X,'   * JTEPS   : ',3X,E8.2)
+C
+C*********************************************************************
+C---- I N I T I A L I S A T I O N   D E   L A   P R E S S I O N
+C*********************************************************************
+C
+
+C
+C AU CAS ON ON FOURNIT UNE PRESSION INITIALE, ON SAUVE LE CONTENU
+C DANS PIM.
+C
+      TYPE=' '
+      CALL ACMO(MTAB3,'PINITIAL',TYPE,IPRESU)
+C
+      IF (IPRESU.EQ.0) THEN
+        SEGACT IZPIM*MOD
+        DO II=1,NL
+           IZPIM.PROG(II)=0.D0
+        ENDDO
+        SEGDES IZPIM
+      ELSE
+        CALL LICHT(IPRESU,IPRESV,TYPC,IGEOM)
+        SEGACT IPRESV*MOD
+        LL1=IPRESV.VPOCHA(/2)
+        LL2=IPRESV.VPOCHA(/1)
+        IF (LL1.NE.1.OR.LL2.NE.NL) THEN
+         WRITE(6,*)'PB DANS CGPR : DIM DE LA PRESSION'
+         WRITE(6,*)'DIM ATTENDUE : ',NL
+         WRITE(6,*)'DIM RECUE    : ',LL2
+         IF(NL.LT.LL2) THEN
+            WRITE(6,*) 'NOMBRES DE CONTRAINTES INCOMPATIBLES'
+            STOP
+         ELSE
+            WRITE(6,*) 'IL Y A DES CONTRAINTES SUPPLEMENTAIRES'
+            SEGACT IZPIM*MOD
+            DO II=1,LL2
+               IZPIM.PROG(II)=IPRESV.VPOCHA(II,1)
+            ENDDO
+            DO II=LL2+1,NL
+               IZPIM.PROG(II)=0.D0
+            ENDDO
+            SEGDES IZPIM,IPRESV
+         ENDIF
+        ENDIF
+        SEGACT IZPIM*MOD
+        DO 15 II=1,NL
+         IZPIM.PROG(II)=IPRESV.VPOCHA(II,1)
+  15    CONTINUE
+        SEGDES IZPIM,IPRESU,IPRESV
+      ENDIF
+C
+C********************************************************************
+C---  A L L O C A T I O N   D E   L A   M A T R I C E
+C********************************************************************
+C
+
+C---  Allocation de memoire pour la matrice A et la diagonale inverse
+
+      IF(KSTO.EQ.0) CALL ACME(MTAB2,'LA',LA)
+      IF(KSTO.EQ.1) CALL ACME(MTAB2,'NNZ',NNZ)
+      IF(KSTO.EQ.1) LA=NL*NNZ
+      JG=LA
+      SEGINI IZA
+      CALL ECMO(MTAB2,'IMAT','LISTREEL',IZA)
+      SEGINI IZD
+C
+C********************************************************************
+C---  C A L C U L   D E   L A   M A T R I C E   D E   P R E S S I O N
+C********************************************************************
+C
+      MELEME=KLEMC
+C
+C   ON COMMENCE PAR ACTIVER
+C
+
+      MELEM1=KGEOS
+      CALL KRIPAD(MELEM1,IZIPAD)
+
+      SEGACT MELEME
+
+C
+C Nombre de sous-objets
+C
+      NBSOUS=LISOUS(/1)
+      IF(NBSOUS.EQ.0)NBSOUS=1
+
+      IES=VPOCHA(/2)
+      NPT=VPOCHA(/1)
+C
+
+C--- S T O C K A G E   M O R S E
+      IF(KSTO.EQ.0) THEN
+      TYPE=' '
+      CALL ACMO(MTAB2,'IA',TYPE,IA)
+      TYPE=' '
+      CALL ACMO(MTAB2,'JA',TYPE,JA)
+      SEGACT IA*MOD,JA*MOD
+      KKA=0
+C
+C On procede sous-objet par sous-objet
+C
+
+C?    write(6,*)' KDPDQ=',KDPDQ
+      IF(KDPDQ.NE.0)THEN
+C
+C OPERATEUR DPDQ
+C
+      CALL KRIPAD(IGEOMC,MLENTI)
+      SEGACT MELSTB*MOD,IGEOMC
+      MELEMK=KGEOC
+      CALL KRIPAD(MELEMK,IZIPAK)
+      SEGACT MELEMK*MOD
+      ENDIF
+
+      KJ=0
+      DO 10 JIS=1,NBSOUS
+         IF(NBSOUS.EQ.1) IPTJ=MELEME
+         IF(NBSOUS.NE.1) IPTJ=LISOUS(JIS)
+         SEGACT IPTJ*MOD
+         IPMJ=LIZAFM(JIS)
+         JKAM=IKAM0 (JIS)
+         SEGACT IPMJ*MOD
+         NPJ=IPTJ.NUM(/1)
+         NEL=IPTJ.NUM(/2)
+C        Un sous-objet est active, on traite tous ses elements
+         DO 1 KJJ=1,NEL
+            KJ=KJ+1
+C
+C---        Boucle sur le nombe de voisins, les numeros de ceux-ci sont
+C           dans JA
+C
+C On v‚rifie que la somme des termes d'une ligne de la matrice est nulle
+C en accumulant dans la variable STERM.
+C
+            STERM=0.D0
+            DO 2 KV=IA.LECT(KJ),IA.LECT(KJ+1)-1
+            KKA=KKA+1
+            KK=JA.LECT(KV)
+C           De deux choses l'une, KK appartient au meme sous-objet
+C           que KJ ou non. Par defaut on dit oui puis on teste.
+            IPTK=IPTJ
+            IPMK=IPMJ
+            KKAM=JKAM
+            NPK=NPJ
+            NSOBJ=IMEM(KK)
+            IF(NSOBJ.NE.JIS) THEN
+C              KK et KJ sont dans deux sous-objets differents, il faut
+C              activer celui de KK
+               IPTK=LISOUS(NSOBJ)
+               IPMK=LIZAFM(NSOBJ)
+               KKAM=IKAM0 (NSOBJ)
+               SEGACT IPTK*MOD
+               SEGACT IPMK*MOD
+               NPK=IPTK.NUM(/1)
+            ENDIF
+            KKK=KK-KKAM+1
+
+            AUX=0.D0
+
+            DO 31 I=1,NPJ
+            DO 32 N=1,NPK
+            IF(IPTJ.NUM(I,KJJ).NE.IPTK.NUM(N,KKK))GO TO 3
+            JD=IZIPAD.LECT(IPTK.NUM(N,KKK))
+*            IPR=IC*(JD-1)+1
+            AUX=AUX+IPMJ.AM(KJJ,I,1)*IPMK.AM(KKK,N,1)/VPOCHA(JD,1)
+     &             +IPMJ.AM(KJJ,I,2)*IPMK.AM(KKK,N,2)/VPOCHA(JD,2)
+            IF(IES.EQ.2)GO TO 3
+            AUX=AUX+IPMJ.AM(KJJ,I,3)*IPMK.AM(KKK,N,3)/VPOCHA(JD,3)
+ 3          CONTINUE
+ 32         CONTINUE
+ 31         CONTINUE
+            IZA.PROG(KKA)=AUX
+            IF(KK.EQ.KJ) IZD.PROG(KJ)=AUX
+
+C?    write(6,*)' KDPDQ 2 = ',KDPDQ
+      IF(KDPDQ.NE.0)THEN
+C
+C OPERATEUR DPDQ
+C
+C  PV  nuna est dans le segment izl. izl n'est pas initialisé
+      if (izl.eq.0) call erreur(5)
+      KJQ=NUNA(KJ)
+      LPJ=LECT(MELEMK.NUM(1,KJQ))
+      IF(LPJ.NE.0)THEN
+      P1=BETA*IZPOC.VPOCHA(LPJ,1)
+
+C?!   D(KJ)=D(KJ)+ABS(P1)
+      IZD.PROG(KJ)=IZD.PROG(KJ)+ABS(P1)
+
+      DO 3819 JC=2,NBK
+      NPC=MELSTB.NUM(JC,LPJ)
+      P=BETA*IZPOC.VPOCHA(LPJ,JC)
+      KPI=IZIPAK.LECT(NPC)
+      KPJN=NUAN(KPI)
+      IF(KPJN.GT.KJ)GO TO 3819
+      IF(KPJN.GT.KJ)GO TO 3819
+
+C# MC : IDEBLK non initialisé + IDECI et LLI uniquement dans KJAA
+C       KJAA non utilisé => on vire !!!
+C      IDECI=IDEBLK(KJ-KJD+1)
+C      LLI=IDEBLK(KJ-KJD+2)-IDEBLK(KJ-KJD+1)
+C      KJAA=LLI-KJ+KPJN+IDECI
+
+C?!   A(KJAA)=A(KJAA)+P
+      IZA.PROG(KKA)=IZA.PROG(KKA)+P
+
+ 3819 CONTINUE
+      ENDIF
+      ENDIF
+C FIN DPDQ
+
+C
+            STERM=STERM+AUX
+C
+C           Il faut desactiver IPMK et IPTK sauf bien sur si on n'a
+C           qu'un seul sous-objet
+C
+            IF(NSOBJ.NE.JIS) THEN
+               SEGDES IPMK
+               SEGDES IPTK
+            ENDIF
+ 2          CONTINUE
+C
+C Controle sur la somme des termes d'une ligne
+C
+            IF(SOMTER.AND.ABS(STERM).GT.1.D-10) THEN
+            WRITE(6,*) 'L''ELEMENT KJ = ',KJ,' DOIT ETRE SUR UNE SORTIE'
+            ENDIF
+ 1       CONTINUE
+         SEGDES IPTJ
+         SEGDES IPMJ
+ 10   CONTINUE
+C
+C Sortie
+C     dimension ts(9)
+C     do 1001 kj=1,nelp
+C        write(61,60) (itab(ka),ka=iat(kj),iat(kj+1)-1)
+C1001 continue
+C     do 1000 kj=1,nelp
+C        call initd(ts,9,0.d0)
+C        do 1003 ka=iat(kj),iat(kj+1)-1
+C        i=ka-iat(kj)+1
+C        ts(i)=a(ka)
+C1003    continue
+C        write(61,61) (a(ka),ka=iat(kj),iat(kj+1)-1)
+C        write(61,61) (ts(i),i=1,9)
+C1000 continue
+ 60   format(9(1x,i4))
+ 61   format(9(1x,f7.4))
+C
+      SEGDES IA,JA,IZA
+      SEGDES MELEME
+
+      IF(KDPDQ.NE.0)THEN
+      SEGSUP IZIPAK,MLENTI
+      ENDIF
+
+
+C--- S T O C K A G E   C O M P R E S S E
+
+      ELSEIF(KSTO.EQ.1) THEN
+      TYPE=' '
+      CALL ACMO(MTAB2,'KA',TYPE,KA)
+      SEGACT KA*MOD
+      KJ=0
+      DO 20 JIS=1,NBSOUS
+         IF(NBSOUS.EQ.1) IPTJ=MELEME
+         IF(NBSOUS.NE.1) IPTJ=LISOUS(JIS)
+         SEGACT IPTJ*MOD
+         IPMJ=LIZAFM(JIS)
+         JKAM=IKAM0 (JIS)
+         SEGACT IPMJ*MOD
+         NPJ=IPTJ.NUM(/1)
+         NEL=IPTJ.NUM(/2)
+C        Un sous-objet est active, on traite tous ses elements
+         DO 101 KJJ=1,NEL
+            KJ=KJ+1
+C
+C---  Boucle sur le nombre de voisins, la liste se termine lorsque
+C     le numero du voisin est egal au numero de l'element.
+C     KA et A sont ranges comme si ils etaient declares KA(NL,NNZ)
+C     et A(NL,NNZ).
+C
+            STERM=0.D0
+            DO 102 KV=1,NNZ
+            KKA=KJ+(KV-1)*NL
+            KK=KA.LECT(KKA)
+            IF(KV.GT.1.AND.KK.EQ.KJ) THEN
+C---           On est arrive a la fin de la liste des voisins
+               IZA.PROG(KKA)=0.D0
+               GOTO 102
+            ENDIF
+C           De deux choses l'une, KK appartient au meme sous-objet
+C           que KJ ou non. Par defaut on dit oui puis on teste.
+            IPTK=IPTJ
+            IPMK=IPMJ
+            KKAM=JKAM
+            NPK=NPJ
+            NSOBJ=IMEM(KK)
+            IF(NSOBJ.NE.JIS) THEN
+C              KK et KJ sont dans deux sous-objets differents, il faut
+C              activer celui de KK
+               IPTK=LISOUS(NSOBJ)
+               IPMK=LIZAFM(NSOBJ)
+               KKAM=IKAM0 (NSOBJ)
+               SEGACT IPTK*MOD
+               SEGACT IPMK*MOD
+               NPK=IPTK.NUM(/1)
+            ENDIF
+            KKK=KK-KKAM+1
+
+            AUX=0.D0
+            DO 131 I=1,NPJ
+            DO 132 N=1,NPK
+            IF(IPTJ.NUM(I,KJJ).NE.IPTK.NUM(N,KKK))GO TO 103
+            JD=IZIPAD.LECT(IPTK.NUM(N,KKK))
+*            IPR=IC*(JD-1)+1
+            AUX=AUX+IPMJ.AM(KJJ,I,1)*IPMK.AM(KKK,N,1)/VPOCHA(JD,1)
+     &             +IPMJ.AM(KJJ,I,2)*IPMK.AM(KKK,N,2)/VPOCHA(JD,2)
+            IF(IES.EQ.2)GO TO 103
+            AUX=AUX+IPMJ.AM(KJJ,I,3)*IPMK.AM(KKK,N,3)/VPOCHA(JD,3)
+ 103        CONTINUE
+ 132        CONTINUE
+ 131        CONTINUE
+            IZA.PROG(KKA)=AUX
+            IF(KV.EQ.1) IZD.PROG(KJ)=AUX
+C
+C           Il faut desactiver IPMK et IPTK sauf bien sur si on n'a
+C           qu'un seul sous-objet
+C
+            STERM=STERM+AUX
+            IF(NSOBJ.NE.JIS) THEN
+               SEGDES IPMK
+               SEGDES IPTK
+            ENDIF
+ 102     CONTINUE
+         IF(SOMTER.AND.ABS(STERM).GT.1.D-10) THEN
+         WRITE(6,*) 'L''ELEMENT KJ = ',KJ,' DOIT ETRE SUR UNE SORTIE'
+         ENDIF
+ 101     CONTINUE
+         SEGDES IPTJ
+         SEGDES IPMJ
+ 20   CONTINUE
+C
+C Sortie
+C     do 2001 kj=1,nelp
+C        write(60,60) (itab(kj+(kv-1)*nelp),kv=1,nnz)
+C2001 continue
+C     do 2000 kj=1,nelp
+C        write(60,61) (  a (kj+(kv-1)*nelp),kv=1,nnz)
+C2000 continue
+      SEGDES KA,IZA
+      SEGDES MELEME
+      ELSE
+         WRITE(6,*) 'CGPR Mode de stockage inconnu |'
+      ENDIF
+C
+C*** RAJOUTER LA DIAGONALE DE LA PRESSION ***
+C
+      TYPE=' '
+      CALL ACMO(MTABP,'DIAGP',TYPE,IZDP)
+      IF(TYPE.EQ.'CHPOINT ')THEN
+      CALL LICHT(IZDP,IZDDP,TYPE,IGEOMI)
+      IGEOM=KGEOC
+
+      SEGACT IZD*MOD
+      SEGACT IGEOM,IGEOMI
+
+      NPT=IZD.PROG(/1)
+      NPTI=IZDDP.VPOCHA(/1)
+
+      IF(KSTO.EQ.0) THEN
+         SEGACT IA*MOD,JA*MOD,IZA*MOD
+      ELSE
+         SEGACT KA*MOD,IZA*MOD
+      ENDIF
+      DO 51 I=1,NPTI
+      XVALI=IZDDP.VPOCHA(I,1)
+      IPOI=IGEOMI.NUM(1,I)
+      DO 52 J=1,NPT
+      IF(IGEOM.NUM(1,J).EQ.IPOI)THEN
+      IZD.PROG(J)=IZD.PROG(J)+XVALI
+C
+C*** Il faut aussi mettre a jour la matrice
+C
+      IF(KSTO.EQ.0) THEN
+         IZA.PROG(IA.LECT(J))=IZA.PROG(IA.LECT(J))+XVALI
+      ELSE
+         IZA.PROG(J)=IZA.PROG(J)+XVALI
+      ENDIF
+
+      GO TO 53
+      ENDIF
+ 52   CONTINUE
+ 53   CONTINUE
+ 51   CONTINUE
+      IF(KSTO.EQ.0) THEN
+         SEGDES IA,JA,IZA
+      ELSE
+         SEGDES KA,IZA
+      ENDIF
+      SEGDES IZDP,IZDDP,IGEOM,IGEOMI
+      ENDIF
+C
+C********************************************************************
+C---  P R E C O N D I T I O N N E M E N T
+C********************************************************************
+C
+
+C     write(6,*)' P R E C O N'
+      IF(KTYPI.EQ.2) THEN
+         SEGACT IZDPR*MOD
+         CALL INITD(IZDPR.PROG,NL,1.D0)
+         CALL ECMO(MTAB3,'IPRC','LISTREEL',IZDPR)
+         SEGDES IZDPR
+      ELSEIF(KTYPI.EQ.3) THEN
+         SEGACT IZDPR*MOD
+         DO 23 K=1,NL
+            IZDPR.PROG(K)=1./SQRT(IZD.PROG(K))
+23       CONTINUE
+         CALL ECMO(MTAB3,'IPRC','LISTREEL',IZDPR)
+         SEGDES IZDPR
+      ELSEIF(KTYPI.EQ.4) THEN
+         IF(KSTO.EQ.0) THEN
+             SEGACT IZICCG*MOD,IZA*MOD,IA*MOD,JA*MOD
+             CALL ICGFAM(IZICCG.PROG,IZA.PROG,IA.LECT,JA.LECT,NL)
+             SEGDES IZICCG,IZA,IA,JA
+         ENDIF
+         IF(KSTO.EQ.1) THEN
+             SEGACT IZICCG*MOD,IZA*MOD,KA*MOD
+             CALL ICGFAC(IZICCG.PROG,IZA.PROG,KA.LECT,NL,NNZ)
+             SEGDES IZICCG,IZA,KA
+         ENDIF
+         CALL ECMO(MTAB3,'IPRC','LISTREEL',IZICCG)
+      ELSE
+         WRITE(6,*) 'CGPR Option inconnue'
+      END IF
+      SEGSUP IZD
+      SEGSUP IZIPAD
+      SEGDES MPOVAL,IZDV
+      KCAC=1
+      SEGDES MATRAK
+      SEGDES MELEME
+C
+C*** RESOLUTION ***
+C
+ 500  CONTINUE
+      CALL LICHT(MCHB,IZB,TYPC,IGEOM)
+      CALL LICHT(MCHR,IZR,TYPC,IGEOM)
+C     write(6,*)' AVT KAL2P '
+      CALL KAL2P(MTABP,MCHB)
+C     write(6,*)' AVT RESCGS'
+      CALL RESCGS(IZB,MTABP,IZR)
+C     write(6,*)' APR RESCGS'
+      segact melstb
+      RETURN
+ 90   CONTINUE
+      WRITE(6,*)' Arret anormal de KRESS'
+      RETURN
+      END
+
+
+
+
+
+
+
+
+
+

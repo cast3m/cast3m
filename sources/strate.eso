@@ -1,0 +1,729 @@
+C STRATE    SOURCE    BP208322  13/04/11    21:16:13     7754
+      subroutine strate(ipsolu,nmodma,nbmode,frshif,nmod,ifini
+     $                 ,shifti,idist,nbonZ,icycle,Northo
+     $                 ,IPRIGI,IPMASS,IPKW2M,nvp0,IFLU,incvrai)
+*
+**********************************************************************
+*                            STRATE
+*
+* fonction : petit systeme "expert" pour definir la meilleure strategie
+*            pour poursuivre la recherche
+*
+* creation : chat 11.2009
+* modifs : bp 02.2010 : ajout du tri des modes par freq croissante (si
+*                       numero mode errone)
+*          bp 11.2010 : modif stratégie alternatives, verification de la
+*                       completude du spectre, completion de la base si
+*                       mode multiple a cheval sur le spectre
+*          bp 12.2010 : ajout tri des modes selon le shift (ordshi.eso)
+*          bp 05.2011 : ajout cas K non-definie positive (nvp0)
+*
+* shifti = shift initial (on le range dans shifin du segment idist)
+* frshif = shift courant (en entrée)
+*        = shift proposé pour le prochain cycle (en sortie)
+*
+**********************************************************************
+*
+      IMPLICIT REAL*8(A-H,O-Z)
+      IMPLICIT INTEGER (I-N)
+*
+-INC CCREEL
+-INC CCOPTIO
+-INC SMSOLUT
+*-INC SMLREEL
+-INC SMLENTI
+-INC SMELEME
+*
+*     idist = reunion des ipsolu des differents cycles
+      segment idist
+        integer  iexis(jg),ipomod(jg),immode(jg),ipve(jg),imil,ienc
+        integer  ialter
+        real*8   dist(jg),frequ(jg),shifin,dismin
+      endsegment
+      pointeur mmod2.mmode
+      pointeur mso3.msolut,msole3.msolen,mmod3.mmode,mmod4.mmode
+c
+      logical test1,test2
+c
+      REAL*8  FRSHIF,W2SHIF,DEUXPI
+      PARAMETER (DEUXPI = (2.D0*XPI))
+c
+c
+c     quelques initialisations et informations utiles
+      ifini=0
+      inouv=0
+*     nvp1 = numero de la 1ere valeur propre non negative
+      nvp1=nvp0+1
+c     IPKW2M a deja été factorisé par Lanczos ou simul1
+      CALL DIAGN1(IPKW2M,imoshi)
+      if(iimpi.ge.5) write(IOIMP,*)
+     & 'strate: IPKW2M,frshif,imoshi=',IPKW2M,frshif,imoshi
+*ajout bp 06/01/2012:
+      CALL DIAGN1(IPMASS,nvp0M)
+*     correction pour elements fluides (inconnue PI mise à 0 via INITFL)
+c       nvp0M = nvp0M - IFLU
+*     bp 10/01/2012: nvp0M et NEMSM ne semblent pas bien calculés ...
+*     (resultats dependant machine -> cf. dyna7.dgibi)
+*     on propose la solution qui suppose que nvp0M si M est LIQUIDE
+      if(IFLU.gt.0) nvp0M=0
+      if(iimpi.ge.5) write(IOIMP,*)
+     & 'strate: IPMASS,       nvp0M',IPMASS,'       ',nvp0M
+      if(nvp0M.ne.0) then
+        if (frshif.gt.0.D0) then
+          imoshi=nvp0M+imoshi
+        elseif (frshif.lt.0.D0) then
+          imoshi=nvp0M-imoshi
+        else
+          imoshi=nvp0M
+        endif
+      endif
+      if(iimpi.ge.5) write(IOIMP,*)
+     & 'strate:  ...  =>   imoshi=',imoshi
+*
+*---- recup ou creation de idist -------------------------------------*
+*
+      if (idist.ne.0) then
+        segact idist*mod
+        jg=iexis(/1)
+c         iplus=jg
+c bp (10/12/2010) : idist existait deja, mais les numeros de mode
+c                   attribués sont-ils coherents avec le shift actuel ?
+        call ordshi(idist,imoshi,frshif)
+        IF(IERR.NE.0) RETURN
+
+      else
+        jg=0
+c         iplus=0
+        segini idist
+        shifin=shifti
+        ialter=0
+c bp (13/05/2011) : on initialise imil avec imoshi du 1er cycle (=shift initial)
+        imil=imoshi+1
+      endif
+*
+*---- travail preliminaire sur ipsolu --------------------------------*
+*
+      mso3=ipsolu
+      if(mso3.eq.0) goto 7
+*     rem bp : ligne ci dessus ne doit jamais arriver? (cf. simul3 et 7)
+      jg=0
+      segact mso3
+      imodgr=0
+      msole3=mso3.msolis(4)
+      msole2=mso3.msolis(5)
+      ipt3=mso3.msolis(3)
+      segact msole3,ipt3,msole2
+      do iou=1,msole3.isolen(/1)
+        mmode=msole3.isolen(iou)
+        segact mmode
+        ia=immodd(1)
+        fr=fmmodd(1)
+        fr2 = fr * (abs(fr))
+        shifin2=shifin * (abs(shifin))
+        if (dismin.eq.0.d0) then
+          dismin=abs(shifin2 - fr2)*10000.d0
+        endif
+        if(ia.gt.jg) jg=ia
+      enddo
+      if(jg.gt.iexis(/1)) segadj,idist
+*     on a parfois besoin d'aller chercher dans (imoshi+1)
+      jg=iexis(/1)
+      if(jg.lt.(imoshi+1)) then
+        jg=imoshi+1
+        segadj,idist
+      endif
+*
+*---- remplissage de idist par la nouvelle solution ------------------*
+*
+      ai=frshif*(abs(frshif))
+c ----boucle sur les modes de ce cycle
+c     bp: avec simul3, ils sont tous nouveaux, reste a les placer
+      do iou=1,msole3.isolen(/1)
+
+         mmode=msole3.isolen(iou)
+         imo=immodd(1)
+         fre=fmmodd(1)
+c       -on suggere que ce mode de frequence fre a le numero imo
+         if (iexis(imo).eq.0) then
+c          imo est effectivement libre -> c'est un bon candidat pour jmo
+           jmo = imo
+         else
+c          imo contient deja un mode -> pb dans la numerotation
+c          -> on cherche une place jmo libre a proximite
+c             (avec imo+idec1 en priorite sur imo+idec2)
+           if (fre.lt.frequ(imo)) then
+              idec1 = -1
+              idec2 =  1
+           else
+              idec1 =  1
+              idec2 = -1
+           endif
+           jmo = 0
+           jmo1 = imo
+           jmo2 = imo
+           ndec = max((jg-imo),imo)
+           do idec=1,ndec
+             jmo1 = jmo1 + idec1
+             if (jmo1.gt.0.and.jmo1.le.jg) then
+                if (iexis(jmo1).eq.0) then
+                   jmo = jmo1
+                   goto 1
+                endif
+c                 write(IOIMP,*) '   ',jmo1,' occupée',iexis(jmo1)
+             endif
+             jmo2 = jmo2 + idec2
+             if (jmo2.gt.0.and.jmo2.le.jg) then
+                if (iexis(jmo2).eq.0) then
+                   jmo = jmo2
+                   goto 1
+                endif
+c                 write(IOIMP,*) '   ',jmo1,' occupée',iexis(jmo1)
+             endif
+           enddo
+c          on n a  pas trouve de place libre
+           jg = jg + 1
+           segadj,idist
+           jmo = jg
+         endif
+    1    continue
+c        => la place jmo est libre.
+c          write(IOIMP,*) '   iou,imo,jmo est libre,jg=',iou,imo,jmo,jg
+
+c       -avant de remplir idist(jmo),
+c        il reste a verifier que les freq sont bien ordonnées :
+c        par construction elles le sont toutes,
+c        sauf fre qu on cherche a insérer
+    5    continue
+c        il peut arriver que finalement il faille augmenter la taille de idist
+         if (jmo.gt.jg) then
+           jg = jmo
+           segadj,idist
+         endif
+         if (jmo.le.0.or.jmo.gt.jg) then
+            write(IOIMP,*)'ERREUR dans STRATE : '
+            write(IOIMP,*)'plage des numeros de mode incorrecte',jmo,jg
+            write(IOIMP,*)'Contactez votre support'
+            stop
+         endif
+         jmo1 = jmo
+         jmo2 = jmo
+c        recherche des plus proches voisins
+    2    continue
+         jmo1 = jmo1 - 1
+         if(jmo1.le.0) goto 3
+         if(iexis(jmo1).eq.0) goto 2
+    3    continue
+         jmo2 = jmo2 + 1
+         if(jmo2.gt.jg) goto 4
+         if(iexis(jmo2).eq.0) goto 3
+    4    continue
+c         write(IOIMP,*) 'jmo1,jmo2=',jmo1,jmo2
+c        il faut que frequ(jmo1) < fre < frequ(jmo2)
+c        pour attribuer frequ(jmo) = fre
+         if (jmo1.le.0) then
+           test1 = .true.
+         else
+           test1 = (frequ(jmo1).le.fre)
+         endif
+         if (jmo2.gt.jg) then
+           test2 = .true.
+         else
+           test2 = (fre.le.frequ(jmo2))
+         endif
+         if (.not.test1) then
+c          on met jmo1 -> jmo
+c          write(IOIMP,*) '   on met ',jmo1,' -> ',jmo
+c           iexis(jmo) = 1
+           iexis(jmo) = iexis(jmo1)
+           frequ(jmo) = frequ(jmo1)
+           dist (jmo) = dist (jmo1)
+           ipve (jmo) = ipve (jmo1)
+           ipomod(jmo)= ipomod(jmo1)
+           immode(jmo)= immode(jmo1)
+           iexis(jmo1) = 0
+           frequ(jmo1) = 0.D0
+c           jmo = jmo1   les 2 doivent etre corrects (et svt equivalentes)
+           jmo = jmo - 1
+* rem (bp): on pourrait aussi décider en fonction de dist(jmo) et de
+*      dist(jmo1) si on ne met pas plutot jmo1 -> jmo1+1 et jmo=jmo1
+*      mais on risque de créer des faux trous ...
+           goto 5
+         elseif (.not.test2) then
+c          on met jmo2 -> jmo
+c          write(IOIMP,*) '   on met ',jmo2,' -> ',jmo
+c           iexis(jmo) = 1
+           iexis(jmo) = iexis(jmo2)
+           frequ(jmo) = frequ(jmo2)
+           dist (jmo) = dist (jmo2)
+           ipve (jmo) = ipve (jmo2)
+           ipomod(jmo)= ipomod(jmo2)
+           immode(jmo)= immode(jmo2)
+           iexis(jmo2) = 0
+           frequ(jmo2) = 0.D0
+c           jmo = jmo2   les 2 doivent etre corrects (et svt equivalentes)
+           jmo = jmo + 1
+           goto 5
+         endif
+
+c       -on peut enfin remplir idist(jmo)
+c         write(IOIMP,*) 'on remplit idist (',jmo
+         inouv=inouv+1
+         iexis(jmo) = icycle
+         frequ(jmo)=fre
+         fr2 = fre * (abs(fre))
+         dist(jmo)=abs(ai-fr2)
+         if(iimpi.ge.6) write(IOIMP,*)
+     &         '--> iou,fre,imo,jmo',iou,fre,imo,jmo
+         if (dismin.gt.dist(jmo)) then
+c            if(iplus.eq.0) imil=jmo
+c cette ligne ci dessus conduit a des erreurs si modes multiples
+           dismin=dist(jmo)
+         endif
+         ipve(jmo)=msole2.isolen(iou)
+         ipomod(jmo)=ipt3.num(1,iou)
+         immode(jmo)=mmode
+
+         segdes mmode
+
+      enddo
+c ----fin de la boucle sur les modes de ce cycle
+      segdes msole2,msole3,mso3
+
+c     on trie les modes de idist en fonction du shift actuel
+      call ordshi(idist,imoshi,frshif)
+      IF(IERR.NE.0) RETURN
+
+    7 continue
+*
+* as-t-on progressé? -------------------*
+      if(iimpi.ge.6)
+     &   write(IOIMP,*) ' nombre de nouveaux modes' ,inouv,'/',nbonZ
+      nbonZ=inouv
+
+      if (inouv.eq.0) then
+*    -on n a pas de nouveaux modes
+        ialter=ialter+1
+        write(IOIMP,*) ' strategie alternative : ',ialter
+c       autorisées 4 fois de suite
+c         if (ialter.ge.3) then
+        if (ialter.ge.5) then
+          write(IOIMP,*) 'ERREUR dans STRATE :',
+     &               ' nombre d alternatives maxi atteinte'
+          write(IOIMP,*) ' Changez de décalage initial,',
+     &               ' Utilisez une machine plus puissante',
+     &               ' ou Contactez votre support...'
+          call erreur(6)
+          return
+        endif
+c      -0eme chance (bp 13/05/2011): on a jamais rien trouvé
+c                   on choisit arbitrairement un shift
+        if (jg.eq.0) then
+           shipro = 10.D0**(icycle-2)
+           write(IOIMP,*) ' On choisit arbitrairement le shift : ',
+     &                  frshif,' devient ',shipro
+           goto 2000
+        endif
+c      -1ere chance : on est allé trop loin et on a rien trouvé :
+c                     on shifte en direction du shift initial
+c         if (((imoshi+1).gt.jg).or.(imoshi.eq.0)) then
+        if ((imoshi.ge.incvrai).or.(imoshi.eq.0)) then
+           if(iimpi.ge.6) write(IOIMP,*) 'jg,incvrai,nbmode,imoshi='
+     &                               ,jg,incvrai,nbmode,imoshi
+           shipro = shifti + ((frshif - shifti) / 2.D0)
+           write(IOIMP,*) ' on se rapproche du shift initial : ',
+     &                frshif,' devient ',shipro
+           goto 2000
+        endif
+c      -2eme chance : on augmente le nombre de vecteurs sans shifter
+        if (ienc.lt.nmodma) then
+c         nmodma =  int(1.5 * ienc) + 4
+c          ienc = ienc + max(4,(nmodma/2))
+          ienc = ienc + max(4,nmodma)
+          ienc = min(ienc,2*nmodma)
+          Northo=ienc
+          shipro=frshif
+          write(IOIMP,*)' augmentation du nombre de mode cherché',ienc
+c         else
+        endif
+        if (ialter.ge.2) then
+c      -3eme chance : on shifte en direction du mode qui semble mal placé
+          if (iexis(imoshi).ne.0.and.iexis(imoshi+1).eq.0) then
+            shipro = (2.*frequ(imoshi)) - frshif
+            Northo=ienc
+            write(IOIMP,*) ' on shifte en direction du mode ',imoshi,
+     &                 ' mal placé : ',frshif,' devient ',shipro
+c             goto 2000
+          elseif (iexis(imoshi).eq.0.and.iexis(imoshi+1).ne.0) then
+            shipro = (2.*frequ(imoshi+1)) - frshif
+            Northo=ienc
+            write(IOIMP,*)' on shifte en direction du mode ',(imoshi+1),
+     &                  ' mal placé : ',frshif,' devient ',shipro
+c             goto 2000
+          else
+            if(iimpi.ge.6)
+     &      write(IOIMP,*) ' jg,nbmode,imoshi=',jg,nbmode,imoshi
+            Northo=ienc
+            if ((frshif.ne.shifti).and.(ialter.lt.4)) then
+             shipro = shifti + ((frshif - shifti) / 2.D0)
+             write(IOIMP,*) ' on se rapproche du shift initial : ',
+     &                  frshif,' devient ',shipro
+            else
+             ifin=jg+1
+    8        ifin=ifin-1
+             if (ifin.ne.0) then
+               if(iexis(ifin).eq.0) goto 8
+               shipro = frequ(ifin)
+             else
+               shipro = shifti
+             endif
+             shipro = max(shipro,frshif)
+             shipro = 4.D0 * shipro
+             shipro = max(shipro,100.D0)
+             write(IOIMP,*) ' on perturbe arbitrairement le shift : ',
+     &                  frshif,' devient ',shipro
+            endif
+c             goto 2000
+          endif
+        endif
+        goto 2000
+
+      else
+c         on a eu des nouveaux modes => on reinitialise ialter
+          ialter=0
+      endif
+* ----fin du cas inouv=0 (pas de nouveau modes) -----*
+
+*
+* on cherche la longueur entourant imil
+      ibas=0
+      if(imil.eq.1) goto 9
+      do ibas=imil-1,1,-1
+        if( iexis(ibas).eq.0) goto 9
+      enddo
+      ibas= 0
+    9 continue
+      ibas=ibas+1
+c bp : mise en commentaire le 06/06/2011
+c       if (imil.lt.nvp1) then
+c         write(IOIMP,*) 'Le shift proposé ne permet pas ',
+c      &             'd obtenir des valeurs propres positives !'
+c         write(IOIMP,*) 'ibas,imil,nvp1=',ibas,imil,nvp1
+c         write(IOIMP,*) 'iexis=',(iexis(iou),iou=1,jg)
+c         call erreur(6)
+c         return
+c       endif
+c bp (13/05/2011): eventuellement (si .not.limage cf. simul1), on limite
+c ibas pour ne pas recuperer les valeurs propres negatives
+      ibas0=ibas
+      ibas=max(ibas,nvp1)
+*bp: on rajoute cette ligne pour le cas ou l on doit trouver ibas > imil
+      if(iexis(ibas).eq.0) goto 9
+      imil1=max(imil,ibas)
+      do ihaut=imil1,jg
+        if(iexis(ihaut).eq.0) goto 10
+      enddo
+      ihaut=jg+1
+   10 continue
+      ihaut = ihaut-1
+      if(iexis(ihaut).eq.0) goto 10
+      ilong= ihaut - ibas + 1
+      if(iimpi.ge.6) write(IOIMP,*) 'numéros trouvés: '
+     & ,'[ibas(imil)ihaut]ilong,jg=',ibas,imil,ihaut,ilong,jg
+*
+*
+* --- on a, peut etre, suffisament de mode -------------------------*
+      if (ilong.ge.nbmode) then
+*
+*       -on partait de zero (ou presque) : pas besoin de réfléchir
+         if (ibas.eq.1.and.shifin.le.frequ(1))  then
+           idep=1
+           ifin=nbmode
+           goto 1000
+         endif
+
+*       -on ne peut descendre plus bas :
+         if (ibas.eq.1) then
+           dbas= dist(ibas)
+           dhaut=dist(ihaut)
+           if(iimpi.ge.6)  write(IOIMP,*) 'ibas,dbas,ihaut,dhaut'
+     &                                ,ibas,dbas,ihaut,dhaut
+
+*          on recupere la plage [idep:ifin] la mieux centree
+           if (dhaut.ge.dbas) then
+             idep=ibas
+             ifin=ihaut
+   13        ilong=ifin-idep+1
+             if(ilong.eq.nbmode) goto 1000
+             if (dist(idep).gt.dist(ifin)) then
+               idep=idep+1
+             else
+               ifin=ifin-1
+             endif
+             goto 13
+
+* a-t-on suffisament de frequence vers le haut?
+           else
+* on regarde combien de frequence sont bien centrées sur imil
+             idep=ibas-1
+             ifin=ihaut
+   11        idep=idep+1
+             if(dist(idep).gt.dhaut) goto 11
+* bp2011: en theorie il faudrait garder idep mais pour les petits sytemes,
+*         idep-1 est mieux adapté sinon on enleve trop de modes, d'ou :
+             idep=idep-1
+             ilong=ifin-idep+1
+             if (ilong.ge.nbmode) then
+* c'est ok il faut selectionner la plage [idep:ifin] la mieux centree
+   14          ilong=ifin-idep+1
+               if(ilong.eq.nbmode) goto 1000
+               if (dist(idep).gt.dist(ifin)) then
+                 idep=idep+1
+               else
+                 ifin=ifin-1
+               endif
+               goto 14
+             else
+* combien au max doit-on trouver de modes supplementaires
+               iveut=nbmode-ilong
+cbp               ienc=min(int(iveut*1.1),nmodma)
+               ienc=min(int(iveut*1.05),(nmodma-2))
+               ienc=max(ienc,1)
+               icle=1
+               call queshi(shifti,ienc,ifin,frequ,nmodma,shipro,iexis
+     $                 ,icle,iexis(/1),Northo)
+               goto 2000
+             endif
+           endif
+
+* ici on a ibas.ne.1 et ilong > nbmode
+         else
+* on regarde combien de frequence sont bien centrees sur imil
+* bp 2012-09-25 : ajout cas particuliers nbmode = 1 ou 2
+          if(nbmode.eq.1) then
+            idep=imil
+            ifin=imil
+            if(iimpi.ge.6) write(IOIMP,*)'nbmode=1 et imil=',imil
+            goto 1000
+          else
+            if (dist(imil-1).lt.dist(imil+1).and.imil.gt.nvp1) then
+              idep=imil-1
+              ifin=imil
+            else
+              idep=imil
+              ifin=imil+1
+            endif
+            if(nbmode.eq.2) then
+               if(iimpi.ge.6) write(IOIMP,*)'nbmode=2 et imil=',imil
+     &         ,' plage: [idep - ifin]=',idep,' - ',ifin
+               if(idep.lt.ibas.or.ifin.gt.ihaut) goto 12
+               goto 1000
+            endif
+          endif
+           do iou=1,nbmode-2
+              if (dist(idep).le.dist(ifin)) then
+* sans depasser la limite fixee eventuellement par nvp1
+                 if (idep.gt.nvp1) then
+                   idep=idep-1
+                 else
+                   ifin=ifin+1
+                 endif
+              else
+                 ifin=ifin+1
+              endif
+              if(idep.lt.ibas.or.ifin.gt.ihaut) goto 12
+           enddo
+*  selection de la plage [idep:ifin] de dim nbmode effectuee!
+      if(iimpi.ge.6)
+     &write(IOIMP,*) 'plage: [idep - ifin]=',idep,' - ',ifin
+           goto 1000
+   12      continue
+* on a atteint la limite de [ibas:ihaut] sans obtenir une plage [idep:ifin] de dim nbmode
+      if(iimpi.ge.6)
+     &write(IOIMP,*) 'numéros centrés: [idep - ifin]=',idep,' - ',ifin
+* dans quel sens faut-il chercher?
+           icle=1
+           icher=ihaut
+           if (idep.lt.ibas) then
+             icle=2
+             icher=ibas
+           endif
+           iveut= nbmode-ifin+idep
+cbp           ienc=min(int(iveut*1.1),nmodma)
+               ienc=min(int(iveut*1.05),(nmodma-2))
+               ienc=max(ienc,1)
+c            write(IOIMP,*) 'iveut,ienc,icher,icle=',
+c      $                iveut,ienc,icher,icle
+           call queshi(shifti,ienc,icher,frequ,nmodma,shipro,iexis,
+     $        icle,iexis(/1),Northo)
+           goto 2000
+         endif
+*
+* --- on a pas assez de mode de maniere certaine -------------------*
+      else
+*     maintenant ilong n'est plus assez grand
+*     dans quelle direction faut-il chercher ?
+         icle=1
+         icher=ihaut
+         if (dist(ibas).lt.dist(ihaut).and.ibas.ne.nvp1) then
+            icle=2
+            icher=ibas
+         endif
+         iveut= nbmode-ilong
+cbp         ienc=min(int(iveut*1.1),nmodma)
+               ienc=min(int(iveut*1.05),(nmodma-2))
+               ienc=max(ienc,1)
+c          write(IOIMP,*) 'iveut,ienc,icher,icle=',
+c      $                iveut,ienc,icher,icle
+         call queshi(shifti,ienc,icher,frequ,nmodma,shipro,iexis,
+     $          icle,iexis(/1),Northo)
+ccc     $          icle,iexis(/1),fpet,fgra)
+         goto 2000
+      endif
+* ------------------------------------------------------------------*
+
+
+ 1000 continue
+*---- on pense avoir gagné !
+
+*---- on commence par rajouter les eventuels modes doubles
+c     pour ne pas gener lors du controle du spectre
+c     en bas
+      if (idep.gt.ibas) then
+      idep0=idep
+      fref = max(1.D0,abs(frequ(idep0)))
+      fref = max(fref,abs(shifti))
+      do ia=(idep0-1),ibas,-1
+c         dfrq = (frequ(idep0) - frequ(ia)) / max(1.D0,abs(frequ(idep0)))
+*       bp 13/01/2012 : si on est dans la plage des modes de corps rigides
+*       on les inclut par defaut, sinon on va avoir des souci lors de la
+*       verif de completude du spectre
+        dfrq = (frequ(idep0) - frequ(ia)) / fref
+        if((abs(dfrq)).ge.1.D-3) goto 1001
+        idep=ia
+      enddo
+      endif
+ 1001 continue
+c     en haut
+      if (ifin.lt.ihaut) then
+      ifin0=ifin
+      fref = max(1.D0,abs(frequ(ifin0)))
+      fref = max(fref,abs(shifti))
+      do ia=(ifin0+1),ihaut,1
+c         dfrq = (frequ(ifin0) - frequ(ia)) / max(1.D0,abs(frequ(ifin0)))
+        dfrq = (frequ(ifin0) - frequ(ia)) / fref
+        if((abs(dfrq)).ge.1.D-3) goto 1002
+        ifin=ia
+      enddo
+      endif
+ 1002 continue
+      nbmode2 = ifin - idep + 1
+      if(iimpi.ge.6) write(IOIMP,*)
+     &    'ibas,ihaut,idep,ifin,nbmode2,nbmode',
+     &     ibas,ihaut,idep,ifin,nbmode2,nbmode
+      if(nbmode2.ne.nbmode) write(IOIMP,*)
+     &   'strate: Presence de modes multiples: on les ajoute'
+
+*     -- ultime verif : controle de la completude du spectre --
+c     en bas
+      if (idep.gt.1) then
+        frshi1 = (1.D0-2.D-4) * frequ(idep)
+        W2SHI1= DEUXPI * frshi1
+        W2SHI1= W2SHI1 * W2SHI1
+        CALL DECALE(IPRIGI,IPMASS,W2SHI1, IPKW21)
+        CALL DIAGN1(IPKW21,nvpdep)
+        CALL DTRIGI(IPKW21)
+      else
+        nvpdep=0
+      endif
+c     en haut
+      frshi2 = (1.D0+2.D-4) * frequ(ifin)
+      W2SHIF= DEUXPI * frshi2
+      W2SHIF= W2SHIF * W2SHIF
+      CALL DTRIGI(IPKW2M)
+      CALL DECALE(IPRIGI,IPMASS,W2SHIF, IPKW2M)
+      CALL DIAGN1(IPKW2M,nvpfin)
+      nvpneg = nvpfin-nvpdep
+      if(iimpi.ge.6)
+     &    write(IOIMP,*) 'nvpdep,nvpfin,nvpneg=',nvpdep,nvpfin,nvpneg
+*     il manque des modes => on redemarre avec ce shift en orthogonalisant
+      if (nvpneg.gt.nbmode2) then
+c         ienc0=nvpneg-nbmode2
+c cbp: on en demande 2 * nbre vraiment manquant a cause des modes doubles
+c c + on avait calculé beaucoup, + on a de chance d'en avoir raté beaucoup
+c         ienc = (2*ienc0) + (nbonZ/8)
+c bp : on orthogonalise par % aux modes deja convergé
+        ienc=nvpneg-nbmode2
+        Northo=ienc
+        shipro = frshi2
+cbp: pour l instant on suppose qu il manque seulement de modes vers le haut
+        if(iimpi.ge.6) write(IOIMP,*)
+     &        'DIAGN1 trouve',ienc,' mode manquant'
+        goto 2000
+      elseif(nbmode2.ne.nbmode) then
+         write(IOIMP,*) '...definitivement ',nbmode,'devient',nbmode2
+         nbmode=nbmode2
+      endif
+*     il ne manque pas de modes => on termine
+
+
+*---- on refabrique un ipsolu qui contient juste les bonnes valeurs ---*
+      segini,mso1=mso3
+      nbnn=1
+      nbelem=nbmode
+      nbsous=0
+      nbref=0
+      segini ipt1
+      n= nbelem
+      segini msole1,msole2
+      mso1.msolis(3)=ipt1
+      mso1.msolis(4)=msole1
+      mso1.msolis(5)=msole2
+      idep1=idep-1
+      if(iimpi.ge.6) write(ioimp,*) 'strate: idep1=',idep1
+      do ia= 1,msole1.isolen(/1)
+        if(iimpi.ge.6)
+     &  write(ioimp,*) 'strate: msole1(',ia,'/',n,immode(idep1+ia)
+        msole1.isolen(ia)=immode(idep1+ia)
+        ipt1.num(1,ia)=ipomod(idep1+ia)
+        msole2.isolen(ia)=ipve(idep1+ia)
+      enddo
+      segdes msole1,msole2
+      segdes ipt1
+      segdes mso1
+      ipsolu=mso1
+      ifini=1
+      if(iimpi.ge.7)
+     & write(IOIMP,*) 'iexis=',(iexis(iio),iio=1,jg)
+      if(iimpi.ge.6)
+     & write(IOIMP,*) 'frequ=',(frequ(iio),iio=1,jg)
+      return
+
+
+ 2000 continue
+*---- on n'a pas fini : menage et nouveau cycle ----------------------*
+c       ifini=0
+c     bp: fait au debut
+      nmod=min ( ienc+2, nmodma)
+      frshif=shipro
+      if(mso3.ne.0) segsup,mso3
+      if(iimpi.ge.7)
+     & write(IOIMP,*) 'iexis=',(iexis(iio),iio=1,jg)
+      if(iimpi.ge.6)
+     & write(IOIMP,*) 'frequ=',(frequ(iio),iio=1,jg)
+      segdes,idist
+      return
+
+      end
+
+
+
+
+
+
+
+
+
+
+
+
+
